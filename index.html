@@ -547,19 +547,19 @@
               return (
                 <button key={id} onClick={() => setFilter(id)} style={{
                   flexShrink: 0,
-                  padding: '5px 13px', borderRadius: 2, fontSize: '0.72rem', fontWeight: 500,
-                  background: active ? C.navy      : 'none',
+                  padding: '5px 13px', borderRadius: 20, fontSize: '0.8rem', fontWeight: 500,
+                  background: active ? C.gold      : 'none',
                   color:      active ? '#FFFFFF'   : C.textSecondary,
                   border:     active ? 'none'      : `1px solid ${C.border}`,
-                  cursor: 'pointer', fontFamily: C.fontSans, letterSpacing: '0.08em', textTransform: 'uppercase',
+                  cursor: 'pointer', fontFamily: C.fontSans,
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}>
                   {label}
                   <span style={{
-                    fontSize: '0.7rem', fontWeight: 700,
-                    background: active ? 'rgba(255,255,255,0.2)' : C.surfaceHover,
+                    fontSize: '0.7rem', fontWeight: 600,
+                    background: active ? 'rgba(255,255,255,0.25)' : C.surfaceHover,
                     color: active ? '#FFFFFF' : C.textSecondary,
-                    borderRadius: 4, padding: '0px 6px',
+                    borderRadius: 10, padding: '0px 6px',
                   }}>
                     {counts[id]}
                   </span>

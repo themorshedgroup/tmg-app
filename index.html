@@ -105,35 +105,44 @@
 
     // ─── Sample Data ─────────────────────────────────────────────────
     const PROPERTIES = [
-      { id: 'p1', address: '1808 Forest Hill Dr', city: 'Austin, TX 78745', mls: '5129346',  agent: 'Tarek Morshed' },
-      { id: 'p2', address: '2310 Kinney Rd',      city: 'Austin, TX 78704', mls: '4892011',  agent: 'Tarek Morshed' },
-      { id: 'p3', address: '4502 Rocking Chair Ln', city: 'Austin, TX 78749', mls: '5034782', agent: 'Tarek Morshed' },
+      { id: 'p1', address: '1808 Forest Hill Dr',   city: 'Austin, TX 78745',          mls: '5129346', agent: 'Tarek Morshed', price: '$775,000',    beds: 4, baths: 2,   sqft: '1,832' },
+      { id: 'p2', address: '3707 Laurel Ledge Ln',  city: 'Austin, TX 78731',          mls: '7341028', agent: 'Tarek Morshed', price: '$1,695,000',  beds: 5, baths: 3.5, sqft: '3,750' },
+      { id: 'p3', address: '4602 Jinx Ave',          city: 'Austin, TX 78745',          mls: '6204571', agent: 'Tarek Morshed', price: '$1,550,000',  beds: 5, baths: 4.5, sqft: '2,850' },
+      { id: 'p4', address: '10621 W Cave Loop',      city: 'Dripping Springs, TX 78620', mls: '8819234', agent: 'Tarek Morshed', price: '$705,000',   beds: 4, baths: 3,   sqft: '2,417' },
+      { id: 'p5', address: '12313 Indian Mound Dr',  city: 'Austin, TX 78758',          mls: '9023165', agent: 'Tarek Morshed', price: '$630,000',    beds: 4, baths: 3,   sqft: '2,081' },
     ];
 
     const SHOWINGS = [
-      // 1808 Forest Hill Dr — 5 showings
-      { id: 's1',  pid: 'p1', agent: 'Kyle Baird',       phone: '(832) 545-5593', office: 'Christies Intl Real Estate', date: 'May 27, 12:10 PM', status: 'feedback_received' },
-      { id: 's2',  pid: 'p1', agent: 'Raymond Torres',   phone: '(512) 297-5133', office: 'Compass RE Texas LLC',        date: 'May 21, 1:21 PM',  status: 'in_progress'       },
-      { id: 's3',  pid: 'p1', agent: 'Katie Jackson',    phone: '(512) 627-1625', office: 'Christies Intl Real Estate', date: 'May 20, 10:53 AM', status: 'in_progress'       },
-      { id: 's4',  pid: 'p1', agent: 'Jennifer Shahry',  phone: '(512) 636-0834', office: 'Compass RE Texas LLC',        date: 'Apr 14, 3:57 PM',  status: 'closed'            },
-      { id: 's5',  pid: 'p1', agent: 'Amir Lancaster',   phone: '(817) 683-8942', office: 'Compass RE Texas LLC',        date: 'Apr 11, 3:12 PM',  status: 'open'              },
-      // 2310 Kinney Rd — 3 showings
+      // 1808 Forest Hill Dr — 5 showings (real Supra data)
+      { id: 's1',  pid: 'p1', agent: 'Kyle Baird',       phone: '(832) 545-5593', office: 'Christies Intl Real Estate',  date: 'May 27, 12:10 PM', status: 'feedback_received' },
+      { id: 's2',  pid: 'p1', agent: 'Raymond Torres',   phone: '(512) 297-5133', office: 'Compass RE Texas LLC',         date: 'May 21, 1:21 PM',  status: 'in_progress'       },
+      { id: 's3',  pid: 'p1', agent: 'Katie Jackson',    phone: '(512) 627-1625', office: 'Christies Intl Real Estate',  date: 'May 20, 10:53 AM', status: 'in_progress'       },
+      { id: 's4',  pid: 'p1', agent: 'Jennifer Shahry',  phone: '(512) 636-0834', office: 'Compass RE Texas LLC',         date: 'Apr 14, 3:57 PM',  status: 'closed'            },
+      { id: 's5',  pid: 'p1', agent: 'Amir Lancaster',   phone: '(817) 683-8942', office: 'Compass RE Texas LLC',         date: 'Apr 11, 3:12 PM',  status: 'open'              },
+      // 3707 Laurel Ledge Ln — 3 showings
       { id: 's6',  pid: 'p2', agent: 'Sarah Mitchell',   phone: '(512) 449-8821', office: "Kuper Sotheby's Intl Realty", date: 'May 26, 2:30 PM',  status: 'feedback_received' },
-      { id: 's7',  pid: 'p2', agent: 'David Okafor',     phone: '(512) 555-3344', office: 'eXp Realty',                  date: 'May 25, 11:00 AM', status: 'in_progress'       },
-      { id: 's8',  pid: 'p2', agent: 'Lisa Hernandez',   phone: '(210) 447-9921', office: 'Keller Williams Realty',      date: 'May 23, 4:15 PM',  status: 'open'              },
-      // 4502 Rocking Chair Ln — 2 showings
-      { id: 's9',  pid: 'p3', agent: 'Michael Chang',    phone: '(512) 882-1100', office: 'Redfin',                      date: 'May 28, 10:00 AM', status: 'open'              },
-      { id: 's10', pid: 'p3', agent: 'Patricia Williams', phone: '(737) 206-5583', office: 'Coldwell Banker Realty',     date: 'May 27, 3:45 PM',  status: 'open'              },
+      { id: 's7',  pid: 'p2', agent: 'David Okafor',     phone: '(512) 555-3344', office: 'eXp Realty',                   date: 'May 25, 11:00 AM', status: 'in_progress'       },
+      { id: 's8',  pid: 'p2', agent: 'Lisa Hernandez',   phone: '(210) 447-9921', office: 'Keller Williams Realty',       date: 'May 23, 4:15 PM',  status: 'open'              },
+      // 4602 Jinx Ave — 3 showings
+      { id: 's9',  pid: 'p3', agent: 'Michael Chang',    phone: '(512) 882-1100', office: 'Redfin',                       date: 'May 28, 10:00 AM', status: 'open'              },
+      { id: 's10', pid: 'p3', agent: 'Patricia Williams', phone: '(737) 206-5583', office: 'Coldwell Banker Realty',      date: 'May 27, 3:45 PM',  status: 'feedback_received' },
+      { id: 's11', pid: 'p3', agent: 'Marcus Webb',      phone: '(512) 730-4421', office: 'Bramlett Residential',         date: 'May 24, 1:00 PM',  status: 'in_progress'       },
+      // 10621 W Cave Loop — 2 showings
+      { id: 's12', pid: 'p4', agent: 'Elena Vasquez',    phone: '(512) 334-7780', office: 'Austin Home Hunters',          date: 'May 27, 11:30 AM', status: 'open'              },
+      { id: 's13', pid: 'p4', agent: 'Tom Nguyen',       phone: '(512) 619-2255', office: 'Horizon Realty Group',         date: 'May 22, 3:00 PM',  status: 'closed'            },
+      // 12313 Indian Mound Dr — 2 showings
+      { id: 's14', pid: 'p5', agent: 'Brittany Fontenot', phone: '(512) 401-8833', office: 'JBGoodwin Realtors',          date: 'May 26, 10:15 AM', status: 'in_progress'       },
+      { id: 's15', pid: 'p5', agent: 'James Oduya',      phone: '(512) 778-9901', office: 'Compass RE Texas LLC',         date: 'May 20, 2:45 PM',  status: 'open'              },
     ];
 
     const SMS_THREADS = {
       s1: [
-        { dir: 'out', touch: 1, time: 'May 28 · 10:02 AM', body: "Hi Kyle! This is Tarek with The Morshed Group. Just following up on your showing at 1808 Forest Hill Dr yesterday — did your clients enjoy the property? Any feedback would be appreciated! 🏡" },
-        { dir: 'in',            time: 'May 28 · 11:34 AM', body: "Hi Tarek! Yes they really liked it. Good size, loved the backyard. They are a bit concerned about the price relative to the kitchen update that's needed. Going to think it over for a few days." },
+        { dir: 'out', touch: 1, time: 'May 28 · 10:02 AM', body: "Hi Kyle! This is Tarek with The Morshed Group. Just following up on your showing at 1808 Forest Hill Dr ($775K) yesterday — did your clients enjoy the property? Any feedback is appreciated!" },
+        { dir: 'in',            time: 'May 28 · 11:34 AM', body: "Hi Tarek! Yes they really liked it. Good size, loved the backyard. A bit concerned about the price relative to the kitchen needing an update. Going to think it over." },
       ],
       s2: [
         { dir: 'out', touch: 1, time: 'May 22 · 10:01 AM', body: "Hi Raymond! This is Tarek with The Morshed Group. Following up on your showing at 1808 Forest Hill Dr on May 21 — how did your clients feel about the property?" },
-        { dir: 'out', touch: 2, time: 'May 24 · 10:00 AM', body: "Hi Raymond, just checking back in on 1808 Forest Hill Dr — did your clients have any thoughts they'd like to share? Happy to answer any questions too!" },
+        { dir: 'out', touch: 2, time: 'May 24 · 10:00 AM', body: "Hi Raymond, just checking back in on 1808 Forest Hill Dr — did your clients have any thoughts to share? Happy to answer questions too!" },
       ],
       s3: [
         { dir: 'out', touch: 1, time: 'May 21 · 10:01 AM', body: "Hi Katie! Tarek here from The Morshed Group. Just following up on your showing at 1808 Forest Hill Dr on May 20 — how did it go with your clients?" },
@@ -144,11 +153,28 @@
         { dir: 'out', touch: 3, time: 'Apr 19 · 10:00 AM', body: "Hi Jennifer, last check-in on 1808 Forest Hill Dr. Feel free to reach out anytime if your clients have questions. Thanks!" },
       ],
       s6: [
-        { dir: 'out', touch: 1, time: 'May 27 · 10:00 AM', body: "Hi Sarah! This is Tarek with The Morshed Group. Following up on your showing at 2310 Kinney Rd yesterday — did your clients have any feedback on the property?" },
-        { dir: 'in',            time: 'May 27 · 12:15 PM', body: "They absolutely loved it, very interested! Can you send over the seller's disclosures? They're seriously considering making an offer this week." },
+        { dir: 'out', touch: 1, time: 'May 27 · 10:00 AM', body: "Hi Sarah! This is Tarek with The Morshed Group. Following up on your showing at 3707 Laurel Ledge Ln ($1.695M) yesterday — did your clients have any feedback?" },
+        { dir: 'in',            time: 'May 27 · 12:15 PM', body: "They absolutely loved it! Stunning home. They're seriously considering making an offer — can you send over the seller's disclosures?" },
       ],
       s7: [
-        { dir: 'out', touch: 1, time: 'May 26 · 10:00 AM', body: "Hi David! This is Tarek with The Morshed Group. Following up on your showing at 2310 Kinney Rd on May 25 — how did your clients like it?" },
+        { dir: 'out', touch: 1, time: 'May 26 · 10:00 AM', body: "Hi David! This is Tarek with The Morshed Group. Following up on your showing at 3707 Laurel Ledge Ln on May 25 — how did your clients like it?" },
+        { dir: 'out', touch: 2, time: 'May 28 · 10:00 AM', body: "Hi David, just a quick follow-up on 3707 Laurel Ledge Ln — any thoughts from your buyers? We're getting good activity on this one!" },
+      ],
+      s10: [
+        { dir: 'out', touch: 1, time: 'May 28 · 10:01 AM', body: "Hi Patricia! This is Tarek with The Morshed Group. Following up on your showing at 4602 Jinx Ave ($1.55M) yesterday — how did your clients feel about it?" },
+        { dir: 'in',            time: 'May 28 · 2:08 PM',  body: "Great showing! My clients loved the open floor plan and the kitchen. They want to come back for a second look this weekend if possible." },
+      ],
+      s11: [
+        { dir: 'out', touch: 1, time: 'May 25 · 10:00 AM', body: "Hi Marcus! Tarek here from The Morshed Group. Following up on your showing at 4602 Jinx Ave on May 24 — any feedback from your clients?" },
+      ],
+      s13: [
+        { dir: 'out', touch: 1, time: 'May 23 · 10:00 AM', body: "Hi Tom! This is Tarek with The Morshed Group. Following up on your showing at 10621 W Cave Loop on May 22 — how did your clients like the property?" },
+        { dir: 'out', touch: 2, time: 'May 25 · 10:00 AM', body: "Hi Tom, checking back in on 10621 W Cave Loop — any thoughts from your buyers? Great Hill Country location at $705K." },
+        { dir: 'out', touch: 3, time: 'May 27 · 10:00 AM', body: "Hi Tom, last follow-up on 10621 W Cave Loop. Feel free to reach out anytime if questions come up. Thanks!" },
+      ],
+      s14: [
+        { dir: 'out', touch: 1, time: 'May 27 · 10:00 AM', body: "Hi Brittany! This is Tarek with The Morshed Group. Following up on your showing at 12313 Indian Mound Dr ($630K) yesterday — any feedback from your clients?" },
+        { dir: 'out', touch: 2, time: 'May 29 · 10:00 AM', body: "Hi Brittany, just a quick check-in on 12313 Indian Mound Dr — did your clients have any questions or thoughts?" },
       ],
     };
 
@@ -348,11 +374,19 @@
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: '0.97rem', color: C.textPrimary, marginBottom: 2 }}>
-                  {property.address}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 2 }}>
+                  <div style={{ fontWeight: 700, fontSize: '0.97rem', color: C.textPrimary }}>
+                    {property.address}
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: '0.9rem', color: C.gold, marginLeft: 8, whiteSpace: 'nowrap' }}>
+                    {property.price}
+                  </div>
                 </div>
-                <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 10 }}>
+                <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 3 }}>
                   {property.city} · MLS# {property.mls}
+                </div>
+                <div style={{ fontSize: '0.76rem', color: C.textMuted, marginBottom: 10 }}>
+                  {property.beds} bd · {property.baths} ba · {property.sqft} sqft
                 </div>
               </div>
               <Icon.Chevron size={15} color={C.textSecondary} down={expanded} />

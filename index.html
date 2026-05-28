@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#1a1a1a" />
+  <title>SFFU App</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box; margin: 0; padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a1a;
+      overscroll-behavior: none;
+      color: #f5f5f5;
+    }
+    ::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="supabase.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+
+  <!-- ─── Auth Overlay (shown by default until session confirmed) ─── -->
+  <div id="auth-overlay" style="
+    position: fixed; inset: 0; z-index: 9999;
+    background: #1a1a1a;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  ">
+    <!-- Sign-in screen -->
+    <div id="auth-signin" style="
+      display: flex; flex-direction: column;
+      align-items: center; padding: 0 48px; width: 100%;
+    ">
+      <div style="font-size: 2.4rem; font-weight: 800; color: #c9a84c; margin-bottom: 4px; letter-spacing: 0.08em;">
+        SFFU
+      </div>
+      <div style="font-size: 0.75rem; font-weight: 600; color: #888; margin-bottom: 6px; letter-spacing: 0.15em; text-transform: uppercase;">
+        Showing Feedback Follow Up
+      </div>
+      <div style="font-size: 0.8rem; color: #555; margin-bottom: 52px;">
+        The Morshed Group
+      </div>
+      <button
+        onclick="SupabaseAuth.signInWithGoogle()"
+        style="
+          display: flex; align-items: center; gap: 12px;
+          background: #fff; border: none; border-radius: 12px;
+          padding: 14px 24px; font-size: 16px; font-weight: 500;
+          color: #3c4043; cursor: pointer;
+          box-shadow: 0 2px 16px rgba(0,0,0,0.5);
+          font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        "
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24">
+          <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+          <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+          <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+          <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+        </svg>
+        Sign in with Google
+      </button>
+    </div>
+
+    <!-- Access denied screen (Phase 2+: domain allowlist) -->
+    <div id="auth-rejected" style="
+      display: none; flex-direction: column;
+      align-items: center; text-align: center; padding: 0 32px;
+    ">
+      <div style="font-size: 2.4rem; font-weight: 800; color: #c9a84c; margin-bottom: 4px; letter-spacing: 0.08em;">SFFU</div>
+      <div style="font-size: 0.75rem; color: #888; margin-bottom: 48px; letter-spacing: 0.15em; text-transform: uppercase;">
+        Showing Feedback Follow Up
+      </div>
+      <div style="
+        width: 52px; height: 52px; border-radius: 50%;
+        background: #2a2a2a; display: flex; align-items: center;
+        justify-content: center; margin-bottom: 20px;
+      ">
+        <svg width="26" height="26" fill="none" stroke="#e05252" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+        </svg>
+      </div>
+      <div style="font-size: 1.1rem; font-weight: 600; color: #fff; margin-bottom: 8px;">Access denied</div>
+      <div style="font-size: 0.9rem; color: #888; margin-bottom: 32px; line-height: 1.6;">
+        Your account doesn't have access.<br/>Contact Symon to be added.
+      </div>
+      <button
+        onclick="SupabaseAuth.signOut()"
+        style="
+          background: none; border: 1px solid #333; border-radius: 10px;
+          padding: 10px 20px; font-size: 14px; color: #888; cursor: pointer;
+          font-family: -apple-system, sans-serif;
+        "
+      >
+        Sign out
+      </button>
+    </div>
+  </div>
+  <!-- ─── End Auth Overlay ─── -->
+
+  <div id="root"></div>
+
+  <!-- ─── Dev localhost mock (bypasses Supabase for local testing) ─── -->
+  <script>
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+    window.SupabaseAuth = {
+      _state: {
+        session: {
+          user: {
+            id: 'dev-user-id',
+            email: 'symon@morshedgroup.com',
+            user_metadata: { full_name: 'Symon', avatar_url: '' }
+          },
+          access_token: 'dev-token'
+        }
+      },
+      signInWithGoogle: function() {},
+      signOut: function() { location.reload(); },
+      getSession: function() { return Promise.resolve(window.SupabaseAuth._state.session); },
+      onAuthStateChange: function(cb) {
+        setTimeout(function() { cb({ session: window.SupabaseAuth._state.session }); }, 50);
+      }
+    };
+  }
+  </script>
+
+  <!-- ─── React App ─── -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ─── Design tokens ───────────────────────────────────────────────
+    const C = {
+      bg:           '#1a1a1a',
+      surface:      '#242424',
+      surfaceHover: '#2a2a2a',
+      border:       '#2e2e2e',
+      gold:         '#c9a84c',
+      goldLight:    '#e2c97e',
+      textPrimary:  '#f5f5f5',
+      textSecondary:'#888888',
+      textMuted:    '#555555',
+      red:          '#e05252',
+      green:        '#4caf7d',
+      navBg:        '#141414',
+    };
+
+    // ─── SVG Icons ───────────────────────────────────────────────────
+    const Icon = {
+      Grid: ({ size = 22, color = C.textSecondary }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="7" height="7" rx="1.5"/>
+          <rect x="14" y="3" width="7" height="7" rx="1.5"/>
+          <rect x="14" y="14" width="7" height="7" rx="1.5"/>
+          <rect x="3" y="14" width="7" height="7" rx="1.5"/>
+        </svg>
+      ),
+      Kanban: ({ size = 22, color = C.textSecondary }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="5" height="18" rx="1.5"/>
+          <rect x="9.5" y="3" width="5" height="13" rx="1.5"/>
+          <rect x="16" y="3" width="5" height="16" rx="1.5"/>
+        </svg>
+      ),
+      Gear: ({ size = 22, color = C.textSecondary }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      ),
+      Menu: ({ size = 22, color = C.textSecondary }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round">
+          <line x1="3" y1="6"  x2="21" y2="6"/>
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      ),
+      X: ({ size = 20, color = C.textSecondary }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6"  y1="6" x2="18" y2="18"/>
+        </svg>
+      ),
+      Plus: ({ size = 20, color = C.gold }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5"  y1="12" x2="19" y2="12"/>
+        </svg>
+      ),
+      Upload: ({ size = 20, color = C.gold }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="16 16 12 12 8 16"/>
+          <line x1="12" y1="12" x2="12" y2="21"/>
+          <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>
+        </svg>
+      ),
+    };
+
+    // ─── Overview Tab ────────────────────────────────────────────────
+    function OverviewTab({ user }) {
+      const firstName = (
+        user?.user_metadata?.full_name?.split(' ')[0] ||
+        user?.email?.split('@')[0] ||
+        'there'
+      );
+
+      return (
+        <div style={{ padding: '20px 16px 100px' }}>
+          {/* Greeting */}
+          <div style={{ marginBottom: 28 }}>
+            <div style={{ fontSize: '1.6rem', fontWeight: 700, color: C.textPrimary }}>
+              Hi, {firstName}
+            </div>
+            <div style={{ fontSize: '0.82rem', color: C.textSecondary, marginTop: 4 }}>
+              Showing Feedback Follow Up
+            </div>
+          </div>
+
+          {/* Summary row — will show counts once data exists */}
+          <div style={{ display: 'flex', gap: 10, marginBottom: 24 }}>
+            {[
+              { label: 'Properties', value: '—' },
+              { label: 'Pending',    value: '—' },
+              { label: 'Received',   value: '—' },
+            ].map(({ label, value }) => (
+              <div key={label} style={{
+                flex: 1, background: C.surface, border: `1px solid ${C.border}`,
+                borderRadius: 12, padding: '12px 8px', textAlign: 'center',
+              }}>
+                <div style={{ fontSize: '1.3rem', fontWeight: 700, color: C.gold }}>{value}</div>
+                <div style={{ fontSize: '0.68rem', color: C.textSecondary, marginTop: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Properties list — empty state */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: '0.7rem', fontWeight: 600, color: C.textSecondary, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 10 }}>
+              Properties
+            </div>
+          </div>
+          <div style={{
+            background: C.surface, border: `1px solid ${C.border}`,
+            borderRadius: 14, padding: '48px 24px', textAlign: 'center',
+          }}>
+            <div style={{ fontSize: '2.2rem', marginBottom: 14 }}>🏘️</div>
+            <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '0.95rem', marginBottom: 6 }}>
+              No properties yet
+            </div>
+            <div style={{ color: C.textSecondary, fontSize: '0.83rem', lineHeight: 1.6 }}>
+              Add a showing manually or upload a<br/>Supra screenshot to get started.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Board Tab ───────────────────────────────────────────────────
+    function BoardTab() {
+      const statuses = [
+        { id: 'open',              label: 'Open',             color: C.textSecondary, count: 0 },
+        { id: 'in_progress',       label: 'In Progress',      color: '#f0a500',       count: 0 },
+        { id: 'feedback_received', label: 'Feedback',         color: C.green,         count: 0 },
+        { id: 'closed',            label: 'Closed',           color: C.textMuted,     count: 0 },
+      ];
+
+      return (
+        <div style={{ padding: '20px 16px 100px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+            <div style={{ fontSize: '1.2rem', fontWeight: 700, color: C.textPrimary }}>Board</div>
+            {/* Filter pills */}
+            <div style={{ display: 'flex', gap: 6 }}>
+              {['All', 'Mine'].map((f, i) => (
+                <button key={f} style={{
+                  padding: '4px 12px', borderRadius: 20, fontSize: '0.78rem', fontWeight: 500,
+                  background: i === 0 ? C.gold : 'none',
+                  color: i === 0 ? '#1a1a1a' : C.textSecondary,
+                  border: i === 0 ? 'none' : `1px solid ${C.border}`,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}>{f}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Status column pills (horizontal scroll) */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 20, overflowX: 'auto', paddingBottom: 4 }}>
+            {statuses.map(({ id, label, color, count }) => (
+              <div key={id} style={{
+                flexShrink: 0, background: C.surface, border: `1px solid ${C.border}`,
+                borderRadius: 10, padding: '8px 14px',
+                display: 'flex', alignItems: 'center', gap: 8,
+              }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: color }} />
+                <span style={{ fontSize: '0.82rem', color: C.textPrimary, fontWeight: 500 }}>{label}</span>
+                <span style={{ fontSize: '0.75rem', color: C.textSecondary, background: C.border, borderRadius: 8, padding: '1px 7px' }}>{count}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Empty state */}
+          <div style={{
+            background: C.surface, border: `1px solid ${C.border}`,
+            borderRadius: 14, padding: '48px 24px', textAlign: 'center',
+          }}>
+            <div style={{ fontSize: '2.2rem', marginBottom: 14 }}>📋</div>
+            <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '0.95rem', marginBottom: 6 }}>
+              No showings yet
+            </div>
+            <div style={{ color: C.textSecondary, fontSize: '0.83rem', lineHeight: 1.6 }}>
+              Showings will appear here once added.<br/>Tap the menu to add one.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Settings Tab ────────────────────────────────────────────────
+    function SettingsTab({ user }) {
+      const fullName  = user?.user_metadata?.full_name || 'User';
+      const email     = user?.email || '';
+      const initial   = fullName.charAt(0).toUpperCase();
+
+      return (
+        <div style={{ padding: '20px 16px 100px', overflowY: 'auto', height: '100%' }}>
+          <div style={{ fontSize: '1.2rem', fontWeight: 700, color: C.textPrimary, marginBottom: 24 }}>
+            Settings
+          </div>
+
+          {/* Account card */}
+          <SectionCard title="Account" style={{ marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 18 }}>
+              <div style={{
+                width: 44, height: 44, borderRadius: '50%',
+                background: C.border, display: 'flex', alignItems: 'center',
+                justifyContent: 'center', color: C.gold, fontWeight: 700, fontSize: '1.1rem',
+                flexShrink: 0,
+              }}>{initial}</div>
+              <div>
+                <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '0.95rem' }}>{fullName}</div>
+                <div style={{ color: C.textSecondary, fontSize: '0.8rem', marginTop: 2 }}>{email}</div>
+              </div>
+            </div>
+            <ActionButton
+              label="Sign out"
+              danger
+              onClick={() => window.SupabaseAuth.signOut()}
+            />
+          </SectionCard>
+
+          {/* SMS Templates (placeholder — Phase 2) */}
+          <SectionCard title="SMS Follow-up Templates" style={{ marginBottom: 14 }}>
+            {[1, 2, 3].map(n => (
+              <div key={n} style={{
+                padding: '12px 14px', background: C.surfaceHover,
+                borderRadius: 10, marginBottom: n < 3 ? 8 : 0,
+              }}>
+                <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.gold, letterSpacing: '0.06em', marginBottom: 4, textTransform: 'uppercase' }}>
+                  Follow-up {n} · Day {[1, 3, 5][n - 1]}
+                </div>
+                <div style={{ fontSize: '0.83rem', color: C.textSecondary }}>
+                  Template coming soon
+                </div>
+              </div>
+            ))}
+          </SectionCard>
+
+          {/* Twilio (placeholder — Phase 1) */}
+          <SectionCard title="Twilio SMS">
+            <div style={{ fontSize: '0.83rem', color: C.textSecondary, lineHeight: 1.6 }}>
+              Twilio configuration will be set up in Phase 1.<br/>
+              Start your Twilio account at <span style={{ color: C.gold }}>twilio.com</span> to get your phone number ready.
+            </div>
+          </SectionCard>
+        </div>
+      );
+    }
+
+    function SectionCard({ title, children, style = {} }) {
+      return (
+        <div style={{
+          background: C.surface, border: `1px solid ${C.border}`,
+          borderRadius: 14, padding: '16px', ...style,
+        }}>
+          <div style={{
+            fontSize: '0.68rem', fontWeight: 700, color: C.textSecondary,
+            letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 14,
+          }}>
+            {title}
+          </div>
+          {children}
+        </div>
+      );
+    }
+
+    function ActionButton({ label, onClick, danger = false }) {
+      return (
+        <button onClick={onClick} style={{
+          width: '100%', padding: '11px', background: 'none',
+          border: `1px solid ${danger ? '#3a2020' : C.border}`,
+          borderRadius: 10, color: danger ? C.red : C.textPrimary,
+          fontSize: '0.9rem', cursor: 'pointer',
+          fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+        }}>
+          {label}
+        </button>
+      );
+    }
+
+    // ─── Hamburger Drawer ────────────────────────────────────────────
+    function HamburgerDrawer({ open, onClose, onAction }) {
+      if (!open) return null;
+      return (
+        <>
+          <div
+            onClick={onClose}
+            style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.6)' }}
+          />
+          <div style={{
+            position: 'fixed', top: 0, right: 0, bottom: 0,
+            width: 270, zIndex: 201,
+            background: C.surface, borderLeft: `1px solid ${C.border}`,
+            display: 'flex', flexDirection: 'column',
+            padding: '52px 20px 40px',
+          }}>
+            <button
+              onClick={onClose}
+              style={{
+                position: 'absolute', top: 16, right: 16,
+                background: 'none', border: 'none', cursor: 'pointer', padding: 6,
+              }}
+            >
+              <Icon.X color={C.textSecondary} />
+            </button>
+
+            {/* Brand */}
+            <div style={{ marginBottom: 36 }}>
+              <div style={{ color: C.gold, fontWeight: 800, fontSize: '1.2rem', letterSpacing: '0.08em' }}>SFFU</div>
+              <div style={{ color: C.textSecondary, fontSize: '0.75rem', marginTop: 2, letterSpacing: '0.08em' }}>
+                Showing Feedback Follow Up
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <DrawerItem icon={<Icon.Plus />} label="Add Showing" onClick={() => { onAction('add-showing'); onClose(); }} />
+              <DrawerItem icon={<Icon.Upload />} label="Upload Supra Screenshot" onClick={() => { onAction('upload-screenshot'); onClose(); }} />
+            </div>
+
+            {/* Sign out */}
+            <div style={{ marginTop: 'auto' }}>
+              <div style={{ height: 1, background: C.border, marginBottom: 20 }} />
+              <button
+                onClick={() => window.SupabaseAuth.signOut()}
+                style={{
+                  width: '100%', padding: '11px', background: 'none',
+                  border: `1px solid #3a2020`, borderRadius: 10,
+                  color: C.red, fontSize: '0.9rem', cursor: 'pointer',
+                  fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+                }}
+              >
+                Sign out
+              </button>
+            </div>
+          </div>
+        </>
+      );
+    }
+
+    function DrawerItem({ icon, label, onClick }) {
+      return (
+        <button onClick={onClick} style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          width: '100%', padding: '13px 14px', background: 'none',
+          border: `1px solid ${C.border}`, borderRadius: 12,
+          color: C.textPrimary, fontSize: '0.9rem', cursor: 'pointer',
+          fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+          textAlign: 'left',
+        }}>
+          {icon}
+          {label}
+        </button>
+      );
+    }
+
+    // ─── Bottom Navigation ───────────────────────────────────────────
+    const TABS = [
+      { id: 'overview', label: 'Overview', Icon: Icon.Grid    },
+      { id: 'board',    label: 'Board',    Icon: Icon.Kanban  },
+      { id: 'settings', label: 'Settings', Icon: Icon.Gear    },
+    ];
+
+    function BottomNav({ active, onChange }) {
+      return (
+        <nav style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 50,
+          background: C.navBg, borderTop: `1px solid ${C.border}`,
+          display: 'flex',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+        }}>
+          {TABS.map(({ id, label, Icon: TabIcon }) => {
+            const isActive = active === id;
+            const color = isActive ? C.gold : C.textSecondary;
+            return (
+              <button key={id} onClick={() => onChange(id)} style={{
+                flex: 1, display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center',
+                gap: 4, padding: '10px 0',
+                background: 'none', border: 'none', cursor: 'pointer',
+              }}>
+                <TabIcon color={color} />
+                <span style={{
+                  fontSize: '0.62rem', color,
+                  fontWeight: isActive ? 600 : 400,
+                  letterSpacing: '0.03em',
+                  fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+                }}>
+                  {label}
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+      );
+    }
+
+    // ─── Top Bar ─────────────────────────────────────────────────────
+    function TopBar({ onMenuOpen }) {
+      return (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '12px 16px',
+          paddingTop: 'calc(12px + env(safe-area-inset-top))',
+          background: C.bg, borderBottom: `1px solid ${C.border}`,
+          flexShrink: 0,
+        }}>
+          <div style={{
+            fontSize: '1rem', fontWeight: 800,
+            color: C.gold, letterSpacing: '0.1em',
+          }}>
+            SFFU
+          </div>
+          <button
+            onClick={onMenuOpen}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}
+          >
+            <Icon.Menu color={C.textSecondary} />
+          </button>
+        </div>
+      );
+    }
+
+    // ─── Root App ────────────────────────────────────────────────────
+    function App({ user }) {
+      const [activeTab,  setActiveTab]  = useState('overview');
+      const [drawerOpen, setDrawerOpen] = useState(false);
+
+      function handleAction(action) {
+        // Phase 1+: wire up modals here
+        console.log('Action:', action);
+      }
+
+      return (
+        <div style={{
+          height: '100%', background: C.bg,
+          display: 'flex', flexDirection: 'column',
+          color: C.textPrimary,
+        }}>
+          <TopBar onMenuOpen={() => setDrawerOpen(true)} />
+
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {activeTab === 'overview' && <OverviewTab user={user} />}
+            {activeTab === 'board'    && <BoardTab />}
+            {activeTab === 'settings' && <SettingsTab user={user} />}
+          </div>
+
+          <BottomNav active={activeTab} onChange={setActiveTab} />
+
+          <HamburgerDrawer
+            open={drawerOpen}
+            onClose={() => setDrawerOpen(false)}
+            onAction={handleAction}
+          />
+        </div>
+      );
+    }
+
+    // ─── Auth Gate → Mount ───────────────────────────────────────────
+    (function mount() {
+      const rootEl = document.getElementById('root');
+      const root   = ReactDOM.createRoot(rootEl);
+
+      function showSignin()   {
+        document.getElementById('auth-signin').style.display   = 'flex';
+        document.getElementById('auth-rejected').style.display = 'none';
+        document.getElementById('auth-overlay').style.display  = 'flex';
+      }
+      function showRejected() {
+        document.getElementById('auth-signin').style.display   = 'none';
+        document.getElementById('auth-rejected').style.display = 'flex';
+        document.getElementById('auth-overlay').style.display  = 'flex';
+      }
+      function hideOverlay()  {
+        document.getElementById('auth-overlay').style.display  = 'none';
+      }
+
+      // Dev bypass
+      if (
+        window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1' ||
+        window.location.protocol === 'file:'
+      ) {
+        const user = window.SupabaseAuth._state.session?.user;
+        root.render(<App user={user} />);
+        hideOverlay();
+        return;
+      }
+
+      // Real auth gate
+      window.SupabaseAuth.onAuthStateChange(function({ session }) {
+        if (!session) { showSignin(); return; }
+        // Phase 0: any Google sign-in = access
+        // Phase 2+: add domain/allowlist check here before calling hideOverlay()
+        root.render(<App user={session.user} />);
+        hideOverlay();
+      });
+    })();
+  </script>
+</body>
+</html>

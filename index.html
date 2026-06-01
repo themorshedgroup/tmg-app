@@ -10,7 +10,18 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
   <style>
+    :root {
+      --tmg-navy:      #001A4A;
+      --tmg-navy-deep: #000D26;
+      --tmg-navy-mid:  #0A1E44;
+      --tmg-gold:      #AD832F;
+      --tmg-gold-soft: #C9A45A;
+      --tmg-paper:     #FCFBF8;
+      --tmg-border:    #E4DFD4;
+      --tmg-slate:     #6B6B6B;
+    }
     *, *::before, *::after {
       box-sizing: border-box; margin: 0; padding: 0;
       -webkit-tap-highlight-color: transparent;
@@ -21,7 +32,9 @@
       background: #FCFBF8;
       overscroll-behavior: none;
       color: #001A4A;
+      transition: background 0.2s ease, color 0.2s ease;
     }
+    body.dark { background: #000D26; color: #FCFBF8; }
     ::-webkit-scrollbar { display: none; }
     * { scrollbar-width: none; }
   </style>
@@ -33,6 +46,8 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body>
+  <!-- ─── Dark mode init (before render to avoid flash) ─── -->
+  <script>if (localStorage.getItem('sffu-theme') === 'dark') document.body.classList.add('dark');</script>
 
   <!-- ─── Auth Overlay ─── -->
   <div id="auth-overlay" style="
@@ -698,94 +713,176 @@
     }
 
     // ─── Hamburger Drawer ─────────────────────────────────────────────
-    function HamburgerDrawer({ open, onClose, onAction }) {
+    const DRAWER_ITEMS = [
+      { id: 'overview',          icon: 'ti-layout-grid', label: 'OVERVIEW',     type: 'tab'    },
+      { id: 'board',             icon: 'ti-columns',     label: 'BOARD',        type: 'tab'    },
+      null,
+      { id: 'add-showing',       icon: 'ti-plus',        label: 'ADD SHOWING',  type: 'action' },
+      { id: 'upload-screenshot', icon: 'ti-upload',      label: 'UPLOAD SUPRA', type: 'action' },
+      null,
+      { id: 'settings',          icon: 'ti-settings',    label: 'SETTINGS',     type: 'tab'    },
+    ];
+
+    function HamburgerDrawer({ open, onClose, onAction, onTabChange, activeTab, dark, user }) {
       if (!open) return null;
+      const firstName    = user?.user_metadata?.full_name?.split(' ')[0] || 'Symon';
+      const totalShowings = SHOWINGS.length;
+      const drawerBg     = dark ? '#000D26' : '#FFFFFF';
+      const headerBorder = dark ? 'rgba(173,131,47,0.15)' : 'rgba(173,131,47,0.20)';
+      const logoColor    = dark ? '#C9A45A' : '#001A4A';
+      const closeColor   = dark ? 'rgba(255,255,255,0.5)' : '#001A4A';
+
       return (
         <>
-          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,26,74,0.5)' }} />
+          {/* Scrim */}
+          <div onClick={onClose} style={{
+            position: 'fixed', inset: 0, zIndex: 200,
+            background: dark ? 'rgba(0,0,0,0.65)' : 'rgba(0,26,74,0.4)',
+          }} />
+
+          {/* Drawer panel */}
           <div style={{
-            position: 'fixed', top: 0, right: 0, bottom: 0, width: 270, zIndex: 201,
-            background: C.navy, borderLeft: 'none',
-            display: 'flex', flexDirection: 'column', padding: '52px 20px 40px',
+            position: 'fixed', top: 0, right: 0, bottom: 0, width: 280, zIndex: 201,
+            background: drawerBg,
+            borderLeft: dark ? 'none' : '3px solid #001A4A',
+            display: 'flex', flexDirection: 'column',
           }}>
-            <button onClick={onClose} style={{ position: 'absolute', top: 16, right: 16, background: 'none', border: 'none', cursor: 'pointer', padding: 6 }}>
-              <Icon.X color="rgba(255,255,255,0.6)" />
-            </button>
-            <div style={{ marginBottom: 36 }}>
-              <div style={{ color: C.goldSoft, fontWeight: 300, fontSize: '1.1rem', letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>SFFU</div>
-              <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: '0.72rem', marginTop: 4, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Showing Feedback Follow Up</div>
+
+            {/* Header */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '20px 20px 16px', borderBottom: `1px solid ${headerBorder}`,
+            }}>
+              <div style={{
+                fontSize: '1rem', fontWeight: 300, letterSpacing: '0.32em',
+                textTransform: 'uppercase', fontFamily: "'Jost', sans-serif", color: logoColor,
+              }}>S F F U</div>
+              <button onClick={onClose} style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 4,
+                color: closeColor, fontSize: 20, lineHeight: 1, display: 'flex', alignItems: 'center',
+              }}><i className="ti ti-x" /></button>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <DrawerItem icon={<Icon.Plus color={C.goldSoft} />}   label="Add Showing"             onClick={() => { onAction('add-showing');        onClose(); }} />
-              <DrawerItem icon={<Icon.Upload color={C.goldSoft} />}  label="Upload Supra Screenshot"  onClick={() => { onAction('upload-screenshot'); onClose(); }} />
+
+            {/* Greeting */}
+            <div style={{ padding: '16px 20px 14px', borderBottom: `1px solid ${headerBorder}` }}>
+              <div style={{
+                fontSize: '1.4rem', fontStyle: 'italic',
+                fontFamily: "'Cormorant Garamond', Georgia, serif",
+                color: dark ? '#FCFBF8' : '#001A4A', marginBottom: 4,
+              }}>Hi, {firstName}</div>
+              <div style={{
+                fontSize: '0.6rem', letterSpacing: '0.18em', textTransform: 'uppercase',
+                fontFamily: "'Jost', sans-serif", fontWeight: 500,
+                color: dark ? 'rgba(255,255,255,0.38)' : '#9B9380',
+              }}>Operations Lead</div>
             </div>
-            <div style={{ marginTop: 'auto' }}>
-              <div style={{ height: 1, background: 'rgba(255,255,255,0.12)', marginBottom: 20 }} />
+
+            {/* Nav items */}
+            <div style={{ flex: 1, overflowY: 'auto', paddingTop: 8, paddingBottom: 8 }}>
+              {DRAWER_ITEMS.map((item, i) => {
+                if (!item) return (
+                  <div key={`div-${i}`} style={{
+                    height: 1, background: dark ? 'rgba(255,255,255,0.08)' : '#E4DFD4',
+                    margin: '6px 20px',
+                  }} />
+                );
+                const isActive  = item.type === 'tab' && item.id === activeTab;
+                const iconColor = isActive ? (dark ? '#C9A45A' : '#AD832F') : (dark ? 'rgba(255,255,255,0.22)' : '#B4B2A9');
+                const lblColor  = isActive ? (dark ? '#C9A45A' : '#001A4A') : (dark ? 'rgba(255,255,255,0.35)' : '#6B6B6B');
+                const itemBg    = isActive ? (dark ? 'rgba(173,131,47,0.12)' : '#F3EBDA') : 'transparent';
+                return (
+                  <button key={item.id} onClick={() => {
+                    if (item.type === 'tab') onTabChange(item.id); else onAction(item.id);
+                    onClose();
+                  }} style={{
+                    display: 'flex', alignItems: 'center', gap: 12,
+                    width: isActive && dark ? 'calc(100% - 12px)' : '100%',
+                    marginRight: isActive && dark ? 12 : 0,
+                    padding: '11px 20px', background: itemBg, outline: 'none', cursor: 'pointer',
+                    textAlign: 'left', border: 'none',
+                    borderLeft: !dark ? `2px solid ${isActive ? '#AD832F' : 'transparent'}` : 'none',
+                    borderRadius: isActive && dark ? '0 20px 20px 0' : 0,
+                  }}>
+                    <i className={`ti ${item.icon}`} style={{ fontSize: 17, color: iconColor, lineHeight: 1, flexShrink: 0 }} />
+                    <span style={{
+                      fontSize: '0.68rem', letterSpacing: '0.14em', fontWeight: 500,
+                      fontFamily: "'Jost', sans-serif", textTransform: 'uppercase', color: lblColor,
+                    }}>{item.label}</span>
+                    {item.id === 'overview' && isActive && (
+                      <span style={{
+                        marginLeft: 'auto', fontSize: '0.65rem', fontWeight: 600,
+                        background: dark ? 'rgba(173,131,47,0.2)' : '#F3EBDA',
+                        color: dark ? '#C9A45A' : '#AD832F',
+                        padding: '2px 8px', borderRadius: 10, fontFamily: "'Jost', sans-serif",
+                      }}>{totalShowings}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Footer — sign out */}
+            <div style={{ borderTop: `1px solid ${headerBorder}`, padding: '16px 20px' }}>
               <button onClick={() => window.SupabaseAuth.signOut()} style={{
-                width: '100%', padding: 11, background: 'none', border: `1px solid rgba(255,255,255,0.2)`,
-                borderRadius: 12, color: 'rgba(255,255,255,0.55)', fontSize: '0.88rem', cursor: 'pointer',
-                fontFamily: C.fontSans,
-              }}>
-                Sign out
-              </button>
+                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                fontSize: '0.62rem', letterSpacing: '0.18em', textTransform: 'uppercase',
+                fontFamily: "'Jost', sans-serif", fontWeight: 500,
+                color: dark ? 'rgba(255,255,255,0.28)' : '#9B9380',
+              }}>Sign Out</button>
             </div>
           </div>
         </>
       );
     }
 
-    function DrawerItem({ icon, label, onClick }) {
-      return (
-        <button onClick={onClick} style={{
-          display: 'flex', alignItems: 'center', gap: 12, width: '100%',
-          padding: '13px 14px', background: 'none', border: `1px solid rgba(255,255,255,0.15)`,
-          borderRadius: 12, color: 'rgba(255,255,255,0.85)', fontSize: '0.88rem', cursor: 'pointer',
-          fontFamily: C.fontSans, textAlign: 'left', letterSpacing: '0.03em',
-        }}>
-          {icon}{label}
-        </button>
-      );
-    }
-
-    // ─── Bottom Nav ───────────────────────────────────────────────────
+    // ─── Bottom Nav (floating pill) ──────────────────────────────────
     const TABS = [
-      { id: 'overview', label: 'Overview', Icon: Icon.Grid   },
-      { id: 'board',    label: 'Board',    Icon: Icon.Kanban },
-      { id: 'settings', label: 'Settings', Icon: Icon.Gear   },
+      { id: 'overview', label: 'Overview', icon: 'ti-layout-grid' },
+      { id: 'board',    label: 'Board',    icon: 'ti-columns'     },
+      { id: 'settings', label: 'Settings', icon: 'ti-settings'    },
     ];
 
-    function BottomNav({ active, onChange }) {
+    function BottomNav({ active, onChange, dark }) {
       return (
         <nav style={{
           position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 50,
-          background: 'rgba(0,26,74,0.92)', backdropFilter: 'blur(20px) saturate(180%)',
-          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          borderTop: '1px solid rgba(255,255,255,0.08)',
-          display: 'flex', paddingBottom: 'env(safe-area-inset-bottom)',
+          background: dark ? '#000D26' : '#FCFBF8',
+          borderTop: dark ? 'none' : '1px solid #E4DFD4',
+          display: 'flex', justifyContent: 'center',
+          padding: `8px 16px calc(8px + env(safe-area-inset-bottom))`,
         }}>
-          {TABS.map(({ id, label, Icon: I }) => {
-            const active_ = active === id;
-            const col = active_ ? C.goldSoft : 'rgba(255,255,255,0.5)';
-            return (
-              <button key={id} onClick={() => onChange(id)} style={{
-                flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
-                justifyContent: 'center', gap: 4, padding: '10px 0',
-                background: 'none', border: 'none', cursor: 'pointer',
-                borderTop: active_ ? `2px solid ${C.goldSoft}` : '2px solid transparent',
-              }}>
-                <I color={col} />
-                <span style={{ fontSize: '0.65rem', color: col, fontWeight: active_ ? 500 : 400, fontFamily: C.fontSans }}>
-                  {label}
-                </span>
-              </button>
-            );
-          })}
+          {/* Pill container */}
+          <div style={{
+            display: 'flex', alignItems: 'center',
+            background: dark ? '#0A1E44' : '#001A4A',
+            borderRadius: 40, padding: 4, gap: 2,
+          }}>
+            {TABS.map(({ id, label, icon }) => {
+              const isActive = active === id;
+              return (
+                <button key={id} onClick={() => onChange(id)} style={{
+                  display: 'flex', flexDirection: 'column', alignItems: 'center',
+                  justifyContent: 'center', gap: 2,
+                  padding: '7px 20px', borderRadius: 30, border: 'none', cursor: 'pointer',
+                  background: isActive ? '#AD832F' : (dark ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.32)'),
+                  transition: 'background 0.2s ease',
+                }}>
+                  <i className={`ti ${icon}`} style={{ fontSize: 14, display: 'block', color: '#FFFFFF', lineHeight: 1 }} />
+                  <span style={{
+                    fontSize: 8, fontFamily: "'Jost', sans-serif",
+                    letterSpacing: '0.14em', fontWeight: 500,
+                    textTransform: 'uppercase', color: '#FFFFFF',
+                  }}>{label}</span>
+                </button>
+              );
+            })}
+          </div>
         </nav>
       );
     }
 
     // ─── Top Bar ──────────────────────────────────────────────────────
-    function TopBar({ onMenuOpen }) {
+    function TopBar({ onMenuOpen, dark, onToggleDark }) {
       return (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -795,9 +892,14 @@
           borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>SFFU</div>
-          <button onClick={onMenuOpen} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
-            <Icon.Menu color="rgba(255,255,255,0.7)" />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <button onClick={onToggleDark} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', color: 'rgba(255,255,255,0.6)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}>
+              <i className={dark ? 'ti ti-sun' : 'ti ti-moon'} />
+            </button>
+            <button onClick={onMenuOpen} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+              <Icon.Menu color="rgba(255,255,255,0.7)" />
+            </button>
+          </div>
         </div>
       );
     }
@@ -806,17 +908,27 @@
     function App({ user }) {
       const [activeTab,  setActiveTab]  = useState('overview');
       const [drawerOpen, setDrawerOpen] = useState(false);
+      const [dark, setDark] = useState(() => localStorage.getItem('sffu-theme') === 'dark');
+
+      useEffect(() => {
+        document.body.classList.toggle('dark', dark);
+        localStorage.setItem('sffu-theme', dark ? 'dark' : 'light');
+      }, [dark]);
 
       return (
-        <div style={{ height: '100%', background: C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary }}>
-          <TopBar onMenuOpen={() => setDrawerOpen(true)} />
+        <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
+          <TopBar onMenuOpen={() => setDrawerOpen(true)} dark={dark} onToggleDark={() => setDark(d => !d)} />
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
             {activeTab === 'overview' && <OverviewTab user={user} />}
             {activeTab === 'board'    && <BoardTab />}
             {activeTab === 'settings' && <SettingsTab user={user} />}
           </div>
-          <BottomNav active={activeTab} onChange={setActiveTab} />
-          <HamburgerDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onAction={a => console.log('action:', a)} />
+          <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />
+          <HamburgerDrawer
+            open={drawerOpen} onClose={() => setDrawerOpen(false)}
+            onAction={a => console.log('action:', a)} onTabChange={setActiveTab}
+            activeTab={activeTab} dark={dark} user={user}
+          />
         </div>
       );
     }

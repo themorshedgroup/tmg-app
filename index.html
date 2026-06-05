@@ -280,8 +280,7 @@
     }
 
     // ─── SMS Thread ───────────────────────────────────────────────────
-    function SmsThread({ sid }) {
-      const thread = getThread(sid);
+    function SmsThread({ thread }) {
       if (!thread.length) return (
         <div style={{ padding: '12px 0 4px', textAlign: 'center', color: C.textMuted, fontSize: '0.8rem' }}>
           No messages yet
@@ -369,7 +368,7 @@
               padding: '0 16px 14px',
               background: C.bg,
             }}>
-              <SmsThread sid={showing.id} />
+              <SmsThread thread={getThread(showing.id)} />
             </div>
           )}
         </div>
@@ -392,34 +391,31 @@
           {/* Property header */}
           <div
             onClick={() => setExpanded(e => !e)}
-            style={{ padding: '16px', cursor: 'pointer' }}
+            style={{ padding: '14px 16px', cursor: 'pointer' }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 2 }}>
-                  <div style={{ fontWeight: 700, fontSize: '0.97rem', color: C.textPrimary }}>
-                    {property.address}
-                  </div>
-                  <div style={{ fontWeight: 500, fontStyle: 'italic', fontSize: '1rem', color: C.gold, marginLeft: 8, whiteSpace: 'nowrap', fontFamily: C.fontDisplay }}>
-                    {property.price}
-                  </div>
-                </div>
-                <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 3 }}>
-                  {property.city} · MLS# {property.mls}
-                </div>
-                <div style={{ fontSize: '0.76rem', color: C.textMuted, marginBottom: 10 }}>
-                  {property.beds} bd · {property.baths} ba · {property.sqft} sqft
-                </div>
+            {/* Row 1: address + mini counts + chevron */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 3, gap: 8 }}>
+              <div style={{ fontWeight: 700, fontSize: '0.97rem', color: C.textPrimary, flex: 1, minWidth: 0 }}>
+                {property.address}
               </div>
-              <Icon.Chevron size={15} color={C.textSecondary} down={expanded} />
+              {/* Mini status counts */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                <span style={{ fontSize: '0.7rem', fontWeight: 600, color: C.gold }}>{showings.length}</span>
+                {feedback > 0 && <span style={{ fontSize: '0.7rem', fontWeight: 600, color: C.green }}>✓{feedback}</span>}
+                {pending > 0  && <span style={{ fontSize: '0.7rem', fontWeight: 600, color: C.amber }}>·{pending}</span>}
+                {closed > 0   && <span style={{ fontSize: '0.7rem', fontWeight: 600, color: C.textMuted }}>×{closed}</span>}
+              </div>
+              <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />
             </div>
-
-            {/* Stats row */}
-            <div style={{ display: 'flex', gap: 8 }}>
-              <StatChip value={showings.length} label="Showings"  color={C.gold} />
-              <StatChip value={feedback}        label="Feedback"  color={C.green} />
-              <StatChip value={pending}         label="Pending"   color={C.amber} />
-              {closed > 0 && <StatChip value={closed} label="Closed" color={C.textMuted} />}
+            {/* Row 2: city · MLS */}
+            <div style={{ fontSize: '0.75rem', color: C.textSecondary, marginBottom: 2 }}>
+              {property.city} · MLS# {property.mls}
+            </div>
+            {/* Row 3: specs + price */}
+            <div style={{ fontSize: '0.73rem', color: C.textMuted, display: 'flex', alignItems: 'baseline', gap: 4 }}>
+              <span>{property.beds} bd · {property.baths} ba · {property.sqft} sqft</span>
+              <span style={{ color: C.border }}>·</span>
+              <span style={{ fontStyle: 'italic', fontFamily: C.fontDisplay, color: C.gold, fontSize: '0.88rem', fontWeight: 500 }}>{property.price}</span>
             </div>
           </div>
 
@@ -449,37 +445,107 @@
     }
 
     function ShowingRow({ showing }) {
-      const [expanded, setExpanded] = useState(false);
-      const thread = getThread(showing.id);
+      const [expanded,    setExpanded]    = useState(false);
+      const [status,      setStatus]      = useState(showing.status);
+      const [localThread, setLocalThread] = useState(() => getThread(showing.id));
+      const [replyText,   setReplyText]   = useState('');
+
+      const hasUnread = localThread.length > 0 && localThread[localThread.length - 1].dir === 'in';
+
+      function handleSend() {
+        const txt = replyText.trim();
+        if (!txt) return;
+        setLocalThread(t => [...t, { dir: 'out', touch: null, time: 'Just now', body: txt }]);
+        setReplyText('');
+      }
+
       return (
         <div style={{ borderBottom: `1px solid ${C.border}` }}>
+          {/* Row header */}
           <div
             onClick={() => setExpanded(e => !e)}
-            style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', cursor: 'pointer', gap: 12 }}
+            style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', cursor: 'pointer', gap: 10 }}
           >
-            {/* Status dot */}
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS[showing.status]?.dot || '#666', flexShrink: 0 }} />
+            {/* Message icon + unread dot */}
+            <div style={{ position: 'relative', flexShrink: 0 }}>
+              <Icon.Msg size={15} color={hasUnread ? C.gold : C.textMuted} />
+              {hasUnread && (
+                <div style={{
+                  position: 'absolute', top: -3, right: -3,
+                  width: 7, height: 7, borderRadius: '50%',
+                  background: C.red, border: `1.5px solid ${C.surface}`,
+                }} />
+              )}
+            </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: '0.88rem', fontWeight: 500, color: C.textPrimary }}>{showing.agent}</div>
-              <div style={{ fontSize: '0.75rem', color: C.textSecondary }}>{showing.date}</div>
+              <div style={{ fontSize: '0.72rem', color: C.textSecondary }}>{showing.date} · {showing.phone}</div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-              {thread.length > 0 && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                  <Icon.Msg size={12} color={C.textMuted} />
-                  <span style={{ fontSize: '0.7rem', color: C.textMuted }}>{thread.length}</span>
-                </div>
-              )}
-              <StatusBadge status={showing.status} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+              <StatusBadge status={status} />
               <Icon.Chevron size={13} color={C.textSecondary} down={expanded} />
             </div>
           </div>
+
+          {/* Expanded panel */}
           {expanded && (
-            <div style={{ background: C.bg, borderTop: `1px solid ${C.border}`, padding: '4px 16px 14px' }}>
-              <div style={{ fontSize: '0.75rem', color: C.textSecondary, marginTop: 8, marginBottom: 4 }}>
-                {showing.phone} · {showing.office}
+            <div style={{ background: C.bg, borderTop: `1px solid ${C.border}`, padding: '10px 16px 16px' }}>
+              {/* Office */}
+              <div style={{ fontSize: '0.72rem', color: C.textMuted, marginBottom: 10 }}>{showing.office}</div>
+
+              {/* SMS thread */}
+              <SmsThread thread={localThread} />
+
+              {/* Status dropdown */}
+              <div style={{ marginTop: 14, marginBottom: 10 }}>
+                <div style={{ fontSize: '0.62rem', fontWeight: 500, color: C.textSecondary, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5, fontFamily: C.fontSans }}>Status</div>
+                <select
+                  value={status}
+                  onChange={e => setStatus(e.target.value)}
+                  style={{
+                    width: '100%', padding: '8px 12px',
+                    border: `1px solid ${C.border}`, borderRadius: 8,
+                    background: C.surface, color: C.textPrimary,
+                    fontSize: '0.85rem', fontFamily: C.fontSans,
+                    outline: 'none', cursor: 'pointer',
+                    appearance: 'none', WebkitAppearance: 'none',
+                  }}
+                >
+                  <option value="open">Open</option>
+                  <option value="in_progress">In Progress</option>
+                  <option value="feedback_received">Feedback Received</option>
+                  <option value="closed">Closed</option>
+                </select>
               </div>
-              <SmsThread sid={showing.id} />
+
+              {/* Reply composer */}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                <textarea
+                  rows={2}
+                  placeholder="Type a reply…"
+                  value={replyText}
+                  onChange={e => setReplyText(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+                  style={{
+                    flex: 1, padding: '8px 12px', resize: 'none',
+                    border: `1px solid ${C.border}`, borderRadius: 8,
+                    background: C.surface, color: C.textPrimary,
+                    fontSize: '0.85rem', fontFamily: C.fontSans,
+                    outline: 'none', lineHeight: 1.5,
+                  }}
+                />
+                <button
+                  onClick={handleSend}
+                  style={{
+                    padding: '8px 14px', borderRadius: 8, border: 'none',
+                    background: replyText.trim() ? C.navy : C.border,
+                    color: replyText.trim() ? '#FFFFFF' : C.textMuted,
+                    fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer',
+                    fontFamily: C.fontSans, transition: 'background 0.15s',
+                    flexShrink: 0, alignSelf: 'stretch',
+                  }}
+                >Send</button>
+              </div>
             </div>
           )}
         </div>
@@ -490,39 +556,14 @@
     function OverviewTab({ user }) {
       const firstName = user?.user_metadata?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there';
 
-      const totalShowings  = SHOWINGS.length;
-      const totalFeedback  = SHOWINGS.filter(s => s.status === 'feedback_received').length;
-      const totalPending   = SHOWINGS.filter(s => s.status === 'open' || s.status === 'in_progress').length;
-
       return (
         <div style={{ padding: '20px 16px 100px' }}>
           {/* Greeting */}
-          <div style={{ marginBottom: 24 }}>
+          <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: '2.2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>Hi, {firstName}</div>
-            <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 4, letterSpacing: '0.16em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Showing Feedback Follow Up</div>
+            <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 4, letterSpacing: '0.16em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Showing Feedback Follow-Up App</div>
           </div>
 
-          {/* Summary row */}
-          <div style={{ display: 'flex', gap: 10, marginBottom: 28 }}>
-            {[
-              { label: 'Showings',  value: totalShowings,  color: C.gold  },
-              { label: 'Pending',   value: totalPending,   color: C.amber },
-              { label: 'Feedback',  value: totalFeedback,  color: C.green },
-            ].map(({ label, value, color }) => (
-              <div key={label} style={{
-                flex: 1, background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)',
-                borderRadius: 14, padding: '14px 8px', textAlign: 'center',
-              }}>
-                <div style={{ fontSize: '1.8rem', fontWeight: 400, fontStyle: 'italic', color, fontFamily: C.fontDisplay }}>{value}</div>
-                <div style={{ fontSize: '0.62rem', color: C.textSecondary, marginTop: 3, textTransform: 'uppercase', letterSpacing: '0.18em', fontFamily: C.fontSans }}>{label}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* Properties */}
-          <div style={{ fontSize: '0.65rem', fontWeight: 500, color: C.navy, letterSpacing: '0.22em', textTransform: 'uppercase', marginBottom: 12, fontFamily: C.fontSans }}>
-            Properties · {PROPERTIES.length}
-          </div>
           {PROPERTIES.map(p => <PropertyCard key={p.id} property={p} />)}
         </div>
       );
@@ -891,7 +932,7 @@
           WebkitBackdropFilter: 'blur(20px) saturate(180%)',
           borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
         }}>
-          <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>SFFU</div>
+          <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>SFFU APP</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <button onClick={onToggleDark} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', color: 'rgba(255,255,255,0.6)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}>
               <i className={dark ? 'ti ti-sun' : 'ti ti-moon'} />

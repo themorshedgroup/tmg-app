@@ -378,10 +378,29 @@
     // ─── Property Card (Overview) ─────────────────────────────────────
     function PropertyCard({ property }) {
       const [expanded, setExpanded] = useState(false);
-      const showings  = getShowings(property.id);
-      const feedback  = showings.filter(s => s.status === 'feedback_received').length;
-      const pending   = showings.filter(s => s.status === 'open' || s.status === 'in_progress').length;
-      const closed    = showings.filter(s => s.status === 'closed').length;
+      const showings    = getShowings(property.id);
+      const feedback    = showings.filter(s => s.status === 'feedback_received').length;
+      const pending     = showings.filter(s => s.status === 'open' || s.status === 'in_progress').length;
+      const closed      = showings.filter(s => s.status === 'closed').length;
+      const unreadCount = showings.filter(s => {
+        const t = getThread(s.id);
+        return t.length > 0 && t[t.length - 1].dir === 'in';
+      }).length;
+
+      // Minimalist emoji chip
+      function EmojiChip({ emoji, count, color }) {
+        if (!count) return null;
+        return (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 3,
+            background: color + '18', borderRadius: 20,
+            padding: '2px 7px',
+          }}>
+            <span style={{ fontSize: '0.72rem' }}>{emoji}</span>
+            <span style={{ fontSize: '0.7rem', fontWeight: 600, color }}>{count}</span>
+          </div>
+        );
+      }
 
       return (
         <div style={{
@@ -393,18 +412,32 @@
             onClick={() => setExpanded(e => !e)}
             style={{ padding: '14px 16px', cursor: 'pointer' }}
           >
-            {/* Row 1: address + mini counts + chevron */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 3, gap: 8 }}>
+            {/* Row 1: address + emoji chips + envelope + chevron */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 3, gap: 6 }}>
               <div style={{ fontWeight: 700, fontSize: '0.97rem', color: C.textPrimary, flex: 1, minWidth: 0 }}>
                 {property.address}
               </div>
-              {/* Mini status counts */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                <span style={{ fontSize: '0.7rem', fontWeight: 600, color: C.gold }}>{showings.length}</span>
-                {feedback > 0 && <span style={{ fontSize: '0.7rem', fontWeight: 600, color: C.green }}>✓{feedback}</span>}
-                {pending > 0  && <span style={{ fontSize: '0.7rem', fontWeight: 600, color: C.amber }}>·{pending}</span>}
-                {closed > 0   && <span style={{ fontSize: '0.7rem', fontWeight: 600, color: C.textMuted }}>×{closed}</span>}
+              {/* Emoji stat chips */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                <EmojiChip emoji="👀" count={showings.length} color={C.gold} />
+                <EmojiChip emoji="✅" count={feedback}        color={C.green} />
+                <EmojiChip emoji="💬" count={pending}         color={C.amber} />
+                <EmojiChip emoji="🔒" count={closed}          color={C.textMuted} />
               </div>
+              {/* Unread envelope badge */}
+              {unreadCount > 0 && (
+                <div style={{ position: 'relative', flexShrink: 0 }}>
+                  <i className="ti ti-mail" style={{ fontSize: 16, color: C.textMuted }} />
+                  <div style={{
+                    position: 'absolute', top: -5, right: -6,
+                    minWidth: 14, height: 14, borderRadius: 7,
+                    background: C.red, border: `1.5px solid ${C.surface}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '0.55rem', fontWeight: 700, color: '#fff',
+                    fontFamily: C.fontSans, padding: '0 2px',
+                  }}>{unreadCount}</div>
+                </div>
+              )}
               <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />
             </div>
             {/* Row 2: city · MLS */}
@@ -482,7 +515,27 @@
               <div style={{ fontSize: '0.72rem', color: C.textSecondary }}>{showing.date} · {showing.phone}</div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-              <StatusBadge status={status} />
+              {/* Status dropdown styled as badge */}
+              <select
+                value={status}
+                onClick={e => e.stopPropagation()}
+                onChange={e => { e.stopPropagation(); setStatus(e.target.value); }}
+                style={{
+                  padding: '3px 8px',
+                  border: `1px solid ${STATUS[status]?.color || '#888'}44`,
+                  borderRadius: 20,
+                  background: STATUS[status]?.bg || C.surfaceHover,
+                  color: STATUS[status]?.color || C.textSecondary,
+                  fontSize: '0.68rem', fontWeight: 600,
+                  fontFamily: C.fontSans, outline: 'none', cursor: 'pointer',
+                  appearance: 'none', WebkitAppearance: 'none',
+                }}
+              >
+                <option value="open">Open</option>
+                <option value="in_progress">In Progress</option>
+                <option value="feedback_received">Feedback ✓</option>
+                <option value="closed">Closed</option>
+              </select>
               <Icon.Chevron size={13} color={C.textSecondary} down={expanded} />
             </div>
           </div>
@@ -495,28 +548,6 @@
 
               {/* SMS thread */}
               <SmsThread thread={localThread} />
-
-              {/* Status dropdown */}
-              <div style={{ marginTop: 14, marginBottom: 10 }}>
-                <div style={{ fontSize: '0.62rem', fontWeight: 500, color: C.textSecondary, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 5, fontFamily: C.fontSans }}>Status</div>
-                <select
-                  value={status}
-                  onChange={e => setStatus(e.target.value)}
-                  style={{
-                    width: '100%', padding: '8px 12px',
-                    border: `1px solid ${C.border}`, borderRadius: 8,
-                    background: C.surface, color: C.textPrimary,
-                    fontSize: '0.85rem', fontFamily: C.fontSans,
-                    outline: 'none', cursor: 'pointer',
-                    appearance: 'none', WebkitAppearance: 'none',
-                  }}
-                >
-                  <option value="open">Open</option>
-                  <option value="in_progress">In Progress</option>
-                  <option value="feedback_received">Feedback Received</option>
-                  <option value="closed">Closed</option>
-                </select>
-              </div>
 
               {/* Reply composer */}
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>

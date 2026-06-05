@@ -201,9 +201,11 @@
     };
 
     // ─── Helpers ─────────────────────────────────────────────────────
-    function getShowings(pid)  { return SHOWINGS.filter(s => s.pid === pid); }
-    function getProperty(pid)  { return PROPERTIES.find(p => p.id === pid); }
-    function getThread(sid)    { return SMS_THREADS[sid] || []; }
+    let _showingsStore = SHOWINGS.slice();
+    function getShowings(pid)    { return _showingsStore.filter(s => s.pid === pid); }
+    function addShowingToStore(s){ _showingsStore = [..._showingsStore, s]; }
+    function getProperty(pid)    { return PROPERTIES.find(p => p.id === pid); }
+    function getThread(sid)      { return SMS_THREADS[sid] || []; }
 
     // ─── Icons ───────────────────────────────────────────────────────
     const Icon = {
@@ -308,69 +310,6 @@
               </div>
             );
           })}
-        </div>
-      );
-    }
-
-    // ─── Showing Card (Board) ─────────────────────────────────────────
-    function ShowingCard({ showing }) {
-      const [expanded, setExpanded] = useState(false);
-      const prop    = getProperty(showing.pid);
-      const thread  = getThread(showing.id);
-      const lastOut = [...thread].reverse().find(m => m.dir === 'out');
-
-      return (
-        <div style={{
-          background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)',
-          borderRadius: 16, overflow: 'hidden', marginBottom: 10,
-        }}>
-          {/* Card header — tap to expand */}
-          <div
-            onClick={() => setExpanded(e => !e)}
-            style={{ padding: '14px 16px', cursor: 'pointer' }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: '0.93rem', color: C.textPrimary, marginBottom: 2 }}>
-                  {showing.agent}
-                </div>
-                <div style={{ fontSize: '0.78rem', color: C.textSecondary }}>{showing.phone}</div>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 10, flexShrink: 0 }}>
-                <StatusBadge status={showing.status} />
-                <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />
-              </div>
-            </div>
-
-            <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 4 }}>
-              📍 {prop?.address} · {showing.date}
-            </div>
-
-            {/* Thread summary */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
-              <Icon.Msg size={13} color={C.textMuted} />
-              {thread.length === 0 && (
-                <span style={{ fontSize: '0.74rem', color: C.textMuted }}>No messages sent yet</span>
-              )}
-              {thread.length > 0 && (
-                <span style={{ fontSize: '0.74rem', color: C.textMuted }}>
-                  {lastOut ? `Day ${lastOut.touch} sent · ${lastOut.time}` : ''}
-                  {thread.some(m => m.dir === 'in') ? ' · Reply received' : ''}
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Expanded thread */}
-          {expanded && (
-            <div style={{
-              borderTop: `1px solid ${C.border}`,
-              padding: '0 16px 14px',
-              background: C.bg,
-            }}>
-              <SmsThread thread={getThread(showing.id)} />
-            </div>
-          )}
         </div>
       );
     }
@@ -482,6 +421,16 @@
       const [status,      setStatus]      = useState(showing.status);
       const [localThread, setLocalThread] = useState(() => getThread(showing.id));
       const [replyText,   setReplyText]   = useState('');
+      const [editing,     setEditing]     = useState(false);
+      const [editAgent,   setEditAgent]   = useState(showing.agent);
+      const [editPhone,   setEditPhone]   = useState(showing.phone);
+      const [editOffice,  setEditOffice]  = useState(showing.office);
+      const [editDate,    setEditDate]    = useState(showing.date);
+      // Display values (updated on save)
+      const [dispAgent,   setDispAgent]   = useState(showing.agent);
+      const [dispPhone,   setDispPhone]   = useState(showing.phone);
+      const [dispOffice,  setDispOffice]  = useState(showing.office);
+      const [dispDate,    setDispDate]    = useState(showing.date);
 
       const hasUnread = localThread.length > 0 && localThread[localThread.length - 1].dir === 'in';
 
@@ -492,11 +441,30 @@
         setReplyText('');
       }
 
+      function handleSaveEdit() {
+        setDispAgent(editAgent); setDispPhone(editPhone);
+        setDispOffice(editOffice); setDispDate(editDate);
+        setEditing(false);
+      }
+
+      function handleCancelEdit() {
+        setEditAgent(dispAgent); setEditPhone(dispPhone);
+        setEditOffice(dispOffice); setEditDate(dispDate);
+        setEditing(false);
+      }
+
+      const inputStyle = {
+        width: '100%', padding: '7px 10px',
+        border: `1px solid ${C.border}`, borderRadius: 8,
+        background: C.surface, color: C.textPrimary,
+        fontSize: '0.83rem', fontFamily: C.fontSans, outline: 'none',
+      };
+
       return (
         <div style={{ borderBottom: `1px solid ${C.border}` }}>
           {/* Row header */}
           <div
-            onClick={() => setExpanded(e => !e)}
+            onClick={() => { if (!editing) setExpanded(e => !e); }}
             style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', cursor: 'pointer', gap: 10 }}
           >
             {/* Message icon + unread dot */}
@@ -511,11 +479,16 @@
               )}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: '0.88rem', fontWeight: 500, color: C.textPrimary }}>{showing.agent}</div>
-              <div style={{ fontSize: '0.72rem', color: C.textSecondary }}>{showing.date} · {showing.phone}</div>
+              <div style={{ fontSize: '0.88rem', fontWeight: 500, color: C.textPrimary }}>{dispAgent}</div>
+              <div style={{ fontSize: '0.72rem', color: C.textSecondary }}>{dispDate} · {dispPhone}</div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-              {/* Status dropdown styled as badge */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+              {/* Pencil edit button */}
+              <button
+                onClick={e => { e.stopPropagation(); setEditing(true); setExpanded(true); }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', color: C.textMuted, fontSize: 14, lineHeight: 1, display: 'flex', alignItems: 'center' }}
+              ><i className="ti ti-pencil" /></button>
+              {/* Status dropdown as pill */}
               <select
                 value={status}
                 onClick={e => e.stopPropagation()}
@@ -542,41 +515,66 @@
 
           {/* Expanded panel */}
           {expanded && (
-            <div style={{ background: C.bg, borderTop: `1px solid ${C.border}`, padding: '10px 16px 16px' }}>
-              {/* Office */}
-              <div style={{ fontSize: '0.72rem', color: C.textMuted, marginBottom: 10 }}>{showing.office}</div>
+            <div style={{ background: C.bg, borderTop: `1px solid ${C.border}`, padding: '12px 16px 16px' }}>
 
-              {/* SMS thread */}
-              <SmsThread thread={localThread} />
-
-              {/* Reply composer */}
-              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-                <textarea
-                  rows={2}
-                  placeholder="Type a reply…"
-                  value={replyText}
-                  onChange={e => setReplyText(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                  style={{
-                    flex: 1, padding: '8px 12px', resize: 'none',
-                    border: `1px solid ${C.border}`, borderRadius: 8,
-                    background: C.surface, color: C.textPrimary,
-                    fontSize: '0.85rem', fontFamily: C.fontSans,
-                    outline: 'none', lineHeight: 1.5,
-                  }}
-                />
-                <button
-                  onClick={handleSend}
-                  style={{
-                    padding: '8px 14px', borderRadius: 8, border: 'none',
-                    background: replyText.trim() ? C.navy : C.border,
-                    color: replyText.trim() ? '#FFFFFF' : C.textMuted,
-                    fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer',
-                    fontFamily: C.fontSans, transition: 'background 0.15s',
-                    flexShrink: 0, alignSelf: 'stretch',
-                  }}
-                >Send</button>
-              </div>
+              {editing ? (
+                /* ── Edit form ── */
+                <div>
+                  <div style={{ fontSize: '0.62rem', fontWeight: 600, color: C.navy, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 10, fontFamily: C.fontSans }}>Edit Showing Details</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                    {[
+                      { label: 'Agent Name', val: editAgent, set: setEditAgent },
+                      { label: 'Phone',      val: editPhone, set: setEditPhone },
+                      { label: 'Office',     val: editOffice,set: setEditOffice },
+                      { label: 'Date / Time',val: editDate,  set: setEditDate  },
+                    ].map(({ label, val, set }) => (
+                      <div key={label}>
+                        <div style={{ fontSize: '0.65rem', color: C.textSecondary, marginBottom: 3, fontFamily: C.fontSans }}>{label}</div>
+                        <input value={val} onChange={e => set(e.target.value)} style={inputStyle} />
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button onClick={handleSaveEdit} style={{ flex: 1, padding: '9px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.82rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>Save</button>
+                    <button onClick={handleCancelEdit} style={{ flex: 1, padding: '9px', background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                /* ── Normal view ── */
+                <div>
+                  <div style={{ fontSize: '0.72rem', color: C.textMuted, marginBottom: 10 }}>{dispOffice}</div>
+                  <SmsThread thread={localThread} />
+                  {/* Spacer before reply box */}
+                  <div style={{ marginTop: 20, paddingTop: 14, borderTop: `1px solid ${C.border}` }} />
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                    <textarea
+                      rows={2}
+                      placeholder="Type a reply…"
+                      value={replyText}
+                      onChange={e => setReplyText(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+                      style={{
+                        flex: 1, padding: '8px 12px', resize: 'none',
+                        border: `1px solid ${C.border}`, borderRadius: 8,
+                        background: C.surface, color: C.textPrimary,
+                        fontSize: '0.85rem', fontFamily: C.fontSans,
+                        outline: 'none', lineHeight: 1.5,
+                      }}
+                    />
+                    <button
+                      onClick={handleSend}
+                      style={{
+                        padding: '8px 14px', borderRadius: 8, border: 'none',
+                        background: replyText.trim() ? C.navy : C.border,
+                        color: replyText.trim() ? '#FFFFFF' : C.textMuted,
+                        fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer',
+                        fontFamily: C.fontSans, transition: 'background 0.15s',
+                        flexShrink: 0, alignSelf: 'stretch',
+                      }}
+                    >Send</button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -596,67 +594,6 @@
           </div>
 
           {PROPERTIES.map(p => <PropertyCard key={p.id} property={p} />)}
-        </div>
-      );
-    }
-
-    // ─── Board Tab ────────────────────────────────────────────────────
-    const BOARD_FILTERS = [
-      { id: 'all',              label: 'All'         },
-      { id: 'open',             label: 'Open'        },
-      { id: 'in_progress',      label: 'In Progress' },
-      { id: 'feedback_received',label: 'Feedback'    },
-      { id: 'closed',           label: 'Closed'      },
-    ];
-
-    function BoardTab() {
-      const [filter, setFilter] = useState('all');
-
-      const counts = {
-        all:              SHOWINGS.length,
-        open:             SHOWINGS.filter(s => s.status === 'open').length,
-        in_progress:      SHOWINGS.filter(s => s.status === 'in_progress').length,
-        feedback_received:SHOWINGS.filter(s => s.status === 'feedback_received').length,
-        closed:           SHOWINGS.filter(s => s.status === 'closed').length,
-      };
-
-      const visible = filter === 'all' ? SHOWINGS : SHOWINGS.filter(s => s.status === filter);
-
-      return (
-        <div style={{ padding: '20px 16px 100px' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 16, fontFamily: C.fontDisplay }}>Board</div>
-
-          {/* Filter pills — horizontal scroll */}
-          <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 6, marginBottom: 18 }}>
-            {BOARD_FILTERS.map(({ id, label }) => {
-              const active = filter === id;
-              const st = STATUS[id];
-              return (
-                <button key={id} onClick={() => setFilter(id)} style={{
-                  flexShrink: 0,
-                  padding: '5px 13px', borderRadius: 20, fontSize: '0.8rem', fontWeight: 500,
-                  background: active ? C.gold      : 'none',
-                  color:      active ? '#FFFFFF'   : C.textSecondary,
-                  border:     active ? 'none'      : `1px solid ${C.border}`,
-                  cursor: 'pointer', fontFamily: C.fontSans,
-                  display: 'flex', alignItems: 'center', gap: 6,
-                }}>
-                  {label}
-                  <span style={{
-                    fontSize: '0.7rem', fontWeight: 600,
-                    background: active ? 'rgba(255,255,255,0.25)' : C.surfaceHover,
-                    color: active ? '#FFFFFF' : C.textSecondary,
-                    borderRadius: 10, padding: '0px 6px',
-                  }}>
-                    {counts[id]}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Showing cards */}
-          {visible.map(s => <ShowingCard key={s.id} showing={s} />)}
         </div>
       );
     }
@@ -787,7 +724,6 @@
     // ─── Hamburger Drawer ─────────────────────────────────────────────
     const DRAWER_ITEMS = [
       { id: 'overview',          icon: 'ti-layout-grid', label: 'OVERVIEW',     type: 'tab'    },
-      { id: 'board',             icon: 'ti-columns',     label: 'BOARD',        type: 'tab'    },
       null,
       { id: 'add-showing',       icon: 'ti-plus',        label: 'ADD SHOWING',  type: 'action' },
       { id: 'upload-screenshot', icon: 'ti-upload',      label: 'UPLOAD SUPRA', type: 'action' },
@@ -907,10 +843,103 @@
       );
     }
 
+    // ─── Add Showing Modal ────────────────────────────────────────────
+    function AddShowingModal({ onClose, onAdd }) {
+      const [pid,    setPid]    = useState(PROPERTIES[0].id);
+      const [agent,  setAgent]  = useState('');
+      const [phone,  setPhone]  = useState('');
+      const [office, setOffice] = useState('');
+      const [date,   setDate]   = useState('');
+
+      const inputStyle = {
+        width: '100%', padding: '9px 12px',
+        border: `1px solid ${C.border}`, borderRadius: 8,
+        background: C.surface, color: C.textPrimary,
+        fontSize: '0.88rem', fontFamily: C.fontSans, outline: 'none',
+      };
+      const labelStyle = {
+        fontSize: '0.65rem', color: C.textSecondary, marginBottom: 4,
+        fontFamily: C.fontSans, textTransform: 'uppercase', letterSpacing: '0.1em',
+      };
+
+      function handleSubmit() {
+        if (!agent.trim()) return;
+        const newShowing = {
+          id: 's' + Date.now(),
+          pid,
+          agent: agent.trim(),
+          phone: phone.trim() || '—',
+          office: office.trim() || '—',
+          date: date.trim() || 'Just added',
+          status: 'open',
+        };
+        addShowingToStore(newShowing);
+        onAdd();
+        onClose();
+      }
+
+      return (
+        <>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,26,74,0.45)' }} />
+          <div style={{
+            position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 301,
+            background: C.surface, borderRadius: '20px 20px 0 0',
+            padding: '24px 20px 40px',
+            boxShadow: '0 -4px 32px rgba(0,26,74,0.15)',
+          }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+              <div style={{ fontSize: '1.2rem', fontStyle: 'italic', fontFamily: C.fontDisplay, color: C.navy }}>Add Showing</div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: C.textMuted, fontSize: 20, display: 'flex' }}>
+                <i className="ti ti-x" />
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {/* Property select */}
+              <div>
+                <div style={labelStyle}>Property</div>
+                <select value={pid} onChange={e => setPid(e.target.value)} style={{ ...inputStyle, appearance: 'none', WebkitAppearance: 'none' }}>
+                  {PROPERTIES.map(p => <option key={p.id} value={p.id}>{p.address}</option>)}
+                </select>
+              </div>
+              <div>
+                <div style={labelStyle}>Agent Name *</div>
+                <input value={agent} onChange={e => setAgent(e.target.value)} placeholder="e.g. Jane Smith" style={inputStyle} />
+              </div>
+              <div>
+                <div style={labelStyle}>Phone</div>
+                <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="e.g. (512) 555-1234" style={inputStyle} />
+              </div>
+              <div>
+                <div style={labelStyle}>Brokerage / Office</div>
+                <input value={office} onChange={e => setOffice(e.target.value)} placeholder="e.g. Compass RE Texas" style={inputStyle} />
+              </div>
+              <div>
+                <div style={labelStyle}>Date &amp; Time</div>
+                <input value={date} onChange={e => setDate(e.target.value)} placeholder="e.g. Jun 7, 10:30 AM" style={inputStyle} />
+              </div>
+            </div>
+
+            <button
+              onClick={handleSubmit}
+              style={{
+                marginTop: 20, width: '100%', padding: 14,
+                background: agent.trim() ? C.navy : C.border,
+                color: agent.trim() ? '#fff' : C.textMuted,
+                border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 500,
+                cursor: agent.trim() ? 'pointer' : 'default',
+                fontFamily: C.fontSans, transition: 'background 0.15s',
+              }}
+            >Add Showing</button>
+          </div>
+        </>
+      );
+    }
+
     // ─── Bottom Nav (floating pill) ──────────────────────────────────
     const TABS = [
       { id: 'overview', label: 'Overview', icon: 'ti-layout-grid' },
-      { id: 'board',    label: 'Board',    icon: 'ti-columns'     },
       { id: 'settings', label: 'Settings', icon: 'ti-settings'    },
     ];
 
@@ -978,8 +1007,10 @@
 
     // ─── Root App ─────────────────────────────────────────────────────
     function App({ user }) {
-      const [activeTab,  setActiveTab]  = useState('overview');
-      const [drawerOpen, setDrawerOpen] = useState(false);
+      const [activeTab,    setActiveTab]    = useState('overview');
+      const [drawerOpen,   setDrawerOpen]   = useState(false);
+      const [showAddModal, setShowAddModal] = useState(false);
+      const [showingsVer,  setShowingsVer]  = useState(0);
       const [dark, setDark] = useState(() => localStorage.getItem('sffu-theme') === 'dark');
 
       useEffect(() => {
@@ -987,20 +1018,30 @@
         localStorage.setItem('sffu-theme', dark ? 'dark' : 'light');
       }, [dark]);
 
+      function handleAction(action) {
+        if (action === 'add-showing') { setShowAddModal(true); }
+        else if (action === 'upload-screenshot') { alert('Supra screenshot parsing coming soon — this will be powered by Claude Vision once the backend is connected.'); }
+      }
+
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
           <TopBar onMenuOpen={() => setDrawerOpen(true)} dark={dark} onToggleDark={() => setDark(d => !d)} />
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-            {activeTab === 'overview' && <OverviewTab user={user} />}
-            {activeTab === 'board'    && <BoardTab />}
+            {activeTab === 'overview' && <OverviewTab user={user} _v={showingsVer} />}
             {activeTab === 'settings' && <SettingsTab user={user} />}
           </div>
           <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />
           <HamburgerDrawer
             open={drawerOpen} onClose={() => setDrawerOpen(false)}
-            onAction={a => console.log('action:', a)} onTabChange={setActiveTab}
+            onAction={handleAction} onTabChange={setActiveTab}
             activeTab={activeTab} dark={dark} user={user}
           />
+          {showAddModal && (
+            <AddShowingModal
+              onClose={() => setShowAddModal(false)}
+              onAdd={() => setShowingsVer(v => v + 1)}
+            />
+          )}
         </div>
       );
     }

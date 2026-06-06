@@ -314,7 +314,8 @@
 
     // ─── Property Card (Overview) ─────────────────────────────────────
     function PropertyCard({ property }) {
-      const [expanded, setExpanded] = useState(false);
+      const [expanded,      setExpanded]      = useState(false);
+      const [openShowingId, setOpenShowingId] = useState(null);
       const showings = getShowings(property.id);
       const active   = showings.filter(s => s.status === 'in_progress').length;
       const closed   = showings.filter(s => s.status === 'closed').length;
@@ -360,23 +361,20 @@
                 <EmojiChip emoji="🔴" count={closed}          color={C.red} />
               </div>
               {/* Unread envelope badge */}
-              {unreadCount > 0 ? (
-                /* Prominent unread notification pill */
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
-                  background: C.red + '18', border: `1px solid ${C.red}44`,
-                  borderRadius: 12, padding: '3px 8px',
-                }}>
-                  <i className="ti ti-mail" style={{ fontSize: 14, color: C.red }} />
-                  <span style={{
-                    fontSize: '0.72rem', fontWeight: 700, color: C.red,
-                    fontFamily: C.fontSans, lineHeight: 1,
-                  }}>{unreadCount}</span>
-                </div>
-              ) : (
-                /* Subtle mail icon when all read */
-                <i className="ti ti-mail" style={{ fontSize: 16, color: C.border, flexShrink: 0 }} />
-              )}
+              {/* Mail icon — always same container width for alignment */}
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+                background: unreadCount > 0 ? C.red + '18' : 'transparent',
+                border: `1px solid ${unreadCount > 0 ? C.red + '44' : C.border}`,
+                borderRadius: 12, padding: '3px 8px', minWidth: 38, justifyContent: 'center',
+              }}>
+                <i className="ti ti-mail" style={{ fontSize: 14, color: unreadCount > 0 ? C.red : C.textMuted }} />
+                {unreadCount > 0 && (
+                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: C.red, fontFamily: C.fontSans, lineHeight: 1 }}>
+                    {unreadCount}
+                  </span>
+                )}
+              </div>
               <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />
             </div>
             {/* Row 2: city · MLS */}
@@ -395,7 +393,14 @@
           {expanded && (
             <div style={{ borderTop: `1px solid ${C.border}` }}>
               {showings.map(s => (
-                <ShowingRow key={s.id} showing={s} />
+                <ShowingRow
+                  key={s.id}
+                  showing={s}
+                  isOpen={openShowingId === s.id}
+                  onToggle={(forceOpen) => setOpenShowingId(cur =>
+                    forceOpen ? s.id : (cur === s.id ? null : s.id)
+                  )}
+                />
               ))}
             </div>
           )}
@@ -416,8 +421,7 @@
       );
     }
 
-    function ShowingRow({ showing }) {
-      const [expanded,    setExpanded]    = useState(false);
+    function ShowingRow({ showing, isOpen = false, onToggle = () => {} }) {
       const [status,      setStatus]      = useState(showing.status);
       const [localThread, setLocalThread] = useState(() => getThread(showing.id));
       const [replyText,   setReplyText]   = useState('');
@@ -465,7 +469,7 @@
         <div style={{ borderBottom: `1px solid ${C.border}` }}>
           {/* Row header */}
           <div
-            onClick={() => { if (!editing) setExpanded(e => !e); }}
+            onClick={() => { if (!editing) onToggle(); }}
             style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', cursor: 'pointer', gap: 10 }}
           >
             {/* Message icon + inbound count badge */}
@@ -489,7 +493,7 @@
             <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
               {/* Pencil edit button */}
               <button
-                onClick={e => { e.stopPropagation(); setEditing(true); setExpanded(true); }}
+                onClick={e => { e.stopPropagation(); setEditing(true); onToggle(true); }}
                 style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', color: C.textMuted, fontSize: 14, lineHeight: 1, display: 'flex', alignItems: 'center' }}
               ><i className="ti ti-pencil" /></button>
               {/* Status dropdown as pill */}
@@ -511,12 +515,12 @@
                 <option value="in_progress">In Progress</option>
                 <option value="closed">Closed</option>
               </select>
-              <Icon.Chevron size={13} color={C.textSecondary} down={expanded} />
+              <Icon.Chevron size={13} color={C.textSecondary} down={isOpen} />
             </div>
           </div>
 
           {/* Expanded panel */}
-          {expanded && (
+          {isOpen && (
             <div style={{ background: C.bg, borderTop: `1px solid ${C.border}`, padding: '12px 16px 16px' }}>
 
               {editing ? (

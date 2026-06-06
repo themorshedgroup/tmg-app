@@ -119,10 +119,8 @@
 
     // ─── Status config ───────────────────────────────────────────────
     const STATUS = {
-      open:              { label: 'Open',         color: '#6B6B6B', dot: '#9B9380', bg: '#F3EBDA' },
-      in_progress:       { label: 'In Progress',  color: '#B07A00', dot: '#B07A00', bg: '#FFF8E6' },
-      feedback_received: { label: 'Feedback ✓',   color: '#1E6B40', dot: '#1E6B40', bg: '#E8F5EE' },
-      closed:            { label: 'Closed',        color: '#9B9380', dot: '#C8C0B4', bg: '#F3EBDA' },
+      in_progress: { label: 'In Progress', color: '#1E6B40', dot: '#1E6B40', bg: '#E8F5EE' },
+      closed:      { label: 'Closed',      color: '#C0392B', dot: '#C0392B', bg: '#FDECEA' },
     };
 
     // ─── Sample Data ─────────────────────────────────────────────────
@@ -136,25 +134,25 @@
 
     const SHOWINGS = [
       // 1808 Forest Hill Dr — 5 showings (real Supra data)
-      { id: 's1',  pid: 'p1', agent: 'Kyle Baird',       phone: '(832) 545-5593', office: 'Christies Intl Real Estate',  date: 'May 27, 12:10 PM', status: 'feedback_received' },
+      { id: 's1',  pid: 'p1', agent: 'Kyle Baird',       phone: '(832) 545-5593', office: 'Christies Intl Real Estate',  date: 'May 27, 12:10 PM', status: 'in_progress' },
       { id: 's2',  pid: 'p1', agent: 'Raymond Torres',   phone: '(512) 297-5133', office: 'Compass RE Texas LLC',         date: 'May 21, 1:21 PM',  status: 'in_progress'       },
       { id: 's3',  pid: 'p1', agent: 'Katie Jackson',    phone: '(512) 627-1625', office: 'Christies Intl Real Estate',  date: 'May 20, 10:53 AM', status: 'in_progress'       },
       { id: 's4',  pid: 'p1', agent: 'Jennifer Shahry',  phone: '(512) 636-0834', office: 'Compass RE Texas LLC',         date: 'Apr 14, 3:57 PM',  status: 'closed'            },
-      { id: 's5',  pid: 'p1', agent: 'Amir Lancaster',   phone: '(817) 683-8942', office: 'Compass RE Texas LLC',         date: 'Apr 11, 3:12 PM',  status: 'open'              },
+      { id: 's5',  pid: 'p1', agent: 'Amir Lancaster',   phone: '(817) 683-8942', office: 'Compass RE Texas LLC',         date: 'Apr 11, 3:12 PM',  status: 'in_progress'              },
       // 3707 Laurel Ledge Ln — 3 showings
-      { id: 's6',  pid: 'p2', agent: 'Sarah Mitchell',   phone: '(512) 449-8821', office: "Kuper Sotheby's Intl Realty", date: 'May 26, 2:30 PM',  status: 'feedback_received' },
+      { id: 's6',  pid: 'p2', agent: 'Sarah Mitchell',   phone: '(512) 449-8821', office: "Kuper Sotheby's Intl Realty", date: 'May 26, 2:30 PM',  status: 'in_progress' },
       { id: 's7',  pid: 'p2', agent: 'David Okafor',     phone: '(512) 555-3344', office: 'eXp Realty',                   date: 'May 25, 11:00 AM', status: 'in_progress'       },
-      { id: 's8',  pid: 'p2', agent: 'Lisa Hernandez',   phone: '(210) 447-9921', office: 'Keller Williams Realty',       date: 'May 23, 4:15 PM',  status: 'open'              },
+      { id: 's8',  pid: 'p2', agent: 'Lisa Hernandez',   phone: '(210) 447-9921', office: 'Keller Williams Realty',       date: 'May 23, 4:15 PM',  status: 'in_progress'              },
       // 4602 Jinx Ave — 3 showings
-      { id: 's9',  pid: 'p3', agent: 'Michael Chang',    phone: '(512) 882-1100', office: 'Redfin',                       date: 'May 28, 10:00 AM', status: 'open'              },
-      { id: 's10', pid: 'p3', agent: 'Patricia Williams', phone: '(737) 206-5583', office: 'Coldwell Banker Realty',      date: 'May 27, 3:45 PM',  status: 'feedback_received' },
+      { id: 's9',  pid: 'p3', agent: 'Michael Chang',    phone: '(512) 882-1100', office: 'Redfin',                       date: 'May 28, 10:00 AM', status: 'in_progress'              },
+      { id: 's10', pid: 'p3', agent: 'Patricia Williams', phone: '(737) 206-5583', office: 'Coldwell Banker Realty',      date: 'May 27, 3:45 PM',  status: 'in_progress' },
       { id: 's11', pid: 'p3', agent: 'Marcus Webb',      phone: '(512) 730-4421', office: 'Bramlett Residential',         date: 'May 24, 1:00 PM',  status: 'in_progress'       },
       // 10621 W Cave Loop — 2 showings
-      { id: 's12', pid: 'p4', agent: 'Elena Vasquez',    phone: '(512) 334-7780', office: 'Austin Home Hunters',          date: 'May 27, 11:30 AM', status: 'open'              },
+      { id: 's12', pid: 'p4', agent: 'Elena Vasquez',    phone: '(512) 334-7780', office: 'Austin Home Hunters',          date: 'May 27, 11:30 AM', status: 'in_progress'              },
       { id: 's13', pid: 'p4', agent: 'Tom Nguyen',       phone: '(512) 619-2255', office: 'Horizon Realty Group',         date: 'May 22, 3:00 PM',  status: 'closed'            },
       // 12313 Indian Mound Dr — 2 showings
       { id: 's14', pid: 'p5', agent: 'Brittany Fontenot', phone: '(512) 401-8833', office: 'JBGoodwin Realtors',          date: 'May 26, 10:15 AM', status: 'in_progress'       },
-      { id: 's15', pid: 'p5', agent: 'James Oduya',      phone: '(512) 778-9901', office: 'Compass RE Texas LLC',         date: 'May 20, 2:45 PM',  status: 'open'              },
+      { id: 's15', pid: 'p5', agent: 'James Oduya',      phone: '(512) 778-9901', office: 'Compass RE Texas LLC',         date: 'May 20, 2:45 PM',  status: 'in_progress'              },
     ];
 
     const SMS_THREADS = {
@@ -269,7 +267,7 @@
 
     // ─── Status Badge ─────────────────────────────────────────────────
     function StatusBadge({ status }) {
-      const { label, color, bg } = STATUS[status] || STATUS.open;
+      const { label, color, bg } = STATUS[status] || STATUS.in_progress;
       return (
         <span style={{
           fontSize: '0.68rem', fontWeight: 600, color,
@@ -317,10 +315,9 @@
     // ─── Property Card (Overview) ─────────────────────────────────────
     function PropertyCard({ property }) {
       const [expanded, setExpanded] = useState(false);
-      const showings    = getShowings(property.id);
-      const feedback    = showings.filter(s => s.status === 'feedback_received').length;
-      const pending     = showings.filter(s => s.status === 'open' || s.status === 'in_progress').length;
-      const closed      = showings.filter(s => s.status === 'closed').length;
+      const showings = getShowings(property.id);
+      const active   = showings.filter(s => s.status === 'in_progress').length;
+      const closed   = showings.filter(s => s.status === 'closed').length;
       const unreadCount = showings.filter(s => {
         const t = getThread(s.id);
         return t.length > 0 && t[t.length - 1].dir === 'in';
@@ -359,9 +356,8 @@
               {/* Emoji stat chips */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                 <EmojiChip emoji="👀" count={showings.length} color={C.gold} />
-                <EmojiChip emoji="✅" count={feedback}        color={C.green} />
-                <EmojiChip emoji="💬" count={pending}         color={C.amber} />
-                <EmojiChip emoji="🔒" count={closed}          color={C.textMuted} />
+                <EmojiChip emoji="🟢" count={active}          color={C.green} />
+                <EmojiChip emoji="🔴" count={closed}          color={C.red} />
               </div>
               {/* Unread envelope badge */}
               {unreadCount > 0 && (
@@ -504,9 +500,7 @@
                   appearance: 'none', WebkitAppearance: 'none',
                 }}
               >
-                <option value="open">Open</option>
                 <option value="in_progress">In Progress</option>
-                <option value="feedback_received">Feedback ✓</option>
                 <option value="closed">Closed</option>
               </select>
               <Icon.Chevron size={13} color={C.textSecondary} down={expanded} />
@@ -871,7 +865,7 @@
           phone: phone.trim() || '—',
           office: office.trim() || '—',
           date: date.trim() || 'Just added',
-          status: 'open',
+          status: 'in_progress',
         };
         addShowingToStore(newShowing);
         onAdd();

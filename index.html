@@ -360,18 +360,22 @@
                 <EmojiChip emoji="🔴" count={closed}          color={C.red} />
               </div>
               {/* Unread envelope badge */}
-              {unreadCount > 0 && (
-                <div style={{ position: 'relative', flexShrink: 0 }}>
-                  <i className="ti ti-mail" style={{ fontSize: 16, color: C.textMuted }} />
-                  <div style={{
-                    position: 'absolute', top: -5, right: -6,
-                    minWidth: 14, height: 14, borderRadius: 7,
-                    background: C.red, border: `1.5px solid ${C.surface}`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '0.55rem', fontWeight: 700, color: '#fff',
-                    fontFamily: C.fontSans, padding: '0 2px',
-                  }}>{unreadCount}</div>
+              {unreadCount > 0 ? (
+                /* Prominent unread notification pill */
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+                  background: C.red + '18', border: `1px solid ${C.red}44`,
+                  borderRadius: 12, padding: '3px 8px',
+                }}>
+                  <i className="ti ti-mail" style={{ fontSize: 14, color: C.red }} />
+                  <span style={{
+                    fontSize: '0.72rem', fontWeight: 700, color: C.red,
+                    fontFamily: C.fontSans, lineHeight: 1,
+                  }}>{unreadCount}</span>
                 </div>
+              ) : (
+                /* Subtle mail icon when all read */
+                <i className="ti ti-mail" style={{ fontSize: 16, color: C.border, flexShrink: 0 }} />
               )}
               <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />
             </div>
@@ -428,7 +432,8 @@
       const [dispOffice,  setDispOffice]  = useState(showing.office);
       const [dispDate,    setDispDate]    = useState(showing.date);
 
-      const hasUnread = localThread.length > 0 && localThread[localThread.length - 1].dir === 'in';
+      const hasUnread     = localThread.length > 0 && localThread[localThread.length - 1].dir === 'in';
+      const inboundCount  = localThread.filter(m => m.dir === 'in').length;
 
       function handleSend() {
         const txt = replyText.trim();
@@ -463,15 +468,18 @@
             onClick={() => { if (!editing) setExpanded(e => !e); }}
             style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', cursor: 'pointer', gap: 10 }}
           >
-            {/* Message icon + unread dot */}
+            {/* Message icon + inbound count badge */}
             <div style={{ position: 'relative', flexShrink: 0 }}>
-              <Icon.Msg size={15} color={hasUnread ? C.gold : C.textMuted} />
-              {hasUnread && (
+              <Icon.Msg size={15} color={inboundCount > 0 ? C.gold : C.textMuted} />
+              {inboundCount > 0 && (
                 <div style={{
-                  position: 'absolute', top: -3, right: -3,
-                  width: 7, height: 7, borderRadius: '50%',
+                  position: 'absolute', top: -5, right: -7,
+                  minWidth: 15, height: 15, borderRadius: 8,
                   background: C.red, border: `1.5px solid ${C.surface}`,
-                }} />
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '0.58rem', fontWeight: 700, color: '#fff',
+                  fontFamily: C.fontSans, padding: '0 2px',
+                }}>{inboundCount}</div>
               )}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>

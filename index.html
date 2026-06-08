@@ -313,17 +313,48 @@
       async loadProperties() {
         if (!this.client()) return PROPERTIES;
         const { data, error } = await this.client()
-          .from('properties').select('*').order('created_at', { ascending: false });
+          .from('properties').select('*')
+          .eq('archived', false)
+          .order('created_at', { ascending: false });
         if (error) { console.error('[DB] loadProperties:', error.message); return PROPERTIES; }
         if (!data || data.length === 0) return PROPERTIES;
         return data.map(row => ({
-          id: row.id,
-          address: row.address,
-          city: '',
-          mls: row.mls || '',
-          agent: row.listing_agent || '',
+          id: row.id, address: row.address, city: '',
+          mls: row.mls || '', agent: row.listing_agent || '',
           price: '', beds: '', baths: '', sqft: '',
         }));
+      },
+
+      async loadArchivedProperties() {
+        if (!this.client()) return [];
+        const { data, error } = await this.client()
+          .from('properties').select('*')
+          .eq('archived', true)
+          .order('created_at', { ascending: false });
+        if (error) { console.error('[DB] loadArchivedProperties:', error.message); return []; }
+        return (data || []).map(row => ({
+          id: row.id, address: row.address, city: '',
+          mls: row.mls || '', agent: row.listing_agent || '',
+          price: '', beds: '', baths: '', sqft: '',
+        }));
+      },
+
+      async archiveProperty(id) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('properties').update({ archived: true }).eq('id', id);
+        if (error) console.error('[DB] archiveProperty:', error.message);
+      },
+
+      async restoreProperty(id) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('properties').update({ archived: false }).eq('id', id);
+        if (error) console.error('[DB] restoreProperty:', error.message);
+      },
+
+      async deleteProperty(id) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('properties').delete().eq('id', id);
+        if (error) console.error('[DB] deleteProperty:', error.message);
       },
 
       async updateProperty(id, fields) {
@@ -473,7 +504,7 @@
     }
 
     // ─── Property Card (Overview) ─────────────────────────────────────
-    function PropertyCard({ property, allShowings, user }) {
+    function PropertyCard({ property, allShowings, user, onArchive }) {
       const [expanded,      setExpanded]      = useState(false);
       const [openShowingId, setOpenShowingId] = useState(null);
       const [editing,       setEditing]       = useState(false);
@@ -586,10 +617,22 @@
                     </div>
                   ))}
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                   <button onClick={handleSaveEdit}   style={{ flex: 1, padding: '9px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.82rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>Save</button>
                   <button onClick={handleCancelEdit} style={{ flex: 1, padding: '9px', background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
                 </div>
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!window.confirm('Archive this property? It will be hidden from the overview. You can restore it from Settings.')) return;
+                    await DB.archiveProperty(property.id);
+                    if (onArchive) onArchive(property.id);
+                  }}
+                  style={{ width: '100%', padding: '9px', background: 'none', color: C.red, border: `1px solid ${C.red}55`, borderRadius: 8, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}
+                >
+                  <i className="ti ti-archive" style={{ marginRight: 6, fontSize: 13 }} />
+                  Archive Property
+                </button>
               </div>
             ) : (
               <>
@@ -818,7 +861,7 @@
     }
 
     // ─── Overview Tab ─────────────────────────────────────────────────
-    function OverviewTab({ user, liveShowings, properties }) {
+    function OverviewTab({ user, liveShowings, properties, onArchive }) {
       const firstName = user?.user_metadata?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there';
 
       return (
@@ -830,9 +873,158 @@
           </div>
 
           {properties.map(p => (
-            <PropertyCard key={p.id} property={p} allShowings={liveShowings} user={user} />
+            <PropertyCard key={p.id} property={p} allShowings={liveShowings} user={user} onArchive={onArchive} />
           ))}
         </div>
+      );
+    }
+
+    // ─── Archived Properties (used in Settings) ──────────────────────
+    function ArchivedProperties() {
+      const [loaded,   setLoaded]   = useState(false);
+      const [loading,  setLoading]  = useState(false);
+      const [items,    setItems]    = useState([]);
+      const [openId,   setOpenId]   = useState(null);
+      const [threads,  setThreads]  = useState({});   // propId → showings[]
+      const [showings, setShowings] = useState({});   // propId → showings[]
+
+      async function load() {
+        setLoading(true);
+        const props = await DB.loadArchivedProperties();
+        setItems(props);
+        setLoaded(true);
+        setLoading(false);
+      }
+
+      async function handleExpand(prop) {
+        const id = prop.id;
+        if (openId === id) { setOpenId(null); return; }
+        setOpenId(id);
+        // Load showings for this archived property if not yet loaded
+        if (!showings[id]) {
+          const client = DB.client();
+          if (client) {
+            const { data } = await client.from('showings').select('*')
+              .eq('property_address', prop.address).order('created_at', { ascending: false });
+            const mapped = (data || []).map(row => ({
+              id: row.id, agent: row.agent_name, phone: row.agent_phone || '—',
+              office: row.agent_office || '—', date: row.showing_date || '—',
+              status: row.status,
+            }));
+            setShowings(prev => ({ ...prev, [id]: mapped }));
+            // Pre-load all threads
+            for (const s of mapped) {
+              const thread = await DB.loadThread(s.id);
+              setThreads(prev => ({ ...prev, [s.id]: thread }));
+            }
+          } else {
+            // Mock: use SHOWINGS filtered by address
+            const mock = SHOWINGS.filter(s => {
+              const p = PROPERTIES.find(pr => pr.id === s.pid);
+              return p?.address === prop.address;
+            }).map(s => ({ id: s.id, agent: s.agent, phone: s.phone, office: s.office, date: s.date, status: s.status }));
+            setShowings(prev => ({ ...prev, [id]: mock }));
+            mock.forEach(s => setThreads(prev => ({ ...prev, [s.id]: SMS_THREADS[s.id] || [] })));
+          }
+        }
+      }
+
+      async function handleRestore(prop) {
+        await DB.restoreProperty(prop.id);
+        setItems(prev => prev.filter(p => p.id !== prop.id));
+        if (openId === prop.id) setOpenId(null);
+      }
+
+      async function handleDeleteForever(prop) {
+        if (!window.confirm(`Permanently delete "${prop.address}"? This cannot be undone.`)) return;
+        await DB.deleteProperty(prop.id);
+        setItems(prev => prev.filter(p => p.id !== prop.id));
+        if (openId === prop.id) setOpenId(null);
+      }
+
+      if (!loaded) {
+        return (
+          <SectionCard title="Archived Properties" mb={14}>
+            <div style={{ fontSize: '0.82rem', color: C.textSecondary, marginBottom: 14, lineHeight: 1.5 }}>
+              Properties you've archived are stored here. You can restore or permanently delete them.
+            </div>
+            <button
+              onClick={load}
+              disabled={loading}
+              style={{ width: '100%', padding: 12, background: 'none', border: `1px solid ${C.border}`, borderRadius: 12, color: C.navy, fontSize: '0.88rem', cursor: 'pointer', fontFamily: C.fontSans }}
+            >
+              {loading ? 'Loading…' : 'Load Archived Properties'}
+            </button>
+          </SectionCard>
+        );
+      }
+
+      return (
+        <SectionCard title="Archived Properties" mb={14}>
+          {items.length === 0 ? (
+            <div style={{ fontSize: '0.82rem', color: C.textMuted, textAlign: 'center', padding: '8px 0' }}>No archived properties.</div>
+          ) : items.map(prop => {
+            const isOpen   = openId === prop.id;
+            const propShowings = showings[prop.id] || [];
+            return (
+              <div key={prop.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, marginBottom: 10, overflow: 'hidden' }}>
+                {/* Header row */}
+                <div
+                  onClick={() => handleExpand(prop)}
+                  style={{ padding: '11px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '0.9rem', fontWeight: 600, color: C.textPrimary }}>{prop.address}</div>
+                    <div style={{ fontSize: '0.72rem', color: C.textSecondary, marginTop: 1 }}>
+                      {[prop.mls ? `MLS# ${prop.mls}` : null, prop.agent || null].filter(Boolean).join(' · ')}
+                    </div>
+                  </div>
+                  <Icon.Chevron size={13} color={C.textSecondary} down={isOpen} />
+                </div>
+
+                {/* Action buttons + expanded showings */}
+                {isOpen && (
+                  <div style={{ borderTop: `1px solid ${C.border}`, padding: '12px 14px' }}>
+                    {/* Restore / Delete Forever */}
+                    <div style={{ display: 'flex', gap: 8, marginBottom: propShowings.length ? 14 : 0 }}>
+                      <button
+                        onClick={() => handleRestore(prop)}
+                        style={{ flex: 1, padding: '8px', background: 'none', color: C.navy, border: `1px solid ${C.navy}55`, borderRadius: 8, fontSize: '0.8rem', cursor: 'pointer', fontFamily: C.fontSans, fontWeight: 500 }}
+                      >
+                        <i className="ti ti-refresh" style={{ marginRight: 5, fontSize: 12 }} />Restore
+                      </button>
+                      <button
+                        onClick={() => handleDeleteForever(prop)}
+                        style={{ flex: 1, padding: '8px', background: 'none', color: C.red, border: `1px solid ${C.red}55`, borderRadius: 8, fontSize: '0.8rem', cursor: 'pointer', fontFamily: C.fontSans }}
+                      >
+                        <i className="ti ti-trash" style={{ marginRight: 5, fontSize: 12 }} />Delete Forever
+                      </button>
+                    </div>
+
+                    {/* Read-only showings */}
+                    {propShowings.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '0.62rem', fontWeight: 600, color: C.navy, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8, fontFamily: C.fontSans }}>
+                          Showing History
+                        </div>
+                        {propShowings.map(s => {
+                          const thread = threads[s.id] || [];
+                          return (
+                            <div key={s.id} style={{ background: C.bg, borderRadius: 8, padding: '10px 12px', marginBottom: 8 }}>
+                              <div style={{ fontSize: '0.85rem', fontWeight: 500, color: C.textPrimary, marginBottom: 2 }}>{s.agent}</div>
+                              <div style={{ fontSize: '0.72rem', color: C.textSecondary, marginBottom: thread.length ? 8 : 0 }}>{s.date} · {s.phone}</div>
+                              {thread.length > 0 && <SmsThread thread={thread} />}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </SectionCard>
       );
     }
 
@@ -897,7 +1089,7 @@
           </SectionCard>
 
           {/* Twilio */}
-          <SectionCard title="Twilio SMS">
+          <SectionCard title="Twilio SMS" mb={14}>
             <div style={{ fontSize: '0.83rem', color: C.textSecondary, lineHeight: 1.6, marginBottom: 14 }}>
               SMS send configuration. Set up your Twilio account to activate automated follow-ups.
             </div>
@@ -909,6 +1101,9 @@
               <ActionButton label="Send Test SMS" onClick={() => {}} />
             </div>
           </SectionCard>
+
+          {/* Archived Properties */}
+          <ArchivedProperties />
         </div>
       );
     }
@@ -1237,6 +1432,10 @@
         setLiveProperties(prev => [newProperty, ...prev]);
       }
 
+      function handlePropertyArchived(propId) {
+        setLiveProperties(prev => prev.filter(p => p.id !== propId));
+      }
+
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
           <TopBar
@@ -1248,7 +1447,7 @@
             onSettings={() => setActiveTab('settings')}
           />
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-            {activeTab === 'overview' && <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} />}
+            {activeTab === 'overview' && <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} onArchive={handlePropertyArchived} />}
             {activeTab === 'settings' && <SettingsTab user={user} />}
           </div>
           <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />

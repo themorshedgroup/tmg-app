@@ -225,6 +225,7 @@
           office: row.agent_office || '—',
           date: row.showing_date || '—',
           status: row.status || 'in_progress',
+          feedback: row.feedback || '',
           addedByName: row.added_by_name,
         }));
       },
@@ -239,6 +240,7 @@
             office: formData.office || '—',
             date: formData.date || 'Just added',
             status: 'in_progress',
+            feedback: '',
           };
         }
         const { data, error } = await this.client().from('showings').insert({
@@ -265,6 +267,7 @@
           office: data.agent_office || '—',
           date: data.showing_date || '—',
           status: data.status,
+          feedback: data.feedback || '',
           addedByName: data.added_by_name,
         };
       },
@@ -272,11 +275,12 @@
       async updateShowing(id, fields) {
         if (!this.client()) return;
         const mapped = {};
-        if (fields.agent  !== undefined) mapped.agent_name   = fields.agent;
-        if (fields.phone  !== undefined) mapped.agent_phone  = fields.phone;
-        if (fields.office !== undefined) mapped.agent_office = fields.office;
-        if (fields.date   !== undefined) mapped.showing_date = fields.date;
-        if (fields.status !== undefined) mapped.status       = fields.status;
+        if (fields.agent    !== undefined) mapped.agent_name   = fields.agent;
+        if (fields.phone    !== undefined) mapped.agent_phone  = fields.phone;
+        if (fields.office   !== undefined) mapped.agent_office = fields.office;
+        if (fields.date     !== undefined) mapped.showing_date = fields.date;
+        if (fields.status   !== undefined) mapped.status       = fields.status;
+        if (fields.feedback !== undefined) mapped.feedback     = fields.feedback || null;
         const { error } = await this.client().from('showings').update(mapped).eq('id', id);
         if (error) console.error('[DB] updateShowing:', error.message);
       },
@@ -695,15 +699,17 @@
           DB.loadThread(showing.id).then(t => setLocalThread(t));
         }
       }, [isOpen]);
-      const [editAgent,   setEditAgent]   = useState(showing.agent);
-      const [editPhone,   setEditPhone]   = useState(showing.phone);
-      const [editOffice,  setEditOffice]  = useState(showing.office);
-      const [editDate,    setEditDate]    = useState(showing.date);
+      const [editAgent,    setEditAgent]    = useState(showing.agent);
+      const [editPhone,    setEditPhone]    = useState(showing.phone);
+      const [editOffice,   setEditOffice]   = useState(showing.office);
+      const [editDate,     setEditDate]     = useState(showing.date);
+      const [editFeedback, setEditFeedback] = useState(showing.feedback || '');
       // Display values (updated on save)
-      const [dispAgent,   setDispAgent]   = useState(showing.agent);
-      const [dispPhone,   setDispPhone]   = useState(showing.phone);
-      const [dispOffice,  setDispOffice]  = useState(showing.office);
-      const [dispDate,    setDispDate]    = useState(showing.date);
+      const [dispAgent,    setDispAgent]    = useState(showing.agent);
+      const [dispPhone,    setDispPhone]    = useState(showing.phone);
+      const [dispOffice,   setDispOffice]   = useState(showing.office);
+      const [dispDate,     setDispDate]     = useState(showing.date);
+      const [dispFeedback, setDispFeedback] = useState(showing.feedback || '');
 
       const hasUnread     = localThread.length > 0 && localThread[localThread.length - 1].dir === 'in';
       const inboundCount  = localThread.filter(m => m.dir === 'in').length;
@@ -721,13 +727,15 @@
       async function handleSaveEdit() {
         setDispAgent(editAgent); setDispPhone(editPhone);
         setDispOffice(editOffice); setDispDate(editDate);
+        setDispFeedback(editFeedback);
         setEditing(false);
-        await DB.updateShowing(showing.id, { agent: editAgent, phone: editPhone, office: editOffice, date: editDate });
+        await DB.updateShowing(showing.id, { agent: editAgent, phone: editPhone, office: editOffice, date: editDate, feedback: editFeedback });
       }
 
       function handleCancelEdit() {
         setEditAgent(dispAgent); setEditPhone(dispPhone);
         setEditOffice(dispOffice); setEditDate(dispDate);
+        setEditFeedback(dispFeedback);
         setEditing(false);
       }
 
@@ -762,6 +770,11 @@
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: '0.88rem', fontWeight: 500, color: C.textPrimary }}>{dispAgent}</div>
               <div style={{ fontSize: '0.72rem', color: C.textSecondary }}>{dispDate} · {dispPhone}</div>
+              {dispFeedback ? (
+                <div style={{ fontSize: '0.72rem', color: C.textSecondary, marginTop: 2 }}>
+                  Feedback: <span style={{ fontStyle: 'italic', fontFamily: C.fontDisplay, fontSize: '0.82rem' }}>{dispFeedback}</span>
+                </div>
+              ) : null}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
               {/* Pencil edit button */}
@@ -802,16 +815,26 @@
                   <div style={{ fontSize: '0.62rem', fontWeight: 600, color: C.navy, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 10, fontFamily: C.fontSans }}>Edit Showing Details</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
                     {[
-                      { label: 'Agent Name', val: editAgent, set: setEditAgent },
-                      { label: 'Phone',      val: editPhone, set: setEditPhone },
-                      { label: 'Office',     val: editOffice,set: setEditOffice },
-                      { label: 'Date / Time',val: editDate,  set: setEditDate  },
+                      { label: 'Agent Name', val: editAgent,  set: setEditAgent  },
+                      { label: 'Phone',      val: editPhone,  set: setEditPhone  },
+                      { label: 'Office',     val: editOffice, set: setEditOffice },
+                      { label: 'Date / Time',val: editDate,   set: setEditDate   },
                     ].map(({ label, val, set }) => (
                       <div key={label}>
                         <div style={{ fontSize: '0.65rem', color: C.textSecondary, marginBottom: 3, fontFamily: C.fontSans }}>{label}</div>
                         <input value={val} onChange={e => set(e.target.value)} style={inputStyle} />
                       </div>
                     ))}
+                    <div>
+                      <div style={{ fontSize: '0.65rem', color: C.textSecondary, marginBottom: 3, fontFamily: C.fontSans }}>Feedback</div>
+                      <textarea
+                        value={editFeedback}
+                        onChange={e => setEditFeedback(e.target.value)}
+                        placeholder="e.g. Loved the backyard, concerned about kitchen update"
+                        rows={2}
+                        style={{ ...inputStyle, resize: 'none', lineHeight: 1.5 }}
+                      />
+                    </div>
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button onClick={handleSaveEdit} style={{ flex: 1, padding: '9px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.82rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>Save</button>

@@ -56,9 +56,10 @@
     font-family:-apple-system,BlinkMacSystemFont,'Jost','Helvetica Neue',Arial,sans-serif;">
 
     <div id="auth-signin" style="display:flex;flex-direction:column;align-items:center;padding:0 48px;width:100%;">
-      <div style="font-size:2.2rem;font-weight:300;color:#C9A45A;margin-bottom:4px;letter-spacing:0.26em;text-transform:uppercase;">SFFU</div>
-      <div style="font-size:0.7rem;font-weight:400;color:#8899BB;margin-bottom:6px;letter-spacing:0.2em;text-transform:uppercase;">Showing Feedback Follow Up</div>
-      <div style="font-size:0.78rem;color:#5566AA;margin-bottom:52px;letter-spacing:0.08em;">The Morshed Group</div>
+      <img src="Morshed Group Logo White.png" alt="Morshed Group" style="width:204px;margin-bottom:-50px;opacity:0.92;" />
+      <div style="font-size:2.2rem;font-weight:300;color:#C9A45A;margin-bottom:6px;letter-spacing:0.26em;text-transform:uppercase;">SFFU App</div>
+      <div style="font-size:0.7rem;font-weight:400;color:#8899BB;margin-bottom:4px;letter-spacing:0.2em;text-transform:uppercase;">Showing Feedback</div>
+      <div style="font-size:0.7rem;font-weight:400;color:#8899BB;margin-bottom:52px;letter-spacing:0.2em;text-transform:uppercase;">Follow-Up App</div>
       <button onclick="SupabaseAuth.signInWithGoogle()" style="display:flex;align-items:center;gap:12px;background:#fff;border:none;border-radius:4px;padding:14px 24px;font-size:15px;font-weight:500;color:#3c4043;cursor:pointer;box-shadow:0 4px 20px rgba(0,0,0,0.4);font-family:'Jost','Helvetica Neue',Arial,sans-serif;letter-spacing:0.03em;">
         <svg width="20" height="20" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
         Sign in with Google
@@ -199,11 +200,158 @@
     };
 
     // ─── Helpers ─────────────────────────────────────────────────────
-    let _showingsStore = SHOWINGS.slice();
-    function getShowings(pid)    { return _showingsStore.filter(s => s.pid === pid); }
-    function addShowingToStore(s){ _showingsStore = [..._showingsStore, s]; }
-    function getProperty(pid)    { return PROPERTIES.find(p => p.id === pid); }
-    function getThread(sid)      { return SMS_THREADS[sid] || []; }
+    function getProperty(pid) { return PROPERTIES.find(p => p.id === pid); }
+
+    // ─── Database helper (Supabase on production, mock on localhost) ──
+    const DB = {
+      client() { return window.SupabaseAuth?._client || null; },
+
+      async loadShowings() {
+        if (!this.client()) {
+          // localhost: enrich mock showings with propertyAddress
+          return SHOWINGS.map(s => {
+            const p = PROPERTIES.find(pr => pr.id === s.pid);
+            return { ...s, propertyAddress: p?.address || '' };
+          });
+        }
+        const { data, error } = await this.client()
+          .from('showings').select('*').order('created_at', { ascending: false });
+        if (error) { console.error('[DB] loadShowings:', error.message); return []; }
+        return (data || []).map(row => ({
+          id: row.id,
+          propertyAddress: row.property_address,
+          agent: row.agent_name,
+          phone: row.agent_phone || '—',
+          office: row.agent_office || '—',
+          date: row.showing_date || '—',
+          status: row.status || 'in_progress',
+          addedByName: row.added_by_name,
+        }));
+      },
+
+      async insertShowing(formData, property, user) {
+        if (!this.client()) {
+          return {
+            id: 's' + Date.now(),
+            propertyAddress: property.address,
+            agent: formData.agent,
+            phone: formData.phone || '—',
+            office: formData.office || '—',
+            date: formData.date || 'Just added',
+            status: 'in_progress',
+          };
+        }
+        const { data, error } = await this.client().from('showings').insert({
+          property_address: property.address,
+          property_city: property.city,
+          property_mls: property.mls,
+          property_price: property.price,
+          property_beds: String(property.beds),
+          property_baths: String(property.baths),
+          property_sqft: property.sqft,
+          agent_name: formData.agent,
+          agent_phone: formData.phone || null,
+          agent_office: formData.office || null,
+          showing_date: formData.date || null,
+          added_by_id: user?.id || null,
+          added_by_name: user?.user_metadata?.full_name || user?.email || null,
+        }).select().single();
+        if (error) throw error;
+        return {
+          id: data.id,
+          propertyAddress: data.property_address,
+          agent: data.agent_name,
+          phone: data.agent_phone || '—',
+          office: data.agent_office || '—',
+          date: data.showing_date || '—',
+          status: data.status,
+          addedByName: data.added_by_name,
+        };
+      },
+
+      async updateShowing(id, fields) {
+        if (!this.client()) return;
+        const mapped = {};
+        if (fields.agent  !== undefined) mapped.agent_name   = fields.agent;
+        if (fields.phone  !== undefined) mapped.agent_phone  = fields.phone;
+        if (fields.office !== undefined) mapped.agent_office = fields.office;
+        if (fields.date   !== undefined) mapped.showing_date = fields.date;
+        if (fields.status !== undefined) mapped.status       = fields.status;
+        const { error } = await this.client().from('showings').update(mapped).eq('id', id);
+        if (error) console.error('[DB] updateShowing:', error.message);
+      },
+
+      async loadThread(showingId) {
+        if (!this.client()) return SMS_THREADS[showingId] || [];
+        const { data, error } = await this.client()
+          .from('sms_messages').select('*')
+          .eq('showing_id', showingId).order('sent_at', { ascending: true });
+        if (error) { console.error('[DB] loadThread:', error.message); return []; }
+        return (data || []).map(row => ({
+          id: row.id,
+          dir: row.direction,
+          touch: row.touch_number,
+          time: new Date(row.sent_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
+          body: row.body,
+          sentByName: row.sent_by_name,
+        }));
+      },
+
+      async insertMessage(showingId, msg, user) {
+        if (!this.client()) return msg;
+        const { error } = await this.client().from('sms_messages').insert({
+          showing_id: showingId,
+          direction: 'out',
+          touch_number: null,
+          body: msg.body,
+          sent_by_id: user?.id || null,
+          sent_by_name: user?.user_metadata?.full_name || user?.email || null,
+        });
+        if (error) console.error('[DB] insertMessage:', error.message);
+      },
+
+      async loadProperties() {
+        if (!this.client()) return PROPERTIES;
+        const { data, error } = await this.client()
+          .from('properties').select('*').order('created_at', { ascending: false });
+        if (error) { console.error('[DB] loadProperties:', error.message); return PROPERTIES; }
+        if (!data || data.length === 0) return PROPERTIES;
+        return data.map(row => ({
+          id: row.id,
+          address: row.address,
+          city: '',
+          mls: row.mls || '',
+          agent: row.listing_agent || '',
+          price: '', beds: '', baths: '', sqft: '',
+        }));
+      },
+
+      async insertProperty(formData, user) {
+        if (!this.client()) {
+          return {
+            id: 'p' + Date.now(),
+            address: formData.address,
+            city: '', mls: formData.mls || '',
+            agent: formData.agent || '',
+            price: '', beds: '', baths: '', sqft: '',
+          };
+        }
+        const { data, error } = await this.client().from('properties').insert({
+          address: formData.address,
+          mls: formData.mls || null,
+          listing_agent: formData.agent || null,
+          added_by_name: user?.user_metadata?.full_name || user?.email || null,
+        }).select().single();
+        if (error) throw error;
+        return {
+          id: data.id,
+          address: data.address,
+          city: '', mls: data.mls || '',
+          agent: data.listing_agent || '',
+          price: '', beds: '', baths: '', sqft: '',
+        };
+      },
+    };
 
     // ─── Icons ───────────────────────────────────────────────────────
     const Icon = {
@@ -293,7 +441,9 @@
             return (
               <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: isOut ? 'flex-end' : 'flex-start' }}>
                 <div style={{ fontSize: '0.65rem', color: isOut ? C.gold : C.green, marginBottom: 3, paddingLeft: isOut ? 0 : 2, paddingRight: isOut ? 2 : 0, letterSpacing: '0.04em' }}>
-                  {isOut ? `Day ${msg.touch} · ${msg.time}` : `Reply · ${msg.time}`}
+                  {isOut
+                    ? (msg.touch ? `Day ${msg.touch} · ${msg.time}` : `${msg.sentByName || 'You'} · ${msg.time}`)
+                    : `Reply · ${msg.time}`}
                 </div>
                 <div style={{
                   maxWidth: '88%',
@@ -313,14 +463,14 @@
     }
 
     // ─── Property Card (Overview) ─────────────────────────────────────
-    function PropertyCard({ property }) {
+    function PropertyCard({ property, allShowings, user }) {
       const [expanded,      setExpanded]      = useState(false);
       const [openShowingId, setOpenShowingId] = useState(null);
-      const showings = getShowings(property.id);
+      const showings = allShowings.filter(s => s.propertyAddress === property.address);
       const active   = showings.filter(s => s.status === 'in_progress').length;
       const closed   = showings.filter(s => s.status === 'closed').length;
       const unreadCount = showings.filter(s => {
-        const t = getThread(s.id);
+        const t = SMS_THREADS[s.id] || [];
         return t.length > 0 && t[t.length - 1].dir === 'in';
       }).length;
 
@@ -381,12 +531,10 @@
             <div style={{ fontSize: '0.75rem', color: C.textSecondary, marginBottom: 2 }}>
               {property.city} · MLS# {property.mls}
             </div>
-            {/* Row 3: specs + price */}
-            <div style={{ fontSize: '0.73rem', color: C.textMuted, display: 'flex', alignItems: 'baseline', gap: 4 }}>
-              <span>{property.beds} bd · {property.baths} ba · {property.sqft} sqft</span>
-              <span style={{ color: C.border }}>·</span>
-              <span style={{ fontStyle: 'italic', fontFamily: C.fontDisplay, color: C.gold, fontSize: '0.88rem', fontWeight: 500 }}>{property.price}</span>
-            </div>
+            {/* Row 3: listing agent */}
+            {property.agent ? (
+              <div style={{ fontSize: '0.73rem', color: C.textMuted }}>{property.agent}</div>
+            ) : null}
           </div>
 
           {/* Expanded showing list */}
@@ -396,6 +544,7 @@
                 <ShowingRow
                   key={s.id}
                   showing={s}
+                  user={user}
                   isOpen={openShowingId === s.id}
                   onToggle={(forceOpen) => setOpenShowingId(cur =>
                     forceOpen ? s.id : (cur === s.id ? null : s.id)
@@ -421,11 +570,20 @@
       );
     }
 
-    function ShowingRow({ showing, isOpen = false, onToggle = () => {} }) {
-      const [status,      setStatus]      = useState(showing.status);
-      const [localThread, setLocalThread] = useState(() => getThread(showing.id));
-      const [replyText,   setReplyText]   = useState('');
-      const [editing,     setEditing]     = useState(false);
+    function ShowingRow({ showing, isOpen = false, onToggle = () => {}, user }) {
+      const [status,       setStatus]       = useState(showing.status);
+      const [localThread,  setLocalThread]  = useState(() => SMS_THREADS[showing.id] || []);
+      const [threadLoaded, setThreadLoaded] = useState(false);
+      const [replyText,    setReplyText]    = useState('');
+      const [editing,      setEditing]      = useState(false);
+
+      // Load thread from DB when first expanded
+      useEffect(() => {
+        if (isOpen && !threadLoaded) {
+          setThreadLoaded(true);
+          DB.loadThread(showing.id).then(t => setLocalThread(t));
+        }
+      }, [isOpen]);
       const [editAgent,   setEditAgent]   = useState(showing.agent);
       const [editPhone,   setEditPhone]   = useState(showing.phone);
       const [editOffice,  setEditOffice]  = useState(showing.office);
@@ -439,17 +597,21 @@
       const hasUnread     = localThread.length > 0 && localThread[localThread.length - 1].dir === 'in';
       const inboundCount  = localThread.filter(m => m.dir === 'in').length;
 
-      function handleSend() {
+      async function handleSend() {
         const txt = replyText.trim();
         if (!txt) return;
-        setLocalThread(t => [...t, { dir: 'out', touch: null, time: 'Just now', body: txt }]);
+        const senderName = user?.user_metadata?.full_name || user?.email || 'You';
+        const msg = { dir: 'out', touch: null, time: 'Just now', body: txt, sentByName: senderName };
+        setLocalThread(t => [...t, msg]);
         setReplyText('');
+        await DB.insertMessage(showing.id, msg, user);
       }
 
-      function handleSaveEdit() {
+      async function handleSaveEdit() {
         setDispAgent(editAgent); setDispPhone(editPhone);
         setDispOffice(editOffice); setDispDate(editDate);
         setEditing(false);
+        await DB.updateShowing(showing.id, { agent: editAgent, phone: editPhone, office: editOffice, date: editDate });
       }
 
       function handleCancelEdit() {
@@ -500,7 +662,7 @@
               <select
                 value={status}
                 onClick={e => e.stopPropagation()}
-                onChange={e => { e.stopPropagation(); setStatus(e.target.value); }}
+                onChange={e => { e.stopPropagation(); const v = e.target.value; setStatus(v); DB.updateShowing(showing.id, { status: v }); }}
                 style={{
                   padding: '3px 8px',
                   border: `1px solid ${STATUS[status]?.color || '#888'}44`,
@@ -588,7 +750,7 @@
     }
 
     // ─── Overview Tab ─────────────────────────────────────────────────
-    function OverviewTab({ user }) {
+    function OverviewTab({ user, liveShowings, properties }) {
       const firstName = user?.user_metadata?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there';
 
       return (
@@ -599,7 +761,9 @@
             <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 4, letterSpacing: '0.16em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Showing Feedback Follow-Up App</div>
           </div>
 
-          {PROPERTIES.map(p => <PropertyCard key={p.id} property={p} />)}
+          {properties.map(p => (
+            <PropertyCard key={p.id} property={p} allShowings={liveShowings} user={user} />
+          ))}
         </div>
       );
     }
@@ -727,131 +891,86 @@
       );
     }
 
-    // ─── Hamburger Drawer ─────────────────────────────────────────────
-    const DRAWER_ITEMS = [
-      { id: 'overview',          icon: 'ti-layout-grid', label: 'OVERVIEW',     type: 'tab'    },
-      null,
-      { id: 'add-showing',       icon: 'ti-plus',        label: 'ADD SHOWING',  type: 'action' },
-      { id: 'upload-screenshot', icon: 'ti-upload',      label: 'UPLOAD SUPRA', type: 'action' },
-      null,
-      { id: 'settings',          icon: 'ti-settings',    label: 'SETTINGS',     type: 'tab'    },
-    ];
+    // ─── Add Property Modal ───────────────────────────────────────────
+    function AddPropertyModal({ onClose, onAdd, user }) {
+      const [address, setAddress] = useState('');
+      const [mls,     setMls]     = useState('');
+      const [agent,   setAgent]   = useState('');
 
-    function HamburgerDrawer({ open, onClose, onAction, onTabChange, activeTab, dark, user }) {
-      if (!open) return null;
-      const firstName    = user?.user_metadata?.full_name?.split(' ')[0] || 'Symon';
-      const totalShowings = SHOWINGS.length;
-      const drawerBg     = dark ? '#000D26' : '#FFFFFF';
-      const headerBorder = dark ? 'rgba(173,131,47,0.15)' : 'rgba(173,131,47,0.20)';
-      const logoColor    = dark ? '#C9A45A' : '#001A4A';
-      const closeColor   = dark ? 'rgba(255,255,255,0.5)' : '#001A4A';
+      const inputStyle = {
+        width: '100%', padding: '9px 12px',
+        border: `1px solid ${C.border}`, borderRadius: 8,
+        background: C.surface, color: C.textPrimary,
+        fontSize: '0.88rem', fontFamily: C.fontSans, outline: 'none',
+      };
+      const labelStyle = {
+        fontSize: '0.65rem', color: C.textSecondary, marginBottom: 4,
+        fontFamily: C.fontSans, textTransform: 'uppercase', letterSpacing: '0.1em',
+      };
+
+      async function handleSubmit() {
+        if (!address.trim()) return;
+        const formData = { address: address.trim(), mls: mls.trim(), agent: agent.trim() };
+        try {
+          const newProperty = await DB.insertProperty(formData, user);
+          onAdd(newProperty);
+          onClose();
+        } catch (e) {
+          console.error('[AddProperty]', e);
+          alert('Failed to save property. Please try again.');
+        }
+      }
 
       return (
         <>
-          {/* Scrim */}
-          <div onClick={onClose} style={{
-            position: 'fixed', inset: 0, zIndex: 200,
-            background: dark ? 'rgba(0,0,0,0.65)' : 'rgba(0,26,74,0.4)',
-          }} />
-
-          {/* Drawer panel */}
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,26,74,0.45)' }} />
           <div style={{
-            position: 'fixed', top: 0, right: 0, bottom: 0, width: 280, zIndex: 201,
-            background: drawerBg,
-            borderLeft: dark ? 'none' : '3px solid #001A4A',
-            display: 'flex', flexDirection: 'column',
+            position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 301,
+            background: C.surface, borderRadius: '20px 20px 0 0',
+            padding: '24px 20px 40px',
+            boxShadow: '0 -4px 32px rgba(0,26,74,0.15)',
           }}>
-
-            {/* Header */}
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '20px 20px 16px', borderBottom: `1px solid ${headerBorder}`,
-            }}>
-              <div style={{
-                fontSize: '1rem', fontWeight: 300, letterSpacing: '0.32em',
-                textTransform: 'uppercase', fontFamily: "'Jost', sans-serif", color: logoColor,
-              }}>S F F U</div>
-              <button onClick={onClose} style={{
-                background: 'none', border: 'none', cursor: 'pointer', padding: 4,
-                color: closeColor, fontSize: 20, lineHeight: 1, display: 'flex', alignItems: 'center',
-              }}><i className="ti ti-x" /></button>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+              <div style={{ fontSize: '1.2rem', fontStyle: 'italic', fontFamily: C.fontDisplay, color: C.navy }}>Add Property</div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: C.textMuted, fontSize: 20, display: 'flex' }}>
+                <i className="ti ti-x" />
+              </button>
             </div>
 
-            {/* Greeting */}
-            <div style={{ padding: '16px 20px 14px', borderBottom: `1px solid ${headerBorder}` }}>
-              <div style={{
-                fontSize: '1.4rem', fontStyle: 'italic',
-                fontFamily: "'Cormorant Garamond', Georgia, serif",
-                color: dark ? '#FCFBF8' : '#001A4A', marginBottom: 4,
-              }}>Hi, {firstName}</div>
-              <div style={{
-                fontSize: '0.6rem', letterSpacing: '0.18em', textTransform: 'uppercase',
-                fontFamily: "'Jost', sans-serif", fontWeight: 500,
-                color: dark ? 'rgba(255,255,255,0.38)' : '#9B9380',
-              }}>Operations Lead</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <div style={labelStyle}>Property Address *</div>
+                <input value={address} onChange={e => setAddress(e.target.value)} placeholder="e.g. 1808 Forest Hill Dr, Austin TX" style={inputStyle} />
+              </div>
+              <div>
+                <div style={labelStyle}>MLS Number</div>
+                <input value={mls} onChange={e => setMls(e.target.value)} placeholder="e.g. 5129346" style={inputStyle} />
+              </div>
+              <div>
+                <div style={labelStyle}>Listing Agent</div>
+                <input value={agent} onChange={e => setAgent(e.target.value)} placeholder="e.g. Tarek Morshed" style={inputStyle} />
+              </div>
             </div>
 
-            {/* Nav items */}
-            <div style={{ flex: 1, overflowY: 'auto', paddingTop: 8, paddingBottom: 8 }}>
-              {DRAWER_ITEMS.map((item, i) => {
-                if (!item) return (
-                  <div key={`div-${i}`} style={{
-                    height: 1, background: dark ? 'rgba(255,255,255,0.08)' : '#E4DFD4',
-                    margin: '6px 20px',
-                  }} />
-                );
-                const isActive  = item.type === 'tab' && item.id === activeTab;
-                const iconColor = isActive ? (dark ? '#C9A45A' : '#AD832F') : (dark ? 'rgba(255,255,255,0.22)' : '#B4B2A9');
-                const lblColor  = isActive ? (dark ? '#C9A45A' : '#001A4A') : (dark ? 'rgba(255,255,255,0.35)' : '#6B6B6B');
-                const itemBg    = isActive ? (dark ? 'rgba(173,131,47,0.12)' : '#F3EBDA') : 'transparent';
-                return (
-                  <button key={item.id} onClick={() => {
-                    if (item.type === 'tab') onTabChange(item.id); else onAction(item.id);
-                    onClose();
-                  }} style={{
-                    display: 'flex', alignItems: 'center', gap: 12,
-                    width: isActive && dark ? 'calc(100% - 12px)' : '100%',
-                    marginRight: isActive && dark ? 12 : 0,
-                    padding: '11px 20px', background: itemBg, outline: 'none', cursor: 'pointer',
-                    textAlign: 'left', border: 'none',
-                    borderLeft: !dark ? `2px solid ${isActive ? '#AD832F' : 'transparent'}` : 'none',
-                    borderRadius: isActive && dark ? '0 20px 20px 0' : 0,
-                  }}>
-                    <i className={`ti ${item.icon}`} style={{ fontSize: 17, color: iconColor, lineHeight: 1, flexShrink: 0 }} />
-                    <span style={{
-                      fontSize: '0.68rem', letterSpacing: '0.14em', fontWeight: 500,
-                      fontFamily: "'Jost', sans-serif", textTransform: 'uppercase', color: lblColor,
-                    }}>{item.label}</span>
-                    {item.id === 'overview' && isActive && (
-                      <span style={{
-                        marginLeft: 'auto', fontSize: '0.65rem', fontWeight: 600,
-                        background: dark ? 'rgba(173,131,47,0.2)' : '#F3EBDA',
-                        color: dark ? '#C9A45A' : '#AD832F',
-                        padding: '2px 8px', borderRadius: 10, fontFamily: "'Jost', sans-serif",
-                      }}>{totalShowings}</span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Footer — sign out */}
-            <div style={{ borderTop: `1px solid ${headerBorder}`, padding: '16px 20px' }}>
-              <button onClick={() => window.SupabaseAuth.signOut()} style={{
-                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-                fontSize: '0.62rem', letterSpacing: '0.18em', textTransform: 'uppercase',
-                fontFamily: "'Jost', sans-serif", fontWeight: 500,
-                color: dark ? 'rgba(255,255,255,0.28)' : '#9B9380',
-              }}>Sign Out</button>
-            </div>
+            <button
+              onClick={handleSubmit}
+              style={{
+                marginTop: 20, width: '100%', padding: 14,
+                background: address.trim() ? C.navy : C.border,
+                color: address.trim() ? '#fff' : C.textMuted,
+                border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 500,
+                cursor: address.trim() ? 'pointer' : 'default',
+                fontFamily: C.fontSans, transition: 'background 0.15s',
+              }}
+            >Add Property</button>
           </div>
         </>
       );
     }
 
     // ─── Add Showing Modal ────────────────────────────────────────────
-    function AddShowingModal({ onClose, onAdd }) {
-      const [pid,    setPid]    = useState(PROPERTIES[0].id);
+    function AddShowingModal({ onClose, onAdd, user, properties }) {
+      const [pid,    setPid]    = useState((properties || PROPERTIES)[0]?.id || '');
       const [agent,  setAgent]  = useState('');
       const [phone,  setPhone]  = useState('');
       const [office, setOffice] = useState('');
@@ -868,20 +987,18 @@
         fontFamily: C.fontSans, textTransform: 'uppercase', letterSpacing: '0.1em',
       };
 
-      function handleSubmit() {
+      async function handleSubmit() {
         if (!agent.trim()) return;
-        const newShowing = {
-          id: 's' + Date.now(),
-          pid,
-          agent: agent.trim(),
-          phone: phone.trim() || '—',
-          office: office.trim() || '—',
-          date: date.trim() || 'Just added',
-          status: 'in_progress',
-        };
-        addShowingToStore(newShowing);
-        onAdd();
-        onClose();
+        const property = (properties || PROPERTIES).find(p => p.id === pid) || getProperty(pid);
+        const formData = { pid, agent: agent.trim(), phone: phone.trim(), office: office.trim(), date: date.trim() };
+        try {
+          const newShowing = await DB.insertShowing(formData, property, user);
+          onAdd(newShowing);
+          onClose();
+        } catch (e) {
+          console.error('[AddShowing]', e);
+          alert('Failed to save showing. Please try again.');
+        }
       }
 
       return (
@@ -906,7 +1023,7 @@
               <div>
                 <div style={labelStyle}>Property</div>
                 <select value={pid} onChange={e => setPid(e.target.value)} style={{ ...inputStyle, appearance: 'none', WebkitAppearance: 'none' }}>
-                  {PROPERTIES.map(p => <option key={p.id} value={p.id}>{p.address}</option>)}
+                  {(properties || PROPERTIES).map(p => <option key={p.id} value={p.id}>{p.address}</option>)}
                 </select>
               </div>
               <div>
@@ -989,7 +1106,20 @@
     }
 
     // ─── Top Bar ──────────────────────────────────────────────────────
-    function TopBar({ onMenuOpen, dark, onToggleDark }) {
+    function TopBar({ dark, onToggleDark, onAddProperty, onAddShowing, onUploadSupra, onSettings }) {
+      const iconBtn = (onClick, iconClass, title) => (
+        <button
+          onClick={onClick}
+          title={title}
+          style={{
+            background: 'none', border: 'none', cursor: 'pointer',
+            padding: '4px 7px', color: 'rgba(255,255,255,0.65)',
+            fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center',
+          }}
+        >
+          <i className={iconClass} />
+        </button>
+      );
       return (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -999,13 +1129,13 @@
           borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>SFFU APP</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <button onClick={onToggleDark} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', color: 'rgba(255,255,255,0.6)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}>
-              <i className={dark ? 'ti ti-sun' : 'ti ti-moon'} />
-            </button>
-            <button onClick={onMenuOpen} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
-              <Icon.Menu color="rgba(255,255,255,0.7)" />
-            </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+            {iconBtn(onToggleDark,   dark ? 'ti ti-sun' : 'ti ti-moon', dark ? 'Light mode' : 'Dark mode')}
+            <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
+            {iconBtn(onAddProperty,  'ti ti-home-plus',    'Add Property')}
+            {iconBtn(onAddShowing,   'ti ti-calendar-plus','Add Showing')}
+            {iconBtn(onUploadSupra,  'ti ti-cloud-upload', 'Upload Supra')}
+            {iconBtn(onSettings,     'ti ti-settings',     'Settings')}
           </div>
         </div>
       );
@@ -1013,39 +1143,60 @@
 
     // ─── Root App ─────────────────────────────────────────────────────
     function App({ user }) {
-      const [activeTab,    setActiveTab]    = useState('overview');
-      const [drawerOpen,   setDrawerOpen]   = useState(false);
-      const [showAddModal, setShowAddModal] = useState(false);
-      const [showingsVer,  setShowingsVer]  = useState(0);
+      const [activeTab,          setActiveTab]          = useState('overview');
+      const [showAddModal,       setShowAddModal]       = useState(false);
+      const [showAddPropModal,   setShowAddPropModal]   = useState(false);
+      const [liveShowings,       setLiveShowings]       = useState([]);
+      const [liveProperties,     setLiveProperties]     = useState(PROPERTIES);
       const [dark, setDark] = useState(() => localStorage.getItem('sffu-theme') === 'dark');
+
+      // Load showings and properties from DB on mount
+      useEffect(() => {
+        DB.loadShowings().then(data => setLiveShowings(data));
+        DB.loadProperties().then(data => setLiveProperties(data));
+      }, []);
 
       useEffect(() => {
         document.body.classList.toggle('dark', dark);
         localStorage.setItem('sffu-theme', dark ? 'dark' : 'light');
       }, [dark]);
 
-      function handleAction(action) {
-        if (action === 'add-showing') { setShowAddModal(true); }
-        else if (action === 'upload-screenshot') { alert('Supra screenshot parsing coming soon — this will be powered by Claude Vision once the backend is connected.'); }
+      function handleShowingAdded(newShowing) {
+        setLiveShowings(prev => [newShowing, ...prev]);
+      }
+
+      function handlePropertyAdded(newProperty) {
+        setLiveProperties(prev => [newProperty, ...prev]);
       }
 
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
-          <TopBar onMenuOpen={() => setDrawerOpen(true)} dark={dark} onToggleDark={() => setDark(d => !d)} />
+          <TopBar
+            dark={dark}
+            onToggleDark={() => setDark(d => !d)}
+            onAddProperty={() => setShowAddPropModal(true)}
+            onAddShowing={() => setShowAddModal(true)}
+            onUploadSupra={() => alert('Supra screenshot parsing coming soon — powered by Claude Vision once the backend is connected.')}
+            onSettings={() => setActiveTab('settings')}
+          />
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-            {activeTab === 'overview' && <OverviewTab user={user} _v={showingsVer} />}
+            {activeTab === 'overview' && <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} />}
             {activeTab === 'settings' && <SettingsTab user={user} />}
           </div>
           <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />
-          <HamburgerDrawer
-            open={drawerOpen} onClose={() => setDrawerOpen(false)}
-            onAction={handleAction} onTabChange={setActiveTab}
-            activeTab={activeTab} dark={dark} user={user}
-          />
+          {showAddPropModal && (
+            <AddPropertyModal
+              onClose={() => setShowAddPropModal(false)}
+              onAdd={handlePropertyAdded}
+              user={user}
+            />
+          )}
           {showAddModal && (
             <AddShowingModal
               onClose={() => setShowAddModal(false)}
-              onAdd={() => setShowingsVer(v => v + 1)}
+              onAdd={handleShowingAdded}
+              user={user}
+              properties={liveProperties}
             />
           )}
         </div>

@@ -1256,11 +1256,46 @@
 
     // ─── Add Showing Modal ────────────────────────────────────────────
     function AddShowingModal({ onClose, onAdd, user, properties }) {
-      const [pid,    setPid]    = useState((properties || PROPERTIES)[0]?.id || '');
-      const [agent,  setAgent]  = useState('');
-      const [phone,  setPhone]  = useState('');
-      const [office, setOffice] = useState('');
-      const [date,   setDate]   = useState('');
+      const [pid,      setPid]      = useState((properties || PROPERTIES)[0]?.id || '');
+      const [agent,    setAgent]    = useState('');
+      const [phone,    setPhone]    = useState('');
+      const [office,   setOffice]   = useState('');
+      const [date,     setDate]     = useState('');
+      const [pasteRow, setPasteRow] = useState('');
+      const [parsed,   setParsed]   = useState(false);
+
+      function parseSupraRow(text) {
+        // Supra table copies as tab-separated: Date | Key Serial | Keyholder | Phone | Office | Office Phone
+        const parts = text.trim().split('\t').map(s => s.trim());
+        if (parts.length < 5) return null;
+        const datePart = (parts[0] || '').split(' ')[0]; // "5/27/2026"
+        let dateStr = '';
+        if (datePart && datePart.includes('/')) {
+          const [m, d, y] = datePart.split('/');
+          const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+          const mIdx = parseInt(m, 10) - 1;
+          if (months[mIdx]) dateStr = `${months[mIdx]} ${parseInt(d, 10)}, ${y}`;
+        }
+        return {
+          date:   dateStr,
+          agent:  parts[2] || '',
+          phone:  parts[3] || '',
+          office: parts[4] || '',
+        };
+      }
+
+      function handlePaste(text) {
+        setPasteRow(text);
+        setParsed(false);
+        const result = parseSupraRow(text);
+        if (result) {
+          if (result.agent)  setAgent(result.agent);
+          if (result.phone)  setPhone(result.phone);
+          if (result.office) setOffice(result.office);
+          if (result.date)   setDate(result.date);
+          setParsed(true);
+        }
+      }
 
       const inputStyle = {
         width: '100%', padding: '9px 12px',
@@ -1305,6 +1340,29 @@
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {/* Supra paste box */}
+              <div>
+                <div style={labelStyle}>Paste Supra Row <span style={{ color: C.textMuted, textTransform: 'none', letterSpacing: 0, fontSize: '0.6rem' }}>(optional — auto-fills fields below)</span></div>
+                <textarea
+                  value={pasteRow}
+                  onChange={e => handlePaste(e.target.value)}
+                  placeholder="Copy a row from SupraWEB and paste here"
+                  rows={2}
+                  style={{
+                    ...inputStyle, resize: 'none', lineHeight: 1.5,
+                    background: parsed ? '#F0FAF4' : C.surface,
+                    borderColor: parsed ? '#1E6B40' : C.border,
+                    transition: 'border-color 0.2s, background 0.2s',
+                  }}
+                />
+                {parsed && (
+                  <div style={{ fontSize: '0.68rem', color: C.green, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <i className="ti ti-circle-check" style={{ fontSize: 13 }} />
+                    Fields filled below — review and edit if needed
+                  </div>
+                )}
+              </div>
+              <div style={{ height: 1, background: C.border }} />
               {/* Property select */}
               <div>
                 <div style={labelStyle}>Property</div>
@@ -1392,7 +1450,7 @@
     }
 
     // ─── Top Bar ──────────────────────────────────────────────────────
-    function TopBar({ dark, onToggleDark, onAddProperty, onAddShowing, onUploadSupra, onSettings }) {
+    function TopBar({ dark, onToggleDark, onAddProperty, onAddShowing, onSettings }) {
       const iconBtn = (onClick, iconClass, title) => (
         <button
           onClick={onClick}
@@ -1420,7 +1478,6 @@
             <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
             {iconBtn(onAddProperty,  'ti ti-home-plus',    'Add Property')}
             {iconBtn(onAddShowing,   'ti ti-calendar-plus','Add Showing')}
-            {iconBtn(onUploadSupra,  'ti ti-cloud-upload', 'Upload Supra')}
             {iconBtn(onSettings,     'ti ti-settings',     'Settings')}
           </div>
         </div>
@@ -1466,7 +1523,6 @@
             onToggleDark={() => setDark(d => !d)}
             onAddProperty={() => setShowAddPropModal(true)}
             onAddShowing={() => setShowAddModal(true)}
-            onUploadSupra={() => alert('Supra screenshot parsing coming soon — powered by Claude Vision once the backend is connected.')}
             onSettings={() => setActiveTab('settings')}
           />
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>

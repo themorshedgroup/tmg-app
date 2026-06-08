@@ -326,6 +326,16 @@
         }));
       },
 
+      async updateProperty(id, fields) {
+        if (!this.client()) return;
+        const mapped = {};
+        if (fields.address !== undefined) mapped.address        = fields.address;
+        if (fields.mls     !== undefined) mapped.mls            = fields.mls;
+        if (fields.agent   !== undefined) mapped.listing_agent  = fields.agent;
+        const { error } = await this.client().from('properties').update(mapped).eq('id', id);
+        if (error) console.error('[DB] updateProperty:', error.message);
+      },
+
       async insertProperty(formData, user) {
         if (!this.client()) {
           return {
@@ -466,13 +476,38 @@
     function PropertyCard({ property, allShowings, user }) {
       const [expanded,      setExpanded]      = useState(false);
       const [openShowingId, setOpenShowingId] = useState(null);
-      const showings = allShowings.filter(s => s.propertyAddress === property.address);
+      const [editing,       setEditing]       = useState(false);
+      const [editAddr,  setEditAddr]  = useState(property.address);
+      const [editMls,   setEditMls]   = useState(property.mls);
+      const [editAgent, setEditAgent] = useState(property.agent);
+      const [dispAddr,  setDispAddr]  = useState(property.address);
+      const [dispMls,   setDispMls]   = useState(property.mls);
+      const [dispAgent, setDispAgent] = useState(property.agent);
+
+      const showings = allShowings.filter(s => s.propertyAddress === dispAddr);
       const active   = showings.filter(s => s.status === 'in_progress').length;
       const closed   = showings.filter(s => s.status === 'closed').length;
       const unreadCount = showings.filter(s => {
         const t = SMS_THREADS[s.id] || [];
         return t.length > 0 && t[t.length - 1].dir === 'in';
       }).length;
+
+      async function handleSaveEdit() {
+        setDispAddr(editAddr); setDispMls(editMls); setDispAgent(editAgent);
+        setEditing(false);
+        await DB.updateProperty(property.id, { address: editAddr, mls: editMls, agent: editAgent });
+      }
+      function handleCancelEdit() {
+        setEditAddr(dispAddr); setEditMls(dispMls); setEditAgent(dispAgent);
+        setEditing(false);
+      }
+
+      const inputStyle = {
+        width: '100%', padding: '7px 10px',
+        border: `1px solid ${C.border}`, borderRadius: 8,
+        background: C.surface, color: C.textPrimary,
+        fontSize: '0.83rem', fontFamily: C.fontSans, outline: 'none',
+      };
 
       // Minimalist emoji chip
       function EmojiChip({ emoji, count, color }) {
@@ -496,49 +531,82 @@
         }}>
           {/* Property header */}
           <div
-            onClick={() => setExpanded(e => !e)}
-            style={{ padding: '14px 16px', cursor: 'pointer' }}
+            onClick={() => { if (!editing) setExpanded(e => !e); }}
+            style={{ padding: '14px 16px', cursor: editing ? 'default' : 'pointer' }}
           >
-            {/* Row 1: address + emoji chips + envelope + chevron */}
-            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 3, gap: 6 }}>
+            {/* Row 1: address + emoji chips + envelope + pencil + chevron */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: editing ? 12 : 3, gap: 6 }}>
               <div style={{ fontWeight: 700, fontSize: '0.97rem', color: C.textPrimary, flex: 1, minWidth: 0 }}>
-                {property.address}
+                {dispAddr}
               </div>
-              {/* Emoji stat chips */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-                <EmojiChip emoji="👀" count={showings.length} color={C.gold} />
-                <EmojiChip emoji="🟢" count={active}          color={C.green} />
-                <EmojiChip emoji="🔴" count={closed}          color={C.red} />
-              </div>
-              {/* Unread envelope badge */}
-              {/* Mail icon — always same container width for alignment */}
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
-                background: unreadCount > 0 ? C.red + '18' : 'transparent',
-                border: `1px solid ${unreadCount > 0 ? C.red + '44' : C.border}`,
-                borderRadius: 12, padding: '3px 8px', minWidth: 38, justifyContent: 'center',
-              }}>
-                <i className="ti ti-mail" style={{ fontSize: 14, color: unreadCount > 0 ? C.red : C.textMuted }} />
-                {unreadCount > 0 && (
-                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: C.red, fontFamily: C.fontSans, lineHeight: 1 }}>
-                    {unreadCount}
-                  </span>
-                )}
-              </div>
-              <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />
+              {!editing && (
+                <>
+                  {/* Emoji stat chips */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                    <EmojiChip emoji="👀" count={showings.length} color={C.gold} />
+                    <EmojiChip emoji="🟢" count={active}          color={C.green} />
+                    <EmojiChip emoji="🔴" count={closed}          color={C.red} />
+                  </div>
+                  {/* Mail badge */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+                    background: unreadCount > 0 ? C.red + '18' : 'transparent',
+                    border: `1px solid ${unreadCount > 0 ? C.red + '44' : C.border}`,
+                    borderRadius: 12, padding: '3px 8px', minWidth: 38, justifyContent: 'center',
+                  }}>
+                    <i className="ti ti-mail" style={{ fontSize: 14, color: unreadCount > 0 ? C.red : C.textMuted }} />
+                    {unreadCount > 0 && (
+                      <span style={{ fontSize: '0.72rem', fontWeight: 700, color: C.red, fontFamily: C.fontSans, lineHeight: 1 }}>
+                        {unreadCount}
+                      </span>
+                    )}
+                  </div>
+                </>
+              )}
+              {/* Pencil edit button */}
+              <button
+                onClick={e => { e.stopPropagation(); setEditing(true); }}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', color: editing ? C.gold : C.textMuted, fontSize: 14, lineHeight: 1, display: 'flex', alignItems: 'center', flexShrink: 0 }}
+              ><i className="ti ti-pencil" /></button>
+              {!editing && <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />}
             </div>
-            {/* Row 2: city · MLS */}
-            <div style={{ fontSize: '0.75rem', color: C.textSecondary, marginBottom: 2 }}>
-              {property.city} · MLS# {property.mls}
-            </div>
-            {/* Row 3: listing agent */}
-            {property.agent ? (
-              <div style={{ fontSize: '0.73rem', color: C.textMuted }}>{property.agent}</div>
-            ) : null}
+
+            {editing ? (
+              /* ── Inline edit form ── */
+              <div onClick={e => e.stopPropagation()}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                  {[
+                    { label: 'Property Address', val: editAddr,  set: setEditAddr  },
+                    { label: 'MLS Number',        val: editMls,   set: setEditMls   },
+                    { label: 'Listing Agent',     val: editAgent, set: setEditAgent },
+                  ].map(({ label, val, set }) => (
+                    <div key={label}>
+                      <div style={{ fontSize: '0.65rem', color: C.textSecondary, marginBottom: 3, fontFamily: C.fontSans }}>{label}</div>
+                      <input value={val} onChange={e => set(e.target.value)} style={inputStyle} />
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={handleSaveEdit}   style={{ flex: 1, padding: '9px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.82rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>Save</button>
+                  <button onClick={handleCancelEdit} style={{ flex: 1, padding: '9px', background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* Row 2: city · MLS */}
+                <div style={{ fontSize: '0.75rem', color: C.textSecondary, marginBottom: 2 }}>
+                  {dispMls ? `MLS# ${dispMls}` : ''}
+                </div>
+                {/* Row 3: listing agent */}
+                {dispAgent ? (
+                  <div style={{ fontSize: '0.73rem', color: C.textMuted }}>{dispAgent}</div>
+                ) : null}
+              </>
+            )}
           </div>
 
           {/* Expanded showing list */}
-          {expanded && (
+          {expanded && !editing && (
             <div style={{ borderTop: `1px solid ${C.border}` }}>
               {showings.map(s => (
                 <ShowingRow

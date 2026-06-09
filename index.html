@@ -711,7 +711,7 @@
     }
 
     // In-flow chat history panel — fills the area between the top bar and the bottom zone.
-    function HistoryPanel({ dark, conversations, onSelect, onNewChat }) {
+    function HistoryPanel({ dark, conversations, onSelect, onNewChat, onRename }) {
       const panelBg    = dark ? '#070F1E' : '#FFFFFF';
       const headBord   = dark ? '#0D1E3A' : '#F0EBE3';
       const titleCol   = dark ? '#FFFFFF' : '#001A4A';
@@ -743,19 +743,22 @@
               const k = ico(c.type);
               const last = i === list.length - 1;
               return (
-                <div key={c.id} onClick={() => onSelect(c.id)} style={{ display: 'flex', gap: 9, padding: '9px 14px', cursor: 'pointer', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
-                  <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, marginTop: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: k.bg }}>
+                <div key={c.id} onClick={() => onSelect(c.id)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 14px', cursor: 'pointer', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: k.bg }}>
                     <i className={`ti ${k.icon}`} style={{ fontSize: 14, color: k.color }} />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontFamily: J, fontSize: 10, fontWeight: 500, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</div>
                     {c.preview && <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{c.preview}</div>}
                   </div>
-                  <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+                  <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                     <div style={{ fontFamily: J, fontSize: 8, color: timeCol }}>{shortTime(c.updatedAt)}</div>
                     {c.unread > 0 && (
                       <div style={{ width: 16, height: 16, borderRadius: '50%', background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{c.unread}</div>
                     )}
+                    <button onClick={(e) => { e.stopPropagation(); onRename(c.id); }} title="Rename" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: timeCol, fontSize: 15, display: 'flex', alignItems: 'center' }}>
+                      <i className="ti ti-pencil" />
+                    </button>
                   </div>
                 </div>
               );
@@ -1082,7 +1085,19 @@
           {showCalendar && <CalendarPopover onClose={() => setShowCalendar(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (drawerOpen
-              ? <HistoryPanel dark={dark} conversations={conversations} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} />
+              ? (
+                <div style={{ height: '100%', display: 'flex', flexDirection: historySide === 'right' ? 'row-reverse' : 'row' }}>
+                  <div style={{
+                    width: '33.333%', height: '100%', minWidth: 0,
+                    [historySide === 'right' ? 'borderLeft' : 'borderRight']: `1px solid ${dark ? '#0D1E3A' : '#F0EBE3'}`,
+                  }}>
+                    <HistoryPanel dark={dark} conversations={conversations} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onRename={renameConversation} />
+                  </div>
+                  <div style={{ flex: 1, height: '100%', minWidth: 0 }}>
+                    <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />
+                  </div>
+                </div>
+              )
               : <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />
             )}
             {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}

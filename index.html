@@ -353,19 +353,92 @@
       { key: 'listing_presentation', label: 'Request Listing Presentation', short: 'Listing' },
     ];
 
+    // ─── Work Mode pills ─────────────────────────────────────────────
+    // Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
+    const FALLBACK_PILLS = [
+      { id: 'fb-kpis',    label: 'Enter KPIs',           icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Enter KPIs' },           enabled: true },
+      { id: 'fb-listing', label: 'Listing Presentation', icon: 'ti-presentation',    colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Listing Presentation' }, enabled: true },
+      { id: 'fb-showing', label: 'Add Showing',          icon: 'ti-home',            colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Add Showing' },          enabled: true },
+      { id: 'fb-comm',    label: 'Commission Log',       icon: 'ti-currency-dollar', colorLight: '#0F6E56', colorDark: '#5DCAA5',               type: 'prompt', config: { prompt: 'Commission Log' },       enabled: true },
+      { id: 'fb-score',   label: 'Team Scorecard',       icon: 'ti-users',           colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Team Scorecard' },        enabled: true },
+      { id: 'fb-eod',     label: 'EOD Report',           icon: 'ti-file-text',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'EOD Report' },            enabled: true },
+      { id: 'fb-weekly',  label: 'Weekly Summary',       icon: 'ti-calendar-stats',  colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Weekly Summary' },        enabled: true },
+    ];
+
+    // Curated icon set for the pill builder's icon picker (all verified Tabler names).
+    const PILL_ICONS = ['ti-chart-bar', 'ti-presentation', 'ti-home', 'ti-currency-dollar', 'ti-users', 'ti-file-text', 'ti-calendar-stats', 'ti-sparkles', 'ti-clipboard', 'ti-clipboard-list', 'ti-mail', 'ti-phone', 'ti-map-pin', 'ti-building', 'ti-key', 'ti-calendar', 'ti-checklist', 'ti-notes', 'ti-report', 'ti-target', 'ti-trophy', 'ti-coin', 'ti-briefcase', 'ti-message'];
+
+    // Color presets (light/dark pair) for pills.
+    const PILL_COLORS = [
+      { l: '#AD832F', d: '#C9A45A' },                 // gold
+      { l: '#001A4A', d: 'rgba(255,255,255,0.6)' },   // navy
+      { l: '#0F6E56', d: '#5DCAA5' },                 // green
+      { l: '#9A3B3B', d: '#E58A8A' },                 // red
+      { l: '#5A3FA0', d: '#B79CEB' },                 // purple
+    ];
+
+    // Make a safe template key from a label/question.
+    function slugKey(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24); }
+
+    // Fill {key} placeholders from collected values; fall back to "Label: value" lines.
+    function composeFromTemplate(template, values, items) {
+      if (template && template.trim()) {
+        return template.replace(/\{(\w+)\}/g, (m, k) => (values[k] !== undefined && values[k] !== '' ? values[k] : ''));
+      }
+      return (items || []).map(it => ((it.label || it.question || it.key) + ': ' + (values[it.key] || ''))).join('\n');
+    }
+
+    // Supabase helper for work_pills (mirrors ConvDB/ProfileDB: fail-open reads, throwing writes).
+    const PillDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+      _map(r) { return { id: r.id, label: r.label, icon: r.icon, colorLight: r.color_light, colorDark: r.color_dark, type: r.type, config: r.config || {}, enabled: r.enabled, sortOrder: r.sort_order }; },
+      async list() {
+        if (!this.client()) return null;
+        const { data, error } = await this.client().from('work_pills').select('*').order('sort_order', { ascending: true }).order('created_at', { ascending: true });
+        if (error) { console.error('[PillDB] list:', error.message); return null; }
+        return (data || []).map(this._map);
+      },
+      async create(p) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('work_pills').insert({
+          label: p.label, icon: p.icon, color_light: p.colorLight, color_dark: p.colorDark,
+          type: p.type, config: p.config || {}, enabled: p.enabled !== false, sort_order: p.sortOrder || 0, created_by: this.uid(),
+        });
+        if (error) { console.error('[PillDB] create:', error.message); throw error; }
+      },
+      async update(id, f) {
+        if (!this.client()) return;
+        const m = {};
+        if (f.label !== undefined) m.label = f.label;
+        if (f.icon !== undefined) m.icon = f.icon;
+        if (f.colorLight !== undefined) m.color_light = f.colorLight;
+        if (f.colorDark !== undefined) m.color_dark = f.colorDark;
+        if (f.type !== undefined) m.type = f.type;
+        if (f.config !== undefined) m.config = f.config;
+        if (f.enabled !== undefined) m.enabled = f.enabled;
+        if (f.sortOrder !== undefined) m.sort_order = f.sortOrder;
+        const { error } = await this.client().from('work_pills').update(m).eq('id', id);
+        if (error) { console.error('[PillDB] update:', error.message); throw error; }
+      },
+      async remove(id) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('work_pills').delete().eq('id', id);
+        if (error) { console.error('[PillDB] remove:', error.message); throw error; }
+      },
+      async reorder(ids) {
+        if (!this.client()) return;
+        for (let i = 0; i < ids.length; i++) {
+          const { error } = await this.client().from('work_pills').update({ sort_order: i }).eq('id', ids[i]);
+          if (error) { console.error('[PillDB] reorder:', error.message); throw error; }
+        }
+      },
+    };
+
     // ─── AI Chat Tab ─────────────────────────────────────────────────
-    function AIChatTab({ user, messages, loading, mode, dark, onChip }) {
+    function AIChatTab({ user, messages, loading, mode, dark, pills, onPill }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
       const scrollRef = useRef(null);
-      const CHIPS = [
-        { label: 'Enter KPIs',           icon: 'ti-chart-bar',      iconL: '#AD832F', iconD: '#C9A45A' },
-        { label: 'Listing Presentation', icon: 'ti-presentation',   iconL: '#AD832F', iconD: '#C9A45A' },
-        { label: 'Add Showing',          icon: 'ti-home',           iconL: '#001A4A', iconD: 'rgba(255,255,255,0.6)' },
-        { label: 'Commission Log',       icon: 'ti-currency-dollar', iconL: '#0F6E56', iconD: '#5DCAA5' },
-        { label: 'Team Scorecard',       icon: 'ti-users',          iconL: '#AD832F', iconD: '#C9A45A' },
-        { label: 'EOD Report',           icon: 'ti-file-text',      iconL: '#AD832F', iconD: '#C9A45A' },
-        { label: 'Weekly Summary',       icon: 'ti-calendar-stats', iconL: '#001A4A', iconD: 'rgba(255,255,255,0.6)' },
-      ];
 
       useEffect(() => {
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -437,14 +510,14 @@
             )}
           </div>
           {/* Work-mode quick-action chips — floated above the chat bar so the greeting stays put */}
-          {mode === 'work' && (
+          {mode === 'work' && pills && pills.length > 0 && (
             <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, display: 'flex', gap: 7, overflowX: 'auto', padding: '10px 16px', borderTop: `1px solid ${dark ? '#152545' : C.border}`, background: dark ? '#000D26' : C.bg }}>
-              {CHIPS.map((chip, i) => (
-                <button key={i} onClick={() => onChip(chip.label)} style={{
+              {pills.map((chip) => (
+                <button key={chip.id} onClick={() => onPill(chip)} style={{
                   display: 'flex', alignItems: 'center', gap: 6, borderRadius: 20, padding: '7px 13px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
                   background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
                 }}>
-                  <i className={`ti ${chip.icon}`} style={{ fontSize: 13, color: dark ? chip.iconD : chip.iconL }} />
+                  <i className={`ti ${chip.icon}`} style={{ fontSize: 13, color: dark ? chip.colorDark : chip.colorLight }} />
                   <span style={{ fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 500, letterSpacing: '0.08em', color: dark ? 'rgba(255,255,255,0.7)' : '#001A4A' }}>{chip.label}</span>
                 </button>
               ))}
@@ -616,7 +689,356 @@
       );
     }
 
-    function SettingsTab({ user, profile, historySide, setHistorySide }) {
+    // ─── Work Mode builder (admin) ───────────────────────────────────
+    function IconGridPicker({ dark, value, onChange }) {
+      const bord = dark ? '#152545' : C.border;
+      return (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+          {PILL_ICONS.map(name => {
+            const on = value === name;
+            return (
+              <button key={name} onClick={() => onChange(name)} style={{ width: 38, height: 38, borderRadius: 9, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: on ? (dark ? 'rgba(173,131,47,0.2)' : '#F3EBDA') : (dark ? '#06101F' : '#F7F4EE'), border: on ? `2px solid ${dark ? C.gold : C.navy}` : `1px solid ${bord}`, color: dark ? '#fff' : C.navy }}>
+                <i className={`ti ${name}`} style={{ fontSize: 18 }} />
+              </button>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function PromptConfigEditor({ config, setConfig, inp, lbl, sub }) {
+      return (
+        <div>
+          <div style={lbl}>AI instruction</div>
+          <textarea value={config.prompt || ''} onChange={e => setConfig({ ...config, prompt: e.target.value })} placeholder="e.g. Ask me for this week's KPIs (calls, appointments, contracts) and format them into a clean summary." rows={5} style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />
+          <div style={{ fontSize: '0.68rem', color: sub, marginTop: 6, lineHeight: 1.5, fontFamily: C.fontSans }}>Sent to the AI when the pill is tapped.</div>
+        </div>
+      );
+    }
+
+    function FormConfigEditor({ config, setConfig, inp, lbl, sub, bord }) {
+      const fields = config.fields || [];
+      const setFields = (fs) => setConfig({ ...config, fields: fs });
+      const update = (i, patch) => setFields(fields.map((f, idx) => idx === i ? { ...f, ...patch } : f));
+      const add = () => setFields([...fields, { key: '', label: '', kind: 'text' }]);
+      const remove = (i) => setFields(fields.filter((_, idx) => idx !== i));
+      const small = { ...inp, padding: '7px 9px', fontSize: '0.8rem' };
+      return (
+        <div>
+          <div style={lbl}>Fields</div>
+          {fields.map((f, i) => (
+            <div key={i} style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: 10, marginBottom: 8 }}>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                <input value={f.label} onChange={e => update(i, { label: e.target.value, key: f.key || slugKey(e.target.value) })} placeholder="Question / label" style={{ ...small, flex: 1 }} />
+                <button onClick={() => remove(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 16, padding: 2 }}><i className="ti ti-x" /></button>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input value={f.key} onChange={e => update(i, { key: e.target.value })} placeholder="key" style={{ ...small, width: 110 }} />
+                <select value={f.kind} onChange={e => update(i, { kind: e.target.value })} style={{ ...small, flex: 1 }}>
+                  <option value="text">Text</option>
+                  <option value="number">Number</option>
+                  <option value="select">Choices</option>
+                </select>
+              </div>
+              {f.kind === 'select' && <input value={(f.options || []).join(', ')} onChange={e => update(i, { options: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })} placeholder="Option A, Option B, Option C" style={{ ...small, marginTop: 6 }} />}
+            </div>
+          ))}
+          <button onClick={add} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 11px', borderRadius: 9, border: `1px dashed ${bord}`, background: 'none', cursor: 'pointer', color: sub, fontFamily: C.fontSans, fontSize: '0.8rem', marginBottom: 12 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add field</button>
+          <div style={lbl}>Message template <span style={{ textTransform: 'none', fontWeight: 400 }}>(use {'{key}'})</span></div>
+          <textarea value={config.template || ''} onChange={e => setConfig({ ...config, template: e.target.value })} placeholder="Create a listing presentation for {address}, listed at {price}." rows={3} style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />
+          <div style={{ fontSize: '0.68rem', color: sub, marginTop: 6, lineHeight: 1.5, fontFamily: C.fontSans }}>On submit, values replace {'{key}'} and the message is sent to the AI. Leave blank to send each field as “Label: value”.</div>
+        </div>
+      );
+    }
+
+    function StepsConfigEditor({ config, setConfig, inp, lbl, sub, bord }) {
+      const steps = config.steps || [];
+      const setSteps = (ss) => setConfig({ ...config, steps: ss });
+      const update = (i, patch) => setSteps(steps.map((s, idx) => idx === i ? { ...s, ...patch } : s));
+      const add = () => setSteps([...steps, { key: '', question: '' }]);
+      const remove = (i) => setSteps(steps.filter((_, idx) => idx !== i));
+      const move = (i, dir) => { const j = i + dir; if (j < 0 || j >= steps.length) return; const a = steps.slice(); const t = a[i]; a[i] = a[j]; a[j] = t; setSteps(a); };
+      const small = { ...inp, padding: '7px 9px', fontSize: '0.8rem' };
+      return (
+        <div>
+          <div style={lbl}>Intro <span style={{ textTransform: 'none', fontWeight: 400 }}>(optional)</span></div>
+          <input value={config.intro || ''} onChange={e => setConfig({ ...config, intro: e.target.value })} placeholder="Let's build your report." style={inp} />
+          <div style={{ ...lbl, marginTop: 14 }}>Questions</div>
+          {steps.map((s, i) => (
+            <div key={i} style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: 10, marginBottom: 8 }}>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'flex-start' }}>
+                <span style={{ color: sub, fontSize: '0.8rem', fontWeight: 600, paddingTop: 8 }}>{i + 1}.</span>
+                <input value={s.question} onChange={e => update(i, { question: e.target.value, key: s.key || slugKey(e.target.value) })} placeholder="What's the goal?" style={{ ...small, flex: 1 }} />
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <button onClick={() => move(i, -1)} disabled={i === 0} style={{ background: 'none', border: 'none', cursor: i === 0 ? 'default' : 'pointer', color: sub, fontSize: 13, padding: 0 }}><i className="ti ti-chevron-up" /></button>
+                  <button onClick={() => move(i, 1)} disabled={i === steps.length - 1} style={{ background: 'none', border: 'none', cursor: i === steps.length - 1 ? 'default' : 'pointer', color: sub, fontSize: 13, padding: 0 }}><i className="ti ti-chevron-down" /></button>
+                </div>
+                <button onClick={() => remove(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 16, padding: 2 }}><i className="ti ti-x" /></button>
+              </div>
+              <input value={s.key} onChange={e => update(i, { key: e.target.value })} placeholder="key" style={{ ...small, width: 110 }} />
+            </div>
+          ))}
+          <button onClick={add} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 11px', borderRadius: 9, border: `1px dashed ${bord}`, background: 'none', cursor: 'pointer', color: sub, fontFamily: C.fontSans, fontSize: '0.8rem', marginBottom: 12 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add question</button>
+          <div style={lbl}>Final message template <span style={{ textTransform: 'none', fontWeight: 400 }}>(use {'{key}'})</span></div>
+          <textarea value={config.template || ''} onChange={e => setConfig({ ...config, template: e.target.value })} placeholder="Write an EOD report. Goal: {goal}. Audience: {audience}." rows={3} style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />
+          <div style={{ fontSize: '0.68rem', color: sub, marginTop: 6, lineHeight: 1.5, fontFamily: C.fontSans }}>After the last question, answers replace {'{key}'} and the message is sent to the AI.</div>
+        </div>
+      );
+    }
+
+    function PillEditor({ dark, pill, onCancel, onSave }) {
+      const [label, setLabel] = useState(pill?.label || '');
+      const [icon, setIcon] = useState(pill?.icon || 'ti-sparkles');
+      const [colorLight, setColorLight] = useState(pill?.colorLight || PILL_COLORS[0].l);
+      const [colorDark, setColorDark] = useState(pill?.colorDark || PILL_COLORS[0].d);
+      const [type, setType] = useState(pill?.type || 'prompt');
+      const [enabled, setEnabled] = useState(pill?.enabled !== false);
+      const [config, setConfig] = useState(pill?.config || {});
+      const [saving, setSaving] = useState(false);
+
+      const bord = dark ? '#152545' : C.border;
+      const cardBg = dark ? '#0A1730' : '#FFFFFF';
+      const txt = dark ? '#FFFFFF' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : C.surfaceHover, border: `1px solid ${bord}`, borderRadius: 9, color: dark ? '#fff' : C.textPrimary, fontSize: '0.85rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const lbl = { fontSize: '0.62rem', color: sub, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 5, fontFamily: C.fontSans, fontWeight: 600 };
+      const section = { background: cardBg, border: `1px solid ${bord}`, borderRadius: 12, padding: 14, marginBottom: 12 };
+
+      function validate() {
+        if (!label.trim()) return 'Please enter a label.';
+        if (type === 'prompt' && !(config.prompt || '').trim()) return 'Please enter the AI instruction.';
+        if (type === 'form') {
+          const fs = config.fields || [];
+          if (!fs.length) return 'Add at least one field.';
+          const keys = fs.map(f => (f.key || '').trim());
+          if (keys.some(k => !k)) return 'Every field needs a key.';
+          if (new Set(keys).size !== keys.length) return 'Field keys must be unique.';
+        }
+        if (type === 'steps') {
+          const ss = config.steps || [];
+          if (!ss.length) return 'Add at least one question.';
+          const keys = ss.map(s => (s.key || '').trim());
+          if (keys.some(k => !k)) return 'Every question needs a key.';
+          if (new Set(keys).size !== keys.length) return 'Question keys must be unique.';
+          if (ss.some(s => !(s.question || '').trim())) return 'Every step needs a question.';
+        }
+        return null;
+      }
+
+      async function submit() {
+        const err = validate();
+        if (err) { alert(err); return; }
+        setSaving(true);
+        try { await onSave({ label: label.trim(), icon, colorLight, colorDark, type, enabled, config }, pill?.id); }
+        finally { setSaving(false); }
+      }
+
+      return (
+        <div>
+          <div style={section}>
+            <div style={lbl}>Label</div>
+            <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. Enter KPIs" style={inp} />
+            <div style={{ ...lbl, marginTop: 14 }}>Icon</div>
+            <IconGridPicker dark={dark} value={icon} onChange={setIcon} />
+            <div style={{ ...lbl, marginTop: 14 }}>Color</div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              {PILL_COLORS.map((c, i) => {
+                const on = colorLight === c.l && colorDark === c.d;
+                return <button key={i} onClick={() => { setColorLight(c.l); setColorDark(c.d); }} style={{ width: 30, height: 30, borderRadius: '50%', cursor: 'pointer', background: dark ? c.d : c.l, border: on ? `2px solid ${dark ? '#fff' : C.navy}` : '2px solid transparent', outline: on ? `2px solid ${dark ? c.d : c.l}` : 'none', outlineOffset: 2 }} />;
+              })}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 16 }}>
+              <span style={{ ...lbl, marginBottom: 0 }}>Enabled</span>
+              <button onClick={() => setEnabled(v => !v)} style={{ width: 44, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer', background: enabled ? (dark ? C.gold : C.navy) : (dark ? '#1E3360' : '#D8D2C6'), position: 'relative', transition: 'background 0.15s' }}>
+                <span style={{ position: 'absolute', top: 3, left: enabled ? 21 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left 0.15s' }} />
+              </button>
+            </div>
+          </div>
+
+          <div style={section}>
+            <div style={lbl}>What happens when tapped</div>
+            <select value={type} onChange={e => setType(e.target.value)} style={inp}>
+              <option value="prompt">Send an AI prompt</option>
+              <option value="form">Open a form</option>
+              <option value="steps">Guided questions</option>
+            </select>
+            <div style={{ marginTop: 14 }}>
+              {type === 'prompt' && <PromptConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} />}
+              {type === 'form' && <FormConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} bord={bord} />}
+              {type === 'steps' && <StepsConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} bord={bord} />}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={submit} disabled={saving} style={{ flex: 1, padding: 12, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save pill'}</button>
+            <button onClick={onCancel} style={{ flex: 1, padding: 12, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
+    function PillRow({ dark, pill, first, last, onEdit, onDelete, onUp, onDown }) {
+      const cardBg = dark ? '#0A1730' : '#FFFFFF';
+      const bord = dark ? '#152545' : C.border;
+      const txt = dark ? '#FFFFFF' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.5)' : C.textSecondary;
+      const typeLabel = { prompt: 'Prompt', form: 'Form', steps: 'Steps' }[pill.type] || pill.type;
+      const arrow = (dir, disabled, fn) => <button onClick={fn} disabled={disabled} style={{ background: 'none', border: 'none', cursor: disabled ? 'default' : 'pointer', color: disabled ? (dark ? 'rgba(255,255,255,0.15)' : '#D8D2C6') : sub, fontSize: 15, padding: 0, display: 'flex' }}><i className={`ti ti-chevron-${dir}`} /></button>;
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: cardBg, border: `1px solid ${bord}`, borderRadius: 12, padding: '10px 12px', marginBottom: 8, opacity: pill.enabled === false ? 0.55 : 1 }}>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>{arrow('up', first, onUp)}{arrow('down', last, onDown)}</div>
+          <div style={{ width: 30, height: 30, borderRadius: 7, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? 'rgba(255,255,255,0.06)' : '#F3EFE7' }}><i className={`ti ${pill.icon}`} style={{ fontSize: 16, color: dark ? pill.colorDark : pill.colorLight }} /></div>
+          <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={onEdit}>
+            <div style={{ fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 600, color: txt, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{pill.label}{pill.enabled === false && <span style={{ fontSize: '0.62rem', color: sub, fontWeight: 500 }}>  · off</span>}</div>
+            <div style={{ fontFamily: C.fontSans, fontSize: '0.62rem', color: sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: 1 }}>{typeLabel}</div>
+          </div>
+          <button onClick={onEdit} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 17, padding: 3, display: 'flex' }}><i className="ti ti-pencil" /></button>
+          <button onClick={onDelete} title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 17, padding: 3, display: 'flex' }}><i className="ti ti-trash" /></button>
+        </div>
+      );
+    }
+
+    function WorkModeBuilder({ dark, onClose, onSaved }) {
+      const [pills, setPills] = useState(null);
+      const [editing, setEditing] = useState(null); // pill | { __new:true } | null
+      const refresh = () => PillDB.list().then(r => setPills(r || []));
+      useEffect(() => { refresh(); }, []);
+
+      const bg = dark ? '#000D26' : C.bg;
+      const bord = dark ? '#152545' : C.border;
+      const txt = dark ? '#FFFFFF' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+
+      async function savePill(obj, id) {
+        if (id) await PillDB.update(id, obj);
+        else await PillDB.create({ ...obj, sortOrder: (pills ? pills.length : 0) });
+        setEditing(null);
+        await refresh();
+        onSaved && onSaved();
+      }
+      async function deletePill(id) {
+        if (!window.confirm('Delete this pill?')) return;
+        try { await PillDB.remove(id); await refresh(); onSaved && onSaved(); }
+        catch (e) { alert('Could not delete: ' + (e.message || e)); }
+      }
+      async function move(idx, dir) {
+        if (!pills) return;
+        const j = idx + dir;
+        if (j < 0 || j >= pills.length) return;
+        const arr = pills.slice();
+        const t = arr[idx]; arr[idx] = arr[j]; arr[j] = t;
+        setPills(arr);
+        try { await PillDB.reorder(arr.map(p => p.id)); onSaved && onSaved(); }
+        catch (e) { alert('Could not reorder: ' + (e.message || e)); refresh(); }
+      }
+
+      return (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 50, background: bg, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 'calc(12px + env(safe-area-inset-top)) 16px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+            <button onClick={editing ? () => setEditing(null) : onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: txt, fontSize: 22, display: 'flex', alignItems: 'center', padding: 0 }}><i className="ti ti-chevron-left" /></button>
+            <div style={{ flex: 1, fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.25rem', color: txt }}>{editing ? (editing.__new ? 'New Pill' : 'Edit Pill') : 'Work Mode Pills'}</div>
+            {!editing && <button onClick={() => setEditing({ __new: true })} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', borderRadius: 20, border: 'none', cursor: 'pointer', background: dark ? C.gold : C.navy, color: '#fff', fontFamily: C.fontSans, fontSize: '0.8rem', fontWeight: 500 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add</button>}
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px 40px' }}>
+            {editing ? (
+              <PillEditor dark={dark} pill={editing.__new ? null : editing} onCancel={() => setEditing(null)} onSave={savePill} />
+            ) : pills === null ? (
+              <div style={{ textAlign: 'center', color: sub, fontSize: '0.85rem', padding: '40px 0' }}>Loading…</div>
+            ) : pills.length === 0 ? (
+              <div style={{ textAlign: 'center', color: sub, fontSize: '0.85rem', padding: '40px 16px', lineHeight: 1.6 }}>No pills yet.<br />Tap <b style={{ color: txt }}>Add</b> to create your first Work Mode pill.</div>
+            ) : (
+              pills.map((p, i) => (
+                <PillRow key={p.id} dark={dark} pill={p} first={i === 0} last={i === pills.length - 1} onEdit={() => setEditing(p)} onDelete={() => deletePill(p.id)} onUp={() => move(i, -1)} onDown={() => move(i, 1)} />
+              ))
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Work Mode runtime sheets (form / guided steps) ──────────────
+    function FormSheet({ dark, pill, onClose, onSubmit }) {
+      const fields = (pill.config && pill.config.fields) || [];
+      const [vals, setVals] = useState(() => { const o = {}; fields.forEach(f => { o[f.key] = f.kind === 'select' ? ((f.options && f.options[0]) || '') : ''; }); return o; });
+      const bord = dark ? '#152545' : C.border;
+      const panelBg = dark ? '#0A1730' : '#FFFFFF';
+      const txt = dark ? '#fff' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const inp = { width: '100%', padding: '10px 12px', background: dark ? '#06101F' : C.surfaceHover, border: `1px solid ${bord}`, borderRadius: 10, color: dark ? '#fff' : C.textPrimary, fontSize: '0.88rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const lbl = { fontSize: '0.66rem', color: sub, letterSpacing: '0.05em', marginBottom: 5, fontFamily: C.fontSans, fontWeight: 600 };
+      function submit() {
+        for (const f of fields) { if (f.required && !String(vals[f.key] || '').trim()) { alert('Please fill in "' + (f.label || f.key) + '".'); return; } }
+        onSubmit(vals);
+      }
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 55, background: 'rgba(0,13,38,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '18px 18px calc(20px + env(safe-area-inset-bottom))', maxHeight: '82vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
+              <i className={`ti ${pill.icon}`} style={{ fontSize: 20, color: dark ? pill.colorDark : pill.colorLight }} />
+              <div style={{ flex: 1, fontFamily: C.fontSans, fontSize: '1rem', fontWeight: 600, color: txt }}>{pill.label}</div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 20, display: 'flex' }}><i className="ti ti-x" /></button>
+            </div>
+            {fields.length === 0 && <div style={{ color: sub, fontSize: '0.82rem', marginBottom: 12 }}>This pill has no fields configured.</div>}
+            {fields.map(f => (
+              <div key={f.key} style={{ marginBottom: 12 }}>
+                <div style={lbl}>{f.label || f.key}{f.required && <span style={{ color: C.red }}> *</span>}</div>
+                {f.kind === 'select'
+                  ? <select value={vals[f.key]} onChange={e => setVals({ ...vals, [f.key]: e.target.value })} style={inp}>{(f.options || []).map(o => <option key={o} value={o}>{o}</option>)}</select>
+                  : <input type={f.kind === 'number' ? 'number' : 'text'} value={vals[f.key]} onChange={e => setVals({ ...vals, [f.key]: e.target.value })} style={inp} />}
+              </div>
+            ))}
+            <button onClick={submit} style={{ width: '100%', padding: 12, marginTop: 6, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>Send</button>
+          </div>
+        </div>
+      );
+    }
+
+    function StepSheet({ dark, pill, onClose, onComplete }) {
+      const steps = (pill.config && pill.config.steps) || [];
+      const [idx, setIdx] = useState(0);
+      const [answers, setAnswers] = useState({});
+      const [val, setVal] = useState('');
+      const cur = steps[idx];
+      const bord = dark ? '#152545' : C.border;
+      const panelBg = dark ? '#0A1730' : '#FFFFFF';
+      const txt = dark ? '#fff' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const inp = { width: '100%', padding: '10px 12px', background: dark ? '#06101F' : C.surfaceHover, border: `1px solid ${bord}`, borderRadius: 10, color: dark ? '#fff' : C.textPrimary, fontSize: '0.88rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      if (!cur) return null;
+      function next() {
+        const a = { ...answers, [cur.key]: val };
+        setAnswers(a);
+        if (idx < steps.length - 1) { setIdx(idx + 1); setVal(a[steps[idx + 1].key] || ''); }
+        else { onComplete(a); }
+      }
+      function back() {
+        if (idx === 0) return;
+        const a = { ...answers, [cur.key]: val };
+        setAnswers(a);
+        setIdx(idx - 1); setVal(a[steps[idx - 1].key] || '');
+      }
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 55, background: 'rgba(0,13,38,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '18px 18px calc(20px + env(safe-area-inset-bottom))' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 4 }}>
+              <i className={`ti ${pill.icon}`} style={{ fontSize: 20, color: dark ? pill.colorDark : pill.colorLight }} />
+              <div style={{ flex: 1, fontFamily: C.fontSans, fontSize: '1rem', fontWeight: 600, color: txt }}>{pill.label}</div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 20, display: 'flex' }}><i className="ti ti-x" /></button>
+            </div>
+            {pill.config.intro && idx === 0 && <div style={{ fontSize: '0.78rem', color: sub, marginBottom: 10, lineHeight: 1.5, fontFamily: C.fontSans }}>{pill.config.intro}</div>}
+            <div style={{ fontFamily: C.fontSans, fontSize: '0.62rem', color: sub, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 8, marginBottom: 6 }}>Step {idx + 1} of {steps.length}</div>
+            <div style={{ fontFamily: C.fontSans, fontSize: '0.95rem', fontWeight: 500, color: txt, marginBottom: 10 }}>{cur.question}</div>
+            <textarea value={val} onChange={e => setVal(e.target.value)} rows={2} style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              {idx > 0 && <button onClick={back} style={{ flex: 1, padding: 11, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.88rem', cursor: 'pointer', fontFamily: C.fontSans }}>Back</button>}
+              <button onClick={next} style={{ flex: 2, padding: 11, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{idx < steps.length - 1 ? 'Next' : 'Send'}</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function SettingsTab({ user, profile, historySide, setHistorySide, onOpenBuilder }) {
       const [me, setMe] = useState(profile || null);
       const [allUsers, setAllUsers] = useState([]);
       const [editing, setEditing] = useState(false);
@@ -707,6 +1129,20 @@
 
           {/* Admin — AI Usage & Cost */}
           {isAdmin && <AdminUsage />}
+
+          {/* Admin — Work Mode Pills builder */}
+          {isAdmin && (
+            <div style={{ ...CARD, cursor: 'pointer' }} onClick={onOpenBuilder}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+                <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-layout-grid" style={{ fontSize: 18, color: C.gold }} /></div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Work Mode Pills</div>
+                  <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Design the work-mode shortcuts and what each one does.</div>
+                </div>
+                <i className="ti ti-chevron-right" style={{ fontSize: 18, color: C.textMuted, flexShrink: 0 }} />
+              </div>
+            </div>
+          )}
 
           {/* Chat history position */}
           <div style={CARD}>
@@ -1882,6 +2318,11 @@
       const [drawerOpen, setDrawerOpen] = useState(false);
       const [historySide, setHistorySide] = useState(() => localStorage.getItem('tmg-history-side') || 'left');
 
+      // Work Mode pills (admin-configurable)
+      const [pills, setPills] = useState(null);
+      const [builderOpen, setBuilderOpen] = useState(false);
+      const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
+
       const zoneRef = useRef(null);
       const fileInputRef = useRef(null);
       const [zoneH, setZoneH] = useState(96);
@@ -1912,6 +2353,11 @@
 
       const refreshConversations = () => ConvDB.loadConversations().then(setConversations);
       useEffect(() => { refreshConversations(); }, []);
+
+      const refreshPills = () => PillDB.list().then(setPills);
+      useEffect(() => { refreshPills(); }, []);
+      // Effective pills: DB pills when present, else the built-in fallback; only enabled ones show.
+      const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false);
       useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
 
       // Per-conversation draft autosave (device-local). Key 'new' before a conversation exists.
@@ -2023,6 +2469,15 @@
         setMessages(msgs);
       }
 
+      // Tap a work-mode pill → run its configured behavior.
+      function dispatchPill(pill) {
+        if (!pill) return;
+        if (pill.type === 'form') { setActivePill({ pill, kind: 'form' }); return; }
+        if (pill.type === 'steps') { setActivePill({ pill, kind: 'steps' }); return; }
+        const text = (pill.config && pill.config.prompt) || pill.label; // prompt (default)
+        runSend(text, { type: 'work' });
+      }
+
       function startWorkRequest(key) {
         const req = WORK_REQUESTS.find(w => w.key === key);
         if (!req) return;
@@ -2060,7 +2515,7 @@
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>
                 {/* Chat stays full width behind; history overlaps it at 50% */}
-                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} onChip={(t) => runSend(t)} />
+                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={effectivePills} onPill={dispatchPill} />
                 {drawerOpen && (
                   <div style={{
                     position: 'absolute', top: 0, bottom: 0, [historySide === 'right' ? 'right' : 'left']: 0,
@@ -2076,7 +2531,7 @@
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'calls' && <CallsTab dark={dark} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
-            {activeTab === 'more' && <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} />}
+            {activeTab === 'more' && <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} onOpenBuilder={() => setBuilderOpen(true)} />}
             {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
@@ -2106,6 +2561,13 @@
             loading={loading}
             zoneRef={zoneRef}
           />
+          {builderOpen && <WorkModeBuilder dark={dark} onClose={() => setBuilderOpen(false)} onSaved={refreshPills} />}
+          {activePill && activePill.kind === 'form' && (
+            <FormSheet dark={dark} pill={activePill.pill} onClose={() => setActivePill(null)} onSubmit={(vals) => { const text = composeFromTemplate(activePill.pill.config.template, vals, activePill.pill.config.fields); setActivePill(null); runSend(text, { type: 'work' }); }} />
+          )}
+          {activePill && activePill.kind === 'steps' && (
+            <StepSheet dark={dark} pill={activePill.pill} onClose={() => setActivePill(null)} onComplete={(ans) => { const text = composeFromTemplate(activePill.pill.config.template, ans, activePill.pill.config.steps); setActivePill(null); runSend(text, { type: 'work' }); }} />
+          )}
         </div>
       );
     }

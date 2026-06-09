@@ -529,6 +529,92 @@
       );
     }
 
+    // Claude pricing — USD per 1,000,000 tokens, matched by model-id substring.
+    // Update these when Anthropic changes prices; historical rows re-cost on view.
+    const PRICING = {
+      'claude-3-5-haiku':  { in: 0.80, out: 4.00 },
+      'claude-3-5-sonnet': { in: 3.00, out: 15.00 },
+      'claude-3-haiku':    { in: 0.25, out: 1.25 },
+      'claude-3-opus':     { in: 15.00, out: 75.00 },
+      'claude-haiku-4':    { in: 1.00, out: 5.00 },
+      'claude-sonnet-4':   { in: 3.00, out: 15.00 },
+      'claude-opus-4':     { in: 15.00, out: 75.00 },
+    };
+    const priceFor = (model) => { const m = model || ''; const k = Object.keys(PRICING).find(x => m.includes(x)); return PRICING[k] || PRICING['claude-3-5-sonnet']; };
+    const rowCost = (r) => { const p = priceFor(r.model); return (Number(r.input_tokens) || 0) / 1e6 * p.in + (Number(r.output_tokens) || 0) / 1e6 * p.out; };
+    const fmtTok = (n) => { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
+    const fmtUsd = (n) => '$' + (Number(n) || 0).toFixed(2);
+
+    // Admin-only AI usage + estimated cost per user. Reads the usage_summary RPC.
+    function AdminUsage() {
+      const [rows, setRows] = useState(null); // null = loading
+      const [users, setUsers] = useState([]);
+      const [days, setDays] = useState(30);
+      useEffect(() => {
+        const c = window.SupabaseAuth && window.SupabaseAuth._client;
+        if (!c) { setRows([]); return; }
+        setRows(null);
+        Promise.all([c.rpc('usage_summary', { days }), ProfileDB.loadAll()]).then(([res, us]) => {
+          if (res.error) { console.error('[Usage]', res.error.message); setRows([]); }
+          else setRows(res.data || []);
+          setUsers(us || []);
+        });
+      }, [days]);
+
+      const nameOf = (id) => { const u = users.find(x => x.id === id); return u ? ((((u.first_name || '') + ' ' + (u.last_name || '')).trim()) || u.email) : 'Unknown user'; };
+
+      const byUser = {};
+      (rows || []).forEach(r => {
+        const k = r.user_id || 'unknown';
+        if (!byUser[k]) byUser[k] = { inTok: 0, outTok: 0, calls: 0, cost: 0 };
+        byUser[k].inTok += Number(r.input_tokens) || 0;
+        byUser[k].outTok += Number(r.output_tokens) || 0;
+        byUser[k].calls += Number(r.calls) || 0;
+        byUser[k].cost += rowCost(r);
+      });
+      const list = Object.entries(byUser).map(([id, v]) => ({ id, ...v })).sort((a, b) => b.cost - a.cost);
+      const total = list.reduce((s, u) => ({ inTok: s.inTok + u.inTok, outTok: s.outTok + u.outTok, calls: s.calls + u.calls, cost: s.cost + u.cost }), { inTok: 0, outTok: 0, calls: 0, cost: 0 });
+
+      const pill = (d, label) => (
+        <button key={d} onClick={() => setDays(d)} style={{ padding: '5px 11px', borderRadius: 8, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.72rem', fontWeight: days === d ? 600 : 500, border: `1px solid ${days === d ? C.navy : C.border}`, background: days === d ? C.navy : 'none', color: days === d ? '#fff' : C.textSecondary }}>{label}</button>
+      );
+
+      return (
+        <div style={CARD}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <i className="ti ti-coin" style={{ fontSize: 14 }} />AI Usage &amp; Cost
+          </div>
+          <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 10, lineHeight: 1.5 }}>Estimated Claude spend per person. Approximate, based on public token prices.</div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>{[[7, '7 days'], [30, '30 days'], [90, '90 days']].map(([d, l]) => pill(d, l))}</div>
+          {rows === null ? (
+            <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '14px 0' }}>Loading…</div>
+          ) : (
+            <React.Fragment>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: C.bg, borderRadius: 10, marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: C.textMuted, fontFamily: C.fontSans }}>Total · {days}d</div>
+                  <div style={{ fontSize: '1.15rem', fontWeight: 700, color: C.navy, fontFamily: C.fontSans }}>{fmtUsd(total.cost)}</div>
+                </div>
+                <div style={{ textAlign: 'right', fontSize: '0.7rem', color: C.textSecondary, fontFamily: C.fontSans, lineHeight: 1.5 }}>
+                  {fmtTok(total.inTok)} in · {fmtTok(total.outTok)} out<br />{total.calls} calls
+                </div>
+              </div>
+              {list.length === 0 && <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '12px 0' }}>No AI usage in this period.</div>}
+              {list.map(u => (
+                <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '0.86rem', fontWeight: 600, color: C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{nameOf(u.id)}</div>
+                    <div style={{ fontSize: '0.68rem', color: C.textSecondary, marginTop: 1, fontFamily: C.fontSans }}>{fmtTok(u.inTok)} in · {fmtTok(u.outTok)} out · {u.calls} calls</div>
+                  </div>
+                  <div style={{ flexShrink: 0, fontSize: '0.92rem', fontWeight: 700, color: C.gold, fontFamily: C.fontSans }}>{fmtUsd(u.cost)}</div>
+                </div>
+              ))}
+            </React.Fragment>
+          )}
+        </div>
+      );
+    }
+
     function SettingsTab({ user, profile, historySide, setHistorySide }) {
       const [me, setMe] = useState(profile || null);
       const [allUsers, setAllUsers] = useState([]);
@@ -617,6 +703,9 @@
 
           {/* Admin — Manage Users */}
           {isAdmin && <AdminUsers />}
+
+          {/* Admin — AI Usage & Cost */}
+          {isAdmin && <AdminUsage />}
 
           {/* Chat history position */}
           <div style={CARD}>

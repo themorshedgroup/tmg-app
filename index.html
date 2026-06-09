@@ -197,14 +197,15 @@
       function chooseWorkOption(opt) { setWorkOption(opt); setMode('work'); setWorkMenuOpen(false); }
 
       const pillStyle = (active) => ({
-        display: 'inline-flex', alignItems: 'center',
-        padding: '6px 14px', borderRadius: 20, cursor: 'pointer',
+        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '11px 14px', borderRadius: 12, cursor: 'pointer',
         border: `1px solid ${active ? C.gold : C.border}`,
         background: active ? C.gold : C.surface,
         color: active ? '#FFFFFF' : C.textSecondary,
-        fontSize: '0.76rem', fontWeight: 500, fontFamily: C.fontSans,
+        fontSize: '0.82rem', fontWeight: active ? 600 : 500, fontFamily: C.fontSans,
         letterSpacing: '0.03em',
-        transition: 'background 0.15s ease, color 0.15s ease, border-color 0.15s ease',
+        boxShadow: active ? '0 2px 8px rgba(173,131,47,0.28)' : 'none',
+        transition: 'background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
       });
 
       const empty = messages.length === 0;
@@ -369,13 +370,13 @@
 
     // ─── Bottom Nav ──────────────────────────────────────────────────
     const TABS = [
-      { id: 'chat',     label: 'AI Chat',   icon: 'ti-sparkles'    },
-      { id: 'teamchat', label: 'Team Chat', icon: 'ti-messages'    },
-      { id: 'calls',    label: 'Calls',     icon: 'ti-phone'       },
-      { id: 'tasks',    label: 'Tasks',     icon: 'ti-list-check'  },
-      { id: 'kpis',     label: 'KPIs',      icon: 'ti-key'         },
-      { id: 'deals',    label: 'Deals',     icon: 'ti-moneybag'    },
-      { id: 'more',     label: 'More',      icon: 'ti-dots'        },
+      { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
+      { id: 'teamchat', label: 'Chat',  icon: 'ti-messages'        },
+      { id: 'calls',    label: 'Calls', icon: 'ti-phone'           },
+      { id: 'tasks',    label: 'Tasks', icon: 'ti-list-check'      },
+      { id: 'kpis',     label: 'KPIs',  icon: 'ti-trophy'          },
+      { id: 'deals',    label: 'Deals', icon: 'ti-currency-dollar' },
+      { id: 'more',     label: 'More',  icon: 'ti-dots'            },
     ];
 
     function BottomNav({ active, onChange, dark }) {
@@ -405,9 +406,9 @@
                 }}>
                   <i className={`ti ${icon}`} style={{ fontSize: 14, display: 'block', color: '#FFFFFF', lineHeight: 1 }} />
                   <span style={{
-                    fontSize: 8, fontFamily: "'Jost', sans-serif",
-                    letterSpacing: '0.14em', fontWeight: 500,
-                    textTransform: 'uppercase', color: '#FFFFFF',
+                    fontSize: 8.5, fontFamily: "'Jost', sans-serif",
+                    letterSpacing: '0.02em', fontWeight: 500,
+                    color: '#FFFFFF',
                   }}>{label}</span>
                 </button>
               );

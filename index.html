@@ -466,11 +466,13 @@
     // ─── Chat (Team Chat) Tab — preview mockup ───────────────────────
     const TCHAT_PHOTOS = {
       tarek:   'https://themorshedgroup.com/wp-content/uploads/2023/01/tarek-morshed-headshot.jpg',
+      symon:   'https://themorshedgroup.com/wp-content/uploads/2025/01/Hidenori-Symon-Yongco-headshot.jpg',
+      brad:    'https://themorshedgroup.com/wp-content/uploads/2023/01/Brad-Baker-headshot-1.jpg',
       cassie:  'https://themorshedgroup.com/wp-content/uploads/2025/08/Cassandra-Cassie-Clemons-headshot.jpg',
       brett:   'https://themorshedgroup.com/wp-content/uploads/2025/09/Brett-Silverman-headshot.jpg',
+      kyle:    'https://themorshedgroup.com/wp-content/uploads/2026/02/Kyle-Baird-headshot.jpg',
       alex:    'https://themorshedgroup.com/wp-content/uploads/2025/04/Alexandra-Machado-headshot.jpg',
       luciana: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Luciana-Pilco-headshot.jpg',
-      kyle:    'https://themorshedgroup.com/wp-content/uploads/2026/02/Kyle-Baird-headshot.jpg',
     };
 
     function ChatTab({ dark }) {
@@ -515,10 +517,15 @@
       );
 
       const threads = [
-        { id: 't1', avatar: <Group a={TCHAT_PHOTOS.tarek} b={TCHAT_PHOTOS.cassie} />, name: 'TMG Agents', preview: 'Cassie: New showing on Jinx Ave just booked...', time: '10:02a', unread: 1 },
-        { id: 't2', avatar: <Single photo={TCHAT_PHOTOS.brett} />, name: 'Brett', preview: 'Sent the commercial comp report over...', time: 'Yest', unread: 0 },
-        { id: 't3', avatar: <Group a={TCHAT_PHOTOS.alex} b={TCHAT_PHOTOS.luciana} />, name: 'Ops & Admin', preview: 'Luciana: Screening shortlist is ready...', time: 'Mon', unread: 0 },
-        { id: 't4', avatar: <Single photo={TCHAT_PHOTOS.kyle} />, name: 'Kyle', preview: 'Following up on the Forest Hill listing...', time: 'Sun', unread: 0 },
+        { id: 't1', avatar: <Group a={TCHAT_PHOTOS.tarek} b={TCHAT_PHOTOS.brad} />, name: 'TMG Agents', preview: 'Brad: New showing on Jinx Ave just booked...', time: '10:02a', unread: 1 },
+        { id: 't2', avatar: <Single photo={TCHAT_PHOTOS.tarek} />, name: 'Tarek', preview: "Let's sync on the Forest Hill offer at 3...", time: '9:48a', unread: 0 },
+        { id: 't3', avatar: <Single photo={TCHAT_PHOTOS.brad} />, name: 'Brad', preview: 'Westlake closing docs are signed and in...', time: '8:30a', unread: 2 },
+        { id: 't4', avatar: <Single photo={TCHAT_PHOTOS.cassie} />, name: 'Cassie', preview: 'Buyer loved the Mueller condo — writing it up...', time: 'Yest', unread: 0 },
+        { id: 't5', avatar: <Single photo={TCHAT_PHOTOS.brett} />, name: 'Brett', preview: 'Sent the commercial comp report over...', time: 'Yest', unread: 0 },
+        { id: 't6', avatar: <Group a={TCHAT_PHOTOS.alex} b={TCHAT_PHOTOS.luciana} />, name: 'Ops & Admin', preview: 'Luciana: Screening shortlist is ready...', time: 'Mon', unread: 0 },
+        { id: 't7', avatar: <Single photo={TCHAT_PHOTOS.alex} />, name: 'Alexandra', preview: '3 files cleared to close this week...', time: 'Mon', unread: 0 },
+        { id: 't8', avatar: <Single photo={TCHAT_PHOTOS.kyle} />, name: 'Kyle', preview: 'Following up on the Forest Hill listing...', time: 'Sun', unread: 0 },
+        { id: 't9', avatar: <Single photo={TCHAT_PHOTOS.luciana} />, name: 'Luciana', preview: "Calendar's updated for next week's listings...", time: 'Sun', unread: 0 },
       ];
 
       return (

@@ -783,6 +783,76 @@
     }
 
     // ─── Chat History Drawer ─────────────────────────────────────────
+    // Short timestamp like "11:42p", "Yest", "Mon", "Jun 3".
+    function shortTime(iso) {
+      if (!iso) return '';
+      const d = new Date(iso), now = new Date();
+      if (d.toDateString() === now.toDateString()) {
+        let h = d.getHours(); const m = d.getMinutes();
+        const ap = h >= 12 ? 'p' : 'a'; h = h % 12 || 12;
+        return h + ':' + String(m).padStart(2, '0') + ap;
+      }
+      const yest = new Date(now); yest.setDate(now.getDate() - 1);
+      if (d.toDateString() === yest.toDateString()) return 'Yest';
+      if (Math.floor((now - d) / 86400000) < 7) return d.toLocaleDateString('en-US', { weekday: 'short' });
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+
+    // In-flow chat history panel — fills the area between the top bar and the bottom zone.
+    function HistoryPanel({ dark, conversations, onSelect, onNewChat }) {
+      const panelBg    = dark ? '#070F1E' : '#FFFFFF';
+      const headBord   = dark ? '#0D1E3A' : '#F0EBE3';
+      const titleCol   = dark ? '#FFFFFF' : '#001A4A';
+      const btnBg      = dark ? '#AD832F' : '#001A4A';
+      const rowBord    = dark ? '#0D1E3A' : '#F5F2EE';
+      const previewCol = dark ? 'rgba(255,255,255,0.35)' : '#888888';
+      const timeCol    = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const J = "'Jost', sans-serif";
+      const list = (conversations || []).filter(c => !c.archived);
+      const ico = (type) => type === 'work'
+        ? { bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', color: dark ? '#C9A45A' : '#AD832F', icon: 'ti-briefcase' }
+        : { bg: dark ? 'rgba(255,255,255,0.07)' : '#EEF0F8', color: dark ? 'rgba(255,255,255,0.6)' : '#001A4A', icon: 'ti-sparkles' };
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: panelBg }}>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px 9px', borderBottom: `1px solid ${headBord}`, flexShrink: 0 }}>
+            <div style={{ fontFamily: J, fontSize: 10, letterSpacing: '0.18em', fontWeight: 600, color: titleCol }}>Chats</div>
+            <button onClick={onNewChat} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 20, border: 'none', cursor: 'pointer', background: btnBg, color: '#fff', fontFamily: J, fontSize: 8, letterSpacing: '0.14em', fontWeight: 500 }}>
+              <i className="ti ti-plus" style={{ fontSize: 11 }} />New
+            </button>
+          </div>
+          {/* List */}
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {list.length === 0 && (
+              <div style={{ textAlign: 'center', color: previewCol, fontSize: '0.8rem', padding: '32px 16px', fontFamily: J }}>No conversations yet.</div>
+            )}
+            {list.map((c, i) => {
+              const k = ico(c.type);
+              const last = i === list.length - 1;
+              return (
+                <div key={c.id} onClick={() => onSelect(c.id)} style={{ display: 'flex', gap: 9, padding: '9px 14px', cursor: 'pointer', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, marginTop: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: k.bg }}>
+                    <i className={`ti ${k.icon}`} style={{ fontSize: 14, color: k.color }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: J, fontSize: 10, fontWeight: 500, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</div>
+                    {c.preview && <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{c.preview}</div>}
+                  </div>
+                  <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+                    <div style={{ fontFamily: J, fontSize: 8, color: timeCol }}>{shortTime(c.updatedAt)}</div>
+                    {c.unread > 0 && (
+                      <div style={{ width: 16, height: 16, borderRadius: '50%', background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{c.unread}</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
     function HistoryDrawer({ dark, side, conversations, currentConvId, onClose, onSelect, onNewChat, onPin, onArchive, onRename, onDelete }) {
       const [menuId, setMenuId] = useState(null);
       const [showArchived, setShowArchived] = useState(false);
@@ -1100,7 +1170,10 @@
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => setShowCalendar(s => !s)} calendarOpen={showCalendar} />
           {showCalendar && <CalendarPopover onClose={() => setShowCalendar(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
-            {activeTab === 'chat' && <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />}
+            {activeTab === 'chat' && (drawerOpen
+              ? <HistoryPanel dark={dark} conversations={conversations} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} />
+              : <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />
+            )}
             {activeTab === 'teamchat' && <ChatTab />}
             {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}
             {!['chat', 'teamchat', 'more'].includes(activeTab) && (
@@ -1117,11 +1190,11 @@
           />
           <BottomZone
             active={activeTab}
-            onChange={setActiveTab}
+            onChange={(t) => { setActiveTab(t); setDrawerOpen(false); }}
             dark={dark}
             mode={mode}
             onToggleMode={toggleMode}
-            onOpenHistory={() => setDrawerOpen(true)}
+            onOpenHistory={() => setDrawerOpen(o => !o)}
             onOpenChats={() => setChatsDrawerOpen(true)}
             onOpenAttach={openFilePicker}
             pendingAttachments={pendingAttachments}
@@ -1132,21 +1205,6 @@
             loading={loading}
             zoneRef={zoneRef}
           />
-          {drawerOpen && (
-            <HistoryDrawer
-              dark={dark}
-              side={historySide}
-              conversations={conversations}
-              currentConvId={currentConvId}
-              onClose={() => setDrawerOpen(false)}
-              onSelect={selectConversation}
-              onNewChat={() => { newChat(); setDrawerOpen(false); }}
-              onPin={pinConversation}
-              onArchive={archiveConversation}
-              onRename={renameConversation}
-              onDelete={removeConversation}
-            />
-          )}
           {chatsDrawerOpen && (
             <ChatDrawer dark={dark} side={historySide} onClose={() => setChatsDrawerOpen(false)} />
           )}

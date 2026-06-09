@@ -354,9 +354,18 @@
     ];
 
     // ─── AI Chat Tab ─────────────────────────────────────────────────
-    function AIChatTab({ user, messages, loading, mode, onStartWorkRequest }) {
+    function AIChatTab({ user, messages, loading, mode, dark, onChip }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
       const scrollRef = useRef(null);
+      const CHIPS = [
+        { label: 'Enter KPIs',           icon: 'ti-chart-bar',      iconL: '#AD832F', iconD: '#C9A45A' },
+        { label: 'Listing Presentation', icon: 'ti-presentation',   iconL: '#AD832F', iconD: '#C9A45A' },
+        { label: 'Add Showing',          icon: 'ti-home',           iconL: '#001A4A', iconD: 'rgba(255,255,255,0.6)' },
+        { label: 'Commission Log',       icon: 'ti-currency-dollar', iconL: '#0F6E56', iconD: '#5DCAA5' },
+        { label: 'Team Scorecard',       icon: 'ti-users',          iconL: '#AD832F', iconD: '#C9A45A' },
+        { label: 'EOD Report',           icon: 'ti-file-text',      iconL: '#AD832F', iconD: '#C9A45A' },
+        { label: 'Weekly Summary',       icon: 'ti-calendar-stats', iconL: '#001A4A', iconD: 'rgba(255,255,255,0.6)' },
+      ];
 
       useEffect(() => {
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -376,26 +385,19 @@
                 <div style={{ fontSize: '0.8rem', color: C.textSecondary, marginTop: 8, letterSpacing: '0.04em' }}>
                   {mode === 'work' ? 'What would you like to do?' : 'How can I help you today?'}
                 </div>
-                {mode === 'work' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 22, width: '100%', maxWidth: 320 }}>
-                    {WORK_REQUESTS.map(req => (
-                      <button key={req.key} onClick={() => onStartWorkRequest(req.key)} style={{
-                        display: 'flex', alignItems: 'center', gap: 10, width: '100%',
-                        padding: '13px 16px', borderRadius: 14, cursor: 'pointer',
-                        background: C.surface, border: `1px solid ${C.border}`,
-                        boxShadow: '0 2px 8px rgba(0,26,74,0.06)',
-                        fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 500, color: C.navy,
-                        textAlign: 'left',
-                      }}>
-                        <span style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, background: '#F3EBDA', display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.gold }}>
-                          <i className="ti ti-briefcase" style={{ fontSize: 16 }} />
-                        </span>
-                        {req.label}
-                        <i className="ti ti-chevron-right" style={{ marginLeft: 'auto', fontSize: 16, color: C.textMuted }} />
-                      </button>
-                    ))}
-                  </div>
-                )}
+                {/* Action chip row — horizontally scrolling */}
+                <div style={{ width: '100%', maxWidth: 340, marginTop: 16, overflowX: 'auto', display: 'flex', gap: 7, paddingBottom: 2 }}>
+                  {CHIPS.map((chip, i) => (
+                    <button key={i} onClick={() => onChip(chip.label)} style={{
+                      display: 'flex', alignItems: 'center', gap: 6, borderRadius: 20, padding: '7px 13px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+                      background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
+                    }}>
+                      <i className={`ti ${chip.icon}`} style={{ fontSize: 13, color: dark ? chip.iconD : chip.iconL }} />
+                      <span style={{ fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 500, letterSpacing: '0.08em', color: dark ? 'rgba(255,255,255,0.7)' : '#001A4A' }}>{chip.label}</span>
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontFamily: "'Jost', sans-serif", fontSize: 8, letterSpacing: '0.12em', textTransform: 'uppercase', marginTop: 8, color: dark ? 'rgba(255,255,255,0.2)' : '#B4B2A9' }}>swipe for more</div>
               </div>
             ) : (
               messages.map((m, i) => {
@@ -1943,7 +1945,7 @@
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>
                 {/* Chat stays full width behind; history overlaps it at 50% */}
-                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />
+                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} onChip={(t) => runSend(t)} />
                 {drawerOpen && (
                   <div style={{
                     position: 'absolute', top: 0, bottom: 0, [historySide === 'right' ? 'right' : 'left']: 0,

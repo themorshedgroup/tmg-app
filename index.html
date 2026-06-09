@@ -1435,54 +1435,93 @@
     }
 
     // ─── Calendar Popover ────────────────────────────────────────────
-    function CalendarPopover({ onClose }) {
+    function CalendarPopover({ dark, onClose }) {
+      const J = "'Jost', sans-serif";
       const today = new Date();
-      const [view, setView] = useState({ y: today.getFullYear(), m: today.getMonth() });
-      const first = new Date(view.y, view.m, 1);
-      const startDay = first.getDay();
-      const daysInMonth = new Date(view.y, view.m + 1, 0).getDate();
-      const monthLabel = first.toLocaleString('en-US', { month: 'long', year: 'numeric' });
-      const isToday = (d) => d === today.getDate() && view.m === today.getMonth() && view.y === today.getFullYear();
-      const prev = () => setView(v => { const m = v.m - 1; return m < 0 ? { y: v.y - 1, m: 11 } : { y: v.y, m }; });
-      const next = () => setView(v => { const m = v.m + 1; return m > 11 ? { y: v.y + 1, m: 0 } : { y: v.y, m }; });
-      const cells = [];
-      for (let i = 0; i < startDay; i++) cells.push(null);
-      for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+      const iso = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const mondayOf = (d) => { const x = new Date(d); const off = (x.getDay() + 6) % 7; x.setDate(x.getDate() - off); x.setHours(0, 0, 0, 0); return x; };
+      const [weekStart, setWeekStart] = useState(() => mondayOf(today));
+      const [selected, setSelected] = useState(() => iso(today));
+      const [vis, setVis] = useState(false);
+      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
 
-      const navBtn = (onClick, icon) => (
-        <button onClick={onClick} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textSecondary, fontSize: 18, padding: 4, display: 'flex', alignItems: 'center' }}><i className={icon} /></button>
-      );
+      const days = [];
+      for (let i = 0; i < 7; i++) { const d = new Date(weekStart); d.setDate(weekStart.getDate() + i); days.push(d); }
+      const dayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+      const monthLabel = days[3].toLocaleString('en-US', { month: 'long', year: 'numeric' });
+      const navWeek = (dir) => setWeekStart(prev => { const x = new Date(prev); x.setDate(prev.getDate() + dir * 7); return x; });
+
+      const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+      const EVENTS = {};
+      EVENTS[iso(today)] = [
+        { c: dark ? '#C9A45A' : '#001A4A', t: 'Team Standup', time: '9:30 – 10:00 AM' },
+        { c: '#AD832F', t: 'Forest Hill Offer Review', time: '10:30 – 11:30 AM' },
+        { c: dark ? '#5DCAA5' : '#0F6E56', t: 'Lunch — EO Member', time: '12:00 – 12:45 PM' },
+        { c: '#AD832F', t: 'Jinx Ave Showing', time: '2:00 – 3:00 PM' },
+      ];
+      EVENTS[iso(tomorrow)] = [{ c: '#AD832F', t: 'Listing Presentation Prep', time: '11:00 – 11:30 AM' }];
+      const events = EVENTS[selected] || [];
+
+      const chevCol = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
+      const dotCol = dark ? '#C9A45A' : '#AD832F';
+      const seg = (t, k) => <span key={k} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, color: '#fff', textTransform: 'uppercase' }}>{t}</span>;
+      const sepEl = (k) => <span key={k} style={{ fontFamily: J, fontSize: 9, color: 'rgba(255,255,255,0.4)' }}>·</span>;
 
       return (
         <React.Fragment>
-          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 200 }} />
-          <div style={{
-            position: 'fixed', top: 'calc(58px + env(safe-area-inset-top))', right: 12, zIndex: 201,
-            width: 300, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
-            boxShadow: '0 10px 36px rgba(0,26,74,0.22)', padding: 14,
+          {/* Overlay — dims content only, sits below the top bar / pill nav */}
+          <div onClick={onClose} style={{ position: 'fixed', top: 'calc(44px + env(safe-area-inset-top))', left: 0, right: 0, bottom: 0, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />
+          {/* Popout */}
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'fixed', top: 'calc(44px + env(safe-area-inset-top))', right: 10, width: 'calc(100% - 20px)', zIndex: 60,
+            borderRadius: 14, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+            background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
+            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease',
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              {navBtn(prev, 'ti ti-chevron-left')}
-              <div style={{ fontSize: '0.95rem', fontWeight: 600, color: C.navy, fontFamily: C.fontSans }}>{monthLabel}</div>
-              {navBtn(next, 'ti ti-chevron-right')}
+            {/* Banner */}
+            <div style={{ background: dark ? '#7F1D1D' : '#9B1C1C', padding: '6px 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+              {seg('Coming Soon', 's1')}{sepEl('p1')}{seg('Calendar', 's2')}{sepEl('p2')}{seg('Q3 2026', 's3')}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, marginBottom: 6 }}>
-              {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
-                <div key={i} style={{ textAlign: 'center', fontSize: '0.62rem', fontWeight: 600, color: C.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{d}</div>
-              ))}
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 14px 6px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <i className="ti ti-chevron-left" onClick={() => navWeek(-1)} style={{ fontSize: 13, cursor: 'pointer', color: chevCol }} />
+                <span style={{ fontFamily: J, fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', color: dark ? '#fff' : '#001A4A' }}>{monthLabel}</span>
+                <i className="ti ti-chevron-right" onClick={() => navWeek(1)} style={{ fontSize: 13, cursor: 'pointer', color: chevCol }} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <i className="ti ti-search" style={{ fontSize: 13, color: dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9' }} />
+                <i className="ti ti-plus" style={{ fontSize: 13, color: dark ? '#C9A45A' : '#AD832F' }} />
+              </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2 }}>
-              {cells.map((d, i) => (
-                <div key={i} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  {d && (
-                    <div style={{
-                      width: 30, height: 30, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '0.8rem', fontFamily: C.fontSans,
-                      background: isToday(d) ? C.navy : 'transparent',
-                      color: isToday(d) ? '#FFFFFF' : C.textPrimary,
-                      fontWeight: isToday(d) ? 600 : 400,
-                    }}>{d}</div>
-                  )}
+            {/* Week strip */}
+            <div style={{ borderTop: `1px solid ${dark ? '#152545' : '#F0EBE3'}`, padding: '6px 10px 8px', display: 'flex', gap: 2 }}>
+              {days.map((d, i) => {
+                const weekend = i >= 5;
+                const isSel = iso(d) === selected;
+                const hasEv = !!EVENTS[iso(d)];
+                const labelCol = isSel ? (dark ? '#C9A45A' : '#AD832F') : (weekend ? (dark ? 'rgba(255,255,255,0.15)' : '#D4D0CC') : (dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9'));
+                const numCol = isSel ? '#fff' : (weekend ? (dark ? 'rgba(255,255,255,0.2)' : '#D4D0CC') : (dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B'));
+                return (
+                  <div key={i} onClick={() => setSelected(iso(d))} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, cursor: 'pointer', padding: '4px 2px', borderRadius: 8, background: isSel ? (dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA') : 'transparent' }}>
+                    <span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.12em', fontWeight: 500, textTransform: 'uppercase', color: labelCol }}>{dayLabels[i]}</span>
+                    <div style={{ width: 27, height: 27, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: J, fontSize: 13, fontWeight: 500, background: isSel ? (dark ? '#AD832F' : '#001A4A') : 'transparent', color: numCol }}>{d.getDate()}</div>
+                    <div style={{ width: 4, height: 4, borderRadius: '50%', background: hasEv ? dotCol : 'transparent' }} />
+                  </div>
+                );
+              })}
+            </div>
+            {/* Event list */}
+            <div style={{ borderTop: `1px solid ${dark ? '#152545' : '#F0EBE3'}`, padding: '6px 12px 10px' }}>
+              {events.length === 0 ? (
+                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>No events</div>
+              ) : events.map((e, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 0', borderBottom: i === events.length - 1 ? 'none' : `1px solid ${dark ? '#152545' : '#F5F2EE'}` }}>
+                  <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, marginTop: 3, background: e.c }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: J, fontSize: 10, fontWeight: 500, color: dark ? '#fff' : '#001A4A' }}>{e.t}</div>
+                    <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.06em', marginTop: 1, color: dark ? 'rgba(255,255,255,0.35)' : '#B4B2A9' }}>{e.time}</div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1886,7 +1925,7 @@
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => setShowCalendar(s => !s)} calendarOpen={showCalendar} />
-          {showCalendar && <CalendarPopover onClose={() => setShowCalendar(false)} />}
+          {showCalendar && <CalendarPopover dark={dark} onClose={() => setShowCalendar(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>

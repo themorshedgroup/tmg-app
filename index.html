@@ -2517,6 +2517,9 @@
                 {/* Chat stays full width behind; history overlaps it at 50% */}
                 <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={effectivePills} onPill={dispatchPill} />
                 {drawerOpen && (
+                  <div onClick={() => setDrawerOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 29, background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)' }} />
+                )}
+                {drawerOpen && (
                   <div style={{
                     position: 'absolute', top: 0, bottom: 0, [historySide === 'right' ? 'right' : 'left']: 0,
                     width: '50%', zIndex: 30,

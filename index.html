@@ -385,19 +385,6 @@
                 <div style={{ fontSize: '0.8rem', color: C.textSecondary, marginTop: 8, letterSpacing: '0.04em' }}>
                   {mode === 'work' ? 'What would you like to do?' : 'How can I help you today?'}
                 </div>
-                {/* Action chip row — horizontally scrolling */}
-                <div style={{ width: '100%', maxWidth: 340, marginTop: 16, overflowX: 'auto', display: 'flex', gap: 7, paddingBottom: 2 }}>
-                  {CHIPS.map((chip, i) => (
-                    <button key={i} onClick={() => onChip(chip.label)} style={{
-                      display: 'flex', alignItems: 'center', gap: 6, borderRadius: 20, padding: '7px 13px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
-                      background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
-                    }}>
-                      <i className={`ti ${chip.icon}`} style={{ fontSize: 13, color: dark ? chip.iconD : chip.iconL }} />
-                      <span style={{ fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 500, letterSpacing: '0.08em', color: dark ? 'rgba(255,255,255,0.7)' : '#001A4A' }}>{chip.label}</span>
-                    </button>
-                  ))}
-                </div>
-                <div style={{ fontFamily: "'Jost', sans-serif", fontSize: 8, letterSpacing: '0.12em', textTransform: 'uppercase', marginTop: 8, color: dark ? 'rgba(255,255,255,0.2)' : '#B4B2A9' }}>swipe for more</div>
               </div>
             ) : (
               messages.map((m, i) => {
@@ -449,6 +436,20 @@
               </div>
             )}
           </div>
+          {/* Work-mode quick-action chips — pinned at the bottom, above the chat bar */}
+          {mode === 'work' && (
+            <div style={{ flexShrink: 0, display: 'flex', gap: 7, overflowX: 'auto', padding: '10px 16px', borderTop: `1px solid ${dark ? '#152545' : C.border}` }}>
+              {CHIPS.map((chip, i) => (
+                <button key={i} onClick={() => onChip(chip.label)} style={{
+                  display: 'flex', alignItems: 'center', gap: 6, borderRadius: 20, padding: '7px 13px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+                  background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
+                }}>
+                  <i className={`ti ${chip.icon}`} style={{ fontSize: 13, color: dark ? chip.iconD : chip.iconL }} />
+                  <span style={{ fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 500, letterSpacing: '0.08em', color: dark ? 'rgba(255,255,255,0.7)' : '#001A4A' }}>{chip.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       );
     }
@@ -1524,7 +1525,7 @@
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '12px 16px', paddingTop: 'calc(12px + env(safe-area-inset-top))',
-          background: 'rgba(0,26,74,0.88)', backdropFilter: 'blur(20px) saturate(180%)',
+          background: dark ? '#0A1730' : '#001A4A', backdropFilter: 'blur(20px) saturate(180%)',
           WebkitBackdropFilter: 'blur(20px) saturate(180%)',
           borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
         }}>

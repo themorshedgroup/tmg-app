@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#001A4A" />
+  <title>TMG App</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
+  <style>
+    :root {
+      --tmg-navy:      #001A4A;
+      --tmg-navy-deep: #000D26;
+      --tmg-navy-mid:  #0A1E44;
+      --tmg-gold:      #AD832F;
+      --tmg-gold-soft: #C9A45A;
+      --tmg-paper:     #FCFBF8;
+      --tmg-border:    #E4DFD4;
+      --tmg-slate:     #6B6B6B;
+    }
+    *, *::before, *::after {
+      box-sizing: border-box; margin: 0; padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif;
+      background: #FCFBF8;
+      overscroll-behavior: none;
+      color: #001A4A;
+      transition: background 0.2s ease, color 0.2s ease;
+    }
+    body.dark { background: #000D26; color: #FCFBF8; }
+    ::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="supabase.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <!-- ─── Dark mode init (before render to avoid flash) ─── -->
+  <script>if (localStorage.getItem('tmg-theme') === 'dark') document.body.classList.add('dark');</script>
+
+  <!-- ─── Auth Overlay ─── -->
+  <div id="auth-overlay" style="
+    position:fixed;inset:0;z-index:9999;background:#001A4A;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    font-family:-apple-system,BlinkMacSystemFont,'Jost','Helvetica Neue',Arial,sans-serif;">
+
+    <div id="auth-signin" style="display:flex;flex-direction:column;align-items:center;padding:0 48px;width:100%;">
+      <img src="Morshed Group Logo White.png" alt="Morshed Group" style="width:204px;margin-bottom:-24px;opacity:0.92;" />
+      <div style="font-size:2.2rem;font-weight:300;color:#C9A45A;margin-bottom:6px;letter-spacing:0.26em;text-transform:uppercase;">TMG App</div>
+      <div style="font-size:0.7rem;font-weight:400;color:#8899BB;margin-bottom:52px;letter-spacing:0.2em;text-transform:uppercase;">The Morshed Group</div>
+      <button onclick="SupabaseAuth.signInWithGoogle()" style="display:flex;align-items:center;gap:12px;background:#fff;border:none;border-radius:4px;padding:14px 24px;font-size:15px;font-weight:500;color:#3c4043;cursor:pointer;box-shadow:0 4px 20px rgba(0,0,0,0.4);font-family:'Jost','Helvetica Neue',Arial,sans-serif;letter-spacing:0.03em;">
+        <svg width="20" height="20" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+        Sign in with Google
+      </button>
+    </div>
+
+    <div id="auth-rejected" style="display:none;flex-direction:column;align-items:center;text-align:center;padding:0 32px;">
+      <div style="font-size:2.2rem;font-weight:300;color:#C9A45A;margin-bottom:4px;letter-spacing:0.26em;text-transform:uppercase;">TMG</div>
+      <div style="font-size:0.7rem;color:#8899BB;margin-bottom:48px;letter-spacing:0.2em;text-transform:uppercase;">The Morshed Group</div>
+      <div style="width:52px;height:52px;border-radius:50%;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;margin-bottom:20px;">
+        <svg width="26" height="26" fill="none" stroke="#E05252" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+      </div>
+      <div style="font-size:1.1rem;font-weight:500;color:#FCFBF8;margin-bottom:8px;letter-spacing:0.04em;">Access denied</div>
+      <div style="font-size:0.88rem;color:#8899BB;margin-bottom:32px;line-height:1.7;">Your account doesn't have access.<br/>Contact Symon to be added.</div>
+      <button onclick="SupabaseAuth.signOut()" style="background:none;border:1px solid rgba(255,255,255,0.2);border-radius:4px;padding:10px 24px;font-size:13px;color:#8899BB;cursor:pointer;font-family:'Jost',sans-serif;letter-spacing:0.08em;text-transform:uppercase;">Sign out</button>
+    </div>
+  </div>
+
+  <div id="root"></div>
+
+  <!-- ─── Dev localhost mock ─── -->
+  <script>
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+    window.SupabaseAuth = {
+      _state: { session: { user: { id: 'dev-user-id', email: 'symon@morshedgroup.com', user_metadata: { full_name: 'Symon', avatar_url: '' } }, access_token: 'dev-token' } },
+      signInWithGoogle: function() {},
+      signOut: function() { location.reload(); },
+      getSession: function() { return Promise.resolve(window.SupabaseAuth._state.session); },
+      onAuthStateChange: function(cb) { setTimeout(function() { cb({ session: window.SupabaseAuth._state.session }); }, 50); }
+    };
+  }
+  </script>
+
+  <!-- ─── React App ─── -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ─── Design tokens (TMG Brand) ───────────────────────────────────
+    const C = {
+      bg:           '#FCFBF8',
+      surface:      '#FFFFFF',
+      surfaceHover: '#F3EBDA',
+      border:       '#E4DFD4',
+      navy:         '#001A4A',
+      navyHover:    '#0A2552',
+      gold:         '#AD832F',
+      goldSoft:     '#C9A45A',
+      textPrimary:  '#001A4A',
+      textSecondary:'#6B6B6B',
+      textMuted:    '#9B9380',
+      red:          '#C0392B',
+      green:        '#1E6B40',
+      amber:        '#B07A00',
+      navBg:        '#001A4A',
+      fontSans:     "-apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif",
+      fontDisplay:  "'Cormorant Garamond', Georgia, serif",
+    };
+
+    // ─── AI backend ──────────────────────────────────────────────────
+    const AI_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/ai-chat';
+    const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
+
+    const SYSTEM_PROMPT =
+      "You are the TMG assistant, an AI helper for The Morshed Group, a real estate team. " +
+      "Be warm, concise, and conversational — talk like a helpful colleague, not a report. " +
+      "Help with general questions, drafting, and day-to-day tasks.";
+
+    function authToken() {
+      return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON;
+    }
+
+    // Sends the running conversation to the ai-chat Edge Function and returns the reply text.
+    async function callAI(messages) {
+      const res = await fetch(AI_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + authToken(),
+          'apikey': SUPABASE_ANON,
+        },
+        body: JSON.stringify({ messages, system: SYSTEM_PROMPT }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) {
+        throw new Error(data.error || ('Request failed (' + res.status + ')'));
+      }
+      return data.text || '';
+    }
+
+    function greeting() {
+      const h = new Date().getHours();
+      if (h < 12) return 'Good morning';
+      if (h < 18) return 'Good afternoon';
+      return 'Good evening';
+    }
+
+    // ─── AI Chat Tab ─────────────────────────────────────────────────
+    function AIChatTab({ user }) {
+      const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
+      const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
+      const [input, setInput] = useState('');
+      const [loading, setLoading] = useState(false);
+      const scrollRef = useRef(null);
+
+      useEffect(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }, [messages, loading]);
+
+      async function send() {
+        const text = input.trim();
+        if (!text || loading) return;
+        const next = [...messages, { role: 'user', content: text }];
+        setMessages(next);
+        setInput('');
+        setLoading(true);
+        try {
+          const apiMsgs = next.map(m => ({ role: m.role, content: m.content }));
+          const reply = await callAI(apiMsgs);
+          setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+        } catch (e) {
+          setMessages(prev => [...prev, { role: 'assistant', content: String(e.message || e), error: true }]);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      function onKeyDown(e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+      }
+
+      const empty = messages.length === 0;
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {/* Messages */}
+          <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '20px 16px' }}>
+            {empty ? (
+              <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 20px' }}>
+                <div style={{ fontSize: '2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>
+                  {greeting()}, {firstName}
+                </div>
+                <div style={{ fontSize: '0.8rem', color: C.textSecondary, marginTop: 8, letterSpacing: '0.04em' }}>
+                  How can I help you today?
+                </div>
+              </div>
+            ) : (
+              messages.map((m, i) => {
+                const isUser = m.role === 'user';
+                return (
+                  <div key={i} style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start', marginBottom: 12 }}>
+                    <div style={{
+                      maxWidth: '82%', padding: '10px 14px', borderRadius: 16,
+                      fontSize: '0.9rem', lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                      background: isUser ? C.navy : (m.error ? '#FDECEA' : C.surface),
+                      color: isUser ? '#fff' : (m.error ? C.red : C.textPrimary),
+                      border: isUser ? 'none' : `1px solid ${m.error ? C.red + '55' : C.border}`,
+                      borderBottomRightRadius: isUser ? 4 : 16,
+                      borderBottomLeftRadius: isUser ? 16 : 4,
+                      boxShadow: isUser ? 'none' : '0 1px 2px rgba(0,26,74,0.05)',
+                    }}>
+                      {m.content}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+            {loading && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 12 }}>
+                <div style={{ padding: '10px 14px', borderRadius: 16, borderBottomLeftRadius: 4, background: C.surface, border: `1px solid ${C.border}`, color: C.textMuted, fontSize: '0.9rem', fontStyle: 'italic' }}>
+                  Thinking…
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Input bar */}
+          <div style={{ flexShrink: 0, padding: '10px 12px', borderTop: `1px solid ${C.border}`, background: C.bg, display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="Message TMG assistant…"
+              rows={1}
+              style={{
+                flex: 1, resize: 'none', maxHeight: 120,
+                padding: '11px 14px', borderRadius: 22, border: `1px solid ${C.border}`,
+                background: C.surface, color: C.textPrimary, fontSize: '0.9rem',
+                lineHeight: 1.4, outline: 'none', fontFamily: C.fontSans,
+              }}
+            />
+            <button
+              onClick={send}
+              disabled={!input.trim() || loading}
+              style={{
+                flexShrink: 0, width: 42, height: 42, borderRadius: '50%', border: 'none',
+                background: (!input.trim() || loading) ? C.border : C.navy,
+                color: '#fff', cursor: (!input.trim() || loading) ? 'default' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
+                transition: 'background 0.15s ease',
+              }}
+            >
+              <i className="ti ti-arrow-up" />
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Settings Tab (placeholder for now) ──────────────────────────
+    function SettingsTab({ user }) {
+      const fullName = user?.user_metadata?.full_name || 'User';
+      const email    = user?.email || '';
+      const initial  = fullName.charAt(0).toUpperCase();
+      return (
+        <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
+          <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Settings</div>
+          <div style={{
+            background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)',
+            borderRadius: 14, padding: 16, marginBottom: 14,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 18 }}>
+              <div style={{ width: 44, height: 44, borderRadius: '50%', background: C.navy, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.goldSoft, fontWeight: 300, fontSize: '1.2rem', fontFamily: C.fontSans, flexShrink: 0 }}>
+                {initial}
+              </div>
+              <div>
+                <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '0.95rem' }}>{fullName}</div>
+                <div style={{ color: C.textSecondary, fontSize: '0.8rem', marginTop: 2 }}>{email}</div>
+              </div>
+            </div>
+            <button onClick={() => window.SupabaseAuth.signOut()} style={{
+              width: '100%', padding: 12, background: 'none', border: `1px solid ${C.red}`,
+              borderRadius: 12, color: C.red, fontSize: '15px', cursor: 'pointer', fontWeight: 500, fontFamily: C.fontSans,
+            }}>Sign out</button>
+          </div>
+          <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '24px 0' }}>
+            More settings coming soon.
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Bottom Nav ──────────────────────────────────────────────────
+    const TABS = [
+      { id: 'chat',     label: 'AI Chat',  icon: 'ti-message-2' },
+      { id: 'settings', label: 'Settings', icon: 'ti-settings'  },
+    ];
+
+    function BottomNav({ active, onChange, dark }) {
+      return (
+        <nav style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 50,
+          background: dark ? '#000D26' : '#FCFBF8',
+          borderTop: dark ? 'none' : '1px solid #E4DFD4',
+          display: 'flex', justifyContent: 'center',
+          padding: `8px 16px calc(8px + env(safe-area-inset-bottom))`,
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center',
+            background: dark ? '#0A1E44' : '#001A4A',
+            borderRadius: 40, padding: 4, gap: 2,
+          }}>
+            {TABS.map(({ id, label, icon }) => {
+              const isActive = active === id;
+              return (
+                <button key={id} onClick={() => onChange(id)} style={{
+                  display: 'flex', flexDirection: 'column', alignItems: 'center',
+                  justifyContent: 'center', gap: 2,
+                  padding: '7px 24px', borderRadius: 30, border: 'none', cursor: 'pointer',
+                  background: isActive ? '#AD832F' : (dark ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.32)'),
+                  transition: 'background 0.2s ease',
+                }}>
+                  <i className={`ti ${icon}`} style={{ fontSize: 14, display: 'block', color: '#FFFFFF', lineHeight: 1 }} />
+                  <span style={{
+                    fontSize: 8, fontFamily: "'Jost', sans-serif",
+                    letterSpacing: '0.14em', fontWeight: 500,
+                    textTransform: 'uppercase', color: '#FFFFFF',
+                  }}>{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      );
+    }
+
+    // ─── Top Bar ─────────────────────────────────────────────────────
+    function TopBar({ dark, onToggleDark }) {
+      return (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '12px 16px', paddingTop: 'calc(12px + env(safe-area-inset-top))',
+          background: 'rgba(0,26,74,0.88)', backdropFilter: 'blur(20px) saturate(180%)',
+          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+          borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
+        }}>
+          <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
+          <button
+            onClick={onToggleDark}
+            title={dark ? 'Light mode' : 'Dark mode'}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 7px', color: 'rgba(255,255,255,0.65)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}
+          >
+            <i className={dark ? 'ti ti-sun' : 'ti ti-moon'} />
+          </button>
+        </div>
+      );
+    }
+
+    // ─── Root App ────────────────────────────────────────────────────
+    function App({ user }) {
+      const [activeTab, setActiveTab] = useState('chat');
+      const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
+
+      useEffect(() => {
+        document.body.classList.toggle('dark', dark);
+        localStorage.setItem('tmg-theme', dark ? 'dark' : 'light');
+      }, [dark]);
+
+      return (
+        <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
+          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} />
+          <div style={{ flex: 1, minHeight: 0, paddingBottom: 72 }}>
+            {activeTab === 'chat'     && <AIChatTab user={user} />}
+            {activeTab === 'settings' && <SettingsTab user={user} />}
+          </div>
+          <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />
+        </div>
+      );
+    }
+
+    // ─── Mount ───────────────────────────────────────────────────────
+    (function mount() {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+
+      function showSignin()   { document.getElementById('auth-signin').style.display = 'flex'; document.getElementById('auth-rejected').style.display = 'none'; document.getElementById('auth-overlay').style.display = 'flex'; }
+      function showRejected() { document.getElementById('auth-signin').style.display = 'none'; document.getElementById('auth-rejected').style.display = 'flex'; document.getElementById('auth-overlay').style.display = 'flex'; }
+      function hideOverlay()  { document.getElementById('auth-overlay').style.display = 'none'; }
+
+      if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+        root.render(<App user={window.SupabaseAuth._state.session?.user} />);
+        hideOverlay();
+        return;
+      }
+
+      window.SupabaseAuth.onAuthStateChange(function({ session }) {
+        if (!session) { showSignin(); return; }
+        root.render(<App user={session.user} />);
+        hideOverlay();
+      });
+    })();
+  </script>
+</body>
+</html>

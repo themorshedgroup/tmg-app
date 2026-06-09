@@ -139,7 +139,7 @@
           'Authorization': 'Bearer ' + authToken(),
           'apikey': SUPABASE_ANON,
         },
-        body: JSON.stringify({ messages, system: SYSTEM_PROMPT }),
+        body: JSON.stringify({ messages, system: SYSTEM_PROMPT, max_tokens: 4096 }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) {
@@ -236,17 +236,62 @@
           .from('ai_messages').select('*').eq('conversation_id', convId)
           .order('created_at', { ascending: true });
         if (error) { console.error('[ConvDB] loadMessages:', error.message); return []; }
-        return (data || []).map(r => ({ role: r.role, content: r.content }));
+        const rows = data || [];
+        const out = [];
+        for (const r of rows) {
+          const atts = Array.isArray(r.attachments) ? r.attachments : [];
+          for (const a of atts) { if (a.path) a.url = await this.signedUrl(a.path); }
+          out.push({ role: r.role, content: r.content || '', attachments: atts });
+        }
+        return out;
       },
 
-      async insertMessage(convId, role, content) {
+      async insertMessage(convId, role, content, attachments) {
         if (!this.client() || String(convId).startsWith('local-')) return;
+        // Strip transient fields (url/objectURL/textContent) before persisting.
+        const slim = (attachments || []).map(a => ({
+          kind: a.kind, name: a.name, mediaType: a.mediaType, path: a.path, size: a.size,
+          ...(a.kind === 'text' ? { textContent: a.textContent } : {}),
+        }));
         const { error } = await this.client().from('ai_messages').insert({
           conversation_id: convId, role, content,
+          attachments: slim.length ? slim : null,
         });
         if (error) console.error('[ConvDB] insertMessage:', error.message);
       },
+
+      async uploadAttachment(file, convId) {
+        if (!this.client()) return null;
+        const safe = (file.name || 'file').replace(/[^\w.\-]+/g, '_').slice(-80);
+        const path = `${this.userId()}/${convId || 'tmp'}/${crypto.randomUUID()}-${safe}`;
+        const { error } = await this.client().storage.from('chat-attachments').upload(path, file, {
+          contentType: file.type || 'application/octet-stream', upsert: false,
+        });
+        if (error) { console.error('[ConvDB] upload:', error.message); throw error; }
+        return path;
+      },
+
+      async signedUrl(path) {
+        if (!this.client() || !path) return null;
+        const { data, error } = await this.client().storage.from('chat-attachments').createSignedUrl(path, 7200);
+        if (error) { console.error('[ConvDB] signedUrl:', error.message); return null; }
+        return data?.signedUrl || null;
+      },
     };
+
+    // Maps a UI message to Claude API content (string, or blocks when it has attachments).
+    function toApiContent(msg) {
+      const atts = msg.attachments || [];
+      if (!atts.length) return msg.content || '';
+      const blocks = [];
+      for (const a of atts) {
+        if (a.kind === 'image' && a.url)      blocks.push({ type: 'image',    source: { type: 'url', url: a.url } });
+        else if (a.kind === 'pdf' && a.url)   blocks.push({ type: 'document', source: { type: 'url', url: a.url } });
+        else if (a.kind === 'text')           blocks.push({ type: 'text', text: 'Attached file "' + a.name + '":\n' + (a.textContent || '') });
+      }
+      if (msg.content) blocks.push({ type: 'text', text: msg.content });
+      return blocks.length ? blocks : (msg.content || '');
+    }
 
     const WORK_REQUESTS = [
       { key: 'kpis',                 label: 'Enter KPIs',                  short: 'KPIs' },
@@ -312,6 +357,27 @@
                       borderBottomLeftRadius: isUser ? 16 : 4,
                       boxShadow: isUser ? 'none' : '0 1px 2px rgba(0,26,74,0.05)',
                     }}>
+                      {(m.attachments || []).length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: m.content ? 8 : 0 }}>
+                          {m.attachments.map((a, ai) => (
+                            a.kind === 'image' && a.url ? (
+                              <a key={ai} href={a.url} target="_blank" rel="noopener noreferrer">
+                                <img src={a.url} alt={a.name} style={{ maxWidth: 200, maxHeight: 200, borderRadius: 10, display: 'block', objectFit: 'cover' }} />
+                              </a>
+                            ) : (
+                              <a key={ai} href={a.url || undefined} target="_blank" rel="noopener noreferrer" style={{
+                                display: 'flex', alignItems: 'center', gap: 7, padding: '8px 10px', borderRadius: 10, maxWidth: 220,
+                                background: isUser ? 'rgba(255,255,255,0.12)' : C.bg,
+                                border: `1px solid ${isUser ? 'rgba(255,255,255,0.18)' : C.border}`,
+                                textDecoration: 'none', color: isUser ? '#fff' : C.textPrimary,
+                              }}>
+                                <i className={`ti ${a.kind === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text'}`} style={{ fontSize: 18, color: isUser ? '#fff' : C.gold, flexShrink: 0 }} />
+                                <span style={{ fontSize: '0.75rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.name}</span>
+                              </a>
+                            )
+                          ))}
+                        </div>
+                      )}
                       {m.content}
                     </div>
                   </div>
@@ -492,12 +558,13 @@
     ];
 
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
-    function BottomZone({ active, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenChats, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenChats, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
       const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
       const modeLabel = mode === 'work' ? 'Work' : 'AI';
       const isAI = active === 'chat';
       const isChat = active === 'teamchat';
       const showBar = isAI || isChat;
+      const pending = pendingAttachments || [];
       const [chatDraft, setChatDraft] = useState(''); // Chat tab is a mockup for now
 
       function onKeyDown(e) {
@@ -512,6 +579,27 @@
           padding: '12px 14px calc(14px + env(safe-area-inset-bottom))',
           display: 'flex', flexDirection: 'column', gap: 10,
         }}>
+          {/* Attachment previews (AI tab only) */}
+          {isAI && pending.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {pending.map(a => (
+                <div key={a.id} style={{ position: 'relative' }}>
+                  {a.kind === 'image' ? (
+                    <img src={a.previewUrl} alt={a.name} style={{ width: 46, height: 46, borderRadius: 10, objectFit: 'cover', display: 'block', border: `1px solid ${dark ? '#152545' : '#E0D8CC'}` }} />
+                  ) : (
+                    <div style={{ height: 46, display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', borderRadius: 10, maxWidth: 160, background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E0D8CC'}` }}>
+                      <i className={`ti ${a.kind === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text'}`} style={{ fontSize: 18, color: C.gold, flexShrink: 0 }} />
+                      <span style={{ fontSize: '0.7rem', color: dark ? '#fff' : C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: C.fontSans }}>{a.name}</span>
+                    </div>
+                  )}
+                  <button onClick={() => onRemoveAttach(a.id)} style={{
+                    position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: '50%', border: '2px solid ' + (dark ? '#000D26' : '#FCFBF8'),
+                    cursor: 'pointer', background: C.navy, color: '#fff', fontSize: 9, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+                  }}><i className="ti ti-x" /></button>
+                </div>
+              ))}
+            </div>
+          )}
           {/* Input bar (AI tab = live; Chat tab = mockup) */}
           {showBar && (
             <div style={{
@@ -556,8 +644,8 @@
                   color: dark ? '#FFFFFF' : '#001A4A',
                 }}
               />
-              {/* Attach file / photo (placeholder — no upload wired yet) */}
-              <button onClick={() => {}} title="Attach file or photo" style={{
+              {/* Attach file / photo (AI tab only) */}
+              <button onClick={isChat ? () => {} : onOpenAttach} title="Attach file or photo" style={{
                 flexShrink: 0, width: 34, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer',
                 color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
@@ -826,6 +914,7 @@
       const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
       const [input, setInput] = useState(() => localStorage.getItem('tmg-draft-new') || '');
       const [loading, setLoading] = useState(false);
+      const [pendingAttachments, setPendingAttachments] = useState([]); // { id, file, kind, name, mediaType, size, previewUrl, textContent }
       const [mode, setMode] = useState(() => localStorage.getItem('tmg-mode') || 'ai');
 
       // Conversation persistence + history
@@ -837,8 +926,32 @@
       const [historySide, setHistorySide] = useState(() => localStorage.getItem('tmg-history-side') || 'left');
 
       const zoneRef = useRef(null);
+      const fileInputRef = useRef(null);
       const [zoneH, setZoneH] = useState(96);
       const onChat = activeTab === 'chat';
+
+      function openFilePicker() { if (fileInputRef.current) fileInputRef.current.click(); }
+      async function onSelectFiles(fileList) {
+        const files = Array.from(fileList || []);
+        const additions = [];
+        for (const file of files) {
+          if (file.size > 20 * 1024 * 1024) { alert('"' + file.name + '" is over 20 MB and was skipped.'); continue; }
+          const type = file.type || '';
+          let kind = null, textContent = null, previewUrl = null;
+          if (type.startsWith('image/')) { kind = 'image'; previewUrl = URL.createObjectURL(file); }
+          else if (type === 'application/pdf' || /\.pdf$/i.test(file.name)) { kind = 'pdf'; }
+          else if (type.startsWith('text/') || /\.(txt|csv|md|json|log)$/i.test(file.name)) { kind = 'text'; textContent = await file.text(); }
+          else { alert('The AI can\'t read "' + file.name + '" yet (unsupported type).'); continue; }
+          additions.push({ id: crypto.randomUUID(), file, kind, name: file.name, mediaType: type, size: file.size, previewUrl, textContent });
+        }
+        if (additions.length) setPendingAttachments(prev => [...prev, ...additions]);
+      }
+      function removeAttachment(id) {
+        setPendingAttachments(prev => prev.filter(a => {
+          if (a.id === id && a.previewUrl) { try { URL.revokeObjectURL(a.previewUrl); } catch (e) {} }
+          return a.id !== id;
+        }));
+      }
 
       const refreshConversations = () => ConvDB.loadConversations().then(setConversations);
       useEffect(() => { refreshConversations(); }, []);
@@ -863,17 +976,23 @@
       // Keep content padding in sync with the fixed bottom zone height.
       useEffect(() => {
         if (zoneRef.current) setZoneH(zoneRef.current.offsetHeight);
-      }, [activeTab, dark, onChat, input, loading]);
+      }, [activeTab, dark, onChat, input, loading, pendingAttachments]);
 
       // Core send: persists the user message, gets a reply, persists it, auto-titles a new conversation.
       async function runSend(text, opts = {}) {
-        if (!text || loading) return;
+        const pend = opts.attachments !== undefined ? opts.attachments : pendingAttachments;
+        if ((!text || !text.trim()) && (!pend || !pend.length)) return;
+        if (loading) return;
         const startType = opts.type || (mode === 'work' ? 'work' : 'ai');
         const startReq  = opts.workRequest !== undefined ? opts.workRequest : workRequest;
         const isFirst = !currentConvId;
 
-        const next = [...messages, { role: 'user', content: text }];
+        // Optimistic user message with local previews; clear the picker immediately.
+        const localAtts = (pend || []).map(a => ({ kind: a.kind, name: a.name, mediaType: a.mediaType, size: a.size, url: a.previewUrl, textContent: a.textContent }));
+        const userMsg = { role: 'user', content: text || '', attachments: localAtts };
+        const next = [...messages, userMsg];
         setMessages(next);
+        setPendingAttachments([]);
         setLoading(true);
 
         let convId = currentConvId;
@@ -884,13 +1003,25 @@
             setCurrentConvId(convId);
             refreshConversations();
           }
-          await ConvDB.insertMessage(convId, 'user', text);
-          const apiMsgs = next.map(m => ({ role: m.role, content: m.content }));
+          // Upload pending files, then resolve signed URLs (needed for Claude + display).
+          const uploaded = [];
+          for (const a of (pend || [])) {
+            let path = null;
+            if (a.file) { try { path = await ConvDB.uploadAttachment(a.file, convId); } catch (e) {} }
+            const url = path ? await ConvDB.signedUrl(path) : a.previewUrl;
+            uploaded.push({ kind: a.kind, name: a.name, mediaType: a.mediaType, size: a.size, path, url, textContent: a.textContent });
+          }
+          const history = next.map((m, idx) => (idx === next.length - 1 ? { ...m, attachments: uploaded } : m));
+          setMessages(history);
+
+          await ConvDB.insertMessage(convId, 'user', text || '', uploaded);
+          const apiMsgs = history.map(m => ({ role: m.role, content: toApiContent(m) }));
           const reply = await callAI(apiMsgs);
           setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
           await ConvDB.insertMessage(convId, 'assistant', reply);
           if (isFirst) {
-            const title = await generateTitle(text);
+            const seed = text || (uploaded[0] && uploaded[0].name) || 'Shared a file';
+            const title = await generateTitle(seed);
             await ConvDB.updateConversation(convId, { title });
           } else {
             await ConvDB.touchConversation(convId);
@@ -905,7 +1036,7 @@
 
       function send() {
         const text = input.trim();
-        if (!text || loading) return;
+        if ((!text && !pendingAttachments.length) || loading) return;
         try { localStorage.removeItem(draftKey(currentConvId)); } catch (e) {}
         setInput('');
         runSend(text);
@@ -976,6 +1107,14 @@
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,application/pdf,.txt,.csv,.md,.json,.log,text/*"
+            style={{ display: 'none' }}
+            onChange={e => { onSelectFiles(e.target.files); e.target.value = ''; }}
+          />
           <BottomZone
             active={activeTab}
             onChange={setActiveTab}
@@ -984,6 +1123,9 @@
             onToggleMode={toggleMode}
             onOpenHistory={() => setDrawerOpen(true)}
             onOpenChats={() => setChatsDrawerOpen(true)}
+            onOpenAttach={openFilePicker}
+            pendingAttachments={pendingAttachments}
+            onRemoveAttach={removeAttachment}
             input={input}
             setInput={updateInput}
             onSend={send}

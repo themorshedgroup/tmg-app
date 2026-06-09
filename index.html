@@ -463,6 +463,112 @@
       );
     }
 
+    // ─── Chat (Team Chat) Tab — preview mockup ───────────────────────
+    const TCHAT_PHOTOS = {
+      tarek:   'https://themorshedgroup.com/wp-content/uploads/2023/01/tarek-morshed-headshot.jpg',
+      cassie:  'https://themorshedgroup.com/wp-content/uploads/2025/08/Cassandra-Cassie-Clemons-headshot.jpg',
+      brett:   'https://themorshedgroup.com/wp-content/uploads/2025/09/Brett-Silverman-headshot.jpg',
+      alex:    'https://themorshedgroup.com/wp-content/uploads/2025/04/Alexandra-Machado-headshot.jpg',
+      luciana: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Luciana-Pilco-headshot.jpg',
+      kyle:    'https://themorshedgroup.com/wp-content/uploads/2026/02/Kyle-Baird-headshot.jpg',
+    };
+
+    function ChatTab({ dark }) {
+      const J = "'Jost', sans-serif";
+      const bg          = dark ? '#000D26' : '#FCFBF8';
+      const bannerBg    = dark ? '#7F1D1D' : '#9B1C1C';
+      const headTitle   = dark ? '#FFFFFF' : '#001A4A';
+      const composeBg   = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+      const composeCol  = dark ? '#C9A45A' : '#AD832F';
+      const searchBg    = dark ? '#0A1730' : '#F5F2EE';
+      const searchCol   = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
+      const pinnedBord  = dark ? '#0D1E3A' : '#F0EBE3';
+      const pinnedLabel = dark ? '#C9A45A' : '#AD832F';
+      const pinnedName  = dark ? 'rgba(255,255,255,0.6)' : '#001A4A';
+      const rowBord     = dark ? '#0D1E3A' : '#F5F2EE';
+      const threadName  = dark ? '#FFFFFF' : '#001A4A';
+      const previewCol  = dark ? 'rgba(255,255,255,0.35)' : '#888888';
+      const timeCol     = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+
+      const seg = (t, key) => <span key={key} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, color: '#fff', textTransform: 'uppercase' }}>{t}</span>;
+      const sep = (key) => <span key={key} style={{ fontFamily: J, fontSize: 9, color: 'rgba(255,255,255,0.45)' }}>·</span>;
+
+      const PinnedContact = ({ photo, name, online, unread }) => (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+          <div style={{ position: 'relative', width: 44, height: 44 }}>
+            <img src={photo} alt={name} style={{ width: 44, height: 44, borderRadius: '50%', objectFit: 'cover', display: 'block' }} />
+            {online && <div style={{ position: 'absolute', bottom: 0, right: 0, width: 10, height: 10, borderRadius: '50%', background: '#3DAF7E', border: `2px solid ${bg}` }} />}
+            {unread > 0 && <div style={{ position: 'absolute', top: -2, right: -2, minWidth: 16, height: 16, borderRadius: 8, background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px' }}>{unread}</div>}
+          </div>
+          <div style={{ fontFamily: J, fontSize: 8, fontWeight: 500, letterSpacing: '0.06em', color: pinnedName }}>{name}</div>
+        </div>
+      );
+
+      const Single = ({ photo }) => (
+        <img src={photo} style={{ width: 36, height: 36, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, display: 'block' }} />
+      );
+      const Group = ({ a, b }) => (
+        <div style={{ position: 'relative', width: 36, height: 36, flexShrink: 0 }}>
+          <img src={a} style={{ position: 'absolute', top: 0, left: 0, width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${bg}` }} />
+          <img src={b} style={{ position: 'absolute', bottom: 0, right: 0, width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${bg}` }} />
+        </div>
+      );
+
+      const threads = [
+        { id: 't1', avatar: <Group a={TCHAT_PHOTOS.tarek} b={TCHAT_PHOTOS.cassie} />, name: 'TMG Agents', preview: 'Cassie: New showing on Jinx Ave just booked...', time: '10:02a', unread: 1 },
+        { id: 't2', avatar: <Single photo={TCHAT_PHOTOS.brett} />, name: 'Brett', preview: 'Sent the commercial comp report over...', time: 'Yest', unread: 0 },
+        { id: 't3', avatar: <Group a={TCHAT_PHOTOS.alex} b={TCHAT_PHOTOS.luciana} />, name: 'Ops & Admin', preview: 'Luciana: Screening shortlist is ready...', time: 'Mon', unread: 0 },
+        { id: 't4', avatar: <Single photo={TCHAT_PHOTOS.kyle} />, name: 'Kyle', preview: 'Following up on the Forest Hill listing...', time: 'Sun', unread: 0 },
+      ];
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {/* Coming Soon banner */}
+          <div style={{ background: bannerBg, padding: '7px 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, flexShrink: 0 }}>
+            {seg('Coming Soon', 's1')}{sep('p1')}{seg('Team Chat', 's2')}{sep('p2')}{seg('Q3 2026', 's3')}
+          </div>
+          {/* Header row */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px 8px', flexShrink: 0 }}>
+            <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Chats</div>
+            <button style={{ width: 28, height: 28, borderRadius: '50%', border: 'none', cursor: 'pointer', background: composeBg, color: composeCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <i className="ti ti-edit" style={{ fontSize: 15 }} />
+            </button>
+          </div>
+          {/* Search */}
+          <div style={{ margin: '0 14px 10px', background: searchBg, borderRadius: 10, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
+            <i className="ti ti-search" style={{ fontSize: 14, color: searchCol }} />
+            <span style={{ fontFamily: J, fontSize: 10, color: searchCol }}>Search</span>
+          </div>
+          {/* Pinned */}
+          <div style={{ padding: '0 14px 10px', borderBottom: `1px solid ${pinnedBord}`, flexShrink: 0 }}>
+            <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.18em', fontWeight: 500, color: pinnedLabel, marginBottom: 8 }}>PINNED</div>
+            <div style={{ display: 'flex', gap: 14 }}>
+              <PinnedContact photo={TCHAT_PHOTOS.tarek} name="Tarek" online unread={3} />
+              <PinnedContact photo={TCHAT_PHOTOS.cassie} name="Cassie" />
+              <PinnedContact photo={TCHAT_PHOTOS.brett} name="Brett" />
+              <PinnedContact photo={TCHAT_PHOTOS.alex} name="Alex" />
+            </div>
+          </div>
+          {/* Thread list */}
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {threads.map((t, i) => (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', borderBottom: i === threads.length - 1 ? 'none' : `1px solid ${rowBord}` }}>
+                {t.avatar}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: threadName, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.name}</div>
+                  <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{t.preview}</div>
+                </div>
+                <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                  <div style={{ fontFamily: J, fontSize: 8, color: timeCol }}>{t.time}</div>
+                  {t.unread > 0 && <div style={{ minWidth: 16, height: 16, borderRadius: 8, background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px' }}>{t.unread}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
     // ─── Bottom Nav ──────────────────────────────────────────────────
     const TABS = [
       { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
@@ -1100,8 +1206,9 @@
               )
               : <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />
             )}
+            {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}
-            {!['chat', 'more'].includes(activeTab) && (
+            {!['chat', 'teamchat', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>

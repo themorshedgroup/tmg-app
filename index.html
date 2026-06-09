@@ -371,6 +371,54 @@
         if (error) console.error('[DB] updateProperty:', error.message);
       },
 
+      async loadTemplates() {
+        if (!this.client()) return SMS_TEMPLATE_DEFAULTS.map(t => t.body);
+        const { data, error } = await this.client()
+          .from('sms_templates').select('*').order('touch_number', { ascending: true });
+        if (error || !data || data.length === 0) return SMS_TEMPLATE_DEFAULTS.map(t => t.body);
+        return data.map(row => row.body);
+      },
+
+      async saveTemplates(bodies, user) {
+        if (!this.client()) return;
+        const now = new Date().toISOString();
+        const userName = user?.user_metadata?.full_name || user?.email || null;
+        const rows = SMS_TEMPLATE_DEFAULTS.map((t, i) => ({
+          id: t.touch,
+          touch_number: t.touch,
+          day_offset: t.day,
+          body: bodies[i] || t.body,
+          updated_at: now,
+          updated_by_name: userName,
+        }));
+        const { error } = await this.client()
+          .from('sms_templates').upsert(rows, { onConflict: 'id' });
+        if (error) throw error;
+      },
+
+      async loadSettings() {
+        if (!this.client()) return { twilioPhone: '', sendTime: '' };
+        const { data, error } = await this.client()
+          .from('app_settings').select('*').eq('id', 1).single();
+        if (error || !data) return { twilioPhone: '', sendTime: '' };
+        return {
+          twilioPhone: data.twilio_phone_number || '',
+          sendTime:    data.send_time_local     || '',
+        };
+      },
+
+      async saveSettings(fields, user) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('app_settings').upsert({
+          id: 1,
+          twilio_phone_number: fields.twilioPhone || null,
+          send_time_local:     fields.sendTime    || null,
+          updated_at:          new Date().toISOString(),
+          updated_by_name:     user?.user_metadata?.full_name || user?.email || null,
+        }, { onConflict: 'id' });
+        if (error) throw error;
+      },
+
       async insertProperty(formData, user) {
         if (!this.client()) {
           return {
@@ -1079,7 +1127,39 @@
       const fullName = user?.user_metadata?.full_name || 'User';
       const email    = user?.email || '';
       const initial  = fullName.charAt(0).toUpperCase();
-      const [templates, setTemplates] = useState(SMS_TEMPLATE_DEFAULTS.map(t => t.body));
+
+      const [templates,       setTemplates]       = useState(SMS_TEMPLATE_DEFAULTS.map(t => t.body));
+      const [twilioPhone,     setTwilioPhone]     = useState('');
+      const [sendTime,        setSendTime]         = useState('');
+      const [tmplSaving,      setTmplSaving]      = useState(false);
+      const [tmplSaved,       setTmplSaved]       = useState(false);
+      const [twilioSaving,    setTwilioSaving]    = useState(false);
+      const [twilioSaved,     setTwilioSaved]     = useState(false);
+
+      useEffect(() => {
+        DB.loadTemplates().then(bodies => setTemplates(bodies));
+        DB.loadSettings().then(s => { setTwilioPhone(s.twilioPhone); setSendTime(s.sendTime); });
+      }, []);
+
+      async function handleSaveTemplates() {
+        setTmplSaving(true); setTmplSaved(false);
+        try {
+          await DB.saveTemplates(templates, user);
+          setTmplSaved(true);
+          setTimeout(() => setTmplSaved(false), 3000);
+        } catch(e) { console.error('[Settings] saveTemplates:', e.message); }
+        finally { setTmplSaving(false); }
+      }
+
+      async function handleSaveTwilio() {
+        setTwilioSaving(true); setTwilioSaved(false);
+        try {
+          await DB.saveSettings({ twilioPhone, sendTime }, user);
+          setTwilioSaved(true);
+          setTimeout(() => setTwilioSaved(false), 3000);
+        } catch(e) { console.error('[Settings] saveSettings:', e.message); }
+        finally { setTwilioSaving(false); }
+      }
 
       return (
         <div style={{ padding: '20px 16px 100px', overflowY: 'auto', height: '100%' }}>
@@ -1121,14 +1201,16 @@
                     width: '100%', background: C.bg, border: `1px solid ${C.border}`,
                     borderRadius: 10, padding: '10px 12px', color: C.textPrimary,
                     fontSize: '0.83rem', lineHeight: 1.6, resize: 'none',
-                    fontFamily: C.fontSans,
-                    outline: 'none',
+                    fontFamily: C.fontSans, outline: 'none',
                   }}
                 />
               </div>
             ))}
             <div style={{ marginTop: 14 }}>
-              <ActionButton label="Save Templates" onClick={() => {}} />
+              <ActionButton
+                label={tmplSaving ? 'Saving…' : tmplSaved ? 'Saved ✓' : 'Save Templates'}
+                onClick={handleSaveTemplates}
+              />
             </div>
           </SectionCard>
 
@@ -1138,11 +1220,14 @@
               SMS send configuration. Set up your Twilio account to activate automated follow-ups.
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <SettingsField label="Twilio Phone Number" placeholder="+1 (512) 000-0000" />
-              <SettingsField label="Send Time (local)" placeholder="10:00 AM Central" />
+              <SettingsField label="Twilio Phone Number" placeholder="+1 (512) 000-0000" value={twilioPhone} onChange={e => setTwilioPhone(e.target.value)} />
+              <SettingsField label="Send Time (local)" placeholder="10:00 AM Central" value={sendTime} onChange={e => setSendTime(e.target.value)} />
             </div>
             <div style={{ marginTop: 14 }}>
-              <ActionButton label="Send Test SMS" onClick={() => {}} />
+              <ActionButton
+                label={twilioSaving ? 'Saving…' : twilioSaved ? 'Saved ✓' : 'Save Twilio Config'}
+                onClick={handleSaveTwilio}
+              />
             </div>
           </SectionCard>
 
@@ -1181,12 +1266,14 @@
       );
     }
 
-    function SettingsField({ label, placeholder }) {
+    function SettingsField({ label, placeholder, value, onChange }) {
       return (
         <div>
           <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.textSecondary, marginBottom: 5 }}>{label}</div>
           <input
             placeholder={placeholder}
+            value={value || ''}
+            onChange={onChange}
             style={{
               width: '100%', padding: '10px 12px', background: C.surfaceHover,
               border: `1px solid ${C.border}`, borderRadius: 10,

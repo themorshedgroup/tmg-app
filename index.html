@@ -623,14 +623,14 @@
           {/* Input bar (AI tab only) */}
           {isAI && (
             <div style={{
-              display: 'flex', alignItems: 'center', height: 40,
-              borderRadius: 24, overflow: 'hidden',
+              display: 'flex', alignItems: 'center', height: 76,
+              borderRadius: 28, overflow: 'hidden',
               background: dark ? '#0A1730' : '#FFFFFF',
               border: `1px solid ${dark ? '#152545' : '#E0D8CC'}`,
             }}>
               {/* Hamburger — AI history */}
               <button onClick={onOpenHistory} title="Chat history" style={{
-                flexShrink: 0, width: 36, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, width: 36, height: 76, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer', paddingLeft: 6,
                 color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
               }}>
@@ -638,7 +638,7 @@
               </button>
               {/* Mode tag */}
               <button onClick={onToggleMode} style={{
-                flexShrink: 0, height: 40, display: 'flex', alignItems: 'center', gap: 7,
+                flexShrink: 0, height: 76, display: 'flex', alignItems: 'center', gap: 7,
                 background: 'none', border: 'none', cursor: 'pointer',
                 padding: '0 10px 0 2px',
                 color: dark ? '#C9A45A' : '#AD832F',
@@ -648,7 +648,7 @@
                 {modeLabel}
               </button>
               {/* Divider */}
-              <div style={{ flexShrink: 0, width: 1, height: 18, background: dark ? '#1E3360' : '#E0D8CC' }} />
+              <div style={{ flexShrink: 0, width: 1, height: 30, background: dark ? '#1E3360' : '#E0D8CC' }} />
               {/* Input */}
               <input
                 value={input}
@@ -656,15 +656,15 @@
                 onKeyDown={onKeyDown}
                 placeholder="Message TMG assistant…"
                 style={{
-                  flex: 1, height: 40, minWidth: 0, border: 'none', outline: 'none',
+                  flex: 1, height: 76, minWidth: 0, border: 'none', outline: 'none',
                   background: 'transparent', padding: '0 10px',
-                  fontFamily: "'Jost', sans-serif", fontSize: 11,
+                  fontFamily: "'Jost', sans-serif", fontSize: 12,
                   color: dark ? '#FFFFFF' : '#001A4A',
                 }}
               />
               {/* Attach file / photo */}
               <button onClick={onOpenAttach} title="Attach file or photo" style={{
-                flexShrink: 0, width: 34, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, width: 34, height: 76, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer',
                 color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
               }}>
@@ -672,10 +672,10 @@
               </button>
               {/* Send */}
               <button onClick={onSend} disabled={loading} style={{
-                flexShrink: 0, width: 40, height: 40, borderRadius: '50%', border: 'none',
+                flexShrink: 0, width: 50, height: 50, marginRight: 8, borderRadius: '50%', border: 'none',
                 background: dark ? '#AD832F' : '#001A4A',
                 color: '#fff', cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 19,
               }}>
                 <i className="ti ti-arrow-up" />
               </button>
@@ -1190,21 +1190,21 @@
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => setShowCalendar(s => !s)} calendarOpen={showCalendar} />
           {showCalendar && <CalendarPopover onClose={() => setShowCalendar(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
-            {activeTab === 'chat' && (drawerOpen
-              ? (
-                <div style={{ height: '100%', display: 'flex', flexDirection: historySide === 'right' ? 'row-reverse' : 'row' }}>
+            {activeTab === 'chat' && (
+              <div style={{ position: 'relative', height: '100%' }}>
+                {/* Chat stays full width behind; history overlaps it at 50% */}
+                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />
+                {drawerOpen && (
                   <div style={{
-                    width: '33.333%', height: '100%', minWidth: 0,
+                    position: 'absolute', top: 0, bottom: 0, [historySide === 'right' ? 'right' : 'left']: 0,
+                    width: '50%', zIndex: 30,
+                    boxShadow: historySide === 'right' ? '-10px 0 28px rgba(0,0,0,0.18)' : '10px 0 28px rgba(0,0,0,0.18)',
                     [historySide === 'right' ? 'borderLeft' : 'borderRight']: `1px solid ${dark ? '#0D1E3A' : '#F0EBE3'}`,
                   }}>
                     <HistoryPanel dark={dark} conversations={conversations} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onRename={renameConversation} />
                   </div>
-                  <div style={{ flex: 1, height: '100%', minWidth: 0 }}>
-                    <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />
-                  </div>
-                </div>
-              )
-              : <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />
+                )}
+              </div>
             )}
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}

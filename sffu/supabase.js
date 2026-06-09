@@ -3,8 +3,8 @@
 // 1. Go to supabase.com → your project → Settings → API
 // 2. Copy "Project URL" and "anon / public" key below
 
-const SUPABASE_URL      = 'YOUR_SUPABASE_URL';
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+const SUPABASE_URL      = 'https://ipqoqhsnjubopybujetn.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
 
 (function () {
   'use strict';
@@ -20,11 +20,22 @@ const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
   const _listeners = [];
 
   async function signInWithGoogle() {
-    const { error } = await client.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo: _cleanUrl },
-    });
-    if (error) console.error('[SA] signIn error:', error.message);
+    try {
+      const { data, error } = await client.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: _cleanUrl },
+      });
+      if (error) {
+        console.error('[SA] signIn error:', error.message);
+        alert('Sign-in error: ' + error.message);
+        return;
+      }
+      // If Supabase returned a URL but the browser didn't navigate, do it manually.
+      if (data && data.url) window.location.href = data.url;
+    } catch (e) {
+      console.error('[SA] signIn exception:', e);
+      alert('Sign-in exception: ' + (e && e.message ? e.message : e));
+    }
   }
 
   async function signOut() {

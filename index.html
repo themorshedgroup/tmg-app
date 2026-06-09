@@ -199,12 +199,12 @@
       const pillStyle = (active) => ({
         flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
         padding: '11px 14px', borderRadius: 12, cursor: 'pointer',
-        border: `1px solid ${active ? C.gold : C.border}`,
-        background: active ? C.gold : C.surface,
+        border: `1px solid ${active ? C.navy : C.border}`,
+        background: active ? C.navy : C.surface,
         color: active ? '#FFFFFF' : C.textSecondary,
         fontSize: '0.82rem', fontWeight: active ? 600 : 500, fontFamily: C.fontSans,
         letterSpacing: '0.03em',
-        boxShadow: active ? '0 2px 8px rgba(173,131,47,0.28)' : 'none',
+        boxShadow: active ? '0 2px 8px rgba(0,26,74,0.18)' : 'none',
         transition: 'background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
       });
 
@@ -254,46 +254,50 @@
           </div>
 
           {/* Mode pills */}
-          <div style={{ flexShrink: 0, position: 'relative', padding: '8px 12px 0', display: 'flex', gap: 8 }}>
-            <button onClick={selectWorkMode} style={pillStyle(mode === 'work')}>
-              <i className="ti ti-briefcase" style={{ fontSize: 13, marginRight: 5 }} />
-              Work Mode{workOption ? ` · ${workOption}` : ''}
-              <i className="ti ti-chevron-up" style={{ fontSize: 12, marginLeft: 5, opacity: 0.85, transform: workMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }} />
-            </button>
+          <div style={{ flexShrink: 0, padding: '8px 12px 0', display: 'flex', gap: 8 }}>
+            {/* Work Mode (wrapper holds the drop-up so it matches the pill width) */}
+            <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
+              <button onClick={selectWorkMode} style={{ ...pillStyle(mode === 'work'), width: '100%' }}>
+                <i className="ti ti-briefcase" style={{ fontSize: 13, marginRight: 6 }} />
+                Work Mode{workOption ? ` · ${workOption}` : ''}
+                <i className="ti ti-chevron-up" style={{ fontSize: 12, marginLeft: 6, opacity: 0.85, transform: workMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }} />
+              </button>
+
+              {/* Drop-up menu — same width as the Work Mode pill, centered options */}
+              {workMenuOpen && (
+                <React.Fragment>
+                  <div onClick={() => setWorkMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+                  <div style={{
+                    position: 'absolute', bottom: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 41,
+                    background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12,
+                    boxShadow: '0 6px 24px rgba(0,26,74,0.18)', padding: 6,
+                  }}>
+                    {['A', 'B', 'C'].map(opt => {
+                      const sel = workOption === opt;
+                      return (
+                        <button key={opt} onClick={() => chooseWorkOption(opt)} style={{
+                          display: 'block', width: '100%', textAlign: 'center',
+                          padding: '10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                          marginBottom: opt !== 'C' ? 4 : 0,
+                          background: sel ? C.navy : 'transparent',
+                          color: sel ? '#FFFFFF' : C.textPrimary,
+                          fontSize: '0.85rem', fontWeight: sel ? 600 : 400, fontFamily: C.fontSans,
+                        }}>Option {opt}</button>
+                      );
+                    })}
+                  </div>
+                </React.Fragment>
+              )}
+            </div>
+
             <button onClick={selectAiMode} style={pillStyle(mode === 'ai')}>
-              <i className="ti ti-sparkles" style={{ fontSize: 13, marginRight: 5 }} />
+              <i className="ti ti-sparkles" style={{ fontSize: 13, marginRight: 6 }} />
               AI Mode
             </button>
-
-            {/* Drop-up menu for Work Mode */}
-            {workMenuOpen && (
-              <React.Fragment>
-                <div onClick={() => setWorkMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
-                <div style={{
-                  position: 'absolute', bottom: 'calc(100% + 6px)', left: 12, zIndex: 41,
-                  background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12,
-                  boxShadow: '0 6px 24px rgba(0,26,74,0.18)', padding: 6, minWidth: 168,
-                }}>
-                  {['A', 'B', 'C'].map(opt => {
-                    const sel = workOption === opt;
-                    return (
-                      <button key={opt} onClick={() => chooseWorkOption(opt)} style={{
-                        display: 'block', width: '100%', textAlign: 'left',
-                        padding: '9px 12px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                        marginBottom: opt !== 'C' ? 2 : 0,
-                        background: sel ? C.gold : 'transparent',
-                        color: sel ? '#FFFFFF' : C.textPrimary,
-                        fontSize: '0.85rem', fontWeight: sel ? 600 : 400, fontFamily: C.fontSans,
-                      }}>Option {opt}</button>
-                    );
-                  })}
-                </div>
-              </React.Fragment>
-            )}
           </div>
 
           {/* Input bar */}
-          <div style={{ flexShrink: 0, padding: '10px 12px', borderTop: `1px solid ${C.border}`, background: C.bg, display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+          <div style={{ flexShrink: 0, padding: '10px 12px', background: C.bg, display: 'flex', gap: 8, alignItems: 'flex-end' }}>
             <textarea
               value={input}
               onChange={e => setInput(e.target.value)}
@@ -370,13 +374,13 @@
 
     // ─── Bottom Nav ──────────────────────────────────────────────────
     const TABS = [
-      { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
-      { id: 'teamchat', label: 'Chat',  icon: 'ti-messages'        },
-      { id: 'calls',    label: 'Calls', icon: 'ti-phone'           },
-      { id: 'tasks',    label: 'Tasks', icon: 'ti-list-check'      },
-      { id: 'kpis',     label: 'KPIs',  icon: 'ti-trophy'          },
-      { id: 'deals',    label: 'Deals', icon: 'ti-currency-dollar' },
-      { id: 'more',     label: 'More',  icon: 'ti-dots'            },
+      { id: 'chat',     label: 'AI',    icon: 'ti-sparkles-filled'      },
+      { id: 'teamchat', label: 'Chat',  icon: 'ti-message-2-filled'     },
+      { id: 'calls',    label: 'Calls', icon: 'ti-phone-filled'         },
+      { id: 'tasks',    label: 'Tasks', icon: 'ti-clipboard-list-filled'},
+      { id: 'kpis',     label: 'KPIs',  icon: 'ti-trophy-filled'        },
+      { id: 'deals',    label: 'Deals', icon: 'ti-coin-filled'          },
+      { id: 'more',     label: 'More',  icon: 'ti-dots'                 },
     ];
 
     function BottomNav({ active, onChange, dark }) {
@@ -399,12 +403,12 @@
               return (
                 <button key={id} onClick={() => onChange(id)} style={{
                   display: 'flex', flexDirection: 'column', alignItems: 'center',
-                  justifyContent: 'center', gap: 2, flexShrink: 0,
-                  padding: '7px 11px', borderRadius: 30, border: 'none', cursor: 'pointer',
+                  justifyContent: 'center', gap: 4, flexShrink: 0,
+                  width: 54, padding: '9px 0', borderRadius: 26, border: 'none', cursor: 'pointer',
                   background: isActive ? '#AD832F' : (dark ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.32)'),
                   transition: 'background 0.2s ease',
                 }}>
-                  <i className={`ti ${icon}`} style={{ fontSize: 14, display: 'block', color: '#FFFFFF', lineHeight: 1 }} />
+                  <i className={`ti ${icon}`} style={{ fontSize: 19, display: 'block', color: '#FFFFFF', lineHeight: 1 }} />
                   <span style={{
                     fontSize: 8.5, fontFamily: "'Jost', sans-serif",
                     letterSpacing: '0.02em', fontWeight: 500,
@@ -419,12 +423,12 @@
     }
 
     // ─── Top Bar ─────────────────────────────────────────────────────
-    function TopBar({ dark, onToggleDark }) {
-      const iconBtn = (onClick, iconClass, title) => (
+    function TopBar({ dark, onToggleDark, onCalendar, calendarOpen }) {
+      const iconBtn = (onClick, iconClass, title, active) => (
         <button
           onClick={onClick}
           title={title}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 7px', color: 'rgba(255,255,255,0.65)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 7px', color: active ? C.goldSoft : 'rgba(255,255,255,0.65)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}
         >
           <i className={iconClass} />
         </button>
@@ -439,11 +443,68 @@
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-            {iconBtn(() => {}, 'ti ti-calendar', 'Calendar')}
-            <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
             {iconBtn(onToggleDark, dark ? 'ti ti-sun' : 'ti ti-moon', dark ? 'Light mode' : 'Dark mode')}
+            <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
+            {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar', calendarOpen)}
           </div>
         </div>
+      );
+    }
+
+    // ─── Calendar Popover ────────────────────────────────────────────
+    function CalendarPopover({ onClose }) {
+      const today = new Date();
+      const [view, setView] = useState({ y: today.getFullYear(), m: today.getMonth() });
+      const first = new Date(view.y, view.m, 1);
+      const startDay = first.getDay();
+      const daysInMonth = new Date(view.y, view.m + 1, 0).getDate();
+      const monthLabel = first.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+      const isToday = (d) => d === today.getDate() && view.m === today.getMonth() && view.y === today.getFullYear();
+      const prev = () => setView(v => { const m = v.m - 1; return m < 0 ? { y: v.y - 1, m: 11 } : { y: v.y, m }; });
+      const next = () => setView(v => { const m = v.m + 1; return m > 11 ? { y: v.y + 1, m: 0 } : { y: v.y, m }; });
+      const cells = [];
+      for (let i = 0; i < startDay; i++) cells.push(null);
+      for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+      const navBtn = (onClick, icon) => (
+        <button onClick={onClick} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textSecondary, fontSize: 18, padding: 4, display: 'flex', alignItems: 'center' }}><i className={icon} /></button>
+      );
+
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 200 }} />
+          <div style={{
+            position: 'fixed', top: 'calc(58px + env(safe-area-inset-top))', right: 12, zIndex: 201,
+            width: 300, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
+            boxShadow: '0 10px 36px rgba(0,26,74,0.22)', padding: 14,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              {navBtn(prev, 'ti ti-chevron-left')}
+              <div style={{ fontSize: '0.95rem', fontWeight: 600, color: C.navy, fontFamily: C.fontSans }}>{monthLabel}</div>
+              {navBtn(next, 'ti ti-chevron-right')}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, marginBottom: 6 }}>
+              {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
+                <div key={i} style={{ textAlign: 'center', fontSize: '0.62rem', fontWeight: 600, color: C.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{d}</div>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2 }}>
+              {cells.map((d, i) => (
+                <div key={i} style={{ aspectRatio: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {d && (
+                    <div style={{
+                      width: 30, height: 30, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: '0.8rem', fontFamily: C.fontSans,
+                      background: isToday(d) ? C.navy : 'transparent',
+                      color: isToday(d) ? '#FFFFFF' : C.textPrimary,
+                      fontWeight: isToday(d) ? 600 : 400,
+                    }}>{d}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </React.Fragment>
       );
     }
 
@@ -451,6 +512,7 @@
     function App({ user }) {
       const [activeTab, setActiveTab] = useState('chat');
       const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
+      const [showCalendar, setShowCalendar] = useState(false);
 
       useEffect(() => {
         document.body.classList.toggle('dark', dark);
@@ -459,7 +521,8 @@
 
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
-          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} />
+          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => setShowCalendar(s => !s)} calendarOpen={showCalendar} />
+          {showCalendar && <CalendarPopover onClose={() => setShowCalendar(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: 72 }}>
             {activeTab === 'chat' && <AIChatTab user={user} />}
             {activeTab === 'more' && <SettingsTab user={user} />}

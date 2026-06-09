@@ -279,6 +279,63 @@
       },
     };
 
+    // ─── Profiles / access ───────────────────────────────────────────
+    // access → allowed bottom-nav tab ids. null = all tabs. 'more' is always allowed.
+    const ROLE_TABS = {
+      admin:      null,
+      operations: null,
+      agent:      ['chat', 'teamchat', 'calls', 'tasks', 'kpis', 'deals', 'more'],
+      tc:         ['chat', 'teamchat', 'tasks', 'more'],
+    };
+
+    const ProfileDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+
+      // Returns the user's profile; auto-creates a pending one on first sign-in. Fail-open (null) on error.
+      async ensureProfile(user) {
+        if (!this.client()) return null;
+        try {
+          const { data, error } = await this.client().from('profiles').select('*').eq('id', user.id).maybeSingle();
+          if (error) { console.error('[ProfileDB] load:', error.message); return null; }
+          if (data) return data;
+          const full = (user.user_metadata?.full_name || '').trim();
+          const parts = full.split(' ');
+          const first = parts.shift() || null;
+          const last = parts.join(' ') || null;
+          const { data: ins, error: e2 } = await this.client().from('profiles').insert({
+            id: user.id, email: user.email, first_name: first, last_name: last,
+            avatar_url: user.user_metadata?.avatar_url || null,
+          }).select().single();
+          if (e2) { console.error('[ProfileDB] create:', e2.message); return null; }
+          return ins;
+        } catch (e) { console.error('[ProfileDB] ensure:', e); return null; }
+      },
+
+      async loadAll() {
+        if (!this.client()) return [];
+        const { data, error } = await this.client().from('profiles').select('*').order('created_at', { ascending: true });
+        if (error) { console.error('[ProfileDB] loadAll:', error.message); return []; }
+        return data || [];
+      },
+
+      async updateMine(fields) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('profiles').update({
+          first_name: fields.first_name || null, last_name: fields.last_name || null, phone: fields.phone || null,
+        }).eq('id', this.uid());
+        if (error) { console.error('[ProfileDB] updateMine:', error.message); throw error; }
+      },
+
+      async adminUpdate(id, fields) {
+        if (!this.client()) return;
+        const mapped = {};
+        ['employee_id', 'title', 'reports_to', 'access', 'status'].forEach(k => { if (fields[k] !== undefined) mapped[k] = fields[k] || null; });
+        const { error } = await this.client().from('profiles').update(mapped).eq('id', id);
+        if (error) { console.error('[ProfileDB] adminUpdate:', error.message); throw error; }
+      },
+    };
+
     // Maps a UI message to Claude API content (string, or blocks when it has attachments).
     function toApiContent(msg) {
       const atts = msg.attachments || [];
@@ -397,10 +454,113 @@
     }
 
     // ─── Settings Tab (placeholder for now) ──────────────────────────
-    function SettingsTab({ user, historySide, setHistorySide }) {
-      const fullName = user?.user_metadata?.full_name || 'User';
-      const email    = user?.email || '';
-      const initial  = fullName.charAt(0).toUpperCase();
+    const ACCESS_LABEL = { admin: 'Admin', operations: 'Operations', agent: 'Agent', tc: 'TC', pending: 'Pending' };
+    const CARD = { background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginBottom: 14 };
+
+    // Admin-only user-management console (under the More tab). Replaces editing in Supabase.
+    function AdminUsers() {
+      const [users, setUsers] = useState([]);
+      const [openId, setOpenId] = useState(null);
+      const refresh = () => ProfileDB.loadAll().then(setUsers);
+      useEffect(() => { refresh(); }, []);
+      const nameOf = (u) => (((u.first_name || '') + ' ' + (u.last_name || '')).trim()) || u.email || 'User';
+      const pending = users.filter(u => u.status === 'pending');
+      const others = users.filter(u => u.status !== 'pending');
+      const inp = { width: '100%', padding: '8px 10px', background: C.surfaceHover, border: `1px solid ${C.border}`, borderRadius: 8, color: C.textPrimary, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans };
+      const lbl = { fontSize: '0.6rem', color: C.textSecondary, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3, fontFamily: C.fontSans };
+
+      const Editor = ({ u }) => {
+        const [emp, setEmp] = useState(u.employee_id || '');
+        const [title, setTitle] = useState(u.title || '');
+        const [reports, setReports] = useState(u.reports_to || '');
+        const [access, setAccess] = useState(u.access || 'pending');
+        const [status, setStatus] = useState(u.status || 'pending');
+        const [saving, setSaving] = useState(false);
+        async function save() {
+          setSaving(true);
+          try { await ProfileDB.adminUpdate(u.id, { employee_id: emp, title, reports_to: reports || null, access, status }); await refresh(); setOpenId(null); }
+          catch (e) { alert('Could not save: ' + (e.message || e)); }
+          finally { setSaving(false); }
+        }
+        return (
+          <div style={{ padding: '10px 12px', background: C.bg, borderRadius: 10, marginTop: 6 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div><div style={lbl}>Employee ID</div><input value={emp} onChange={e => setEmp(e.target.value)} style={inp} /></div>
+              <div><div style={lbl}>Title</div><input value={title} onChange={e => setTitle(e.target.value)} style={inp} /></div>
+              <div><div style={lbl}>Access</div><select value={access} onChange={e => setAccess(e.target.value)} style={inp}>{['admin', 'operations', 'agent', 'tc', 'pending'].map(a => <option key={a} value={a}>{ACCESS_LABEL[a]}</option>)}</select></div>
+              <div><div style={lbl}>Status</div><select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{['active', 'pending', 'disabled'].map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Reports to</div><select value={reports} onChange={e => setReports(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => x.id !== u.id).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button onClick={save} disabled={saving} style={{ flex: 1, padding: '8px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save'}</button>
+              <button onClick={() => setOpenId(null)} style={{ flex: 1, padding: '8px', background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: '0.8rem', cursor: 'pointer', fontFamily: C.fontSans }}>Close</button>
+            </div>
+          </div>
+        );
+      };
+
+      const row = (u) => (
+        <div key={u.id} style={{ borderBottom: `1px solid ${C.border}`, padding: '8px 0' }}>
+          <div onClick={() => setOpenId(openId === u.id ? null : u.id)} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.86rem', fontWeight: 600, color: C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{nameOf(u)}</div>
+              <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{u.email}</div>
+            </div>
+            <span style={{ flexShrink: 0, fontSize: '0.58rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: u.status === 'active' ? C.green : (u.status === 'pending' ? C.amber : C.red) }}>{u.status}</span>
+            <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{ACCESS_LABEL[u.access] || u.access || '—'}</span>
+            <i className={`ti ti-chevron-${openId === u.id ? 'up' : 'down'}`} style={{ fontSize: 14, color: C.textMuted, flexShrink: 0 }} />
+          </div>
+          {openId === u.id && <Editor u={u} />}
+        </div>
+      );
+
+      return (
+        <div style={CARD}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <i className="ti ti-users" style={{ fontSize: 14 }} />Manage Users
+          </div>
+          <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 10, lineHeight: 1.5 }}>Approve new sign-ins and set each person's access, title, employee ID, and reporting line.</div>
+          {pending.length > 0 && <div style={{ fontSize: '0.58rem', fontWeight: 600, color: C.amber, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 2 }}>Pending approval</div>}
+          {pending.map(row)}
+          {others.length > 0 && <div style={{ fontSize: '0.58rem', fontWeight: 600, color: C.textMuted, letterSpacing: '0.1em', textTransform: 'uppercase', margin: '12px 0 2px' }}>Team</div>}
+          {others.map(row)}
+          {users.length === 0 && <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '16px 0' }}>No users yet.</div>}
+        </div>
+      );
+    }
+
+    function SettingsTab({ user, profile, historySide, setHistorySide }) {
+      const [me, setMe] = useState(profile || null);
+      const [allUsers, setAllUsers] = useState([]);
+      const [editing, setEditing] = useState(false);
+      const [first, setFirst] = useState((profile && profile.first_name) || '');
+      const [last, setLast] = useState((profile && profile.last_name) || '');
+      const [phone, setPhone] = useState((profile && profile.phone) || '');
+      const [saving, setSaving] = useState(false);
+
+      useEffect(() => { ProfileDB.loadAll().then(setAllUsers); }, []);
+
+      const isAdmin = !!(me && (me.access === 'admin' || me.access === 'operations'));
+      const fullName = ((((me && me.first_name) || '') + ' ' + ((me && me.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || 'User';
+      const email = (me && me.email) || (user && user.email) || '';
+      const initial = fullName.charAt(0).toUpperCase();
+      const avatar = (me && me.avatar_url) || (user && user.user_metadata && user.user_metadata.avatar_url) || '';
+      const managerName = (id) => { if (!id) return ''; const m = allUsers.find(u => u.id === id); return m ? ((((m.first_name || '') + ' ' + (m.last_name || '')).trim()) || m.email) : ''; };
+
+      async function saveMine() {
+        setSaving(true);
+        try { await ProfileDB.updateMine({ first_name: first, last_name: last, phone }); setMe(prev => ({ ...(prev || {}), first_name: first, last_name: last, phone })); setEditing(false); }
+        catch (e) { alert('Could not save: ' + (e.message || e)); }
+        finally { setSaving(false); }
+      }
+
+      const fieldRow = (label, value) => (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '7px 0', borderBottom: `1px solid ${C.border}`, gap: 12 }}>
+          <span style={{ fontSize: '0.72rem', color: C.textSecondary, fontFamily: C.fontSans, flexShrink: 0 }}>{label}</span>
+          <span style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans, fontWeight: 500, textAlign: 'right', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value || '—'}</span>
+        </div>
+      );
+      const inputStyle = { width: '100%', padding: '10px 12px', background: C.surfaceHover, border: `1px solid ${C.border}`, borderRadius: 10, color: C.textPrimary, fontSize: '0.87rem', outline: 'none', fontFamily: C.fontSans };
       const sideBtn = (val, label, icon) => {
         const on = historySide === val;
         return (
@@ -415,33 +575,51 @@
           </button>
         );
       };
+
       return (
         <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
           <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Settings</div>
-          <div style={{
-            background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)',
-            borderRadius: 14, padding: 16, marginBottom: 14,
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 18 }}>
-              <div style={{ width: 44, height: 44, borderRadius: '50%', background: C.navy, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.goldSoft, fontWeight: 300, fontSize: '1.2rem', fontFamily: C.fontSans, flexShrink: 0 }}>
-                {initial}
+
+          {/* My Profile */}
+          <div style={CARD}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14 }}>
+              {avatar
+                ? <img src={avatar} alt={fullName} style={{ width: 48, height: 48, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
+                : <div style={{ width: 48, height: 48, borderRadius: '50%', background: C.navy, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.goldSoft, fontWeight: 300, fontSize: '1.3rem', fontFamily: C.fontSans, flexShrink: 0 }}>{initial}</div>}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '1rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{fullName}</div>
+                <div style={{ color: C.textSecondary, fontSize: '0.8rem', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(me && me.title) || email}</div>
               </div>
-              <div>
-                <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '0.95rem' }}>{fullName}</div>
-                <div style={{ color: C.textSecondary, fontSize: '0.8rem', marginTop: 2 }}>{email}</div>
-              </div>
+              <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{ACCESS_LABEL[me && me.access] || '—'}</span>
             </div>
-            <button onClick={() => window.SupabaseAuth.signOut()} style={{
-              width: '100%', padding: 12, background: 'none', border: `1px solid ${C.red}`,
-              borderRadius: 12, color: C.red, fontSize: '15px', cursor: 'pointer', fontWeight: 500, fontFamily: C.fontSans,
-            }}>Sign out</button>
+            {!editing ? (
+              <React.Fragment>
+                {fieldRow('Employee ID', me && me.employee_id)}
+                {fieldRow('Title', me && me.title)}
+                {fieldRow('Reports to', managerName(me && me.reports_to))}
+                {fieldRow('Phone', me && me.phone)}
+                {fieldRow('Email', email)}
+                <button onClick={() => { setFirst((me && me.first_name) || ''); setLast((me && me.last_name) || ''); setPhone((me && me.phone) || ''); setEditing(true); }} style={{ width: '100%', padding: 11, marginTop: 12, background: 'none', border: `1px solid ${C.navy}`, borderRadius: 12, color: C.navy, fontSize: '0.9rem', cursor: 'pointer', fontWeight: 500, fontFamily: C.fontSans }}>Edit my info</button>
+              </React.Fragment>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input placeholder="First name" value={first} onChange={e => setFirst(e.target.value)} style={inputStyle} />
+                <input placeholder="Last name" value={last} onChange={e => setLast(e.target.value)} style={inputStyle} />
+                <input placeholder="Phone" value={phone} onChange={e => setPhone(e.target.value)} style={inputStyle} />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={saveMine} disabled={saving} style={{ flex: 1, padding: 11, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save'}</button>
+                  <button onClick={() => setEditing(false)} style={{ flex: 1, padding: 11, background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+                </div>
+                <div style={{ fontSize: '0.7rem', color: C.textMuted, lineHeight: 1.4 }}>Employee ID, title, reports-to, and access are set by an admin.</div>
+              </div>
+            )}
           </div>
 
+          {/* Admin — Manage Users */}
+          {isAdmin && <AdminUsers />}
+
           {/* Chat history position */}
-          <div style={{
-            background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)',
-            borderRadius: 14, padding: 16, marginBottom: 14,
-          }}>
+          <div style={CARD}>
             <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6, fontFamily: C.fontSans }}>Chat History</div>
             <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 12, lineHeight: 1.5 }}>Which side the chat history panel opens from.</div>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -449,6 +627,11 @@
               {sideBtn('right', 'Right', 'ti-layout-sidebar-right-expand')}
             </div>
           </div>
+
+          <button onClick={() => window.SupabaseAuth.signOut()} style={{
+            width: '100%', padding: 12, background: 'none', border: `1px solid ${C.red}`,
+            borderRadius: 12, color: C.red, fontSize: '15px', cursor: 'pointer', fontWeight: 500, fontFamily: C.fontSans,
+          }}>Sign out</button>
         </div>
       );
     }
@@ -1088,7 +1271,8 @@
     ];
 
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
-    function BottomZone({ active, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, tabs, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
+      const navTabs = tabs || TABS;
       const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
       const modeLabel = mode === 'work' ? 'Work' : 'AI';
       const isAI = active === 'chat';
@@ -1195,7 +1379,7 @@
             background: dark ? '#0A1730' : '#001A4A',
             borderRadius: 40, padding: 4, width: '100%',
           }}>
-            {TABS.map(({ id, label, icon }) => {
+            {navTabs.map(({ id, label, icon }) => {
               const isActive = active === id;
               const activeColor = dark ? '#FFFFFF' : '#001A4A';
               const inactiveColor = dark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.28)';
@@ -1503,10 +1687,17 @@
     }
 
     // ─── Root App ────────────────────────────────────────────────────
-    function App({ user }) {
+    function App({ user, profile }) {
       const [activeTab, setActiveTab] = useState('chat');
       const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
       const [showCalendar, setShowCalendar] = useState(false);
+
+      // Role-based tabs: filter the nav to what this access role may see.
+      const allowedIds = profile ? ROLE_TABS[profile.access] : undefined;
+      const visibleTabs = Array.isArray(allowedIds) ? TABS.filter(t => allowedIds.includes(t.id)) : TABS;
+      useEffect(() => {
+        if (!visibleTabs.some(t => t.id === activeTab)) setActiveTab((visibleTabs[0] || { id: 'more' }).id);
+      }, [profile]);
 
       // Chat state (lifted so the input lives in the shared bottom zone)
       const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
@@ -1716,7 +1907,7 @@
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'calls' && <CallsTab dark={dark} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
-            {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}
+            {activeTab === 'more' && <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} />}
             {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
@@ -1731,6 +1922,7 @@
           />
           <BottomZone
             active={activeTab}
+            tabs={visibleTabs}
             onChange={(t) => { setActiveTab(t); setDrawerOpen(false); }}
             dark={dark}
             mode={mode}
@@ -1758,14 +1950,17 @@
       function hideOverlay()  { document.getElementById('auth-overlay').style.display = 'none'; }
 
       if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
-        root.render(<App user={window.SupabaseAuth._state.session?.user} />);
+        root.render(<App user={window.SupabaseAuth._state.session?.user} profile={{ id: 'dev-user-id', email: 'symon@morshedgroup.com', first_name: 'Symon', last_name: 'Yongco', title: 'Operations Manager', employee_id: 'TMG-001', access: 'admin', status: 'active', avatar_url: '' }} />);
         hideOverlay();
         return;
       }
 
-      window.SupabaseAuth.onAuthStateChange(function({ session }) {
+      window.SupabaseAuth.onAuthStateChange(async function({ session }) {
         if (!session) { showSignin(); return; }
-        root.render(<App user={session.user} />);
+        const profile = await ProfileDB.ensureProfile(session.user);
+        // Gate: a profile that exists but isn't active is blocked. No profile (error/not-yet-set-up) → fail open.
+        if (profile && profile.status && profile.status !== 'active') { showRejected(); return; }
+        root.render(<App user={session.user} profile={profile} />);
         hideOverlay();
       });
     })();

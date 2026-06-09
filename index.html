@@ -357,10 +357,25 @@
       );
     }
 
+    // ─── Placeholder (not-yet-built tabs) ────────────────────────────
+    function Placeholder({ title }) {
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 24px' }}>
+          <div style={{ fontSize: '1.7rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>{title}</div>
+          <div style={{ fontSize: '0.78rem', color: C.textMuted, marginTop: 8, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Coming soon</div>
+        </div>
+      );
+    }
+
     // ─── Bottom Nav ──────────────────────────────────────────────────
     const TABS = [
-      { id: 'chat',     label: 'AI Chat',  icon: 'ti-message-2' },
-      { id: 'settings', label: 'Settings', icon: 'ti-settings'  },
+      { id: 'chat',     label: 'AI Chat',   icon: 'ti-sparkles'    },
+      { id: 'teamchat', label: 'Team Chat', icon: 'ti-messages'    },
+      { id: 'calls',    label: 'Calls',     icon: 'ti-phone'       },
+      { id: 'tasks',    label: 'Tasks',     icon: 'ti-list-check'  },
+      { id: 'kpis',     label: 'KPIs',      icon: 'ti-key'         },
+      { id: 'deals',    label: 'Deals',     icon: 'ti-moneybag'    },
+      { id: 'more',     label: 'More',      icon: 'ti-dots'        },
     ];
 
     function BottomNav({ active, onChange, dark }) {
@@ -370,20 +385,21 @@
           background: dark ? '#000D26' : '#FCFBF8',
           borderTop: dark ? 'none' : '1px solid #E4DFD4',
           display: 'flex', justifyContent: 'center',
-          padding: `8px 16px calc(8px + env(safe-area-inset-bottom))`,
+          padding: `8px 10px calc(8px + env(safe-area-inset-bottom))`,
         }}>
           <div style={{
             display: 'flex', alignItems: 'center',
             background: dark ? '#0A1E44' : '#001A4A',
             borderRadius: 40, padding: 4, gap: 2,
+            maxWidth: '100%', overflowX: 'auto',
           }}>
             {TABS.map(({ id, label, icon }) => {
               const isActive = active === id;
               return (
                 <button key={id} onClick={() => onChange(id)} style={{
                   display: 'flex', flexDirection: 'column', alignItems: 'center',
-                  justifyContent: 'center', gap: 2,
-                  padding: '7px 24px', borderRadius: 30, border: 'none', cursor: 'pointer',
+                  justifyContent: 'center', gap: 2, flexShrink: 0,
+                  padding: '7px 11px', borderRadius: 30, border: 'none', cursor: 'pointer',
                   background: isActive ? '#AD832F' : (dark ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.32)'),
                   transition: 'background 0.2s ease',
                 }}>
@@ -403,6 +419,15 @@
 
     // ─── Top Bar ─────────────────────────────────────────────────────
     function TopBar({ dark, onToggleDark }) {
+      const iconBtn = (onClick, iconClass, title) => (
+        <button
+          onClick={onClick}
+          title={title}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 7px', color: 'rgba(255,255,255,0.65)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}
+        >
+          <i className={iconClass} />
+        </button>
+      );
       return (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -412,13 +437,11 @@
           borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
-          <button
-            onClick={onToggleDark}
-            title={dark ? 'Light mode' : 'Dark mode'}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 7px', color: 'rgba(255,255,255,0.65)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}
-          >
-            <i className={dark ? 'ti ti-sun' : 'ti ti-moon'} />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+            {iconBtn(() => {}, 'ti ti-calendar', 'Calendar')}
+            <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
+            {iconBtn(onToggleDark, dark ? 'ti ti-sun' : 'ti ti-moon', dark ? 'Light mode' : 'Dark mode')}
+          </div>
         </div>
       );
     }
@@ -437,8 +460,11 @@
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} />
           <div style={{ flex: 1, minHeight: 0, paddingBottom: 72 }}>
-            {activeTab === 'chat'     && <AIChatTab user={user} />}
-            {activeTab === 'settings' && <SettingsTab user={user} />}
+            {activeTab === 'chat' && <AIChatTab user={user} />}
+            {activeTab === 'more' && <SettingsTab user={user} />}
+            {!['chat', 'more'].includes(activeTab) && (
+              <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
+            )}
           </div>
           <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />
         </div>

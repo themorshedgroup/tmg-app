@@ -515,8 +515,14 @@
           <img src={b} style={{ position: 'absolute', bottom: 0, right: 0, width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${bg}` }} />
         </div>
       );
+      const Emoji = ({ e }) => (
+        <div style={{ width: 36, height: 36, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', fontSize: 18 }}>{e}</div>
+      );
 
       const threads = [
+        { id: 'c1', avatar: <Emoji e="📣" />, name: 'Announcements', preview: 'Tarek: Q3 kickoff is set for July 8 — details inside', time: '9:15a', unread: 0 },
+        { id: 'c2', avatar: <Emoji e="🏅" />, name: 'Great Shares', preview: 'Cassie: Closed the Mueller condo! 🎉', time: 'Yest', unread: 0 },
+        { id: 'c3', avatar: <Emoji e="😂" />, name: 'Memes', preview: 'Brad: when the buyer ghosts after 3 showings 💀', time: 'Mon', unread: 0 },
         { id: 't1', avatar: <Group a={TCHAT_PHOTOS.tarek} b={TCHAT_PHOTOS.brad} />, name: 'TMG Agents', preview: 'Brad: New showing on Jinx Ave just booked...', time: '10:02a', unread: 1 },
         { id: 't2', avatar: <Single photo={TCHAT_PHOTOS.tarek} />, name: 'Tarek', preview: "Let's sync on the Forest Hill offer at 3...", time: '9:48a', unread: 0 },
         { id: 't3', avatar: <Single photo={TCHAT_PHOTOS.brad} />, name: 'Brad', preview: 'Westlake closing docs are signed and in...', time: '8:30a', unread: 2 },
@@ -570,6 +576,148 @@
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Calls Tab — preview mockup ──────────────────────────────────
+    function CallsTab({ dark }) {
+      const J = "'Jost', sans-serif";
+      const [day, setDay] = useState('today');
+      const [coachOpen, setCoachOpen] = useState(() => localStorage.getItem('tmg-coach-open') !== 'false');
+      useEffect(() => { localStorage.setItem('tmg-coach-open', coachOpen ? 'true' : 'false'); }, [coachOpen]);
+
+      const bannerBg   = dark ? '#7F1D1D' : '#9B1C1C';
+      const headTitle  = dark ? '#FFFFFF' : '#001A4A';
+      const addBg      = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+      const addCol     = dark ? '#C9A45A' : '#AD832F';
+      const navInBg    = dark ? '#0A1730' : '#F5F2EE';
+      const navInCol   = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
+      const navOnBg    = dark ? '#AD832F' : '#001A4A';
+      const rowBord    = dark ? '#0D1E3A' : '#F5F2EE';
+      const nameCol    = dark ? '#FFFFFF' : '#001A4A';
+      const callBtnBg  = dark ? '#AD832F' : '#001A4A';
+      const coachBg    = dark ? '#040C1C' : '#FCFBF8';
+      const coachBord  = dark ? '#0D1E3A' : '#F0EBE3';
+      const coachLabel = dark ? '#C9A45A' : '#AD832F';
+
+      const seg = (t, key) => <span key={key} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, color: '#fff', textTransform: 'uppercase' }}>{t}</span>;
+      const sep = (key) => <span key={key} style={{ fontFamily: J, fontSize: 9, color: 'rgba(255,255,255,0.45)' }}>·</span>;
+
+      const contacts = [
+        { id: 1,  name: 'Steve Johnson',   grade: 'B', due: '2026-06-02', phone: '214-257-7550' },
+        { id: 2,  name: 'Jonathan Hewitt', grade: 'A', due: '2026-06-09', phone: '512-215-0064' },
+        { id: 3,  name: 'Nick Spiller',    grade: 'A', due: '2026-06-09', phone: '512-496-5408' },
+        { id: 4,  name: 'Courtney Gill',   grade: 'A', due: '2026-06-08', phone: '281-793-5224' },
+        { id: 5,  name: 'Adriana Culling', grade: 'B', due: '2026-06-12', phone: '512-410-9775' },
+        { id: 6,  name: 'Daksha Patel',    grade: 'A', due: '2026-06-14', phone: '512-329-0586' },
+        { id: 7,  name: 'Chris Gober',     grade: 'C', due: '2026-06-15', phone: '214-930-1174' },
+        { id: 8,  name: 'Ariana Hall',     grade: 'C', due: '2026-06-01', phone: '310-989-2030' },
+        { id: 9,  name: 'Jeremy Bell',     grade: 'A', due: '2026-05-27', phone: '503-860-5477' },
+        { id: 10, name: 'Michael Beeler',  grade: 'C', due: '2026-05-26', phone: '508-315-7985' },
+      ];
+      const bucketOf = (due) => due < '2026-06-08' ? 'yesterday' : (due <= '2026-06-10' ? 'today' : 'tomorrow');
+      const statusOf = (due) => due < '2026-06-09' ? 'missed' : (due <= '2026-06-10' ? 'completed' : 'pending');
+      const initials = (n) => n.split(' ').map(p => p[0]).slice(0, 2).join('').toUpperCase();
+      const shown = contacts.filter(c => bucketOf(c.due) === day);
+
+      const avatarOf = (g) => ({
+        A: { bg: dark ? '#0A1E44' : '#EEF2F8', col: dark ? '#C9A45A' : '#001A4A' },
+        B: { bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', col: dark ? '#C9A45A' : '#AD832F' },
+        C: { bg: dark ? '#0A1730' : '#F5F2EE', col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B' },
+      }[g]);
+      const badgeOf = (g) => ({
+        A: { bg: dark ? '#C9A45A' : '#001A4A', col: dark ? '#001A4A' : '#C9A45A' },
+        B: { bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', col: dark ? '#C9A45A' : '#AD832F' },
+        C: { bg: dark ? '#0A1730' : '#F5F2EE', col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B' },
+      }[g]);
+      const statusInfo = (s) => ({
+        completed: { icon: 'ti-phone-check', col: dark ? '#5DCAA5' : '#0F6E56', num: dark ? 'rgba(255,255,255,0.4)' : '#888888' },
+        missed:    { icon: 'ti-phone-x',     col: dark ? '#F87171' : '#9B1C1C', num: dark ? '#F87171' : '#9B1C1C' },
+        pending:   { icon: 'ti-phone',       col: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9', num: dark ? 'rgba(255,255,255,0.4)' : '#888888' },
+      }[s]);
+
+      const botMsg = (t, key) => <div key={key} style={{ alignSelf: 'flex-start', marginRight: '8%', background: dark ? '#0A1E44' : '#F3EBDA', color: dark ? '#fff' : '#001A4A', borderRadius: '8px 8px 8px 2px', padding: '6px 8px', fontFamily: J, fontSize: 8, lineHeight: 1.45 }}>{t}</div>;
+      const userMsg = (t, key) => <div key={key} style={{ alignSelf: 'flex-end', marginLeft: '8%', background: dark ? '#AD832F' : '#001A4A', color: '#fff', borderRadius: '8px 8px 2px 8px', padding: '6px 8px', fontFamily: J, fontSize: 8, lineHeight: 1.45 }}>{t}</div>;
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {/* Coming Soon banner */}
+          <div style={{ background: bannerBg, padding: '7px 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, flexShrink: 0 }}>
+            {seg('Coming Soon', 's1')}{sep('p1')}{seg('Calls', 's2')}{sep('p2')}{seg('Q3 2026', 's3')}
+          </div>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '9px 14px 7px', flexShrink: 0 }}>
+            <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Call List</div>
+            <button style={{ width: 24, height: 24, borderRadius: '50%', border: 'none', cursor: 'pointer', background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <i className="ti ti-phone-plus" style={{ fontSize: 12 }} />
+            </button>
+          </div>
+          {/* Day nav */}
+          <div style={{ margin: '0 14px 10px', borderRadius: 10, overflow: 'hidden', display: 'flex', flexShrink: 0 }}>
+            {['yesterday', 'today', 'tomorrow'].map(d => {
+              const on = day === d;
+              return (
+                <button key={d} onClick={() => setDay(d)} style={{
+                  flex: 1, padding: '6px 4px', textAlign: 'center', border: 'none', cursor: 'pointer',
+                  fontFamily: J, fontSize: 8, letterSpacing: '0.14em', fontWeight: 500, textTransform: 'uppercase',
+                  background: on ? navOnBg : navInBg, color: on ? '#fff' : navInCol, borderRadius: on ? 8 : 0,
+                }}>{d}</button>
+              );
+            })}
+          </div>
+          {/* Call list */}
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {shown.map((c, i) => {
+              const av = avatarOf(c.grade), bd = badgeOf(c.grade), st = statusInfo(statusOf(c.due));
+              const last = i === shown.length - 1;
+              return (
+                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
+                  <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: av.bg, color: av.col, fontFamily: J, fontSize: 11, fontWeight: 600 }}>{initials(c.name)}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                      <i className={`ti ${st.icon}`} style={{ fontSize: 11, color: st.col }} />
+                      <span style={{ fontFamily: J, fontSize: 8, color: st.num }}>{c.phone}</span>
+                    </div>
+                  </div>
+                  <div style={{ width: 16, height: 16, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: bd.bg, color: bd.col, fontFamily: J, fontSize: 8, fontWeight: 700 }}>{c.grade}</div>
+                  <button style={{ width: 26, height: 26, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, background: callBtnBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <i className="ti ti-phone" style={{ fontSize: 12 }} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {/* AI Call Coach */}
+          <div style={{ flexShrink: 0, background: coachBg, borderTop: `1px solid ${coachBord}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <i className="ti ti-sparkles" style={{ fontSize: 11, color: coachLabel }} />
+                <span style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.16em', fontWeight: 500, color: coachLabel, textTransform: 'uppercase' }}>AI Call Coach</span>
+              </div>
+              <button onClick={() => setCoachOpen(o => !o)} style={{ width: 22, height: 22, borderRadius: '50%', border: 'none', cursor: 'pointer', background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <i className={`ti ti-chevron-${coachOpen ? 'down' : 'up'}`} style={{ fontSize: 13 }} />
+              </button>
+            </div>
+            {coachOpen && (
+              <React.Fragment>
+                <div style={{ padding: '7px 12px 5px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {botMsg('Jonathan Hewitt is your top priority today — A grade, due today. Spouse Lana may be involved in the decision. Lead with the market update.', 'b1')}
+                  {userMsg('Any notes on Steve Johnson?', 'u1')}
+                  {botMsg('B grade, overdue since 6/2. Keep it under 5 min.', 'b2')}
+                </div>
+                <div style={{ padding: '0 12px 8px', display: 'flex', gap: 6 }}>
+                  <div style={{ flex: 1, borderRadius: 18, height: 30, padding: '0 10px', display: 'flex', alignItems: 'center', background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E0D8CC'}` }}>
+                    <span style={{ fontFamily: J, fontSize: 8, color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>Ask about a contact...</span>
+                  </div>
+                  <button style={{ width: 26, height: 26, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, background: callBtnBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <i className="ti ti-arrow-up" style={{ fontSize: 12 }} />
+                  </button>
+                </div>
+              </React.Fragment>
+            )}
           </div>
         </div>
       );
@@ -1213,8 +1361,9 @@
               </div>
             )}
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
+            {activeTab === 'calls' && <CallsTab dark={dark} />}
             {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}
-            {!['chat', 'teamchat', 'more'].includes(activeTab) && (
+            {!['chat', 'teamchat', 'calls', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>

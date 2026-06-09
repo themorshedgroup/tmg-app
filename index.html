@@ -727,7 +727,7 @@
 
       // Chat state (lifted so the input lives in the shared bottom zone)
       const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
-      const [input, setInput] = useState('');
+      const [input, setInput] = useState(() => localStorage.getItem('tmg-draft-new') || '');
       const [loading, setLoading] = useState(false);
       const [mode, setMode] = useState(() => localStorage.getItem('tmg-mode') || 'ai');
 
@@ -745,6 +745,13 @@
       const refreshConversations = () => ConvDB.loadConversations().then(setConversations);
       useEffect(() => { refreshConversations(); }, []);
       useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
+
+      // Per-conversation draft autosave (device-local). Key 'new' before a conversation exists.
+      const draftKey = (id) => 'tmg-draft-' + (id || 'new');
+      function updateInput(val) {
+        setInput(val);
+        try { localStorage.setItem(draftKey(currentConvId), val); } catch (e) {}
+      }
 
       useEffect(() => {
         document.body.classList.toggle('dark', dark);
@@ -801,6 +808,7 @@
       function send() {
         const text = input.trim();
         if (!text || loading) return;
+        try { localStorage.removeItem(draftKey(currentConvId)); } catch (e) {}
         setInput('');
         runSend(text);
       }
@@ -809,7 +817,7 @@
         setMessages([]);
         setCurrentConvId(null);
         setWorkRequest(null);
-        setInput('');
+        setInput(localStorage.getItem('tmg-draft-new') || '');
       }
 
       function toggleMode() {
@@ -821,6 +829,7 @@
         const conv = conversations.find(c => c.id === id);
         setDrawerOpen(false);
         setCurrentConvId(id);
+        setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
         if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
         setActiveTab('chat');
@@ -852,6 +861,7 @@
       async function removeConversation(id) {
         if (!window.confirm('Delete this conversation permanently?')) return;
         await ConvDB.deleteConversation(id);
+        try { localStorage.removeItem(draftKey(id)); } catch (e) {}
         if (id === currentConvId) newChat();
         refreshConversations();
       }
@@ -876,7 +886,7 @@
             onToggleMode={toggleMode}
             onOpenHistory={() => setDrawerOpen(true)}
             input={input}
-            setInput={setInput}
+            setInput={updateInput}
             onSend={send}
             loading={loading}
             zoneRef={zoneRef}

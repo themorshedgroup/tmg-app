@@ -1052,10 +1052,27 @@
     }
 
     // ─── Settings Tab ─────────────────────────────────────────────────
+
+    // Renders a template body by replacing all placeholders with real values.
+    // showing  → { agent_name, property_address }
+    // property → { address, agent (listing agent name) }
+    // user     → Supabase user object
+    function renderTemplate(body, showing, property, user) {
+      const agentFirst   = (showing?.agent_name  || '').split(' ')[0] || '{{agent_first_name}}';
+      const streetAddr   = property?.address     || showing?.property_address || '{{address}}';
+      const senderFirst  = ((user?.user_metadata?.full_name || '')).split(' ')[0] || '{{my_name}}';
+      const listingAgent = property?.agent       || '{{listing_agent}}';
+      return body
+        .replace(/\{\{agent_first_name\}\}/g, agentFirst)
+        .replace(/\{\{address\}\}/g,          streetAddr)
+        .replace(/\{\{my_name\}\}/g,          senderFirst)
+        .replace(/\{\{listing_agent\}\}/g,    listingAgent);
+    }
+
     const SMS_TEMPLATE_DEFAULTS = [
-      { touch: 1, day: 1, body: "Hi {{agent_first_name}}! This is Tarek with The Morshed Group. Just following up on your showing at {{address}} — did your clients enjoy the property? Any feedback would be appreciated! 🏡" },
-      { touch: 2, day: 3, body: "Hi {{agent_first_name}}, just checking back in on {{address}} — did your clients have any thoughts they'd like to share? Happy to answer any questions too!" },
-      { touch: 3, day: 5, body: "Hi {{agent_first_name}}, last check-in on {{address}}. Feel free to reach out anytime if your clients have questions. Thanks for showing the property!" },
+      { touch: 1, day: 1, body: "Hi {{agent_first_name}}! This is {{my_name}} with The Morshed Group, reaching out on behalf of our listing agent {{listing_agent}}. Just following up on your showing at {{address}} — did your clients enjoy the property? Any feedback would be greatly appreciated! 🏡" },
+      { touch: 2, day: 3, body: "Hi {{agent_first_name}}, this is {{my_name}} again from The Morshed Group — just checking back in on {{address}}. Did your clients have any thoughts they'd like to share? {{listing_agent}} would love to hear from you!" },
+      { touch: 3, day: 5, body: "Hi {{agent_first_name}}, one last follow-up on {{address}}. Feel free to reach out anytime if your clients have questions for {{listing_agent}}. Thanks so much for showing the property!" },
     ];
 
     function SettingsTab({ user }) {
@@ -1084,8 +1101,12 @@
 
           {/* SMS Templates */}
           <SectionCard title="SMS Follow-up Templates" mb={14}>
-            <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 14, lineHeight: 1.5 }}>
-              Use <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{agent_first_name}}'}</span> and <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{address}}'}</span> as placeholders.
+            <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 14, lineHeight: 1.8 }}>
+              Available placeholders:{' '}
+              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{agent_first_name}}'}</span>{' · '}
+              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{address}}'}</span>{' · '}
+              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{my_name}}'}</span>{' · '}
+              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{listing_agent}}'}</span>
             </div>
             {SMS_TEMPLATE_DEFAULTS.map((t, i) => (
               <div key={t.touch} style={{ marginBottom: i < 2 ? 14 : 0 }}>

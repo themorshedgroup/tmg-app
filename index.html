@@ -397,6 +397,89 @@
       );
     }
 
+    // ─── Chat Tab (Team Chat — mockup, Coming Soon Q3) ───────────────
+    function ChatTab() {
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 24px' }}>
+          <div style={{ width: 60, height: 60, borderRadius: 18, background: '#F3EBDA', display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.gold, marginBottom: 18 }}>
+            <i className="ti ti-message" style={{ fontSize: 28 }} />
+          </div>
+          <div style={{ fontSize: '2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>Coming Soon</div>
+          <div style={{ fontSize: '0.72rem', color: C.textMuted, marginTop: 8, letterSpacing: '0.2em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Team Chat · Q3 2026</div>
+        </div>
+      );
+    }
+
+    // Mock data for the Chat drawer (real data comes in Q3)
+    const MOCK_DMS = [
+      { name: 'Tarek Morshed',  last: 'Sounds good — let’s sync at 3.' },
+      { name: 'Sarah Mitchell', last: 'Sent the disclosures over.' },
+      { name: 'David Okafor',   last: 'Thanks, appreciate it!' },
+    ];
+    const MOCK_GROUPS = [
+      { name: 'Listings Team', last: 'New listing on Forest Hill Dr.' },
+      { name: 'Operations',    last: 'Reminder: KPIs due Friday.' },
+      { name: 'All Agents',    last: 'Welcome to the team, Jess! 🎉' },
+    ];
+
+    // ─── Chat Drawer (mock DMs + group chats; same shell as HistoryDrawer) ──
+    function ChatDrawer({ dark, side, onClose }) {
+      const panelBg   = dark ? '#0A1730' : '#FFFFFF';
+      const textCol   = dark ? '#FFFFFF' : C.textPrimary;
+      const subCol    = dark ? 'rgba(255,255,255,0.5)' : C.textSecondary;
+      const borderCol = dark ? '#152545' : C.border;
+
+      const sectionLabel = (txt) => (
+        <div style={{ fontSize: '0.62rem', fontWeight: 600, color: subCol, letterSpacing: '0.1em', textTransform: 'uppercase', padding: '14px 14px 6px', fontFamily: C.fontSans }}>{txt}</div>
+      );
+
+      const row = (item, isGroup) => (
+        <div key={item.name} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 16px', cursor: 'default' }}>
+          {isGroup ? (
+            <div style={{ width: 38, height: 38, borderRadius: '50%', flexShrink: 0, background: dark ? 'rgba(255,255,255,0.08)' : '#F3EBDA', display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.gold }}>
+              <i className="ti ti-users" style={{ fontSize: 18 }} />
+            </div>
+          ) : (
+            <div style={{ width: 38, height: 38, borderRadius: '50%', flexShrink: 0, background: C.navy, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.goldSoft, fontWeight: 500, fontSize: '0.95rem', fontFamily: C.fontSans }}>
+              {item.name.charAt(0)}
+            </div>
+          )}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: '0.88rem', fontWeight: 500, color: textCol, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.name}</div>
+            <div style={{ fontSize: '0.74rem', color: subCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 1 }}>{item.last}</div>
+          </div>
+        </div>
+      );
+
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,13,38,0.45)' }} />
+          <div style={{
+            position: 'fixed', top: 0, bottom: 0, [side]: 0, zIndex: 301,
+            width: 'min(86vw, 320px)', background: panelBg,
+            borderRight: side === 'left' ? `1px solid ${borderCol}` : 'none',
+            borderLeft: side === 'right' ? `1px solid ${borderCol}` : 'none',
+            display: 'flex', flexDirection: 'column', boxShadow: '0 0 40px rgba(0,0,0,0.3)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'calc(14px + env(safe-area-inset-top)) 14px 12px', borderBottom: `1px solid ${borderCol}` }}>
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: textCol, fontFamily: C.fontSans }}>Messages</div>
+              <button onClick={() => {}} title="New message" style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 9, cursor: 'pointer',
+                background: dark ? C.gold : C.navy, color: '#fff', border: 'none', fontFamily: C.fontSans, fontSize: '0.8rem', fontWeight: 500,
+              }}><i className="ti ti-plus" style={{ fontSize: 15 }} />New</button>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '2px 0 20px' }}>
+              {sectionLabel('Direct Messages')}
+              {MOCK_DMS.map(d => row(d, false))}
+              {sectionLabel('Group Chats')}
+              {MOCK_GROUPS.map(g => row(g, true))}
+              <div style={{ textAlign: 'center', color: subCol, fontSize: '0.7rem', letterSpacing: '0.14em', textTransform: 'uppercase', padding: '22px 16px 6px' }}>Coming Soon · Q3</div>
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
     // ─── Bottom Nav ──────────────────────────────────────────────────
     const TABS = [
       { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
@@ -409,9 +492,13 @@
     ];
 
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
-    function BottomZone({ active, onChange, dark, showInput, mode, onToggleMode, onOpenHistory, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenChats, input, setInput, onSend, loading, zoneRef }) {
       const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
       const modeLabel = mode === 'work' ? 'Work' : 'AI';
+      const isAI = active === 'chat';
+      const isChat = active === 'teamchat';
+      const showBar = isAI || isChat;
+      const [chatDraft, setChatDraft] = useState(''); // Chat tab is a mockup for now
 
       function onKeyDown(e) {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); }
@@ -425,41 +512,43 @@
           padding: '12px 14px calc(14px + env(safe-area-inset-bottom))',
           display: 'flex', flexDirection: 'column', gap: 10,
         }}>
-          {/* Input bar (AI tab only) */}
-          {showInput && (
+          {/* Input bar (AI tab = live; Chat tab = mockup) */}
+          {showBar && (
             <div style={{
               display: 'flex', alignItems: 'center', height: 40,
               borderRadius: 24, overflow: 'hidden',
               background: dark ? '#0A1730' : '#FFFFFF',
               border: `1px solid ${dark ? '#152545' : '#E0D8CC'}`,
             }}>
-              {/* History (hamburger) */}
-              <button onClick={onOpenHistory} title="Chat history" style={{
+              {/* Hamburger — AI history or Chat (DMs/groups) */}
+              <button onClick={isChat ? onOpenChats : onOpenHistory} title={isChat ? 'Messages' : 'Chat history'} style={{
                 flexShrink: 0, width: 36, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer', paddingLeft: 6,
                 color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
               }}>
                 <i className="ti ti-menu-2" />
               </button>
-              {/* Mode tag */}
-              <button onClick={onToggleMode} style={{
-                flexShrink: 0, height: 40, display: 'flex', alignItems: 'center', gap: 7,
-                background: 'none', border: 'none', cursor: 'pointer',
-                padding: '0 10px 0 2px',
-                color: dark ? '#C9A45A' : '#AD832F',
-                fontFamily: "'Jost', sans-serif", fontSize: 14, fontWeight: 600, letterSpacing: '0.01em',
-              }}>
-                <i className={`ti ${modeIcon}`} style={{ fontSize: 16 }} />
-                {modeLabel}
-              </button>
+              {/* Mode tag (AI only) */}
+              {isAI && (
+                <button onClick={onToggleMode} style={{
+                  flexShrink: 0, height: 40, display: 'flex', alignItems: 'center', gap: 7,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  padding: '0 10px 0 2px',
+                  color: dark ? '#C9A45A' : '#AD832F',
+                  fontFamily: "'Jost', sans-serif", fontSize: 14, fontWeight: 600, letterSpacing: '0.01em',
+                }}>
+                  <i className={`ti ${modeIcon}`} style={{ fontSize: 16 }} />
+                  {modeLabel}
+                </button>
+              )}
               {/* Divider */}
-              <div style={{ flexShrink: 0, width: 1, height: 18, background: dark ? '#1E3360' : '#E0D8CC' }} />
+              <div style={{ flexShrink: 0, width: 1, height: 18, marginLeft: isChat ? 4 : 0, background: dark ? '#1E3360' : '#E0D8CC' }} />
               {/* Input */}
               <input
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={onKeyDown}
-                placeholder="Message TMG assistant…"
+                value={isChat ? chatDraft : input}
+                onChange={e => (isChat ? setChatDraft(e.target.value) : setInput(e.target.value))}
+                onKeyDown={isChat ? undefined : onKeyDown}
+                placeholder={isChat ? 'Message…' : 'Message TMG assistant…'}
                 style={{
                   flex: 1, height: 40, minWidth: 0, border: 'none', outline: 'none',
                   background: 'transparent', padding: '0 10px',
@@ -476,10 +565,10 @@
                 <i className="ti ti-paperclip" />
               </button>
               {/* Send */}
-              <button onClick={onSend} disabled={loading} style={{
+              <button onClick={isChat ? () => {} : onSend} disabled={isChat ? false : loading} style={{
                 flexShrink: 0, width: 40, height: 40, borderRadius: '50%', border: 'none',
                 background: dark ? '#AD832F' : '#001A4A',
-                color: '#fff', cursor: loading ? 'default' : 'pointer',
+                color: '#fff', cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17,
               }}>
                 <i className="ti ti-arrow-up" />
@@ -744,6 +833,7 @@
       const [currentConvId, setCurrentConvId] = useState(null);
       const [workRequest, setWorkRequest] = useState(null); // 'kpis' | 'listing_presentation' | null
       const [drawerOpen, setDrawerOpen] = useState(false);
+      const [chatsDrawerOpen, setChatsDrawerOpen] = useState(false);
       const [historySide, setHistorySide] = useState(() => localStorage.getItem('tmg-history-side') || 'left');
 
       const zoneRef = useRef(null);
@@ -880,8 +970,9 @@
           {showCalendar && <CalendarPopover onClose={() => setShowCalendar(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />}
+            {activeTab === 'teamchat' && <ChatTab />}
             {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}
-            {!['chat', 'more'].includes(activeTab) && (
+            {!['chat', 'teamchat', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>
@@ -889,10 +980,10 @@
             active={activeTab}
             onChange={setActiveTab}
             dark={dark}
-            showInput={onChat}
             mode={mode}
             onToggleMode={toggleMode}
             onOpenHistory={() => setDrawerOpen(true)}
+            onOpenChats={() => setChatsDrawerOpen(true)}
             input={input}
             setInput={updateInput}
             onSend={send}
@@ -913,6 +1004,9 @@
               onRename={renameConversation}
               onDelete={removeConversation}
             />
+          )}
+          {chatsDrawerOpen && (
+            <ChatDrawer dark={dark} side={historySide} onClose={() => setChatsDrawerOpen(false)} />
           )}
         </div>
       );

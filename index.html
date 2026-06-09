@@ -156,57 +156,13 @@
     }
 
     // ─── AI Chat Tab ─────────────────────────────────────────────────
-    function AIChatTab({ user }) {
+    function AIChatTab({ user, messages, loading }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
-      const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
-      const [input, setInput] = useState('');
-      const [loading, setLoading] = useState(false);
-      const [mode, setMode] = useState('ai');             // 'ai' | 'work'
-      const [workOption, setWorkOption] = useState(null); // 'A' | 'B' | 'C' | null
-      const [workMenuOpen, setWorkMenuOpen] = useState(false);
       const scrollRef = useRef(null);
 
       useEffect(() => {
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       }, [messages, loading]);
-
-      async function send() {
-        const text = input.trim();
-        if (!text || loading) return;
-        const next = [...messages, { role: 'user', content: text }];
-        setMessages(next);
-        setInput('');
-        setLoading(true);
-        try {
-          const apiMsgs = next.map(m => ({ role: m.role, content: m.content }));
-          const reply = await callAI(apiMsgs);
-          setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
-        } catch (e) {
-          setMessages(prev => [...prev, { role: 'assistant', content: String(e.message || e), error: true }]);
-        } finally {
-          setLoading(false);
-        }
-      }
-
-      function onKeyDown(e) {
-        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-      }
-
-      function selectAiMode()   { setMode('ai'); setWorkMenuOpen(false); }
-      function selectWorkMode()  { setMode('work'); setWorkMenuOpen(o => !o); }
-      function chooseWorkOption(opt) { setWorkOption(opt); setMode('work'); setWorkMenuOpen(false); }
-
-      const pillStyle = (active) => ({
-        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: '11px 14px', borderRadius: 12, cursor: 'pointer',
-        border: `1px solid ${active ? C.navy : C.border}`,
-        background: active ? C.navy : C.surface,
-        color: active ? '#FFFFFF' : C.textSecondary,
-        fontSize: '0.82rem', fontWeight: active ? 600 : 500, fontFamily: C.fontSans,
-        letterSpacing: '0.03em',
-        boxShadow: active ? '0 2px 8px rgba(0,26,74,0.18)' : 'none',
-        transition: 'background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease',
-      });
 
       const empty = messages.length === 0;
 
@@ -251,79 +207,6 @@
                 </div>
               </div>
             )}
-          </div>
-
-          {/* Mode pills */}
-          <div style={{ flexShrink: 0, padding: '8px 12px 0', display: 'flex', gap: 8 }}>
-            {/* Work Mode (wrapper holds the drop-up so it matches the pill width) */}
-            <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
-              <button onClick={selectWorkMode} style={{ ...pillStyle(mode === 'work'), width: '100%' }}>
-                <i className="ti ti-briefcase" style={{ fontSize: 13, marginRight: 6 }} />
-                Work Mode{workOption ? ` · ${workOption}` : ''}
-                <i className="ti ti-chevron-up" style={{ fontSize: 12, marginLeft: 6, opacity: 0.85, transform: workMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }} />
-              </button>
-
-              {/* Drop-up menu — same width as the Work Mode pill, centered options */}
-              {workMenuOpen && (
-                <React.Fragment>
-                  <div onClick={() => setWorkMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
-                  <div style={{
-                    position: 'absolute', bottom: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 41,
-                    background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12,
-                    boxShadow: '0 6px 24px rgba(0,26,74,0.18)', padding: 6,
-                  }}>
-                    {['A', 'B', 'C'].map(opt => {
-                      const sel = workOption === opt;
-                      return (
-                        <button key={opt} onClick={() => chooseWorkOption(opt)} style={{
-                          display: 'block', width: '100%', textAlign: 'center',
-                          padding: '10px', borderRadius: 8, border: 'none', cursor: 'pointer',
-                          marginBottom: opt !== 'C' ? 4 : 0,
-                          background: sel ? C.navy : 'transparent',
-                          color: sel ? '#FFFFFF' : C.textPrimary,
-                          fontSize: '0.85rem', fontWeight: sel ? 600 : 400, fontFamily: C.fontSans,
-                        }}>Option {opt}</button>
-                      );
-                    })}
-                  </div>
-                </React.Fragment>
-              )}
-            </div>
-
-            <button onClick={selectAiMode} style={pillStyle(mode === 'ai')}>
-              <i className="ti ti-sparkles" style={{ fontSize: 13, marginRight: 6 }} />
-              AI Mode
-            </button>
-          </div>
-
-          {/* Input bar */}
-          <div style={{ flexShrink: 0, padding: '10px 12px', background: C.bg, display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-            <textarea
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="Message TMG assistant…"
-              rows={1}
-              style={{
-                flex: 1, resize: 'none', maxHeight: 120,
-                padding: '11px 14px', borderRadius: 22, border: `1px solid ${C.border}`,
-                background: C.surface, color: C.textPrimary, fontSize: '0.9rem',
-                lineHeight: 1.4, outline: 'none', fontFamily: C.fontSans,
-              }}
-            />
-            <button
-              onClick={send}
-              disabled={!input.trim() || loading}
-              style={{
-                flexShrink: 0, width: 42, height: 42, borderRadius: '50%', border: 'none',
-                background: (!input.trim() || loading) ? C.border : C.navy,
-                color: '#fff', cursor: (!input.trim() || loading) ? 'default' : 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
-                transition: 'background 0.15s ease',
-              }}
-            >
-              <i className="ti ti-arrow-up" />
-            </button>
           </div>
         </div>
       );
@@ -374,51 +257,108 @@
 
     // ─── Bottom Nav ──────────────────────────────────────────────────
     const TABS = [
-      { id: 'chat',     label: 'AI',    icon: 'ti-stars-filled'             },
-      { id: 'teamchat', label: 'Chat',  icon: 'ti-message-circle-2-filled'  },
-      { id: 'calls',    label: 'Calls', icon: 'ti-phone-filled'             },
-      { id: 'tasks',    label: 'Tasks', icon: 'ti-square-rounded-check-filled' },
-      { id: 'kpis',     label: 'KPIs',  icon: 'ti-trophy-filled'            },
-      { id: 'deals',    label: 'Deals', icon: 'ti-coin-filled'              },
-      { id: 'more',     label: 'More',  icon: 'ti-dots'                     },
+      { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
+      { id: 'teamchat', label: 'Chat',  icon: 'ti-message'         },
+      { id: 'calls',    label: 'Calls', icon: 'ti-phone'           },
+      { id: 'tasks',    label: 'Tasks', icon: 'ti-check'           },
+      { id: 'kpis',     label: 'KPIs',  icon: 'ti-chart-bar'       },
+      { id: 'deals',    label: 'Deals', icon: 'ti-currency-dollar' },
+      { id: 'more',     label: 'More',  icon: 'ti-dots'            },
     ];
 
-    function BottomNav({ active, onChange, dark }) {
+    // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
+    function BottomZone({ active, onChange, dark, showInput, mode, onToggleMode, input, setInput, onSend, loading, zoneRef }) {
+      const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
+      const modeLabel = mode === 'work' ? 'Work' : 'AI';
+
+      function onKeyDown(e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); }
+      }
+
       return (
-        <nav style={{
+        <div ref={zoneRef} style={{
           position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 50,
+          borderTop: `1px solid ${dark ? '#0D1E3A' : '#E0D8CC'}`,
           background: dark ? '#000D26' : '#FCFBF8',
-          borderTop: dark ? 'none' : '1px solid #E4DFD4',
-          display: 'flex', justifyContent: 'center',
-          padding: `8px 10px calc(8px + env(safe-area-inset-bottom))`,
+          padding: '12px 14px calc(14px + env(safe-area-inset-bottom))',
+          display: 'flex', flexDirection: 'column', gap: 10,
         }}>
+          {/* Input bar (AI tab only) */}
+          {showInput && (
+            <div style={{
+              display: 'flex', alignItems: 'center', height: 40,
+              borderRadius: 24, overflow: 'hidden',
+              background: dark ? '#0A1730' : '#FFFFFF',
+              border: `1px solid ${dark ? '#152545' : '#E0D8CC'}`,
+            }}>
+              {/* Mode tag */}
+              <button onClick={onToggleMode} style={{
+                flexShrink: 0, height: 40, display: 'flex', alignItems: 'center', gap: 5,
+                background: 'none', border: 'none', cursor: 'pointer',
+                padding: '0 10px 0 14px',
+                color: dark ? '#C9A45A' : '#AD832F',
+                fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 500, letterSpacing: '0.13em',
+                textTransform: 'uppercase',
+              }}>
+                <i className={`ti ${modeIcon}`} style={{ fontSize: 14 }} />
+                {modeLabel}
+              </button>
+              {/* Divider */}
+              <div style={{ flexShrink: 0, width: 1, height: 18, background: dark ? '#1E3360' : '#E0D8CC' }} />
+              {/* Input */}
+              <input
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="Message TMG assistant…"
+                style={{
+                  flex: 1, height: 40, minWidth: 0, border: 'none', outline: 'none',
+                  background: 'transparent', padding: '0 10px',
+                  fontFamily: "'Jost', sans-serif", fontSize: 11,
+                  color: dark ? '#FFFFFF' : '#001A4A',
+                }}
+              />
+              {/* Send */}
+              <button onClick={onSend} disabled={loading} style={{
+                flexShrink: 0, width: 40, height: 40, borderRadius: '50%', border: 'none',
+                background: dark ? '#AD832F' : '#001A4A',
+                color: '#fff', cursor: loading ? 'default' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17,
+              }}>
+                <i className="ti ti-arrow-up" />
+              </button>
+            </div>
+          )}
+
+          {/* Pill nav */}
           <div style={{
             display: 'flex', alignItems: 'center',
-            background: dark ? '#0A1E44' : '#001A4A',
-            borderRadius: 40, padding: 4, gap: 2,
-            maxWidth: '100%', overflowX: 'auto',
+            background: dark ? '#0A1730' : '#001A4A',
+            borderRadius: 40, padding: 4, width: '100%',
           }}>
             {TABS.map(({ id, label, icon }) => {
               const isActive = active === id;
+              const activeColor = dark ? '#FFFFFF' : '#001A4A';
+              const inactiveColor = dark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.28)';
+              const color = isActive ? activeColor : inactiveColor;
               return (
                 <button key={id} onClick={() => onChange(id)} style={{
-                  display: 'flex', flexDirection: 'column', alignItems: 'center',
-                  justifyContent: 'center', gap: 4, flexShrink: 0,
-                  width: 54, padding: '9px 0', borderRadius: 26, border: 'none', cursor: 'pointer',
-                  background: isActive ? '#AD832F' : (dark ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.32)'),
+                  flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+                  justifyContent: 'center', gap: 3,
+                  padding: '7px 1px', borderRadius: 28, border: 'none', cursor: 'pointer',
+                  background: isActive ? (dark ? '#AD832F' : '#FFFFFF') : 'transparent',
                   transition: 'background 0.2s ease',
                 }}>
-                  <i className={`ti ${icon}`} style={{ fontSize: 19, display: 'block', color: '#FFFFFF', lineHeight: 1 }} />
+                  <i className={`ti ${icon}`} style={{ fontSize: 18, display: 'block', color, lineHeight: 1 }} />
                   <span style={{
-                    fontSize: 8.5, fontFamily: "'Jost', sans-serif",
-                    letterSpacing: '0.02em', fontWeight: 500,
-                    color: '#FFFFFF',
+                    fontFamily: "'Jost', sans-serif", fontSize: 7, fontWeight: 500,
+                    letterSpacing: '0.11em', color,
                   }}>{label}</span>
                 </button>
               );
             })}
           </div>
-        </nav>
+        </div>
       );
     }
 
@@ -443,6 +383,8 @@
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+            {iconBtn(() => {}, 'ti ti-menu-2', 'Menu')}
+            <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
             {iconBtn(onToggleDark, dark ? 'ti ti-sun' : 'ti ti-moon', dark ? 'Light mode' : 'Dark mode')}
             <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
             {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar', calendarOpen)}
@@ -514,23 +456,72 @@
       const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
       const [showCalendar, setShowCalendar] = useState(false);
 
+      // Chat state (lifted so the input lives in the shared bottom zone)
+      const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
+      const [input, setInput] = useState('');
+      const [loading, setLoading] = useState(false);
+      const [mode, setMode] = useState(() => localStorage.getItem('tmg-mode') || 'work');
+
+      const zoneRef = useRef(null);
+      const [zoneH, setZoneH] = useState(96);
+      const onChat = activeTab === 'chat';
+
       useEffect(() => {
         document.body.classList.toggle('dark', dark);
         localStorage.setItem('tmg-theme', dark ? 'dark' : 'light');
       }, [dark]);
 
+      useEffect(() => {
+        localStorage.setItem('tmg-mode', mode);
+      }, [mode]);
+
+      // Keep content padding in sync with the fixed bottom zone height.
+      useEffect(() => {
+        if (zoneRef.current) setZoneH(zoneRef.current.offsetHeight);
+      }, [activeTab, dark, onChat, input, loading]);
+
+      async function send() {
+        const text = input.trim();
+        if (!text || loading) return;
+        const next = [...messages, { role: 'user', content: text }];
+        setMessages(next);
+        setInput('');
+        setLoading(true);
+        try {
+          const apiMsgs = next.map(m => ({ role: m.role, content: m.content }));
+          const reply = await callAI(apiMsgs);
+          setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+        } catch (e) {
+          setMessages(prev => [...prev, { role: 'assistant', content: String(e.message || e), error: true }]);
+        } finally {
+          setLoading(false);
+        }
+      }
+
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => setShowCalendar(s => !s)} calendarOpen={showCalendar} />
           {showCalendar && <CalendarPopover onClose={() => setShowCalendar(false)} />}
-          <div style={{ flex: 1, minHeight: 0, paddingBottom: 72 }}>
-            {activeTab === 'chat' && <AIChatTab user={user} />}
+          <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
+            {activeTab === 'chat' && <AIChatTab user={user} messages={messages} loading={loading} />}
             {activeTab === 'more' && <SettingsTab user={user} />}
             {!['chat', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>
-          <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />
+          <BottomZone
+            active={activeTab}
+            onChange={setActiveTab}
+            dark={dark}
+            showInput={onChat}
+            mode={mode}
+            onToggleMode={() => setMode(m => (m === 'work' ? 'ai' : 'work'))}
+            input={input}
+            setInput={setInput}
+            onSend={send}
+            loading={loading}
+            zoneRef={zoneRef}
+          />
         </div>
       );
     }

@@ -155,8 +155,106 @@
       return 'Good evening';
     }
 
+    // Generates a short conversation title via the edge function; falls back to the first message.
+    async function generateTitle(firstUserText) {
+      const fallback = (firstUserText || 'New chat').replace(/\s+/g, ' ').trim().slice(0, 40);
+      try {
+        const res = await fetch(AI_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: 'Conversation starts with: "' + firstUserText + '"\n\nReply with ONLY a 3-6 word title for it, no quotes, no punctuation at the end.' }],
+            system: 'You write short, specific chat titles. Reply with only the title text.',
+            max_tokens: 24,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        const t = (data.text || '').replace(/^["'\s]+|["'\s.]+$/g, '').trim();
+        return t || fallback;
+      } catch (e) {
+        return fallback;
+      }
+    }
+
+    // ─── Conversations DB (Supabase on prod; no-op/in-memory on localhost) ──
+    const ConvDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      userId()  { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+
+      async loadConversations() {
+        if (!this.client()) return [];
+        const { data, error } = await this.client()
+          .from('ai_conversations').select('*')
+          .order('pinned', { ascending: false })
+          .order('updated_at', { ascending: false });
+        if (error) { console.error('[ConvDB] load:', error.message); return []; }
+        return (data || []).map(r => ({
+          id: r.id, type: r.type, workRequest: r.work_request,
+          title: r.title || 'New chat', pinned: !!r.pinned, archived: !!r.archived,
+          updatedAt: r.updated_at,
+        }));
+      },
+
+      async createConversation({ type, workRequest, title }) {
+        if (!this.client()) {
+          return { id: 'local-' + Date.now(), type, workRequest: workRequest || null, title: title || 'New chat', pinned: false, archived: false };
+        }
+        const { data, error } = await this.client().from('ai_conversations').insert({
+          user_id: this.userId(),
+          type: type || 'ai',
+          work_request: workRequest || null,
+          title: title || null,
+        }).select().single();
+        if (error) { console.error('[ConvDB] create:', error.message); throw error; }
+        return { id: data.id, type: data.type, workRequest: data.work_request, title: data.title || 'New chat', pinned: false, archived: false };
+      },
+
+      async updateConversation(id, fields) {
+        if (!this.client() || String(id).startsWith('local-')) return;
+        const mapped = { updated_at: new Date().toISOString() };
+        if (fields.title    !== undefined) mapped.title    = fields.title;
+        if (fields.pinned   !== undefined) mapped.pinned   = fields.pinned;
+        if (fields.archived !== undefined) mapped.archived = fields.archived;
+        const { error } = await this.client().from('ai_conversations').update(mapped).eq('id', id);
+        if (error) console.error('[ConvDB] update:', error.message);
+      },
+
+      async touchConversation(id) {
+        if (!this.client() || String(id).startsWith('local-')) return;
+        await this.client().from('ai_conversations').update({ updated_at: new Date().toISOString() }).eq('id', id);
+      },
+
+      async deleteConversation(id) {
+        if (!this.client() || String(id).startsWith('local-')) return;
+        const { error } = await this.client().from('ai_conversations').delete().eq('id', id);
+        if (error) console.error('[ConvDB] delete:', error.message);
+      },
+
+      async loadMessages(convId) {
+        if (!this.client() || String(convId).startsWith('local-')) return [];
+        const { data, error } = await this.client()
+          .from('ai_messages').select('*').eq('conversation_id', convId)
+          .order('created_at', { ascending: true });
+        if (error) { console.error('[ConvDB] loadMessages:', error.message); return []; }
+        return (data || []).map(r => ({ role: r.role, content: r.content }));
+      },
+
+      async insertMessage(convId, role, content) {
+        if (!this.client() || String(convId).startsWith('local-')) return;
+        const { error } = await this.client().from('ai_messages').insert({
+          conversation_id: convId, role, content,
+        });
+        if (error) console.error('[ConvDB] insertMessage:', error.message);
+      },
+    };
+
+    const WORK_REQUESTS = [
+      { key: 'kpis',                 label: 'Enter KPIs',                  short: 'KPIs' },
+      { key: 'listing_presentation', label: 'Request Listing Presentation', short: 'Listing' },
+    ];
+
     // ─── AI Chat Tab ─────────────────────────────────────────────────
-    function AIChatTab({ user, messages, loading }) {
+    function AIChatTab({ user, messages, loading, mode, onStartWorkRequest }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
       const scrollRef = useRef(null);
 
@@ -171,13 +269,33 @@
           {/* Messages */}
           <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '20px 16px' }}>
             {empty ? (
-              <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 20px' }}>
+              <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 24px' }}>
                 <div style={{ fontSize: '2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>
                   {greeting()}, {firstName}
                 </div>
                 <div style={{ fontSize: '0.8rem', color: C.textSecondary, marginTop: 8, letterSpacing: '0.04em' }}>
-                  How can I help you today?
+                  {mode === 'work' ? 'What would you like to do?' : 'How can I help you today?'}
                 </div>
+                {mode === 'work' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 22, width: '100%', maxWidth: 320 }}>
+                    {WORK_REQUESTS.map(req => (
+                      <button key={req.key} onClick={() => onStartWorkRequest(req.key)} style={{
+                        display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                        padding: '13px 16px', borderRadius: 14, cursor: 'pointer',
+                        background: C.surface, border: `1px solid ${C.border}`,
+                        boxShadow: '0 2px 8px rgba(0,26,74,0.06)',
+                        fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 500, color: C.navy,
+                        textAlign: 'left',
+                      }}>
+                        <span style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, background: '#F3EBDA', display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.gold }}>
+                          <i className="ti ti-briefcase" style={{ fontSize: 16 }} />
+                        </span>
+                        {req.label}
+                        <i className="ti ti-chevron-right" style={{ marginLeft: 'auto', fontSize: 16, color: C.textMuted }} />
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               messages.map((m, i) => {
@@ -213,10 +331,24 @@
     }
 
     // ─── Settings Tab (placeholder for now) ──────────────────────────
-    function SettingsTab({ user }) {
+    function SettingsTab({ user, historySide, setHistorySide }) {
       const fullName = user?.user_metadata?.full_name || 'User';
       const email    = user?.email || '';
       const initial  = fullName.charAt(0).toUpperCase();
+      const sideBtn = (val, label, icon) => {
+        const on = historySide === val;
+        return (
+          <button onClick={() => setHistorySide(val)} style={{
+            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            padding: '10px', borderRadius: 10, cursor: 'pointer',
+            border: `1px solid ${on ? C.navy : C.border}`,
+            background: on ? C.navy : C.surface, color: on ? '#fff' : C.textSecondary,
+            fontFamily: C.fontSans, fontSize: '0.85rem', fontWeight: on ? 600 : 500,
+          }}>
+            <i className={`ti ${icon}`} style={{ fontSize: 16 }} />{label}
+          </button>
+        );
+      };
       return (
         <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
           <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Settings</div>
@@ -238,8 +370,18 @@
               borderRadius: 12, color: C.red, fontSize: '15px', cursor: 'pointer', fontWeight: 500, fontFamily: C.fontSans,
             }}>Sign out</button>
           </div>
-          <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '24px 0' }}>
-            More settings coming soon.
+
+          {/* Chat history position */}
+          <div style={{
+            background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)',
+            borderRadius: 14, padding: 16, marginBottom: 14,
+          }}>
+            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6, fontFamily: C.fontSans }}>Chat History</div>
+            <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 12, lineHeight: 1.5 }}>Which side the chat history panel opens from.</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {sideBtn('left', 'Left', 'ti-layout-sidebar-left-expand')}
+              {sideBtn('right', 'Right', 'ti-layout-sidebar-right-expand')}
+            </div>
           </div>
         </div>
       );
@@ -267,7 +409,7 @@
     ];
 
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
-    function BottomZone({ active, onChange, dark, showInput, mode, onToggleMode, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, onChange, dark, showInput, mode, onToggleMode, onOpenHistory, input, setInput, onSend, loading, zoneRef }) {
       const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
       const modeLabel = mode === 'work' ? 'Work' : 'AI';
 
@@ -291,11 +433,19 @@
               background: dark ? '#0A1730' : '#FFFFFF',
               border: `1px solid ${dark ? '#152545' : '#E0D8CC'}`,
             }}>
+              {/* History (hamburger) */}
+              <button onClick={onOpenHistory} title="Chat history" style={{
+                flexShrink: 0, width: 36, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: 'none', border: 'none', cursor: 'pointer', paddingLeft: 6,
+                color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
+              }}>
+                <i className="ti ti-menu-2" />
+              </button>
               {/* Mode tag */}
               <button onClick={onToggleMode} style={{
                 flexShrink: 0, height: 40, display: 'flex', alignItems: 'center', gap: 7,
                 background: 'none', border: 'none', cursor: 'pointer',
-                padding: '0 10px 0 14px',
+                padding: '0 10px 0 2px',
                 color: dark ? '#C9A45A' : '#AD832F',
                 fontFamily: "'Jost', sans-serif", fontSize: 14, fontWeight: 600, letterSpacing: '0.01em',
               }}>
@@ -382,8 +532,6 @@
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-            {iconBtn(() => {}, 'ti ti-menu-2', 'Menu')}
-            <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
             {iconBtn(onToggleDark, dark ? 'ti ti-sun' : 'ti ti-moon', dark ? 'Light mode' : 'Dark mode')}
             <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
             {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar', calendarOpen)}
@@ -449,6 +597,128 @@
       );
     }
 
+    // ─── Chat History Drawer ─────────────────────────────────────────
+    function HistoryDrawer({ dark, side, conversations, currentConvId, onClose, onSelect, onNewChat, onPin, onArchive, onRename, onDelete }) {
+      const [menuId, setMenuId] = useState(null);
+      const [showArchived, setShowArchived] = useState(false);
+
+      const panelBg   = dark ? '#0A1730' : '#FFFFFF';
+      const textCol   = dark ? '#FFFFFF' : C.textPrimary;
+      const subCol    = dark ? 'rgba(255,255,255,0.5)' : C.textSecondary;
+      const borderCol = dark ? '#152545' : C.border;
+      const hoverBg   = dark ? 'rgba(255,255,255,0.06)' : '#F3EBDA';
+
+      const active   = conversations.filter(c => !c.archived);
+      const pinned   = active.filter(c => c.pinned);
+      const recent   = active.filter(c => !c.pinned);
+      const archived = conversations.filter(c => c.archived);
+      const reqShort = (k) => (WORK_REQUESTS.find(w => w.key === k) || {}).short;
+
+      const sectionLabel = (txt) => (
+        <div style={{ fontSize: '0.62rem', fontWeight: 600, color: subCol, letterSpacing: '0.1em', textTransform: 'uppercase', padding: '12px 14px 6px', fontFamily: C.fontSans }}>{txt}</div>
+      );
+
+      const row = (c) => {
+        const isCur = c.id === currentConvId;
+        const open = menuId === c.id;
+        return (
+          <div key={c.id} style={{ position: 'relative', padding: '0 8px' }}>
+            <div onClick={() => onSelect(c.id)} style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '10px 10px', borderRadius: 10, cursor: 'pointer',
+              background: isCur ? hoverBg : 'transparent',
+            }}>
+              <i className={`ti ${c.type === 'work' ? 'ti-briefcase' : 'ti-sparkles'}`} style={{ fontSize: 16, flexShrink: 0, color: c.type === 'work' ? C.gold : (dark ? C.goldSoft : C.navy) }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '0.86rem', color: textCol, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</div>
+                {c.type === 'work' && reqShort(c.workRequest) && (
+                  <div style={{ fontSize: '0.62rem', color: C.gold, letterSpacing: '0.06em', textTransform: 'uppercase', marginTop: 1 }}>{reqShort(c.workRequest)}</div>
+                )}
+              </div>
+              {c.pinned && <i className="ti ti-pin-filled" style={{ fontSize: 13, color: subCol, flexShrink: 0 }} />}
+              <button onClick={(e) => { e.stopPropagation(); setMenuId(open ? null : c.id); }} style={{
+                flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer', color: subCol, fontSize: 16, padding: 2,
+              }}><i className="ti ti-dots" /></button>
+            </div>
+            {open && (
+              <React.Fragment>
+                <div onClick={() => setMenuId(null)} style={{ position: 'fixed', inset: 0, zIndex: 320 }} />
+                <div style={{
+                  position: 'absolute', top: '80%', right: 12, zIndex: 321, minWidth: 150,
+                  background: panelBg, border: `1px solid ${borderCol}`, borderRadius: 10,
+                  boxShadow: '0 8px 28px rgba(0,0,0,0.28)', padding: 5,
+                }}>
+                  {[
+                    c.archived
+                      ? { t: 'Restore', i: 'ti-refresh', fn: () => onArchive(c.id, false) }
+                      : (c.pinned ? { t: 'Unpin', i: 'ti-pinned-off', fn: () => onPin(c.id, false) } : { t: 'Pin', i: 'ti-pin', fn: () => onPin(c.id, true) }),
+                    !c.archived && { t: 'Rename', i: 'ti-pencil', fn: () => onRename(c.id) },
+                    !c.archived && { t: 'Archive', i: 'ti-archive', fn: () => onArchive(c.id, true) },
+                    { t: 'Delete', i: 'ti-trash', fn: () => onDelete(c.id), danger: true },
+                  ].filter(Boolean).map(a => (
+                    <button key={a.t} onClick={() => { setMenuId(null); a.fn(); }} style={{
+                      display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left',
+                      padding: '9px 10px', borderRadius: 7, border: 'none', cursor: 'pointer', background: 'none',
+                      color: a.danger ? C.red : textCol, fontSize: '0.82rem', fontFamily: C.fontSans,
+                    }}>
+                      <i className={`ti ${a.i}`} style={{ fontSize: 15 }} />{a.t}
+                    </button>
+                  ))}
+                </div>
+              </React.Fragment>
+            )}
+          </div>
+        );
+      };
+
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,13,38,0.45)' }} />
+          <div style={{
+            position: 'fixed', top: 0, bottom: 0, [side]: 0, zIndex: 301,
+            width: 'min(86vw, 320px)', background: panelBg,
+            borderRight: side === 'left' ? `1px solid ${borderCol}` : 'none',
+            borderLeft: side === 'right' ? `1px solid ${borderCol}` : 'none',
+            display: 'flex', flexDirection: 'column',
+            boxShadow: '0 0 40px rgba(0,0,0,0.3)',
+          }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'calc(14px + env(safe-area-inset-top)) 14px 12px', borderBottom: `1px solid ${borderCol}` }}>
+              <div style={{ fontSize: '1rem', fontWeight: 600, color: textCol, fontFamily: C.fontSans }}>Chats</div>
+              <button onClick={onNewChat} style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 9, cursor: 'pointer',
+                background: dark ? C.gold : C.navy, color: '#fff', border: 'none', fontFamily: C.fontSans, fontSize: '0.8rem', fontWeight: 500,
+              }}><i className="ti ti-plus" style={{ fontSize: 15 }} />New</button>
+            </div>
+
+            {/* List */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0 20px' }}>
+              {active.length === 0 && (
+                <div style={{ textAlign: 'center', color: subCol, fontSize: '0.8rem', padding: '32px 16px' }}>No conversations yet.</div>
+              )}
+              {pinned.length > 0 && sectionLabel('Pinned')}
+              {pinned.map(row)}
+              {recent.length > 0 && sectionLabel('Recent')}
+              {recent.map(row)}
+
+              {archived.length > 0 && (
+                <React.Fragment>
+                  <button onClick={() => setShowArchived(s => !s)} style={{
+                    display: 'flex', alignItems: 'center', gap: 6, width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+                    color: subCol, fontSize: '0.62rem', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase',
+                    padding: '16px 14px 6px', fontFamily: C.fontSans,
+                  }}>
+                    <i className={`ti ti-chevron-${showArchived ? 'down' : 'right'}`} style={{ fontSize: 13 }} />
+                    Archived ({archived.length})
+                  </button>
+                  {showArchived && archived.map(row)}
+                </React.Fragment>
+              )}
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
     // ─── Root App ────────────────────────────────────────────────────
     function App({ user }) {
       const [activeTab, setActiveTab] = useState('chat');
@@ -459,11 +729,22 @@
       const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
       const [input, setInput] = useState('');
       const [loading, setLoading] = useState(false);
-      const [mode, setMode] = useState(() => localStorage.getItem('tmg-mode') || 'work');
+      const [mode, setMode] = useState(() => localStorage.getItem('tmg-mode') || 'ai');
+
+      // Conversation persistence + history
+      const [conversations, setConversations] = useState([]);
+      const [currentConvId, setCurrentConvId] = useState(null);
+      const [workRequest, setWorkRequest] = useState(null); // 'kpis' | 'listing_presentation' | null
+      const [drawerOpen, setDrawerOpen] = useState(false);
+      const [historySide, setHistorySide] = useState(() => localStorage.getItem('tmg-history-side') || 'left');
 
       const zoneRef = useRef(null);
       const [zoneH, setZoneH] = useState(96);
       const onChat = activeTab === 'chat';
+
+      const refreshConversations = () => ConvDB.loadConversations().then(setConversations);
+      useEffect(() => { refreshConversations(); }, []);
+      useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
 
       useEffect(() => {
         document.body.classList.toggle('dark', dark);
@@ -479,22 +760,100 @@
         if (zoneRef.current) setZoneH(zoneRef.current.offsetHeight);
       }, [activeTab, dark, onChat, input, loading]);
 
-      async function send() {
-        const text = input.trim();
+      // Core send: persists the user message, gets a reply, persists it, auto-titles a new conversation.
+      async function runSend(text, opts = {}) {
         if (!text || loading) return;
+        const startType = opts.type || (mode === 'work' ? 'work' : 'ai');
+        const startReq  = opts.workRequest !== undefined ? opts.workRequest : workRequest;
+        const isFirst = !currentConvId;
+
         const next = [...messages, { role: 'user', content: text }];
         setMessages(next);
-        setInput('');
         setLoading(true);
+
+        let convId = currentConvId;
         try {
+          if (!convId) {
+            const conv = await ConvDB.createConversation({ type: startType, workRequest: startReq });
+            convId = conv.id;
+            setCurrentConvId(convId);
+            refreshConversations();
+          }
+          await ConvDB.insertMessage(convId, 'user', text);
           const apiMsgs = next.map(m => ({ role: m.role, content: m.content }));
           const reply = await callAI(apiMsgs);
           setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+          await ConvDB.insertMessage(convId, 'assistant', reply);
+          if (isFirst) {
+            const title = await generateTitle(text);
+            await ConvDB.updateConversation(convId, { title });
+          } else {
+            await ConvDB.touchConversation(convId);
+          }
         } catch (e) {
           setMessages(prev => [...prev, { role: 'assistant', content: String(e.message || e), error: true }]);
         } finally {
           setLoading(false);
+          refreshConversations();
         }
+      }
+
+      function send() {
+        const text = input.trim();
+        if (!text || loading) return;
+        setInput('');
+        runSend(text);
+      }
+
+      function newChat() {
+        setMessages([]);
+        setCurrentConvId(null);
+        setWorkRequest(null);
+        setInput('');
+      }
+
+      function toggleMode() {
+        setMode(m => (m === 'work' ? 'ai' : 'work'));
+        newChat();
+      }
+
+      async function selectConversation(id) {
+        const conv = conversations.find(c => c.id === id);
+        setDrawerOpen(false);
+        setCurrentConvId(id);
+        setWorkRequest(conv?.workRequest || null);
+        if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
+        setActiveTab('chat');
+        const msgs = await ConvDB.loadMessages(id);
+        setMessages(msgs);
+      }
+
+      function startWorkRequest(key) {
+        const req = WORK_REQUESTS.find(w => w.key === key);
+        if (!req) return;
+        setMode('work');
+        setWorkRequest(key);
+        setCurrentConvId(null);
+        setMessages([]);
+        runSend(req.label, { type: 'work', workRequest: key });
+      }
+
+      async function pinConversation(id, pinned) { await ConvDB.updateConversation(id, { pinned }); refreshConversations(); }
+      async function archiveConversation(id, archived) {
+        await ConvDB.updateConversation(id, { archived });
+        if (id === currentConvId) newChat();
+        refreshConversations();
+      }
+      async function renameConversation(id) {
+        const conv = conversations.find(c => c.id === id);
+        const title = window.prompt('Rename conversation', conv?.title || '');
+        if (title && title.trim()) { await ConvDB.updateConversation(id, { title: title.trim() }); refreshConversations(); }
+      }
+      async function removeConversation(id) {
+        if (!window.confirm('Delete this conversation permanently?')) return;
+        await ConvDB.deleteConversation(id);
+        if (id === currentConvId) newChat();
+        refreshConversations();
       }
 
       return (
@@ -502,8 +861,8 @@
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => setShowCalendar(s => !s)} calendarOpen={showCalendar} />
           {showCalendar && <CalendarPopover onClose={() => setShowCalendar(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
-            {activeTab === 'chat' && <AIChatTab user={user} messages={messages} loading={loading} />}
-            {activeTab === 'more' && <SettingsTab user={user} />}
+            {activeTab === 'chat' && <AIChatTab user={user} messages={messages} loading={loading} mode={mode} onStartWorkRequest={startWorkRequest} />}
+            {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}
             {!['chat', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
@@ -514,13 +873,29 @@
             dark={dark}
             showInput={onChat}
             mode={mode}
-            onToggleMode={() => setMode(m => (m === 'work' ? 'ai' : 'work'))}
+            onToggleMode={toggleMode}
+            onOpenHistory={() => setDrawerOpen(true)}
             input={input}
             setInput={setInput}
             onSend={send}
             loading={loading}
             zoneRef={zoneRef}
           />
+          {drawerOpen && (
+            <HistoryDrawer
+              dark={dark}
+              side={historySide}
+              conversations={conversations}
+              currentConvId={currentConvId}
+              onClose={() => setDrawerOpen(false)}
+              onSelect={selectConversation}
+              onNewChat={() => { newChat(); setDrawerOpen(false); }}
+              onPin={pinConversation}
+              onArchive={archiveConversation}
+              onRename={renameConversation}
+              onDelete={removeConversation}
+            />
+          )}
         </div>
       );
     }

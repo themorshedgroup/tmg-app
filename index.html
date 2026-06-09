@@ -1652,7 +1652,8 @@
     }
 
     // In-flow chat history panel — fills the area between the top bar and the bottom zone.
-    function HistoryPanel({ dark, conversations, onSelect, onNewChat, onRename }) {
+    function HistoryPanel({ dark, conversations, onSelect, onNewChat, onPin, onArchive, onRename, onDelete }) {
+      const [menuId, setMenuId] = useState(null);
       const panelBg    = dark ? '#070F1E' : '#FFFFFF';
       const headBord   = dark ? '#0D1E3A' : '#F0EBE3';
       const titleCol   = dark ? '#FFFFFF' : '#001A4A';
@@ -1661,7 +1662,10 @@
       const previewCol = dark ? 'rgba(255,255,255,0.35)' : '#888888';
       const timeCol    = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
       const J = "'Jost', sans-serif";
-      const list = (conversations || []).filter(c => !c.archived);
+      const menuBord = dark ? '#1A2D4D' : '#EAE3D6';
+      const pinCol   = dark ? '#C9A45A' : '#AD832F';
+      const list = (conversations || []).filter(c => !c.archived)
+        .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)); // pinned float to top
       const ico = (type) => type === 'work'
         ? { bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', color: dark ? '#C9A45A' : '#AD832F', icon: 'ti-briefcase' }
         : { bg: dark ? 'rgba(255,255,255,0.07)' : '#EEF0F8', color: dark ? 'rgba(255,255,255,0.6)' : '#001A4A', icon: 'ti-sparkles' };
@@ -1683,13 +1687,17 @@
             {list.map((c, i) => {
               const k = ico(c.type);
               const last = i === list.length - 1;
+              const open = menuId === c.id;
               return (
-                <div key={c.id} onClick={() => onSelect(c.id)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 14px', cursor: 'pointer', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
+                <div key={c.id} onClick={() => onSelect(c.id)} onContextMenu={(e) => { e.preventDefault(); setMenuId(open ? null : c.id); }} style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 9, padding: '9px 14px', cursor: 'pointer', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
                   <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: k.bg }}>
                     <i className={`ti ${k.icon}`} style={{ fontSize: 14, color: k.color }} />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontFamily: J, fontSize: 10, fontWeight: 500, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      {c.pinned && <i className="ti ti-pin-filled" style={{ fontSize: 10, color: pinCol, flexShrink: 0 }} />}
+                      <div style={{ fontFamily: J, fontSize: 10, fontWeight: 500, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</div>
+                    </div>
                     {c.preview && <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{c.preview}</div>}
                   </div>
                   <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
@@ -1697,10 +1705,27 @@
                     {c.unread > 0 && (
                       <div style={{ width: 16, height: 16, borderRadius: '50%', background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{c.unread}</div>
                     )}
-                    <button onClick={(e) => { e.stopPropagation(); onRename(c.id); }} title="Rename" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: timeCol, fontSize: 15, display: 'flex', alignItems: 'center' }}>
-                      <i className="ti ti-pencil" />
+                    <button onClick={(e) => { e.stopPropagation(); setMenuId(open ? null : c.id); }} title="Options" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: timeCol, fontSize: 16, display: 'flex', alignItems: 'center' }}>
+                      <i className="ti ti-dots" />
                     </button>
                   </div>
+                  {open && (
+                    <React.Fragment>
+                      <div onClick={(e) => { e.stopPropagation(); setMenuId(null); }} style={{ position: 'fixed', inset: 0, zIndex: 120 }} />
+                      <div style={{ position: 'absolute', top: '74%', right: 12, zIndex: 121, minWidth: 146, background: panelBg, border: `1px solid ${menuBord}`, borderRadius: 10, boxShadow: '0 8px 28px rgba(0,0,0,0.28)', padding: 5 }}>
+                        {[
+                          c.pinned ? { t: 'Unpin', i: 'ti-pinned-off', fn: () => onPin(c.id, false) } : { t: 'Pin', i: 'ti-pin', fn: () => onPin(c.id, true) },
+                          { t: 'Rename', i: 'ti-pencil', fn: () => onRename(c.id) },
+                          { t: 'Archive', i: 'ti-archive', fn: () => onArchive(c.id, true) },
+                          { t: 'Delete', i: 'ti-trash', fn: () => onDelete(c.id), danger: true },
+                        ].map(a => (
+                          <button key={a.t} onClick={(e) => { e.stopPropagation(); setMenuId(null); a.fn(); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 7, border: 'none', cursor: 'pointer', background: 'none', color: a.danger ? C.red : titleCol, fontFamily: J, fontSize: 11 }}>
+                            <i className={`ti ${a.i}`} style={{ fontSize: 14 }} />{a.t}
+                          </button>
+                        ))}
+                      </div>
+                    </React.Fragment>
+                  )}
                 </div>
               );
             })}
@@ -2043,7 +2068,7 @@
                     boxShadow: historySide === 'right' ? '-10px 0 28px rgba(0,0,0,0.18)' : '10px 0 28px rgba(0,0,0,0.18)',
                     [historySide === 'right' ? 'borderLeft' : 'borderRight']: `1px solid ${dark ? '#0D1E3A' : '#F0EBE3'}`,
                   }}>
-                    <HistoryPanel dark={dark} conversations={conversations} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onRename={renameConversation} />
+                    <HistoryPanel dark={dark} conversations={conversations} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onPin={pinConversation} onArchive={archiveConversation} onRename={renameConversation} onDelete={removeConversation} />
                   </div>
                 )}
               </div>

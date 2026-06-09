@@ -374,9 +374,9 @@
       const empty = messages.length === 0;
 
       return (
-        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {/* Messages */}
-          <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '20px 16px' }}>
+          <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: mode === 'work' ? '20px 16px 64px' : '20px 16px' }}>
             {empty ? (
               <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 24px' }}>
                 <div style={{ fontSize: '2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>
@@ -436,9 +436,9 @@
               </div>
             )}
           </div>
-          {/* Work-mode quick-action chips — pinned at the bottom, above the chat bar */}
+          {/* Work-mode quick-action chips — floated above the chat bar so the greeting stays put */}
           {mode === 'work' && (
-            <div style={{ flexShrink: 0, display: 'flex', gap: 7, overflowX: 'auto', padding: '10px 16px', borderTop: `1px solid ${dark ? '#152545' : C.border}` }}>
+            <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, display: 'flex', gap: 7, overflowX: 'auto', padding: '10px 16px', borderTop: `1px solid ${dark ? '#152545' : C.border}`, background: dark ? '#000D26' : C.bg }}>
               {CHIPS.map((chip, i) => (
                 <button key={i} onClick={() => onChip(chip.label)} style={{
                   display: 'flex', alignItems: 'center', gap: 6, borderRadius: 20, padding: '7px 13px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,

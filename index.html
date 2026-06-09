@@ -65,15 +65,13 @@
       </button>
     </div>
 
-    <div id="auth-rejected" style="display:none;flex-direction:column;align-items:center;text-align:center;padding:0 32px;">
-      <div style="font-size:2.2rem;font-weight:300;color:#C9A45A;margin-bottom:4px;letter-spacing:0.26em;text-transform:uppercase;">TMG</div>
-      <div style="font-size:0.7rem;color:#8899BB;margin-bottom:48px;letter-spacing:0.2em;text-transform:uppercase;">The Morshed Group</div>
-      <div style="width:52px;height:52px;border-radius:50%;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;margin-bottom:20px;">
-        <svg width="26" height="26" fill="none" stroke="#E05252" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
-      </div>
-      <div style="font-size:1.1rem;font-weight:500;color:#FCFBF8;margin-bottom:8px;letter-spacing:0.04em;">Access denied</div>
-      <div style="font-size:0.88rem;color:#8899BB;margin-bottom:32px;line-height:1.7;">Your account doesn't have access.<br/>Contact Symon to be added.</div>
-      <button onclick="SupabaseAuth.signOut()" style="background:none;border:1px solid rgba(255,255,255,0.2);border-radius:4px;padding:10px 24px;font-size:13px;color:#8899BB;cursor:pointer;font-family:'Jost',sans-serif;letter-spacing:0.08em;text-transform:uppercase;">Sign out</button>
+    <div id="auth-rejected" style="display:none;flex-direction:column;align-items:center;text-align:center;padding:0 48px;width:100%;">
+      <img src="Morshed Group Logo White.png" alt="Morshed Group" style="width:204px;margin-bottom:-24px;opacity:0.92;" />
+      <div style="font-size:2.2rem;font-weight:300;color:#C9A45A;margin-bottom:6px;letter-spacing:0.26em;text-transform:uppercase;">TMG App</div>
+      <div style="font-size:0.7rem;font-weight:400;color:#8899BB;margin-bottom:44px;letter-spacing:0.2em;text-transform:uppercase;">The Morshed Group</div>
+      <div style="font-size:1.1rem;font-weight:500;color:#FCFBF8;margin-bottom:10px;letter-spacing:0.04em;">Access denied</div>
+      <div style="font-size:0.88rem;color:#8899BB;margin-bottom:32px;line-height:1.7;">Your account doesn't have access yet.<br/>Contact <span style="color:#C9A45A;">operations@themorshedgroup.com</span> to be added.</div>
+      <button onclick="SupabaseAuth.signOut()" style="display:flex;align-items:center;gap:10px;background:none;border:1px solid rgba(255,255,255,0.2);border-radius:4px;padding:12px 26px;font-size:13px;color:#8899BB;cursor:pointer;font-family:'Jost','Helvetica Neue',Arial,sans-serif;letter-spacing:0.08em;text-transform:uppercase;">Sign out</button>
     </div>
   </div>
 
@@ -1274,7 +1272,18 @@
     function BottomZone({ active, tabs, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
       const navTabs = tabs || TABS;
       const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
-      const modeLabel = mode === 'work' ? 'Work' : 'AI';
+      const modeLabel = mode === 'work' ? 'Work Mode' : 'AI Mode';
+      const MODE_THEME = {
+        work: {
+          light: { barBg: '#FDF6EC', barBord: '#E8D9BC', ham: '#C4A97A', tagIcon: '#AD832F', tagLabel: '#7A5B1E', div: '#DCC99A', ph: '#C4A97A', clip: '#C4A97A', send: '#7A5B1E' },
+          dark:  { barBg: '#0A1730', barBord: '#152545', ham: 'rgba(255,255,255,0.25)', tagIcon: '#C9A45A', tagLabel: '#C9A45A', div: '#1E3360', ph: 'rgba(255,255,255,0.25)', clip: 'rgba(255,255,255,0.25)', send: '#AD832F' },
+        },
+        ai: {
+          light: { barBg: '#F0F2FF', barBord: '#C8D0F0', ham: '#7A8EC4', tagIcon: '#4A6FD4', tagLabel: '#2A4FA4', div: '#B0C0E8', ph: '#7A8EC4', clip: '#7A8EC4', send: '#2A4FA4' },
+          dark:  { barBg: '#0D1040', barBord: '#1A2060', ham: 'rgba(255,255,255,0.25)', tagIcon: '#7A9AFF', tagLabel: '#7A9AFF', div: '#2A3580', ph: 'rgba(255,255,255,0.25)', clip: 'rgba(255,255,255,0.25)', send: '#4A6FD4' },
+        },
+      };
+      const M = MODE_THEME[mode === 'work' ? 'work' : 'ai'][dark ? 'dark' : 'light'];
       const isAI = active === 'chat';
       const pending = pendingAttachments || [];
 
@@ -1311,19 +1320,21 @@
               ))}
             </div>
           )}
-          {/* Input bar (AI tab only) */}
+          {/* Input bar (AI tab only) — themed by active mode */}
           {isAI && (
             <div style={{
               display: 'flex', alignItems: 'center', height: 61,
               borderRadius: 28, overflow: 'hidden',
-              background: dark ? '#0A1730' : '#FFFFFF',
-              border: `1px solid ${dark ? '#152545' : '#E0D8CC'}`,
+              background: M.barBg,
+              border: `1px solid ${M.barBord}`,
+              transition: 'background-color 200ms ease, border-color 200ms ease',
             }}>
+              <style>{`.tmg-ai-input::placeholder{color:${M.ph};opacity:1;}`}</style>
               {/* Hamburger — AI history */}
               <button onClick={onOpenHistory} title="Chat history" style={{
                 flexShrink: 0, width: 36, height: 61, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer', paddingLeft: 6,
-                color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
+                color: M.ham, fontSize: 18,
               }}>
                 <i className="ti ti-menu-2" />
               </button>
@@ -1332,16 +1343,17 @@
                 flexShrink: 0, height: 61, display: 'flex', alignItems: 'center', gap: 7,
                 background: 'none', border: 'none', cursor: 'pointer',
                 padding: '0 10px 0 2px',
-                color: dark ? '#C9A45A' : '#AD832F',
-                fontFamily: "'Jost', sans-serif", fontSize: 14, fontWeight: 600, letterSpacing: '0.01em',
+                color: M.tagLabel,
+                fontFamily: "'Jost', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '0.13em',
               }}>
-                <i className={`ti ${modeIcon}`} style={{ fontSize: 16 }} />
+                <i className={`ti ${modeIcon}`} style={{ fontSize: 16, color: M.tagIcon }} />
                 {modeLabel}
               </button>
               {/* Divider */}
-              <div style={{ flexShrink: 0, width: 1, height: 24, background: dark ? '#1E3360' : '#E0D8CC' }} />
+              <div style={{ flexShrink: 0, width: 1, height: 24, background: M.div }} />
               {/* Input */}
               <input
+                className="tmg-ai-input"
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={onKeyDown}
@@ -1357,16 +1369,17 @@
               <button onClick={onOpenAttach} title="Attach file or photo" style={{
                 flexShrink: 0, width: 34, height: 61, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer',
-                color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
+                color: M.clip, fontSize: 18,
               }}>
                 <i className="ti ti-paperclip" />
               </button>
               {/* Send */}
               <button onClick={onSend} disabled={loading} style={{
                 flexShrink: 0, width: 44, height: 44, marginRight: 8, borderRadius: '50%', border: 'none',
-                background: dark ? '#AD832F' : '#001A4A',
+                background: M.send,
                 color: '#fff', cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
+                transition: 'background-color 200ms ease',
               }}>
                 <i className="ti ti-arrow-up" />
               </button>

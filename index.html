@@ -161,6 +161,9 @@
       const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
       const [input, setInput] = useState('');
       const [loading, setLoading] = useState(false);
+      const [mode, setMode] = useState('ai');             // 'ai' | 'work'
+      const [workOption, setWorkOption] = useState(null); // 'A' | 'B' | 'C' | null
+      const [workMenuOpen, setWorkMenuOpen] = useState(false);
       const scrollRef = useRef(null);
 
       useEffect(() => {
@@ -188,6 +191,21 @@
       function onKeyDown(e) {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
       }
+
+      function selectAiMode()   { setMode('ai'); setWorkMenuOpen(false); }
+      function selectWorkMode()  { setMode('work'); setWorkMenuOpen(o => !o); }
+      function chooseWorkOption(opt) { setWorkOption(opt); setMode('work'); setWorkMenuOpen(false); }
+
+      const pillStyle = (active) => ({
+        display: 'inline-flex', alignItems: 'center',
+        padding: '6px 14px', borderRadius: 20, cursor: 'pointer',
+        border: `1px solid ${active ? C.gold : C.border}`,
+        background: active ? C.gold : C.surface,
+        color: active ? '#FFFFFF' : C.textSecondary,
+        fontSize: '0.76rem', fontWeight: 500, fontFamily: C.fontSans,
+        letterSpacing: '0.03em',
+        transition: 'background 0.15s ease, color 0.15s ease, border-color 0.15s ease',
+      });
 
       const empty = messages.length === 0;
 
@@ -231,6 +249,45 @@
                   Thinking…
                 </div>
               </div>
+            )}
+          </div>
+
+          {/* Mode pills */}
+          <div style={{ flexShrink: 0, position: 'relative', padding: '8px 12px 0', display: 'flex', gap: 8 }}>
+            <button onClick={selectWorkMode} style={pillStyle(mode === 'work')}>
+              <i className="ti ti-briefcase" style={{ fontSize: 13, marginRight: 5 }} />
+              Work Mode{workOption ? ` · ${workOption}` : ''}
+              <i className="ti ti-chevron-up" style={{ fontSize: 12, marginLeft: 5, opacity: 0.85, transform: workMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }} />
+            </button>
+            <button onClick={selectAiMode} style={pillStyle(mode === 'ai')}>
+              <i className="ti ti-sparkles" style={{ fontSize: 13, marginRight: 5 }} />
+              AI Mode
+            </button>
+
+            {/* Drop-up menu for Work Mode */}
+            {workMenuOpen && (
+              <React.Fragment>
+                <div onClick={() => setWorkMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+                <div style={{
+                  position: 'absolute', bottom: 'calc(100% + 6px)', left: 12, zIndex: 41,
+                  background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12,
+                  boxShadow: '0 6px 24px rgba(0,26,74,0.18)', padding: 6, minWidth: 168,
+                }}>
+                  {['A', 'B', 'C'].map(opt => {
+                    const sel = workOption === opt;
+                    return (
+                      <button key={opt} onClick={() => chooseWorkOption(opt)} style={{
+                        display: 'block', width: '100%', textAlign: 'left',
+                        padding: '9px 12px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                        marginBottom: opt !== 'C' ? 2 : 0,
+                        background: sel ? C.gold : 'transparent',
+                        color: sel ? '#FFFFFF' : C.textPrimary,
+                        fontSize: '0.85rem', fontWeight: sel ? 600 : 400, fontFamily: C.fontSans,
+                      }}>Option {opt}</button>
+                    );
+                  })}
+                </div>
+              </React.Fragment>
             )}
           </div>
 

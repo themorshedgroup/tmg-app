@@ -467,6 +467,14 @@
                   color: dark ? '#FFFFFF' : '#001A4A',
                 }}
               />
+              {/* Attach file / photo (placeholder — no upload wired yet) */}
+              <button onClick={() => {}} title="Attach file or photo" style={{
+                flexShrink: 0, width: 34, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
+              }}>
+                <i className="ti ti-paperclip" />
+              </button>
               {/* Send */}
               <button onClick={onSend} disabled={loading} style={{
                 flexShrink: 0, width: 40, height: 40, borderRadius: '50%', border: 'none',

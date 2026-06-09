@@ -723,6 +723,205 @@
       );
     }
 
+    // ─── KPIs Tab — preview mockup ───────────────────────────────────
+    function KpisTab({ dark }) {
+      const J = "'Jost', sans-serif";
+      const CG = "'Cormorant Garamond', Georgia, serif";
+      const [sub, setSub] = useState('kpis');
+
+      const green = dark ? '#5DCAA5' : '#0F6E56';
+      const red   = dark ? '#F87171' : '#9B1C1C';
+      const gold  = dark ? '#C9A45A' : '#AD832F';
+      const ink   = dark ? '#FFFFFF' : '#001A4A';
+      const muted = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
+      const faint = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const cardBg   = dark ? '#0A1730' : '#FFFFFF';
+      const cardBord = dark ? '#0D1E3A' : '#E4DFD4';
+      const goldCardBg = dark ? '#0A1E44' : '#F3EBDA';
+      const bannerBg   = dark ? '#7F1D1D' : '#9B1C1C';
+      const subBarBg   = dark ? '#070F1E' : '#FFFFFF';
+      const subBarBord = dark ? '#0D1E3A' : '#F0EBE3';
+
+      const seg = (t, key) => <span key={key} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, color: '#fff', textTransform: 'uppercase' }}>{t}</span>;
+      const sep = (key) => <span key={key} style={{ fontFamily: J, fontSize: 9, color: 'rgba(255,255,255,0.4)' }}>·</span>;
+      const statLbl = { fontFamily: J, fontSize: 7, letterSpacing: '0.14em', fontWeight: 500, textTransform: 'uppercase', color: muted };
+      const ctcCell = (w) => ({ width: w, textAlign: 'right', display: 'inline-block', fontFamily: J });
+
+      const Header = ({ icon, label }) => (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, margin: '0 0 8px' }}>
+          <i className={`ti ${icon}`} style={{ fontSize: 11, color: gold }} />
+          <span style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.2em', fontWeight: 600, textTransform: 'uppercase', color: gold }}>{label}</span>
+          <div style={{ flex: 1, height: 1, background: dark ? '#0D1E3A' : '#E4DFD4' }} />
+        </div>
+      );
+      const StatCard = ({ label, value, sub: subTxt, subColor, valColor, bg, bord }) => (
+        <div style={{ borderRadius: 6, padding: '9px 10px', background: bg, border: `1px solid ${bord}` }}>
+          <div style={statLbl}>{label}</div>
+          <div style={{ fontFamily: CG, fontStyle: 'italic', fontSize: 16, color: valColor || ink, marginTop: 2, lineHeight: 1.1 }}>{value}</div>
+          {subTxt && <div style={{ fontFamily: J, fontSize: 7, color: subColor, marginTop: 2 }}>{subTxt}</div>}
+        </div>
+      );
+
+      const accountability = [
+        { name: 'Luciana', right: '100% wk · 96% YTD', pct: 96, c: green },
+        { name: 'Symon',   right: '98% YTD', pct: 98, c: green },
+        { name: 'Alexa',   right: '95% YTD', pct: 95, c: green },
+        { name: 'Brett',   right: '75% YTD', pct: 75, c: gold },
+        { name: 'Tarek',   right: '36% YTD', pct: 36, c: red },
+        { name: 'Brad',    right: '18% YTD', pct: 18, c: red },
+      ];
+      const ctc = [
+        { name: 'Tarek', v: ['6', '9.0', '9.0'], red: false },
+        { name: 'Brad',  v: ['6', '7.8', '4.9'], red: false },
+        { name: 'Brett', v: ['6', '7.2', '6.9'], red: false },
+        { name: 'Kyle',  v: ['0', '0.0', '1.8'], red: true },
+      ];
+      const weekly = [
+        { name: 'Tarek', tag: 'Focused · Empowered · Accountable', rows: [
+          { m: 'Calls', s: '0', g: '20', y: '157%', sc: red, yc: green },
+          { m: 'Notes', s: '14', g: '12', y: '104%', sc: green, yc: green },
+          { m: 'Pop-bys', s: '6', g: '5', y: '161%', sc: green, yc: green },
+          { m: 'Agent Training', s: '3', g: '1', y: '249%', sc: green, yc: green },
+        ] },
+        { name: 'Brad', tag: 'Bold · Confident · Value-additive', rows: [
+          { m: 'Calls', s: '110', g: '20', y: '148%', sc: green, yc: green },
+          { m: 'Notes', s: '28', g: '10', y: '71%', sc: green, yc: red },
+          { m: 'Hotzone', s: '22', g: '20', y: '84%', sc: green, yc: red },
+          { m: 'Pop-bys', s: '12', g: '2', y: '155%', sc: green, yc: green },
+        ] },
+      ];
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {/* Banner */}
+          <div style={{ background: bannerBg, padding: '7px 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, flexShrink: 0 }}>
+            {seg('Coming Soon', 's1')}{sep('p1')}{seg('KPIs', 's2')}{sep('p2')}{seg('Q3 2026', 's3')}
+          </div>
+          {/* Sub-tab row */}
+          <div style={{ display: 'flex', background: subBarBg, borderBottom: `1px solid ${subBarBord}`, flexShrink: 0 }}>
+            {[['kpis', 'KPIs'], ['scorecard', 'Scorecard']].map(([id, label]) => {
+              const on = sub === id;
+              return (
+                <div key={id} onClick={() => setSub(id)} style={{
+                  flex: 1, textAlign: 'center', cursor: 'pointer',
+                  fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, textTransform: 'uppercase',
+                  padding: '9px 4px 8px',
+                  color: on ? (dark ? '#C9A45A' : '#001A4A') : (dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9'),
+                  borderBottom: `2px solid ${on ? (dark ? '#C9A45A' : '#AD832F') : 'transparent'}`,
+                  marginBottom: -1,
+                }}>{label}</div>
+              );
+            })}
+          </div>
+
+          {sub === 'kpis' ? (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA' }}>
+                <i className="ti ti-chart-bar" style={{ fontSize: 22, color: gold }} />
+              </div>
+              <div style={{ fontFamily: CG, fontStyle: 'italic', fontSize: 18, color: ink }}>KPIs</div>
+              <div style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: faint }}>Coming soon</div>
+            </div>
+          ) : (
+            <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '10px 14px 6px' }}>
+              <div style={{ textAlign: 'right', fontFamily: J, fontSize: 8, letterSpacing: '0.12em', marginBottom: 10, color: faint }}>As of 06/08/26</div>
+
+              {/* A — Sales Goals */}
+              <Header icon="ti-currency-dollar" label="Sales Goals" />
+              <div style={{ borderRadius: 6, padding: '9px 10px', border: `1px solid ${cardBord}`, background: cardBg, marginBottom: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <div><div style={statLbl}>Annual Goal</div><div style={{ fontFamily: CG, fontStyle: 'italic', fontSize: 20, color: ink, lineHeight: 1.1 }}>$100M</div></div>
+                  <div><div style={statLbl}>Current</div><div style={{ fontFamily: CG, fontStyle: 'italic', fontSize: 16, color: gold, lineHeight: 1.1 }}>$17.6M</div></div>
+                  <div><div style={statLbl}>Pending</div><div style={{ fontFamily: CG, fontStyle: 'italic', fontSize: 16, color: ink, lineHeight: 1.1 }}>$12.8M</div></div>
+                </div>
+                <div style={{ height: 4, borderRadius: 2, marginTop: 8, background: dark ? '#0D1E3A' : '#F3EBDA' }}>
+                  <div style={{ height: 4, borderRadius: 2, width: '17.6%', background: '#AD832F' }} />
+                </div>
+                <div style={{ textAlign: 'right', fontFamily: J, fontSize: 7, marginTop: 3, color: faint }}>17.6% to goal</div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 14 }}>
+                <StatCard label="Avg Sale Price" value="$1.30M" sub="↓ $197K vs goal" subColor={red} bg={dark ? '#0A1730' : '#F3EBDA'} bord={cardBord} />
+                <StatCard label="Days to Close" value="105" sub="↑ 15 ahead" subColor={green} bg={dark ? '#0A1730' : '#F3EBDA'} bord={cardBord} />
+              </div>
+
+              {/* B — Accountability */}
+              <Header icon="ti-check" label="Accountability" />
+              <div style={{ marginBottom: 14 }}>
+                {accountability.map(a => (
+                  <div key={a.name} style={{ marginBottom: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                      <span style={{ fontFamily: J, fontSize: 9, fontWeight: 500, color: ink }}>{a.name}</span>
+                      <span style={{ fontFamily: J, fontSize: 8, color: a.c }}>{a.right}</span>
+                    </div>
+                    <div style={{ height: 4, borderRadius: 2, marginTop: 3, background: dark ? '#0A1E44' : '#F3EBDA' }}>
+                      <div style={{ height: 4, borderRadius: 2, width: a.pct + '%', background: a.c }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* C — CTC Hours */}
+              <Header icon="ti-clock" label="CTC Hours" />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 5 }}>
+                <span style={{ ...ctcCell(44), fontSize: 7, letterSpacing: '0.12em', color: faint }}>LAST WK</span>
+                <span style={{ ...ctcCell(40), fontSize: 7, letterSpacing: '0.12em', color: faint }}>Q AVE</span>
+                <span style={{ ...ctcCell(34), fontSize: 7, letterSpacing: '0.12em', color: faint }}>YTD</span>
+              </div>
+              {ctc.map(r => {
+                const sc = r.red ? red : (dark ? 'rgba(255,255,255,0.7)' : '#001A4A');
+                return (
+                  <div key={r.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: `1px solid ${dark ? '#0D1E3A' : '#F0EBE3'}` }}>
+                    <span style={{ fontFamily: J, fontSize: 9, color: r.red ? red : ink }}>{r.name}</span>
+                    <div>
+                      <span style={{ ...ctcCell(44), fontSize: 8.5, color: sc }}>{r.v[0]}</span>
+                      <span style={{ ...ctcCell(40), fontSize: 8.5, color: sc }}>{r.v[1]}</span>
+                      <span style={{ ...ctcCell(34), fontSize: 8.5, color: sc }}>{r.v[2]}</span>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '6px 8px', borderRadius: 4, marginTop: 6, marginBottom: 14, background: dark ? '#0A1E44' : '#F3EBDA' }}>
+                <span style={{ fontFamily: J, fontSize: 8, fontWeight: 500, color: dark ? 'rgba(255,255,255,0.6)' : '#001A4A' }}>Team Last Wk</span>
+                <span style={{ fontFamily: CG, fontStyle: 'italic', fontSize: 14, color: gold }}>7.4</span>
+                <span style={{ fontFamily: J, fontSize: 8, fontWeight: 500, color: dark ? 'rgba(255,255,255,0.6)' : '#001A4A' }}>Q Ave</span>
+                <span style={{ fontFamily: CG, fontStyle: 'italic', fontSize: 14, color: gold }}>5.0</span>
+              </div>
+
+              {/* D — Weekly KPIs */}
+              <Header icon="ti-chart-bar" label="Weekly KPIs" />
+              {weekly.map(agent => (
+                <div key={agent.name} style={{ marginBottom: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.1em', color: ink }}>{agent.name}</span>
+                    <span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.1em', padding: '2px 6px', borderRadius: 2, background: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', color: gold }}>{agent.tag}</span>
+                  </div>
+                  {agent.rows.map((row, ri) => (
+                    <div key={row.m} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: ri === agent.rows.length - 1 ? 'none' : `1px solid ${dark ? '#0D1E3A' : '#F5F2EE'}` }}>
+                      <span style={{ fontFamily: J, fontSize: 8, color: muted }}>{row.m}</span>
+                      <span style={{ fontFamily: J, fontSize: 8 }}>
+                        <span style={{ color: row.sc, fontWeight: 600 }}>{row.s}</span>
+                        <span style={{ color: muted }}> / {row.g} · </span>
+                        <span style={{ color: row.yc, fontWeight: 600 }}>{row.y}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+
+              {/* E — Finance Health */}
+              <Header icon="ti-trending-up" label="Finance Health" />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, paddingBottom: 6 }}>
+                <StatCard label="YTD Revenue" value="$398K" bg={cardBg} bord={cardBord} />
+                <StatCard label="Run Rate" value="$2.39M" sub="87% to goal" subColor={green} bg={cardBg} bord={cardBord} />
+                <StatCard label="Margin" value="8%" sub="↓ 7% vs goal" subColor={red} bg={cardBg} bord={cardBord} />
+                <StatCard label="Margin w/ SD" value="27%" sub="↑ 12% vs goal" subColor={green} valColor={green} bg={goldCardBg} bord={cardBord} />
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ─── Bottom Nav ──────────────────────────────────────────────────
     const TABS = [
       { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
@@ -1362,8 +1561,9 @@
             )}
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'calls' && <CallsTab dark={dark} />}
+            {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'more' && <SettingsTab user={user} historySide={historySide} setHistorySide={setHistorySide} />}
-            {!['chat', 'teamchat', 'calls', 'more'].includes(activeTab) && (
+            {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>

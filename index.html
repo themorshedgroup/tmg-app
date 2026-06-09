@@ -544,7 +544,6 @@
             <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.18em', fontWeight: 500, color: pinnedLabel, marginBottom: 8 }}>PINNED</div>
             <div style={{ display: 'flex', gap: 14 }}>
               <PinnedContact photo={TCHAT_PHOTOS.tarek} name="Tarek" online unread={3} />
-              <PinnedContact photo={TCHAT_PHOTOS.cassie} name="Cassie" />
               <PinnedContact photo={TCHAT_PHOTOS.brett} name="Brett" />
               <PinnedContact photo={TCHAT_PHOTOS.alex} name="Alex" />
             </div>
@@ -623,14 +622,14 @@
           {/* Input bar (AI tab only) */}
           {isAI && (
             <div style={{
-              display: 'flex', alignItems: 'center', height: 76,
+              display: 'flex', alignItems: 'center', height: 61,
               borderRadius: 28, overflow: 'hidden',
               background: dark ? '#0A1730' : '#FFFFFF',
               border: `1px solid ${dark ? '#152545' : '#E0D8CC'}`,
             }}>
               {/* Hamburger — AI history */}
               <button onClick={onOpenHistory} title="Chat history" style={{
-                flexShrink: 0, width: 36, height: 76, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, width: 36, height: 61, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer', paddingLeft: 6,
                 color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
               }}>
@@ -638,7 +637,7 @@
               </button>
               {/* Mode tag */}
               <button onClick={onToggleMode} style={{
-                flexShrink: 0, height: 76, display: 'flex', alignItems: 'center', gap: 7,
+                flexShrink: 0, height: 61, display: 'flex', alignItems: 'center', gap: 7,
                 background: 'none', border: 'none', cursor: 'pointer',
                 padding: '0 10px 0 2px',
                 color: dark ? '#C9A45A' : '#AD832F',
@@ -648,7 +647,7 @@
                 {modeLabel}
               </button>
               {/* Divider */}
-              <div style={{ flexShrink: 0, width: 1, height: 30, background: dark ? '#1E3360' : '#E0D8CC' }} />
+              <div style={{ flexShrink: 0, width: 1, height: 24, background: dark ? '#1E3360' : '#E0D8CC' }} />
               {/* Input */}
               <input
                 value={input}
@@ -656,7 +655,7 @@
                 onKeyDown={onKeyDown}
                 placeholder="Message TMG assistant…"
                 style={{
-                  flex: 1, height: 76, minWidth: 0, border: 'none', outline: 'none',
+                  flex: 1, height: 61, minWidth: 0, border: 'none', outline: 'none',
                   background: 'transparent', padding: '0 10px',
                   fontFamily: "'Jost', sans-serif", fontSize: 12,
                   color: dark ? '#FFFFFF' : '#001A4A',
@@ -664,7 +663,7 @@
               />
               {/* Attach file / photo */}
               <button onClick={onOpenAttach} title="Attach file or photo" style={{
-                flexShrink: 0, width: 34, height: 76, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, width: 34, height: 61, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer',
                 color: dark ? 'rgba(255,255,255,0.55)' : C.textSecondary, fontSize: 18,
               }}>
@@ -672,10 +671,10 @@
               </button>
               {/* Send */}
               <button onClick={onSend} disabled={loading} style={{
-                flexShrink: 0, width: 50, height: 50, marginRight: 8, borderRadius: '50%', border: 'none',
+                flexShrink: 0, width: 44, height: 44, marginRight: 8, borderRadius: '50%', border: 'none',
                 background: dark ? '#AD832F' : '#001A4A',
                 color: '#fff', cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 19,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
               }}>
                 <i className="ti ti-arrow-up" />
               </button>

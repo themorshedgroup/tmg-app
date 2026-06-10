@@ -523,6 +523,23 @@ Continue with TMG Gmail
       },
     };
 
+    // SMS follow-up message templates (single row id=1). n8n reads these at send time.
+    const TemplateDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      async load() {
+        const defs = { msg1: '', msg2: '', msg3: '' };
+        if (!this.client()) return defs;
+        const { data, error } = await this.client().from('followup_templates').select('msg1,msg2,msg3').eq('id', 1).maybeSingle();
+        if (error) { console.error('[TemplateDB] load:', error.message); return defs; }
+        return data || defs;
+      },
+      async save(t) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('followup_templates').upsert({ id: 1, msg1: t.msg1 || '', msg2: t.msg2 || '', msg3: t.msg3 || '', updated_at: new Date().toISOString() });
+        if (error) { console.error('[TemplateDB] save:', error.message); throw error; }
+      },
+    };
+
     // ─── AI Chat Tab ─────────────────────────────────────────────────
     function AIChatTab({ user, messages, loading, mode, dark, pills, onPill }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
@@ -1126,6 +1143,38 @@ Continue with TMG Gmail
       );
     }
 
+    // Admin-only SMS follow-up template editor (saves to Supabase; n8n sends from here).
+    function SmsTemplates() {
+      const [t, setT] = useState({ msg1: '', msg2: '', msg3: '' });
+      const [saving, setSaving] = useState(false);
+      useEffect(() => { TemplateDB.load().then(setT); }, []);
+      const inp = { width: '100%', padding: '11px 13px', background: C.surfaceHover, border: `1px solid ${C.border}`, borderRadius: 10, color: C.textPrimary, fontSize: '0.86rem', lineHeight: 1.55, outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box', resize: 'vertical' };
+      const lbl = { fontSize: '0.6rem', fontWeight: 600, color: C.navy, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 7, fontFamily: C.fontSans };
+      const ph = (s) => <span style={{ color: C.gold, fontFamily: 'monospace', fontSize: '0.78rem' }}>{s}</span>;
+      async function save() {
+        setSaving(true);
+        try { await TemplateDB.save(t); } catch (e) { alert('Could not save: ' + (e.message || e)); } finally { setSaving(false); }
+      }
+      const row = (key, label) => (
+        <div style={{ marginBottom: 16 }}>
+          <div style={lbl}>{label}</div>
+          <textarea value={t[key] || ''} onChange={e => setT({ ...t, [key]: e.target.value })} rows={3} style={inp} />
+        </div>
+      );
+      return (
+        <div style={CARD}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8, fontFamily: C.fontSans }}>SMS Follow-Up Templates</div>
+          <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 14, lineHeight: 1.8 }}>
+            Available placeholders: {ph('{{agent_first_name}}')} · {ph('{{address}}')} · {ph('{{my_name}}')} · {ph('{{listing_agent}}')}
+          </div>
+          {row('msg1', 'Follow-up 1 · Day 1')}
+          {row('msg2', 'Follow-up 2 · Day 3')}
+          {row('msg3', 'Follow-up 3 · Day 5')}
+          <button onClick={save} disabled={saving} style={{ width: '100%', padding: 13, marginTop: 2, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.92rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save Templates'}</button>
+        </div>
+      );
+    }
+
     function SettingsTab({ user, profile, historySide, setHistorySide, onOpenBuilder }) {
       const [me, setMe] = useState(profile || null);
       const [allUsers, setAllUsers] = useState([]);
@@ -1231,6 +1280,9 @@ Continue with TMG Gmail
               </div>
             </div>
           )}
+
+          {/* Admin — SMS Follow-Up Templates */}
+          {isAdmin && <SmsTemplates />}
 
           {/* Chat history position */}
           <div style={CARD}>

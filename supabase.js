@@ -26,7 +26,7 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
         options: {
           redirectTo: _cleanUrl,
           scopes: 'https://www.googleapis.com/auth/calendar.readonly',
-          queryParams: { access_type: 'offline', prompt: 'consent' },
+          queryParams: { access_type: 'offline', prompt: 'consent', hd: 'themorshedgroup.com' },
         },
       });
       if (error) {

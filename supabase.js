@@ -23,7 +23,11 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     try {
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
-        options: { redirectTo: _cleanUrl },
+        options: {
+          redirectTo: _cleanUrl,
+          scopes: 'https://www.googleapis.com/auth/calendar.readonly',
+          queryParams: { access_type: 'offline', prompt: 'consent' },
+        },
       });
       if (error) {
         console.error('[SA] signIn error:', error.message);
@@ -75,6 +79,9 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
         const { data, error } = await client.auth.setSession({ access_token: at, refresh_token: rt });
         if (!error && data.session) _state.session = data.session;
       }
+      // Capture the Google refresh token (offline access) so the app can persist it once.
+      const prt = p.get('provider_refresh_token');
+      if (prt) { try { window.SupabaseAuth._googleRefresh = prt; } catch (e) {} }
       window.history.replaceState({}, document.title, _cleanUrl);
     }
     if (!_state.session) {
@@ -84,5 +91,5 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     _notify({ session: _state.session });
   })();
 
-  window.SupabaseAuth = { signInWithGoogle, signOut, getSession, onAuthStateChange, _state, _client: client };
+  window.SupabaseAuth = { signInWithGoogle, signOut, getSession, onAuthStateChange, _state, _client: client, _googleRefresh: null };
 })();

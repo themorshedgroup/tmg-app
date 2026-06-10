@@ -146,6 +146,26 @@
       return data.text || '';
     }
 
+    // ─── Google Calendar (read-only) via edge function ──────────────
+    const CAL_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-calendar';
+    async function callCalendar(payload) {
+      const res = await fetch(CAL_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    }
+    async function fetchGoogleEvents(timeMin, timeMax) {
+      const { ok, data } = await callCalendar({ action: 'list', timeMin, timeMax });
+      if (!ok) { const err = new Error(data.error || 'calendar_error'); err.code = data.error; throw err; }
+      return data.events || [];
+    }
+    function connectGoogleCalendar(refreshToken) {
+      callCalendar({ action: 'connect', refresh_token: refreshToken }).catch(() => {});
+    }
+
     function greeting() {
       const h = new Date().getHours();
       if (h < 12) return 'Good morning';
@@ -1992,21 +2012,35 @@
       const monthLabel = days[3].toLocaleString('en-US', { month: 'long', year: 'numeric' });
       const navWeek = (dir) => setWeekStart(prev => { const x = new Date(prev); x.setDate(prev.getDate() + dir * 7); return x; });
 
-      const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
-      const EVENTS = {};
-      EVENTS[iso(today)] = [
-        { c: dark ? '#C9A45A' : '#001A4A', t: 'Team Standup', time: '9:30 – 10:00 AM' },
-        { c: '#AD832F', t: 'Forest Hill Offer Review', time: '10:30 – 11:30 AM' },
-        { c: dark ? '#5DCAA5' : '#0F6E56', t: 'Lunch — EO Member', time: '12:00 – 12:45 PM' },
-        { c: '#AD832F', t: 'Jinx Ave Showing', time: '2:00 – 3:00 PM' },
-      ];
-      EVENTS[iso(tomorrow)] = [{ c: '#AD832F', t: 'Listing Presentation Prep', time: '11:00 – 11:30 AM' }];
-      const events = EVENTS[selected] || [];
+      const [eventsByDay, setEventsByDay] = useState({});
+      const [calState, setCalState] = useState('loading'); // loading | ready | needs_connect | error
+      const fmtTime = (s) => { try { return new Date(s).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
+      const colorFor = (id) => ({ '1': '#3B82C4', '2': '#0F6E56', '5': '#AD832F', '6': '#C2562B', '11': '#9A3B3B' }[id] || (dark ? '#C9A45A' : '#AD832F'));
+      useEffect(() => {
+        let cancelled = false;
+        setCalState('loading');
+        const tMin = new Date(weekStart);
+        const tMax = new Date(weekStart); tMax.setDate(tMax.getDate() + 7);
+        fetchGoogleEvents(tMin.toISOString(), tMax.toISOString())
+          .then(list => {
+            if (cancelled) return;
+            const map = {};
+            (list || []).forEach(e => {
+              const key = e.allDay ? (e.start || '').slice(0, 10) : iso(new Date(e.start));
+              if (!key) return;
+              const time = e.allDay ? 'All day' : (fmtTime(e.start) + (e.end ? ' – ' + fmtTime(e.end) : ''));
+              (map[key] = map[key] || []).push({ c: colorFor(e.colorId), t: e.title, time });
+            });
+            setEventsByDay(map);
+            setCalState('ready');
+          })
+          .catch(err => { if (!cancelled) setCalState(err.code === 'needs_connect' ? 'needs_connect' : 'error'); });
+        return () => { cancelled = true; };
+      }, [weekStart]);
+      const events = eventsByDay[selected] || [];
 
       const chevCol = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
       const dotCol = dark ? '#C9A45A' : '#AD832F';
-      const seg = (t, k) => <span key={k} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, color: '#fff', textTransform: 'uppercase' }}>{t}</span>;
-      const sepEl = (k) => <span key={k} style={{ fontFamily: J, fontSize: 9, color: 'rgba(255,255,255,0.4)' }}>·</span>;
 
       return (
         <React.Fragment>
@@ -2019,10 +2053,6 @@
             background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
             opacity: vis ? 1 : 0, transition: 'opacity 150ms ease',
           }}>
-            {/* Banner */}
-            <div style={{ background: dark ? '#7F1D1D' : '#9B1C1C', padding: '6px 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-              {seg('Coming Soon', 's1')}{sepEl('p1')}{seg('Calendar', 's2')}{sepEl('p2')}{seg('Q3 2026', 's3')}
-            </div>
             {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 14px 6px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -2040,7 +2070,7 @@
               {days.map((d, i) => {
                 const weekend = i >= 5;
                 const isSel = iso(d) === selected;
-                const hasEv = !!EVENTS[iso(d)];
+                const hasEv = (eventsByDay[iso(d)] || []).length > 0;
                 const labelCol = isSel ? (dark ? '#C9A45A' : '#AD832F') : (weekend ? (dark ? 'rgba(255,255,255,0.15)' : '#D4D0CC') : (dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9'));
                 const numCol = isSel ? '#fff' : (weekend ? (dark ? 'rgba(255,255,255,0.2)' : '#D4D0CC') : (dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B'));
                 return (
@@ -2054,7 +2084,13 @@
             </div>
             {/* Event list */}
             <div style={{ borderTop: `1px solid ${dark ? '#152545' : '#F0EBE3'}`, padding: '6px 12px 10px' }}>
-              {events.length === 0 ? (
+              {calState === 'loading' ? (
+                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>Loading…</div>
+              ) : calState === 'needs_connect' ? (
+                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, lineHeight: 1.7, padding: '12px 8px', color: dark ? 'rgba(255,255,255,0.35)' : '#9A8F7E' }}>Sign out and back in to<br />connect your Google Calendar.</div>
+              ) : calState === 'error' ? (
+                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>Couldn't load calendar.</div>
+              ) : events.length === 0 ? (
                 <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>No events</div>
               ) : events.map((e, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 0', borderBottom: i === events.length - 1 ? 'none' : `1px solid ${dark ? '#152545' : '#F5F2EE'}` }}>
@@ -2594,6 +2630,9 @@
         const profile = await ProfileDB.ensureProfile(session.user);
         // Gate: a profile that exists but isn't active is blocked. No profile (error/not-yet-set-up) → fail open.
         if (profile && profile.status && profile.status !== 'active') { showRejected(); return; }
+        // One-time: persist the Google refresh token captured at sign-in so the calendar can sync.
+        const grt = window.SupabaseAuth._googleRefresh;
+        if (grt) { window.SupabaseAuth._googleRefresh = null; connectGoogleCalendar(grt); }
         root.render(<App user={session.user} profile={profile} />);
         hideOverlay();
       });

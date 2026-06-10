@@ -227,7 +227,7 @@ Continue with TMG Gmail
     }
     async function fetchGoogleEvents(timeMin, timeMax) {
       const { ok, data } = await callCalendar({ action: 'list', timeMin, timeMax });
-      if (!ok) { const err = new Error(data.error || 'calendar_error'); err.code = data.error; throw err; }
+      if (!ok) { const err = new Error(data.error || 'calendar_error'); err.code = data.error; err.detail = data.detail || ''; throw err; }
       return data.events || [];
     }
     function connectGoogleCalendar(refreshToken) {
@@ -2082,6 +2082,7 @@ Continue with TMG Gmail
 
       const [eventsByDay, setEventsByDay] = useState({});
       const [calState, setCalState] = useState('loading'); // loading | ready | needs_connect | error
+      const [calDetail, setCalDetail] = useState('');
       const fmtTime = (s) => { try { return new Date(s).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
       const colorFor = (id) => ({ '1': '#3B82C4', '2': '#0F6E56', '5': '#AD832F', '6': '#C2562B', '11': '#9A3B3B' }[id] || (dark ? '#C9A45A' : '#AD832F'));
       useEffect(() => {
@@ -2102,7 +2103,7 @@ Continue with TMG Gmail
             setEventsByDay(map);
             setCalState('ready');
           })
-          .catch(err => { if (!cancelled) setCalState(err.code === 'needs_connect' ? 'needs_connect' : 'error'); });
+          .catch(err => { if (!cancelled) { setCalState(err.code === 'needs_connect' ? 'needs_connect' : 'error'); setCalDetail(err.detail || ''); } });
         return () => { cancelled = true; };
       }, [weekStart]);
       const events = eventsByDay[selected] || [];
@@ -2155,9 +2156,9 @@ Continue with TMG Gmail
               {calState === 'loading' ? (
                 <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>Loading…</div>
               ) : calState === 'needs_connect' ? (
-                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, lineHeight: 1.7, padding: '12px 8px', color: dark ? 'rgba(255,255,255,0.35)' : '#9A8F7E' }}>Sign out and back in to<br />connect your Google Calendar.</div>
+                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, lineHeight: 1.7, padding: '12px 8px', color: dark ? 'rgba(255,255,255,0.35)' : '#9A8F7E' }}>Sign out and back in to<br />connect your Google Calendar.{calDetail && <span style={{ display: 'block', marginTop: 6, fontSize: 8, color: dark ? 'rgba(255,255,255,0.25)' : '#C4B9A6' }}>{calDetail}</span>}</div>
               ) : calState === 'error' ? (
-                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>Couldn't load calendar.</div>
+                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>Couldn't load calendar.{calDetail && <span style={{ display: 'block', marginTop: 6, fontSize: 8 }}>{calDetail}</span>}</div>
               ) : events.length === 0 ? (
                 <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>No events</div>
               ) : events.map((e, i) => (

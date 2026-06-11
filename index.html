@@ -635,6 +635,18 @@ Continue with TMG Gmail
     // ─── Settings Tab (placeholder for now) ──────────────────────────
     const ACCESS_LABEL = { admin: 'Admin', operations: 'Operations', agent: 'Sales Agent', tc: 'Transaction Coordinator', pending: 'Pending' };
     const STATUS_LABEL = { active: 'Active', pending: 'Pending', disabled: 'Disabled' };
+    // Access is a LIST of roles (Postgres text[]). Helpers are backward-compatible with old single-string values.
+    const toRoles = (a) => (Array.isArray(a) ? a : (a ? [a] : [])).filter(r => r && r !== 'pending');
+    const hasAdmin = (a) => toRoles(a).some(r => r === 'admin' || r === 'operations');
+    const accessLabel = (a) => { const r = toRoles(a); return r.length ? r.map(x => ACCESS_LABEL[x] || x).join(' · ') : 'Pending'; };
+    function allowedTabIds(a) {
+      const roles = toRoles(a);
+      if (!roles.length) return null;                          // no roles → all tabs (fallback)
+      if (roles.some(r => ROLE_TABS[r] === null)) return null; // admin/operations → all tabs
+      const ids = new Set(['more']);
+      roles.forEach(r => (ROLE_TABS[r] || []).forEach(id => ids.add(id)));
+      return Array.from(ids);
+    }
     const CARD = { background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginBottom: 14 };
 
     // Admin-only user-management console (under the More tab). Replaces editing in Supabase.
@@ -654,12 +666,12 @@ Continue with TMG Gmail
         const [title, setTitle] = useState(u.title || '');
         const [reports, setReports] = useState(u.reports_to || '');
         const [assignedTc, setAssignedTc] = useState(u.assigned_tc || '');
-        const [access, setAccess] = useState(u.access || 'pending');
+        const [roles, setRoles] = useState(toRoles(u.access));
         const [status, setStatus] = useState(u.status || 'pending');
         const [saving, setSaving] = useState(false);
         async function save() {
           setSaving(true);
-          try { await ProfileDB.adminUpdate(u.id, { employee_id: emp, title, reports_to: reports || null, assigned_tc: assignedTc || null, access, status }); await refresh(); setOpenId(null); }
+          try { await ProfileDB.adminUpdate(u.id, { employee_id: emp, title, reports_to: reports || null, assigned_tc: assignedTc || null, access: roles, status }); await refresh(); setOpenId(null); }
           catch (e) { alert('Could not save: ' + (e.message || e)); }
           finally { setSaving(false); }
         }
@@ -668,10 +680,10 @@ Continue with TMG Gmail
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               <div><div style={lbl}>Employee ID</div><input value={emp} onChange={e => setEmp(e.target.value)} style={inp} /></div>
               <div><div style={lbl}>Title</div><input value={title} onChange={e => setTitle(e.target.value)} style={inp} /></div>
-              <div><div style={lbl}>Access</div><select value={access} onChange={e => setAccess(e.target.value)} style={inp}>{['admin', 'operations', 'agent', 'tc', 'pending'].map(a => <option key={a} value={a}>{ACCESS_LABEL[a]}</option>)}</select></div>
-              <div><div style={lbl}>Status</div><select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{['active', 'pending', 'disabled'].map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select></div>
+              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Access <span style={{ textTransform: 'none', fontWeight: 400 }}>(one or more)</span></div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{['admin', 'operations', 'agent', 'tc'].map(a => { const on = roles.includes(a); return <button key={a} type="button" onClick={() => setRoles(on ? roles.filter(r => r !== a) : [...roles, a])} style={{ padding: '6px 10px', borderRadius: 8, border: `1px solid ${on ? C.navy : C.border}`, background: on ? C.navy : C.surface, color: on ? '#fff' : C.textSecondary, fontSize: '0.74rem', fontWeight: on ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans }}>{ACCESS_LABEL[a]}</button>; })}</div></div>
+              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Status</div><select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{['active', 'pending', 'disabled'].map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select></div>
               <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Reports to</div><select value={reports} onChange={e => setReports(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => x.id !== u.id).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
-              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Assigned TC</div><select value={assignedTc} onChange={e => setAssignedTc(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => x.access === 'tc').map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
+              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Assigned TC</div><select value={assignedTc} onChange={e => setAssignedTc(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => toRoles(x.access).includes('tc')).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
               <button onClick={save} disabled={saving} style={{ flex: 1, padding: '8px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save'}</button>
@@ -689,7 +701,7 @@ Continue with TMG Gmail
               <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{u.email}</div>
             </div>
             <span style={{ flexShrink: 0, fontSize: '0.58rem', fontWeight: 600, letterSpacing: '0.06em', color: u.status === 'active' ? C.green : (u.status === 'pending' ? C.amber : C.red) }}>{STATUS_LABEL[u.status] || u.status}</span>
-            <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{ACCESS_LABEL[u.access] || u.access || '—'}</span>
+            <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{accessLabel(u.access)}</span>
             <i className={`ti ti-chevron-${openId === u.id ? 'up' : 'down'}`} style={{ fontSize: 14, color: C.textMuted, flexShrink: 0 }} />
           </div>
           {openId === u.id && <Editor u={u} />}
@@ -1211,7 +1223,7 @@ Continue with TMG Gmail
 
       useEffect(() => { ProfileDB.loadAll().then(setAllUsers); }, []);
 
-      const isAdmin = !!(me && (me.access === 'admin' || me.access === 'operations'));
+      const isAdmin = hasAdmin(me && me.access);
       const fullName = ((((me && me.first_name) || '') + ' ' + ((me && me.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || 'User';
       const email = (me && me.email) || (user && user.email) || '';
       const initial = fullName.charAt(0).toUpperCase();
@@ -1261,14 +1273,14 @@ Continue with TMG Gmail
                 <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '1rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{fullName}</div>
                 <div style={{ color: C.textSecondary, fontSize: '0.8rem', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(me && me.title) || email}</div>
               </div>
-              <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{ACCESS_LABEL[me && me.access] || '—'}</span>
+              <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{accessLabel(me && me.access)}</span>
             </div>
             {!editing ? (
               <React.Fragment>
                 {fieldRow('Employee ID', me && me.employee_id)}
                 {fieldRow('Title', me && me.title)}
                 {fieldRow('Reports to', managerName(me && me.reports_to))}
-                {(me && (me.access === 'agent' || me.assigned_tc)) && fieldRow('Assigned TC', managerName(me && me.assigned_tc))}
+                {(me && (toRoles(me.access).includes('agent') || me.assigned_tc)) && fieldRow('Assigned TC', managerName(me && me.assigned_tc))}
                 {fieldRow('Phone', me && me.phone)}
                 {fieldRow('Email', email)}
                 <button onClick={() => { setFirst((me && me.first_name) || ''); setLast((me && me.last_name) || ''); setPhone((me && me.phone) || ''); setEditing(true); }} style={{ width: '100%', padding: 11, marginTop: 12, background: 'none', border: `1px solid ${C.navy}`, borderRadius: 12, color: C.navy, fontSize: '0.9rem', cursor: 'pointer', fontWeight: 500, fontFamily: C.fontSans }}>Edit my info</button>
@@ -2461,9 +2473,9 @@ Continue with TMG Gmail
       const [showCalendar, setShowCalendar] = useState(false);
 
       // Role-based tabs: filter the nav to what this access role may see.
-      const allowedIds = profile ? ROLE_TABS[profile.access] : undefined;
+      const allowedIds = profile ? allowedTabIds(profile.access) : undefined;
       const visibleTabs = Array.isArray(allowedIds) ? TABS.filter(t => allowedIds.includes(t.id)) : TABS;
-      const isAdmin = !!(profile && (profile.access === 'admin' || profile.access === 'operations'));
+      const isAdmin = hasAdmin(profile && profile.access);
       // "More" menu options (extensible — add future screens here).
       const moreItems = [{ id: 'settings', label: 'Settings', icon: 'ti-settings' }].concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
       useEffect(() => {

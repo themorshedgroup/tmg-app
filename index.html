@@ -633,7 +633,8 @@ Continue with TMG Gmail
     }
 
     // ─── Settings Tab (placeholder for now) ──────────────────────────
-    const ACCESS_LABEL = { admin: 'Admin', operations: 'Operations', agent: 'Agent', tc: 'TC', pending: 'Pending' };
+    const ACCESS_LABEL = { admin: 'Admin', operations: 'Operations', agent: 'Agent', tc: 'Transaction Coordinator', pending: 'Pending' };
+    const STATUS_LABEL = { active: 'Active', pending: 'Pending', disabled: 'Disabled' };
     const CARD = { background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginBottom: 14 };
 
     // Admin-only user-management console (under the More tab). Replaces editing in Supabase.
@@ -668,7 +669,7 @@ Continue with TMG Gmail
               <div><div style={lbl}>Employee ID</div><input value={emp} onChange={e => setEmp(e.target.value)} style={inp} /></div>
               <div><div style={lbl}>Title</div><input value={title} onChange={e => setTitle(e.target.value)} style={inp} /></div>
               <div><div style={lbl}>Access</div><select value={access} onChange={e => setAccess(e.target.value)} style={inp}>{['admin', 'operations', 'agent', 'tc', 'pending'].map(a => <option key={a} value={a}>{ACCESS_LABEL[a]}</option>)}</select></div>
-              <div><div style={lbl}>Status</div><select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{['active', 'pending', 'disabled'].map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+              <div><div style={lbl}>Status</div><select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{['active', 'pending', 'disabled'].map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select></div>
               <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Reports to</div><select value={reports} onChange={e => setReports(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => x.id !== u.id).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
               <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Assigned TC</div><select value={assignedTc} onChange={e => setAssignedTc(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => x.access === 'tc').map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
             </div>
@@ -687,7 +688,7 @@ Continue with TMG Gmail
               <div style={{ fontSize: '0.86rem', fontWeight: 600, color: C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{nameOf(u)}</div>
               <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{u.email}</div>
             </div>
-            <span style={{ flexShrink: 0, fontSize: '0.58rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: u.status === 'active' ? C.green : (u.status === 'pending' ? C.amber : C.red) }}>{u.status}</span>
+            <span style={{ flexShrink: 0, fontSize: '0.58rem', fontWeight: 600, letterSpacing: '0.06em', color: u.status === 'active' ? C.green : (u.status === 'pending' ? C.amber : C.red) }}>{STATUS_LABEL[u.status] || u.status}</span>
             <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{ACCESS_LABEL[u.access] || u.access || '—'}</span>
             <i className={`ti ti-chevron-${openId === u.id ? 'up' : 'down'}`} style={{ fontSize: 14, color: C.textMuted, flexShrink: 0 }} />
           </div>

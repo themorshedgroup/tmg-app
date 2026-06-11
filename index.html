@@ -2743,7 +2743,7 @@ Continue with TMG Gmail
           {moreMenuOpen && (
             <React.Fragment>
               <div onClick={() => setMoreMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 51 }} />
-              <div style={{ position: 'fixed', right: 12, bottom: (zoneH + 8) + 'px', zIndex: 52, background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : C.border}`, borderRadius: 12, boxShadow: '0 8px 28px rgba(0,0,0,0.22)', padding: 6, minWidth: 168 }}>
+              <div style={{ position: 'fixed', right: 12, bottom: 'calc(68px + env(safe-area-inset-bottom))', zIndex: 52, background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : C.border}`, borderRadius: 12, boxShadow: '0 8px 28px rgba(0,0,0,0.22)', padding: 6, minWidth: 168 }}>
                 {moreItems.map(it => {
                   const on = activeTab === 'more' && moreView === it.id;
                   return (

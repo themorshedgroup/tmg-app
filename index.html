@@ -1175,7 +1175,29 @@ Continue with TMG Gmail
       );
     }
 
-    function SettingsTab({ user, profile, historySide, setHistorySide, onOpenBuilder }) {
+    // Admin screen (admin/operations) — separate from Settings, opened via the More menu.
+    function AdminTab({ onOpenBuilder }) {
+      return (
+        <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
+          <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Admin</div>
+          <AdminUsers />
+          <AdminUsage />
+          <div style={{ ...CARD, cursor: 'pointer' }} onClick={onOpenBuilder}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+              <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-layout-grid" style={{ fontSize: 18, color: C.gold }} /></div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Work Mode Pills</div>
+                <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Design the work-mode shortcuts and what each one does.</div>
+              </div>
+              <i className="ti ti-chevron-right" style={{ fontSize: 18, color: C.textMuted, flexShrink: 0 }} />
+            </div>
+          </div>
+          <SmsTemplates />
+        </div>
+      );
+    }
+
+    function SettingsTab({ user, profile, historySide, setHistorySide, dark, setDark }) {
       const [me, setMe] = useState(profile || null);
       const [allUsers, setAllUsers] = useState([]);
       const [editing, setEditing] = useState(false);
@@ -1261,32 +1283,14 @@ Continue with TMG Gmail
             )}
           </div>
 
-          {/* Admin — Manage Users */}
-          {isAdmin && <AdminUsers />}
-
-          {/* Admin — AI Usage & Cost */}
-          {isAdmin && <AdminUsage />}
-
-          {/* Admin — Work Mode Pills builder */}
-          {isAdmin && (
-            <div style={{ ...CARD, cursor: 'pointer' }} onClick={onOpenBuilder}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-                <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-layout-grid" style={{ fontSize: 18, color: C.gold }} /></div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Work Mode Pills</div>
-                  <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Design the work-mode shortcuts and what each one does.</div>
-                </div>
-                <i className="ti ti-chevron-right" style={{ fontSize: 18, color: C.textMuted, flexShrink: 0 }} />
-              </div>
-            </div>
-          )}
-
-          {/* Admin — SMS Follow-Up Templates */}
-          {isAdmin && <SmsTemplates />}
-
-          {/* Chat history position */}
+          {/* Appearance + Chat history */}
           <div style={CARD}>
-            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6, fontFamily: C.fontSans }}>Chat History</div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 6 }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Chat History</div>
+              <button onClick={() => setDark(d => !d)} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.surface, color: C.textSecondary, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.78rem', fontWeight: 500, flexShrink: 0 }}>
+                <i className={`ti ${dark ? 'ti-sun' : 'ti-moon'}`} style={{ fontSize: 15 }} />{dark ? 'Light' : 'Dark'}
+              </button>
+            </div>
             <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 12, lineHeight: 1.5 }}>Which side the chat history panel opens from.</div>
             <div style={{ display: 'flex', gap: 8 }}>
               {sideBtn('left', 'Left', 'ti-layout-sidebar-left-expand')}
@@ -2107,8 +2111,6 @@ Continue with TMG Gmail
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-            {iconBtn(onToggleDark, dark ? 'ti ti-sun' : 'ti ti-moon', dark ? 'Light mode' : 'Dark mode')}
-            <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 4px' }} />
             {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar', calendarOpen)}
           </div>
         </div>
@@ -2457,6 +2459,9 @@ Continue with TMG Gmail
       // Role-based tabs: filter the nav to what this access role may see.
       const allowedIds = profile ? ROLE_TABS[profile.access] : undefined;
       const visibleTabs = Array.isArray(allowedIds) ? TABS.filter(t => allowedIds.includes(t.id)) : TABS;
+      const isAdmin = !!(profile && (profile.access === 'admin' || profile.access === 'operations'));
+      // "More" menu options (extensible — add future screens here).
+      const moreItems = [{ id: 'settings', label: 'Settings', icon: 'ti-settings' }].concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
       useEffect(() => {
         if (!visibleTabs.some(t => t.id === activeTab)) setActiveTab((visibleTabs[0] || { id: 'more' }).id);
       }, [profile]);
@@ -2479,6 +2484,10 @@ Continue with TMG Gmail
       const [pills, setPills] = useState(null);
       const [builderOpen, setBuilderOpen] = useState(false);
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
+
+      // "More" menu: which screen (settings | admin) + dropdown open state.
+      const [moreView, setMoreView] = useState('settings');
+      const [moreMenuOpen, setMoreMenuOpen] = useState(false);
 
       const zoneRef = useRef(null);
       const fileInputRef = useRef(null);
@@ -2691,7 +2700,9 @@ Continue with TMG Gmail
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'calls' && <CallsTab dark={dark} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
-            {activeTab === 'more' && <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} onOpenBuilder={() => setBuilderOpen(true)} />}
+            {activeTab === 'more' && (moreView === 'admin' && isAdmin
+              ? <AdminTab onOpenBuilder={() => setBuilderOpen(true)} />
+              : <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} />)}
             {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
@@ -2707,7 +2718,15 @@ Continue with TMG Gmail
           <BottomZone
             active={activeTab}
             tabs={visibleTabs}
-            onChange={(t) => { setActiveTab(t); setDrawerOpen(false); }}
+            onChange={(t) => {
+              setDrawerOpen(false);
+              if (t === 'more') {
+                if (moreItems.length <= 1) { setMoreView('settings'); setActiveTab('more'); }
+                else setMoreMenuOpen(o => !o);
+                return;
+              }
+              setMoreMenuOpen(false); setActiveTab(t);
+            }}
             dark={dark}
             mode={mode}
             onToggleMode={toggleMode}
@@ -2721,6 +2740,21 @@ Continue with TMG Gmail
             loading={loading}
             zoneRef={zoneRef}
           />
+          {moreMenuOpen && (
+            <React.Fragment>
+              <div onClick={() => setMoreMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 45 }} />
+              <div style={{ position: 'fixed', right: 12, bottom: 'calc(78px + env(safe-area-inset-bottom))', zIndex: 46, background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : C.border}`, borderRadius: 12, boxShadow: '0 8px 28px rgba(0,0,0,0.22)', padding: 6, minWidth: 168 }}>
+                {moreItems.map(it => {
+                  const on = activeTab === 'more' && moreView === it.id;
+                  return (
+                    <button key={it.id} onClick={() => { setMoreView(it.id); setActiveTab('more'); setMoreMenuOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 11, width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: 'none', background: on ? (dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA') : 'none', cursor: 'pointer', color: dark ? '#fff' : C.navy, fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 500 }}>
+                      <i className={`ti ${it.icon}`} style={{ fontSize: 18, color: dark ? C.goldSoft : C.gold }} />{it.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </React.Fragment>
+          )}
           {builderOpen && <WorkModeBuilder dark={dark} onClose={() => setBuilderOpen(false)} onSaved={refreshPills} />}
           {activePill && activePill.kind === 'form' && (
             <FormSheet dark={dark} pill={activePill.pill} onClose={() => setActivePill(null)} onSubmit={(vals) => { const text = composeFromTemplate(activePill.pill.config.template, vals, activePill.pill.config.fields); setActivePill(null); runSend(text, { type: 'work' }); }} />

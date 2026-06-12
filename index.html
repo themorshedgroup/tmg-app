@@ -523,23 +523,6 @@ Continue with TMG Gmail
       },
     };
 
-    // SMS follow-up message templates (single row id=1). n8n reads these at send time.
-    const TemplateDB = {
-      client() { return window.SupabaseAuth?._client || null; },
-      async load() {
-        const defs = { msg1: '', msg2: '', msg3: '' };
-        if (!this.client()) return defs;
-        const { data, error } = await this.client().from('followup_templates').select('msg1,msg2,msg3').eq('id', 1).maybeSingle();
-        if (error) { console.error('[TemplateDB] load:', error.message); return defs; }
-        return data || defs;
-      },
-      async save(t) {
-        if (!this.client()) return;
-        const { error } = await this.client().from('followup_templates').upsert({ id: 1, msg1: t.msg1 || '', msg2: t.msg2 || '', msg3: t.msg3 || '', updated_at: new Date().toISOString() });
-        if (error) { console.error('[TemplateDB] save:', error.message); throw error; }
-      },
-    };
-
     // ─── AI Chat Tab ─────────────────────────────────────────────────
     function AIChatTab({ user, messages, loading, mode, dark, pills, onPill }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
@@ -1172,38 +1155,6 @@ Continue with TMG Gmail
       );
     }
 
-    // Admin-only SMS follow-up template editor (saves to Supabase; n8n sends from here).
-    function SmsTemplates() {
-      const [t, setT] = useState({ msg1: '', msg2: '', msg3: '' });
-      const [saving, setSaving] = useState(false);
-      useEffect(() => { TemplateDB.load().then(setT); }, []);
-      const inp = { width: '100%', padding: '11px 13px', background: C.surfaceHover, border: `1px solid ${C.border}`, borderRadius: 10, color: C.textPrimary, fontSize: '0.86rem', lineHeight: 1.55, outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box', resize: 'vertical' };
-      const lbl = { fontSize: '0.6rem', fontWeight: 600, color: C.navy, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 7, fontFamily: C.fontSans };
-      const ph = (s) => <span style={{ color: C.gold, fontFamily: 'monospace', fontSize: '0.78rem' }}>{s}</span>;
-      async function save() {
-        setSaving(true);
-        try { await TemplateDB.save(t); } catch (e) { alert('Could not save: ' + (e.message || e)); } finally { setSaving(false); }
-      }
-      const row = (key, label) => (
-        <div style={{ marginBottom: 16 }}>
-          <div style={lbl}>{label}</div>
-          <textarea value={t[key] || ''} onChange={e => setT({ ...t, [key]: e.target.value })} rows={3} style={inp} />
-        </div>
-      );
-      return (
-        <div style={CARD}>
-          <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8, fontFamily: C.fontSans }}>SMS Follow-Up Templates</div>
-          <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 14, lineHeight: 1.8 }}>
-            Available placeholders: {ph('{{agent_first_name}}')} · {ph('{{address}}')} · {ph('{{my_name}}')} · {ph('{{listing_agent}}')}
-          </div>
-          {row('msg1', 'Follow-up 1 · Day 1')}
-          {row('msg2', 'Follow-up 2 · Day 3')}
-          {row('msg3', 'Follow-up 3 · Day 5')}
-          <button onClick={save} disabled={saving} style={{ width: '100%', padding: 13, marginTop: 2, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.92rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save Templates'}</button>
-        </div>
-      );
-    }
-
     // Admin screen (admin/operations) — separate from Settings, opened via the More menu.
     function AdminTab({ onOpenBuilder }) {
       return (
@@ -1221,7 +1172,6 @@ Continue with TMG Gmail
               <i className="ti ti-chevron-right" style={{ fontSize: 18, color: C.textMuted, flexShrink: 0 }} />
             </div>
           </div>
-          <SmsTemplates />
         </div>
       );
     }
@@ -1356,6 +1306,243 @@ Continue with TMG Gmail
     }
 
     // ─── Shared Drives (opened from the More menu) ───────────────────
+    // ─── Company Directory + Profile (opened from the More menu) ─────
+    // HYBRID source: the directory reads LIVE from the Supabase `profiles`
+    // table (ProfileDB.loadAll) and merges it OVER this curated seed.
+    //  • Curated photo / title / badge win for display.
+    //  • Live data fills the per-person FIELDS (employee ID, reports-to,
+    //    phone, email, location, timezone, pets) automatically once a
+    //    person signs up or is set in Manage Users — no code edits needed.
+    //  • People not yet signed up still show from this seed.
+    //  • New sign-ups not in the seed are appended (active accounts only).
+    // The website headshots are the curated `photo`; clear a person's
+    // `photo` to fall back to their account avatar. See buildRoster() below.
+    const TEAM = [
+      { id: 'tarek', name: 'Tarek Morshed', title: 'Chief Realty Officer',
+        photo: 'https://themorshedgroup.com/wp-content/uploads/2023/01/tarek-morshed-headshot.jpg',
+        badge: { label: 'Principal', lightBg: '#001A4A', lightFg: '#C9A45A', darkBg: '#C9A45A', darkFg: '#001A4A' },
+        employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
+      { id: 'symon', name: 'Symon Yongco', title: 'Operations Manager',
+        photo: 'https://themorshedgroup.com/wp-content/uploads/2025/01/Hidenori-Symon-Yongco-headshot.jpg',
+        badge: { label: 'Admin', lightBg: '#F3EBDA', lightFg: '#AD832F', darkBg: 'rgba(173,131,47,0.2)', darkFg: '#C9A45A' },
+        employeeId: 'TMG-03', reportsTo: '', phone: '(512) 643-6688', email: 'manager@themorshedgroup.com', location: 'Manila, Philippines', timezone: 'Asia/Manila', pets: '🐶 Dog' },
+      { id: 'brad', name: 'Brad Baker', title: 'Real Estate Professional',
+        photo: 'https://themorshedgroup.com/wp-content/uploads/2023/01/Brad-Baker-headshot-1.jpg',
+        badge: null, employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
+      { id: 'cassandra', name: 'Cassandra Clemons', title: 'Real Estate Professional',
+        photo: 'https://themorshedgroup.com/wp-content/uploads/2025/08/Cassandra-Cassie-Clemons-headshot.jpg',
+        badge: null, employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
+      { id: 'brett', name: 'Brett Silverman', title: 'Commercial Advisor',
+        photo: 'https://themorshedgroup.com/wp-content/uploads/2025/09/Brett-Silverman-headshot.jpg',
+        badge: null, employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
+      { id: 'kyle', name: 'Kyle Baird', title: 'Real Estate Professional',
+        photo: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Kyle-Baird-headshot.jpg',
+        badge: null, employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
+      { id: 'alexandra', name: 'Alexandra Machado', title: 'Transaction Coordinator',
+        photo: 'https://themorshedgroup.com/wp-content/uploads/2025/04/Alexandra-Machado-headshot.jpg',
+        badge: null, employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
+      { id: 'luciana', name: 'Luciana Pilco', title: 'Executive Assistant',
+        photo: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Luciana-Pilco-headshot.jpg',
+        badge: null, employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
+    ];
+
+    // Avatar with an initials fallback when no photo/account-avatar exists.
+    function Avatar({ photo, name, size }) {
+      if (photo) return <img src={photo} alt={name} style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />;
+      return <div style={{ width: size, height: size, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.navy, color: C.goldSoft, fontFamily: "'Jost', sans-serif", fontWeight: 600, fontSize: Math.round(size * 0.4) }}>{(name || '?').trim().charAt(0).toUpperCase()}</div>;
+    }
+
+    // Merge live Supabase profiles OVER the curated TEAM seed (see note above).
+    function buildRoster(profiles) {
+      profiles = profiles || [];
+      const fullName = (p) => (((p.first_name || '') + ' ' + (p.last_name || '')).trim());
+      const petsText = (v) => Array.isArray(v) ? v.map(petLabel).join('  ') : (v || '');
+      const locationText = (p) => {
+        if (!p) return '';
+        const c = COUNTRIES.find(x => x.c === p.country);
+        const cn = c ? c.n : (p.country || '');
+        const city = p.timezone ? tzCity(p.timezone) : '';
+        return [city, cn].filter(Boolean).join(', ');
+      };
+      const byId = {}, byName = {}, byEmail = {};
+      profiles.forEach(p => {
+        byId[p.id] = p;
+        const nm = fullName(p).toLowerCase(); if (nm) byName[nm] = p;
+        if (p.email) byEmail[p.email.toLowerCase()] = p;
+      });
+      const reportsName = (id) => { const m = id ? byId[id] : null; return m ? (fullName(m) || m.email || '') : ''; };
+      const used = new Set();
+
+      // Curated seed (fixed order), each enriched by its matching live profile.
+      const seeded = TEAM.map(s => {
+        const live = (s.email && byEmail[s.email.toLowerCase()]) || byName[s.name.toLowerCase()] || null;
+        if (live) used.add(live.id);
+        return {
+          id: s.id, name: s.name,
+          title: s.title || (live && live.title) || '',
+          photo: s.photo || (live && live.avatar_url) || '',
+          badge: s.badge,
+          employeeId: (live && live.employee_id) || s.employeeId || '',
+          reportsTo: (live && reportsName(live.reports_to)) || s.reportsTo || '',
+          phone: (live && live.phone) || s.phone || '',
+          email: (live && live.email) || s.email || '',
+          location: (live && locationText(live)) || s.location || '',
+          timezone: (live && live.timezone) || s.timezone || '',
+          pets: (live && live.pets && live.pets.length ? petsText(live.pets) : '') || s.pets || '',
+        };
+      });
+
+      // New sign-ups not already in the curated seed (active accounts only).
+      const extras = profiles
+        .filter(p => !used.has(p.id) && p.status === 'active' && (fullName(p) || p.email))
+        .map(p => ({
+          id: p.id, name: fullName(p) || p.email,
+          title: p.title || '',
+          photo: p.avatar_url || '',
+          badge: hasAdmin(p.access) ? { label: 'Admin', lightBg: '#F3EBDA', lightFg: '#AD832F', darkBg: 'rgba(173,131,47,0.2)', darkFg: '#C9A45A' } : null,
+          employeeId: p.employee_id || '',
+          reportsTo: reportsName(p.reports_to),
+          phone: p.phone || '',
+          email: p.email || '',
+          location: locationText(p),
+          timezone: p.timezone || '',
+          pets: petsText(p.pets),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      return seeded.concat(extras);
+    }
+
+    function ProfileView({ person, dark, onBack }) {
+      const J = "'Jost', sans-serif";
+      const p = person;
+      const ink   = dark ? '#fff' : '#001A4A';
+      const role  = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+      const keyC  = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+      const valC  = dark ? '#fff' : '#001A4A';
+      const muted = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+      const bord  = dark ? '#0D1E3A' : '#F0EBE3';
+      const rows = [
+        ['Employee ID', p.employeeId],
+        ['Title', p.title],
+        ['Reports to', p.reportsTo],
+        ['Phone', p.phone],
+        ['Email', p.email],
+        ['Location', p.location],
+        ['Local time', p.timezone ? localTimeIn(p.timezone) : ''],
+        ['Pets', p.pets],
+      ];
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {/* Header */}
+          <div style={{ padding: '11px 14px 0', display: 'flex', alignItems: 'center', gap: 9 }}>
+            <button onClick={onBack} aria-label="Back to directory" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: ink }}>
+              <i className="ti ti-chevron-left" style={{ fontSize: 18 }} />
+            </button>
+            <span style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: ink }}>Directory</span>
+          </div>
+          {/* Profile header */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 13, padding: '16px 16px 14px' }}>
+            <Avatar photo={p.photo} name={p.name} size={60} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, lineHeight: 1.1, color: ink }}>{p.name}</div>
+              <div style={{ fontFamily: J, fontSize: 10, marginTop: 3, color: role }}>{p.title}</div>
+            </div>
+            {p.badge && <span style={{ flexShrink: 0, fontFamily: J, fontSize: 7, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', padding: '3px 9px', borderRadius: 11, background: dark ? p.badge.darkBg : p.badge.lightBg, color: dark ? p.badge.darkFg : p.badge.lightFg }}>{p.badge.label}</span>}
+          </div>
+          {/* Field rows */}
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            {rows.map((r, idx) => {
+              const empty = !r[1];
+              const isEmail = r[0] === 'Email';
+              return (
+                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '11px 16px', borderBottom: `1px solid ${bord}`, gap: 12 }}>
+                  <span style={{ fontFamily: J, fontSize: 10, color: keyC, flexShrink: 0 }}>{r[0]}</span>
+                  <span style={{ fontFamily: J, fontSize: isEmail ? 8.5 : 10, fontWeight: 600, textAlign: 'right', color: empty ? muted : valC, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{empty ? '—' : r[1]}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    function CompanyDirectory({ dark, onBack }) {
+      const J = "'Jost', sans-serif";
+      const [query, setQuery] = useState('');
+      const [profiles, setProfiles] = useState([]);
+      const [selId, setSelId] = useState(null);
+      const [anim, setAnim] = useState(false);
+
+      useEffect(() => { ProfileDB.loadAll().then(setProfiles); }, []);
+
+      const open = (p) => { setSelId(p.id); setAnim(false); requestAnimationFrame(() => requestAnimationFrame(() => setAnim(true))); };
+      const close = () => { setAnim(false); setTimeout(() => setSelId(null), 220); };
+
+      const roster = buildRoster(profiles);
+      const sel = selId ? roster.find(p => p.id === selId) : null;
+      const q = query.trim().toLowerCase();
+      const shown = roster.filter(p => !q || p.name.toLowerCase().indexOf(q) > -1);
+
+      const titleC   = dark ? '#fff' : '#001A4A';
+      const subC     = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const backC    = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const searchBg = dark ? '#0A1730' : '#F0EBE3';
+      const searchFg = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const sectionC = dark ? '#C9A45A' : '#AD832F';
+      const bord     = dark ? '#0D1E3A' : '#F0EBE3';
+      const nameC    = dark ? '#fff' : '#001A4A';
+      const roleC    = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+      const chevC    = dark ? 'rgba(255,255,255,0.25)' : '#D4D0CC';
+
+      return (
+        <div style={{ height: '100%', position: 'relative', overflow: 'hidden' }}>
+          <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+            {/* Header */}
+            <div style={{ padding: '11px 14px 7px', display: 'flex', alignItems: 'center', gap: 9 }}>
+              <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: backC }}>
+                <i className="ti ti-chevron-left" style={{ fontSize: 16 }} />
+              </button>
+              <div>
+                <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, color: titleC }}>Company Directory</div>
+                <div style={{ fontFamily: J, fontSize: 8, marginTop: 1, color: subC }}>{roster.length} team members</div>
+              </div>
+            </div>
+            {/* Search */}
+            <div style={{ margin: '0 14px 10px', borderRadius: 11, padding: '8px 11px', display: 'flex', alignItems: 'center', gap: 7, background: searchBg }}>
+              <i className="ti ti-search" style={{ fontSize: 13, color: searchFg }} />
+              <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search team..." style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 9, color: searchFg }} />
+            </div>
+            {/* Section label */}
+            <div style={{ padding: '4px 14px 6px', display: 'flex', alignItems: 'center', gap: 5 }}>
+              <i className="ti ti-users" style={{ fontSize: 10, color: sectionC }} />
+              <span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.18em', fontWeight: 600, textTransform: 'uppercase', color: sectionC }}>The A Team</span>
+            </div>
+            {/* Person list */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              {shown.map(p => (
+                <div key={p.id} onClick={() => open(p)} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 14px', borderBottom: `1px solid ${bord}`, cursor: 'pointer' }}>
+                  <Avatar photo={p.photo} name={p.name} size={42} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: nameC, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+                    <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.04em', color: roleC, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.title}</div>
+                  </div>
+                  {p.badge && <span style={{ flexShrink: 0, fontFamily: J, fontSize: 6, letterSpacing: '0.1em', fontWeight: 600, textTransform: 'uppercase', padding: '2px 6px', borderRadius: 8, background: dark ? p.badge.darkBg : p.badge.lightBg, color: dark ? p.badge.darkFg : p.badge.lightFg }}>{p.badge.label}</span>}
+                  <i className="ti ti-chevron-right" style={{ fontSize: 14, color: chevC, flexShrink: 0 }} />
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Profile slide-over */}
+          {sel && (
+            <div style={{ position: 'absolute', inset: 0, transform: anim ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 220ms ease', background: dark ? '#000D26' : '#FCFBF8' }}>
+              <ProfileView person={sel} dark={dark} onBack={close} />
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function SharedDrivesTab({ dark, onBack }) {
       const J = "'Jost', sans-serif";
       const [query, setQuery] = useState('');
@@ -2598,7 +2785,7 @@ Continue with TMG Gmail
       const visibleTabs = Array.isArray(allowedIds) ? TABS.filter(t => allowedIds.includes(t.id)) : TABS;
       const isAdmin = hasAdmin(profile && profile.access);
       // "More" menu options (extensible — add future screens here).
-      const moreItems = [{ id: 'settings', label: 'Settings', icon: 'ti-settings' }, { id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }].concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
+      const moreItems = [{ id: 'settings', label: 'Settings', icon: 'ti-settings' }, { id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }, { id: 'directory', label: 'Company Directory', icon: 'ti-users' }].concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
       useEffect(() => {
         if (!visibleTabs.some(t => t.id === activeTab)) setActiveTab((visibleTabs[0] || { id: 'more' }).id);
       }, [profile]);
@@ -2840,6 +3027,7 @@ Continue with TMG Gmail
             {activeTab === 'more' && (
               moreView === 'admin' && isAdmin ? <AdminTab onOpenBuilder={() => setBuilderOpen(true)} />
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
+              : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} />)}
             {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />

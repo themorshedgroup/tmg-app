@@ -942,11 +942,13 @@
 
       return (
         <div style={{ padding: '20px 16px 100px' }}>
-          {/* Greeting */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: '2.2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>Hi, {firstName}</div>
-            <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 4, letterSpacing: '0.16em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Showing Feedback Follow-Up App</div>
-          </div>
+          {/* Greeting — hidden when embedded in TMG (the app name lives in the TMG header row) */}
+          {!EMBED && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: '2.2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>Hi, {firstName}</div>
+              <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 4, letterSpacing: '0.16em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Showing Feedback Follow-Up App</div>
+            </div>
+          )}
 
           {properties.map(p => (
             <PropertyCard key={p.id} property={p} allShowings={liveShowings} user={user} onArchive={onArchive} />
@@ -1617,7 +1619,6 @@
       const [activeTab,          setActiveTab]          = useState('overview');
       const [showAddModal,       setShowAddModal]       = useState(false);
       const [showAddPropModal,   setShowAddPropModal]   = useState(false);
-      const [fabOpen,            setFabOpen]            = useState(false);
       const [liveShowings,       setLiveShowings]       = useState([]);
       const [liveProperties,     setLiveProperties]     = useState(PROPERTIES);
       const [dark, setDark] = useState(() => EMBED_THEME ? EMBED_THEME === 'dark' : localStorage.getItem('sffu-theme') === 'dark');
@@ -1632,6 +1633,19 @@
         document.body.classList.toggle('dark', dark);
         localStorage.setItem('sffu-theme', dark ? 'dark' : 'light');
       }, [dark]);
+
+      // When embedded in TMG, the header-row buttons drive these actions via postMessage.
+      useEffect(() => {
+        if (!EMBED) return;
+        const onMsg = (e) => {
+          if (e.origin !== location.origin || !e.data || e.data.tmg !== 'sffu') return;
+          if (e.data.action === 'add-property') setShowAddPropModal(true);
+          else if (e.data.action === 'add-showing') setShowAddModal(true);
+          else if (e.data.action === 'toggle-settings') setActiveTab(t => t === 'settings' ? 'overview' : 'settings');
+        };
+        window.addEventListener('message', onMsg);
+        return () => window.removeEventListener('message', onMsg);
+      }, []);
 
       function handleShowingAdded(newShowing) {
         setLiveShowings(prev => [newShowing, ...prev]);
@@ -1660,19 +1674,7 @@
             {activeTab === 'overview' && <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} onArchive={handlePropertyArchived} />}
             {activeTab === 'settings' && <SettingsTab user={user} />}
           </div>
-          <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />
-          {/* Embedded: the add actions move here since SFFU's own top bar is hidden */}
-          {EMBED && (
-            <div style={{ position: 'fixed', right: 18, bottom: 'calc(82px + env(safe-area-inset-bottom))', zIndex: 60, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 10 }}>
-              {fabOpen && (
-                <React.Fragment>
-                  <button onClick={() => { setShowAddPropModal(true); setFabOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 22, border: 'none', cursor: 'pointer', background: dark ? '#0A1730' : '#FFFFFF', color: dark ? '#fff' : '#001A4A', boxShadow: '0 4px 16px rgba(0,0,0,0.22)', fontFamily: "'Jost', sans-serif", fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}><i className="ti ti-home-plus" style={{ fontSize: 16, color: '#AD832F' }} />Add Property</button>
-                  <button onClick={() => { setShowAddModal(true); setFabOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 22, border: 'none', cursor: 'pointer', background: dark ? '#0A1730' : '#FFFFFF', color: dark ? '#fff' : '#001A4A', boxShadow: '0 4px 16px rgba(0,0,0,0.22)', fontFamily: "'Jost', sans-serif", fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}><i className="ti ti-calendar-plus" style={{ fontSize: 16, color: '#AD832F' }} />Add Showing</button>
-                </React.Fragment>
-              )}
-              <button onClick={() => setFabOpen(o => !o)} aria-label="Add" style={{ width: 52, height: 52, borderRadius: '50%', border: 'none', cursor: 'pointer', background: '#AD832F', color: '#fff', boxShadow: '0 6px 20px rgba(173,131,47,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'transform 150ms ease', transform: fabOpen ? 'rotate(45deg)' : 'none' }}><i className="ti ti-plus" style={{ fontSize: 24 }} /></button>
-            </div>
-          )}
+          {!EMBED && <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />}
           {showAddPropModal && (
             <AddPropertyModal
               onClose={() => setShowAddPropModal(false)}

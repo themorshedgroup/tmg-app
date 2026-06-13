@@ -1700,21 +1700,31 @@ Continue with TMG Gmail
     }
 
     // Embeds the standalone SFFU app (same origin + same Supabase login) as a TMG view.
-    // SFFU keeps its own settings; ?embed=1 hides SFFU's own top bar; theme is passed through.
+    // The header row drives SFFU's actions via postMessage; SFFU keeps its own settings.
     function SffuFrame({ dark, onBack }) {
       const J = "'Jost', sans-serif";
+      const frameRef = useRef(null);
       const src = 'sffu/index.html?embed=1&theme=' + (dark ? 'dark' : 'light');
       const ink = dark ? '#fff' : '#001A4A';
+      const send = (action) => { try { const w = frameRef.current && frameRef.current.contentWindow; if (w) w.postMessage({ tmg: 'sffu', action }, location.origin); } catch (e) {} };
+      const actBtn = (action, icon, label) => (
+        <button onClick={() => send(action)} title={label} aria-label={label} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '5px 6px', color: dark ? '#C9A45A' : '#AD832F', fontSize: 19, lineHeight: 1, display: 'flex', alignItems: 'center' }}>
+          <i className={`ti ${icon}`} />
+        </button>
+      );
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: dark ? '#000D26' : '#FCFBF8' }}>
-          {/* Slim TMG header so you can get back to the More menu */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: `1px solid ${dark ? '#0D1E3A' : '#E4DFD4'}`, flexShrink: 0 }}>
-            <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: ink }}>
+          {/* Header row: back · app name · SFFU actions */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 8px 7px 12px', borderBottom: `1px solid ${dark ? '#0D1E3A' : '#E4DFD4'}`, flexShrink: 0 }}>
+            <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: ink, flexShrink: 0 }}>
               <i className="ti ti-chevron-left" style={{ fontSize: 20 }} />
             </button>
-            <span style={{ fontFamily: J, fontSize: 14, fontWeight: 600, letterSpacing: '0.02em', color: ink }}>SFFU</span>
+            <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 13, fontWeight: 600, letterSpacing: '0.02em', color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Showing Feedback Follow-Up</span>
+            {actBtn('add-property', 'ti-home-plus', 'Add Property')}
+            {actBtn('add-showing', 'ti-calendar-plus', 'Add Showing')}
+            {actBtn('toggle-settings', 'ti-settings', 'Settings')}
           </div>
-          <iframe src={src} title="SFFU" style={{ flex: 1, width: '100%', border: 'none', display: 'block' }} />
+          <iframe ref={frameRef} src={src} title="SFFU" style={{ flex: 1, width: '100%', border: 'none', display: 'block' }} />
         </div>
       );
     }
@@ -3247,7 +3257,7 @@ Continue with TMG Gmail
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); }} tasksOpen={showTasks} />
           {showCalendar && <CalendarPopover dark={dark} onClose={() => setShowCalendar(false)} />}
           {showTasks && <TasksPopover dark={dark} onClose={() => setShowTasks(false)} />}
-          <div style={{ flex: 1, minHeight: 0, paddingBottom: (activeTab === 'more' && moreView === 'sffu') ? 0 : zoneH }}>
+          <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>
                 {/* Chat stays full width behind; history overlaps it at 50% */}
@@ -3288,7 +3298,7 @@ Continue with TMG Gmail
             style={{ display: 'none' }}
             onChange={e => { onSelectFiles(e.target.files); e.target.value = ''; }}
           />
-          {!(activeTab === 'more' && moreView === 'sffu') && <BottomZone
+          <BottomZone
             active={activeTab}
             tabs={visibleTabs}
             onChange={(t) => {
@@ -3312,7 +3322,7 @@ Continue with TMG Gmail
             onSend={send}
             loading={loading}
             zoneRef={zoneRef}
-          />}
+          />
           {moreMenuOpen && (
             <React.Fragment>
               <div onClick={() => setMoreMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 51 }} />

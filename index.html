@@ -367,13 +367,36 @@ Continue with TMG Gmail
     };
 
     // ─── Profiles / access ───────────────────────────────────────────
-    // access → allowed bottom-nav tab ids. null = all tabs. 'more' is always allowed.
-    const ROLE_TABS = {
-      admin:      null,
-      operations: null,
-      agent:      ['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'],
-      tc:         ['chat', 'teamchat', 'more'],
+    // Per-tool access: which configurable roles can open each tool/app.
+    // Admin & Operations are always on. Editable in Admin → Tab Access,
+    // persisted in the app_access table (see app-access.sql).
+    const ACCESS_APPS = [
+      { id: 'chat',      label: 'AI Chat',           icon: 'ti-sparkles' },
+      { id: 'teamchat',  label: 'Team Chat',         icon: 'ti-message' },
+      { id: 'calls',     label: 'Calls',             icon: 'ti-phone' },
+      { id: 'kpis',      label: 'KPIs',              icon: 'ti-chart-bar' },
+      { id: 'deals',     label: 'Deals',             icon: 'ti-currency-dollar' },
+      { id: 'drives',    label: 'Shared Drives',     icon: 'ti-folders' },
+      { id: 'directory', label: 'Company Directory', icon: 'ti-users' },
+    ];
+    const ACCESS_ROLES = [
+      { id: 'agent', label: 'Sales Agent' },
+      { id: 'tc',    label: 'Transaction Coordinator' },
+    ];
+    const DEFAULT_ACCESS = {
+      chat: ['agent', 'tc'], teamchat: ['agent', 'tc'],
+      calls: ['agent'], kpis: ['agent'], deals: ['agent'],
+      drives: ['agent', 'tc'], directory: ['agent', 'tc'],
     };
+    // Fill any missing/invalid apps with defaults; keep only known roles.
+    function normalizeAccess(cfg) {
+      const out = {};
+      ACCESS_APPS.forEach(a => {
+        const v = (cfg && Array.isArray(cfg[a.id])) ? cfg[a.id] : DEFAULT_ACCESS[a.id];
+        out[a.id] = (v || []).filter(r => r === 'agent' || r === 'tc');
+      });
+      return out;
+    }
 
     const ProfileDB = {
       client() { return window.SupabaseAuth?._client || null; },
@@ -635,14 +658,35 @@ Continue with TMG Gmail
     const toRoles = (a) => (Array.isArray(a) ? a : (a ? [a] : [])).filter(r => r && r !== 'pending');
     const hasAdmin = (a) => toRoles(a).some(r => r === 'admin' || r === 'operations');
     const accessLabel = (a) => { const r = toRoles(a); return r.length ? r.map(x => ACCESS_LABEL[x] || x).join(' · ') : 'Pending'; };
-    function allowedTabIds(a) {
+    // Apps this user may open. null = everything (admins/operations, or no role set).
+    // Otherwise a Set of app ids; 'more' + 'settings' are always available separately.
+    function allowedAppSet(a, cfg) {
       const roles = toRoles(a);
-      if (!roles.length) return null;                          // no roles → all tabs (fallback)
-      if (roles.some(r => ROLE_TABS[r] === null)) return null; // admin/operations → all tabs
-      const ids = new Set(['more']);
-      roles.forEach(r => (ROLE_TABS[r] || []).forEach(id => ids.add(id)));
-      return Array.from(ids);
+      if (!roles.length) return null;                                        // no roles → all (fallback)
+      if (roles.some(r => r === 'admin' || r === 'operations')) return null; // admin/ops → all
+      const set = new Set();
+      ACCESS_APPS.forEach(app => {
+        const appRoles = (cfg && Array.isArray(cfg[app.id])) ? cfg[app.id] : (DEFAULT_ACCESS[app.id] || []);
+        if (roles.some(r => appRoles.includes(r))) set.add(app.id);
+      });
+      return set;
     }
+
+    // Reads/writes the single-row app_access config (admins write; everyone reads).
+    const AccessDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      async load() {
+        if (!this.client()) return null;
+        const { data, error } = await this.client().from('app_access').select('config').eq('id', 1).maybeSingle();
+        if (error) { console.error('[AccessDB] load:', error.message); return null; }
+        return (data && data.config) || null;
+      },
+      async save(config) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('app_access').upsert({ id: 1, config, updated_at: new Date().toISOString() });
+        if (error) { console.error('[AccessDB] save:', error.message); throw error; }
+      },
+    };
     const CARD = { background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginBottom: 14 };
 
     // Admin-only user-management console (under the More tab). Replaces editing in Supabase.
@@ -1157,11 +1201,94 @@ Continue with TMG Gmail
     }
 
     // Admin screen (admin/operations) — separate from Settings, opened via the More menu.
+    // Admin: per-tool role access. Left = tool, right = a roles multiselect dropdown.
+    function TabAccess() {
+      const [cfg, setCfg] = useState(null);
+      const [openId, setOpenId] = useState(null);
+      const [saving, setSaving] = useState(false);
+      const [saved, setSaved] = useState(false);
+      useEffect(() => { AccessDB.load().then(c => setCfg(normalizeAccess(c))); }, []);
+
+      const toggle = (appId, roleId) => {
+        setSaved(false);
+        setCfg(prev => {
+          const cur = (prev && prev[appId]) || [];
+          const next = cur.includes(roleId) ? cur.filter(r => r !== roleId) : [...cur, roleId];
+          return { ...prev, [appId]: next };
+        });
+      };
+      const summary = (roles) => {
+        const r = roles || [];
+        if (r.length >= ACCESS_ROLES.length) return 'All roles';
+        if (r.length === 0) return 'Admins only';
+        if (r.length === 1) { const m = ACCESS_ROLES.find(x => x.id === r[0]); return m ? m.label : '1 role'; }
+        return r.length + ' roles';
+      };
+      const save = async () => {
+        setSaving(true);
+        try { await AccessDB.save(cfg); setSaved(true); }
+        catch (e) { alert('Could not save: ' + (e.message || e)); }
+        finally { setSaving(false); }
+      };
+      const checkbox = (on) => (
+        <div style={{ width: 20, height: 20, borderRadius: 6, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: on ? C.navy : C.surface, border: on ? 'none' : `1.5px solid ${C.border}` }}>
+          {on && <i className="ti ti-check" style={{ color: '#fff', fontSize: 12 }} />}
+        </div>
+      );
+
+      return (
+        <div style={CARD}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 3 }}>Tab Access</div>
+          <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 6, lineHeight: 1.5 }}>For each tool, pick which roles can open it.</div>
+          {!cfg ? (
+            <div style={{ fontSize: '0.78rem', color: C.textMuted, padding: '12px 2px', fontFamily: C.fontSans }}>Loading…</div>
+          ) : (
+            <React.Fragment>
+              {ACCESS_APPS.map(app => {
+                const roles = cfg[app.id] || [];
+                const isOpen = openId === app.id;
+                return (
+                  <div key={app.id}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '11px 2px', borderTop: `1px solid ${C.border}` }}>
+                      <div style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.surfaceHover }}><i className={`ti ${app.icon}`} style={{ fontSize: 16, color: C.gold }} /></div>
+                      <span style={{ flex: 1, fontSize: '0.84rem', fontWeight: 500, color: C.navy, fontFamily: C.fontSans }}>{app.label}</span>
+                      <button onClick={() => setOpenId(isOpen ? null : app.id)} style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap', padding: '7px 10px', borderRadius: 9, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.76rem', fontWeight: 600, color: C.navy, background: isOpen ? C.surface : C.surfaceHover, border: `1.5px solid ${isOpen ? C.navy : C.border}` }}>
+                        {summary(roles)}<i className={`ti ti-chevron-${isOpen ? 'up' : 'down'}`} style={{ fontSize: 14, color: C.gold }} />
+                      </button>
+                    </div>
+                    {isOpen && (
+                      <div style={{ margin: '0 0 8px 41px', border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden', boxShadow: '0 8px 24px rgba(0,26,74,0.13)' }}>
+                        {ACCESS_ROLES.map(r => {
+                          const on = roles.includes(r.id);
+                          return (
+                            <button key={r.id} onClick={() => toggle(app.id, r.id)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', textAlign: 'left', gap: 10, padding: '10px 12px', cursor: 'pointer', background: C.surface, border: 'none', borderBottom: `1px solid ${C.bg}`, fontFamily: C.fontSans }}>
+                              <span style={{ fontSize: '0.8rem', fontWeight: 500, color: C.navy }}>{r.label}</span>
+                              {checkbox(on)}
+                            </button>
+                          );
+                        })}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', background: C.bg }}>
+                          <i className="ti ti-lock" style={{ fontSize: 12, color: C.gold }} />
+                          <span style={{ fontSize: '0.68rem', fontWeight: 500, color: C.textMuted, fontFamily: C.fontSans }}>Admin &amp; Operations — always on</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <button onClick={save} disabled={saving} style={{ width: '100%', padding: 12, marginTop: 14, background: saved ? C.green : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, transition: 'background 200ms ease' }}>{saving ? 'Saving…' : saved ? 'Saved ✓' : 'Save changes'}</button>
+            </React.Fragment>
+          )}
+        </div>
+      );
+    }
+
     function AdminTab({ onOpenBuilder }) {
       return (
         <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
           <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Admin</div>
           <AdminUsers />
+          <TabAccess />
           <AdminUsage />
           <div style={{ ...CARD, cursor: 'pointer' }} onClick={onOpenBuilder}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
@@ -2849,15 +2976,19 @@ Continue with TMG Gmail
       const [activeTab, setActiveTab] = useState('chat');
       const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
       const [fontScale, setFontScale] = useState(() => parseFloat(localStorage.getItem('tmg-fontscale')) || 1);
+      const [accessCfg, setAccessCfg] = useState(DEFAULT_ACCESS);
       const [showCalendar, setShowCalendar] = useState(false);
       const [showTasks, setShowTasks] = useState(false);
 
-      // Role-based tabs: filter the nav to what this access role may see.
-      const allowedIds = profile ? allowedTabIds(profile.access) : undefined;
-      const visibleTabs = Array.isArray(allowedIds) ? TABS.filter(t => allowedIds.includes(t.id)) : TABS;
+      // Admin-configurable access: filter the nav + More apps to what this user may see.
+      const appSet = profile ? allowedAppSet(profile.access, accessCfg) : null; // null = everything
+      const visibleTabs = appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS;
       const isAdmin = hasAdmin(profile && profile.access);
-      // "More" menu options (extensible — add future screens here).
-      const moreItems = [{ id: 'settings', label: 'Settings', icon: 'ti-settings' }, { id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }, { id: 'directory', label: 'Company Directory', icon: 'ti-users' }].concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
+      // "More" menu — Settings always; Shared Drives / Company Directory gated; Admin role-gated.
+      const moreItems = [{ id: 'settings', label: 'Settings', icon: 'ti-settings' }]
+        .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
+        .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
+        .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
       useEffect(() => {
         if (!visibleTabs.some(t => t.id === activeTab)) setActiveTab((visibleTabs[0] || { id: 'more' }).id);
       }, [profile]);
@@ -2939,6 +3070,9 @@ Continue with TMG Gmail
         localStorage.setItem('tmg-fontscale', String(fontScale));
         document.documentElement.style.zoom = fontScale === 1 ? '' : String(fontScale);
       }, [fontScale]);
+
+      // Load the per-tool role-access config (gates this user's tabs + More apps).
+      useEffect(() => { AccessDB.load().then(c => { if (c) setAccessCfg(normalizeAccess(c)); }); }, []);
 
       useEffect(() => {
         localStorage.setItem('tmg-mode', mode);

@@ -97,6 +97,11 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
+    // Embedded inside the TMG app (?embed=1): hide our own top bar; sync theme from the parent.
+    const EMBED_PARAMS = new URLSearchParams(location.search);
+    const EMBED = EMBED_PARAMS.get('embed') === '1';
+    const EMBED_THEME = EMBED_PARAMS.get('theme'); // 'dark' | 'light' | null
+
     // ─── Design tokens (TMG Brand) ───────────────────────────────────
     const C = {
       bg:           '#FCFBF8',   // paper
@@ -1612,9 +1617,10 @@
       const [activeTab,          setActiveTab]          = useState('overview');
       const [showAddModal,       setShowAddModal]       = useState(false);
       const [showAddPropModal,   setShowAddPropModal]   = useState(false);
+      const [fabOpen,            setFabOpen]            = useState(false);
       const [liveShowings,       setLiveShowings]       = useState([]);
       const [liveProperties,     setLiveProperties]     = useState(PROPERTIES);
-      const [dark, setDark] = useState(() => localStorage.getItem('sffu-theme') === 'dark');
+      const [dark, setDark] = useState(() => EMBED_THEME ? EMBED_THEME === 'dark' : localStorage.getItem('sffu-theme') === 'dark');
 
       // Load showings and properties from DB on mount
       useEffect(() => {
@@ -1641,18 +1647,32 @@
 
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
-          <TopBar
-            dark={dark}
-            onToggleDark={() => setDark(d => !d)}
-            onAddProperty={() => setShowAddPropModal(true)}
-            onAddShowing={() => setShowAddModal(true)}
-            onSettings={() => setActiveTab('settings')}
-          />
+          {!EMBED && (
+            <TopBar
+              dark={dark}
+              onToggleDark={() => setDark(d => !d)}
+              onAddProperty={() => setShowAddPropModal(true)}
+              onAddShowing={() => setShowAddModal(true)}
+              onSettings={() => setActiveTab('settings')}
+            />
+          )}
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
             {activeTab === 'overview' && <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} onArchive={handlePropertyArchived} />}
             {activeTab === 'settings' && <SettingsTab user={user} />}
           </div>
           <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />
+          {/* Embedded: the add actions move here since SFFU's own top bar is hidden */}
+          {EMBED && (
+            <div style={{ position: 'fixed', right: 18, bottom: 'calc(82px + env(safe-area-inset-bottom))', zIndex: 60, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 10 }}>
+              {fabOpen && (
+                <React.Fragment>
+                  <button onClick={() => { setShowAddPropModal(true); setFabOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 22, border: 'none', cursor: 'pointer', background: dark ? '#0A1730' : '#FFFFFF', color: dark ? '#fff' : '#001A4A', boxShadow: '0 4px 16px rgba(0,0,0,0.22)', fontFamily: "'Jost', sans-serif", fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}><i className="ti ti-home-plus" style={{ fontSize: 16, color: '#AD832F' }} />Add Property</button>
+                  <button onClick={() => { setShowAddModal(true); setFabOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 22, border: 'none', cursor: 'pointer', background: dark ? '#0A1730' : '#FFFFFF', color: dark ? '#fff' : '#001A4A', boxShadow: '0 4px 16px rgba(0,0,0,0.22)', fontFamily: "'Jost', sans-serif", fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}><i className="ti ti-calendar-plus" style={{ fontSize: 16, color: '#AD832F' }} />Add Showing</button>
+                </React.Fragment>
+              )}
+              <button onClick={() => setFabOpen(o => !o)} aria-label="Add" style={{ width: 52, height: 52, borderRadius: '50%', border: 'none', cursor: 'pointer', background: '#AD832F', color: '#fff', boxShadow: '0 6px 20px rgba(173,131,47,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'transform 150ms ease', transform: fabOpen ? 'rotate(45deg)' : 'none' }}><i className="ti ti-plus" style={{ fontSize: 24 }} /></button>
+            </div>
+          )}
           {showAddPropModal && (
             <AddPropertyModal
               onClose={() => setShowAddPropModal(false)}

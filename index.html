@@ -2299,6 +2299,16 @@ Continue with TMG Gmail
       const isAI = active === 'chat';
       const pending = pendingAttachments || [];
 
+      // Auto-grow the message box with its content, up to 6 lines, then scroll.
+      const taRef = useRef(null);
+      React.useLayoutEffect(() => {
+        const el = taRef.current; if (!el) return;
+        el.style.height = 'auto';
+        const max = 136; // 6 lines @ 20px line-height + 16px vertical padding
+        el.style.height = Math.min(el.scrollHeight, max) + 'px';
+        el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
+      }, [input, isAI]);
+
       function onKeyDown(e) {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); }
       }
@@ -2335,7 +2345,7 @@ Continue with TMG Gmail
           {/* Input bar (AI tab only) — themed by active mode */}
           {isAI && (
             <div style={{
-              display: 'flex', alignItems: 'center', height: 61,
+              display: 'flex', alignItems: 'center', minHeight: 61,
               borderRadius: 28, overflow: 'hidden',
               background: M.barBg,
               border: `1px solid ${M.barBord}`,
@@ -2364,17 +2374,20 @@ Continue with TMG Gmail
               {/* Divider */}
               <div style={{ flexShrink: 0, width: 1, height: 24, background: M.div }} />
               {/* Input */}
-              <input
+              <textarea
+                ref={taRef}
                 className="tmg-ai-input"
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={onKeyDown}
                 placeholder="Message TMG assistant…"
+                rows={1}
                 style={{
-                  flex: 1, height: 61, minWidth: 0, border: 'none', outline: 'none',
-                  background: 'transparent', padding: '0 10px',
-                  fontFamily: "'Jost', sans-serif", fontSize: 12,
+                  flex: 1, minWidth: 0, border: 'none', outline: 'none',
+                  background: 'transparent', padding: '8px 10px', margin: 0,
+                  fontFamily: "'Jost', sans-serif", fontSize: 12, lineHeight: '20px',
                   color: dark ? '#FFFFFF' : '#001A4A',
+                  resize: 'none', boxSizing: 'border-box', display: 'block', maxHeight: 136,
                 }}
               />
               {/* Attach file / photo */}

@@ -2445,11 +2445,18 @@ Continue with TMG Gmail
 
     // ─── Top Bar ─────────────────────────────────────────────────────
     function TopBar({ dark, onToggleDark, onCalendar, calendarOpen, onTasks, tasksOpen }) {
-      const iconBtn = (onClick, iconClass, title, active) => (
+      // Gold-tinted rounded-square chip; same tint + gold icon in light and dark.
+      const iconBtn = (onClick, iconClass, title) => (
         <button
           onClick={onClick}
           title={title}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 7px', color: active ? C.goldSoft : 'rgba(255,255,255,0.65)', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}
+          aria-label={title}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 32, height: 32, borderRadius: 9, cursor: 'pointer', padding: 0,
+            background: 'rgba(201,164,90,0.16)', border: 'none',
+            color: '#C9A45A', fontSize: 16, lineHeight: 1,
+          }}
         >
           <i className={iconClass} />
         </button>
@@ -2463,9 +2470,9 @@ Continue with TMG Gmail
           borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-            {iconBtn(onTasks, 'ti ti-checklist', 'Tasks', tasksOpen)}
-            {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar', calendarOpen)}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {iconBtn(onTasks, 'ti ti-checklist', 'Tasks')}
+            {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar')}
           </div>
         </div>
       );

@@ -82,6 +82,7 @@
 <body>
   <!-- ─── Dark mode init (before render to avoid flash) ─── -->
   <script>if (localStorage.getItem('tmg-theme') === 'dark') document.body.classList.add('dark');</script>
+  <script>(function(){var fs=parseFloat(localStorage.getItem('tmg-fontscale'));if(fs&&fs!==1)document.documentElement.style.zoom=fs;})();</script>
 
   <!-- ─── Auth Overlay ─── -->
   <div id="auth-overlay" style="position:fixed;inset:0;z-index:9999;background:#001A4A;">
@@ -370,8 +371,8 @@ Continue with TMG Gmail
     const ROLE_TABS = {
       admin:      null,
       operations: null,
-      agent:      ['chat', 'teamchat', 'calls', 'tasks', 'kpis', 'deals', 'more'],
-      tc:         ['chat', 'teamchat', 'tasks', 'more'],
+      agent:      ['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'],
+      tc:         ['chat', 'teamchat', 'more'],
     };
 
     const ProfileDB = {
@@ -1176,7 +1177,7 @@ Continue with TMG Gmail
       );
     }
 
-    function SettingsTab({ user, profile, historySide, setHistorySide, dark, setDark }) {
+    function SettingsTab({ user, profile, historySide, setHistorySide, dark, setDark, fontScale, setFontScale }) {
       const [me, setMe] = useState(profile || null);
       const [allUsers, setAllUsers] = useState([]);
       const [editing, setEditing] = useState(false);
@@ -1282,14 +1283,30 @@ Continue with TMG Gmail
             )}
           </div>
 
-          {/* Appearance + Chat history */}
+          {/* Appearance — dark mode + text size (standalone card, separate from Chat History) */}
           <div style={CARD}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 6 }}>
-              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Chat History</div>
-              <button onClick={() => setDark(d => !d)} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.surface, color: C.textSecondary, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.78rem', fontWeight: 500, flexShrink: 0 }}>
+            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 14 }}>Appearance</div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 18 }}>
+              <span style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans }}>Dark mode</span>
+              <button onClick={() => setDark(d => !d)} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.surface, color: C.textSecondary, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.8rem', fontWeight: 500, flexShrink: 0 }}>
                 <i className={`ti ${dark ? 'ti-sun' : 'ti-moon'}`} style={{ fontSize: 15 }} />{dark ? 'Light' : 'Dark'}
               </button>
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
+              <span style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans }}>Text size</span>
+              <span style={{ fontSize: '0.72rem', color: C.textMuted, fontFamily: C.fontSans, fontWeight: 600 }}>{Math.round((fontScale || 1) * 100)}%</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+              <span style={{ fontSize: 13, color: C.textMuted, fontFamily: C.fontSans, fontWeight: 700, flexShrink: 0 }}>A</span>
+              <input type="range" min="0.85" max="1.35" step="0.05" value={fontScale || 1} onChange={e => setFontScale(parseFloat(e.target.value))} style={{ flex: 1, accentColor: C.navy, cursor: 'pointer' }} />
+              <span style={{ fontSize: 22, color: C.textMuted, fontFamily: C.fontSans, fontWeight: 700, flexShrink: 0 }}>A</span>
+            </div>
+            <div style={{ fontSize: '0.72rem', color: C.textMuted, marginTop: 9, lineHeight: 1.5, fontFamily: C.fontSans }}>Adjusts the size of everything in the app.{(fontScale || 1) !== 1 && <React.Fragment> · <button onClick={() => setFontScale(1)} style={{ background: 'none', border: 'none', padding: 0, color: C.gold, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.72rem', fontWeight: 600 }}>Reset to 100%</button></React.Fragment>}</div>
+          </div>
+
+          {/* Chat history */}
+          <div style={CARD}>
+            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 6 }}>Chat History</div>
             <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 12, lineHeight: 1.5 }}>Which side the chat history panel opens from.</div>
             <div style={{ display: 'flex', gap: 8 }}>
               {sideBtn('left', 'Left', 'ti-layout-sidebar-left-expand')}
@@ -2258,7 +2275,6 @@ Continue with TMG Gmail
       { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
       { id: 'teamchat', label: 'Chat',  icon: 'ti-message'         },
       { id: 'calls',    label: 'Calls', icon: 'ti-phone'           },
-      { id: 'tasks',    label: 'Tasks', icon: 'ti-check'           },
       { id: 'kpis',     label: 'KPIs',  icon: 'ti-chart-bar'       },
       { id: 'deals',    label: 'Deals', icon: 'ti-currency-dollar' },
       { id: 'more',     label: 'More',  icon: 'ti-dots'            },
@@ -2415,7 +2431,7 @@ Continue with TMG Gmail
     }
 
     // ─── Top Bar ─────────────────────────────────────────────────────
-    function TopBar({ dark, onToggleDark, onCalendar, calendarOpen }) {
+    function TopBar({ dark, onToggleDark, onCalendar, calendarOpen, onTasks, tasksOpen }) {
       const iconBtn = (onClick, iconClass, title, active) => (
         <button
           onClick={onClick}
@@ -2435,6 +2451,7 @@ Continue with TMG Gmail
         }}>
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+            {iconBtn(onTasks, 'ti ti-checklist', 'Tasks', tasksOpen)}
             {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar', calendarOpen)}
           </div>
         </div>
@@ -2548,6 +2565,39 @@ Continue with TMG Gmail
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
+    // ─── Tasks Popover ───────────────────────────────────────────────
+    // Mirrors the calendar pop-out. Placeholder body until Tasks ships (Q3).
+    function TasksPopover({ dark, onClose }) {
+      const J = "'Jost', sans-serif";
+      const [vis, setVis] = useState(false);
+      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
+      return (
+        <React.Fragment>
+          {/* Overlay — dims content only, sits below the top bar / pill nav */}
+          <div onClick={onClose} style={{ position: 'fixed', top: 'calc(54px + env(safe-area-inset-top))', left: 0, right: 0, bottom: 0, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />
+          {/* Popout */}
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'fixed', top: 'calc(54px + env(safe-area-inset-top))', right: 10, width: '75%', zIndex: 60,
+            borderRadius: 14, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+            background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
+            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease',
+          }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '10px 14px', borderBottom: `1px solid ${dark ? '#152545' : '#F0EBE3'}` }}>
+              <i className="ti ti-checklist" style={{ fontSize: 14, color: dark ? '#C9A45A' : '#AD832F' }} />
+              <span style={{ fontFamily: J, fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', color: dark ? '#fff' : '#001A4A' }}>Tasks</span>
+            </div>
+            {/* Body — placeholder until the Tasks feature ships */}
+            <div style={{ padding: '22px 16px', textAlign: 'center' }}>
+              <i className="ti ti-checklist" style={{ fontSize: 26, color: dark ? 'rgba(255,255,255,0.18)' : '#D8D2C6' }} />
+              <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, marginTop: 8, color: dark ? '#fff' : '#001A4A' }}>Tasks are coming soon</div>
+              <div style={{ fontFamily: J, fontSize: 9, lineHeight: 1.6, marginTop: 4, color: dark ? 'rgba(255,255,255,0.35)' : '#9A8F7E' }}>Your to-dos and assignments<br />will live here.</div>
             </div>
           </div>
         </React.Fragment>
@@ -2778,7 +2828,9 @@ Continue with TMG Gmail
     function App({ user, profile }) {
       const [activeTab, setActiveTab] = useState('chat');
       const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
+      const [fontScale, setFontScale] = useState(() => parseFloat(localStorage.getItem('tmg-fontscale')) || 1);
       const [showCalendar, setShowCalendar] = useState(false);
+      const [showTasks, setShowTasks] = useState(false);
 
       // Role-based tabs: filter the nav to what this access role may see.
       const allowedIds = profile ? allowedTabIds(profile.access) : undefined;
@@ -2861,6 +2913,12 @@ Continue with TMG Gmail
         document.body.classList.toggle('dark', dark);
         localStorage.setItem('tmg-theme', dark ? 'dark' : 'light');
       }, [dark]);
+
+      // App-wide text/UI scale (iPhone-style). Applied as page zoom; persisted.
+      useEffect(() => {
+        localStorage.setItem('tmg-fontscale', String(fontScale));
+        document.documentElement.style.zoom = fontScale === 1 ? '' : String(fontScale);
+      }, [fontScale]);
 
       useEffect(() => {
         localStorage.setItem('tmg-mode', mode);
@@ -2999,8 +3057,9 @@ Continue with TMG Gmail
 
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
-          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => setShowCalendar(s => !s)} calendarOpen={showCalendar} />
+          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); }} tasksOpen={showTasks} />
           {showCalendar && <CalendarPopover dark={dark} onClose={() => setShowCalendar(false)} />}
+          {showTasks && <TasksPopover dark={dark} onClose={() => setShowTasks(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>
@@ -3028,7 +3087,7 @@ Continue with TMG Gmail
               moreView === 'admin' && isAdmin ? <AdminTab onOpenBuilder={() => setBuilderOpen(true)} />
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
-              : <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} />)}
+              : <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />)}
             {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}

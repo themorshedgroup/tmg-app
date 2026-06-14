@@ -1728,6 +1728,53 @@ Continue with TMG Gmail
       );
     }
 
+    // ─── Exp Survey (opened from the More menu, under Company Directory) ─
+    // Contents of the "TMG Experience Survey URL & QR Code" PDF: the survey
+    // link + a self-contained QR (generated for the same URL; no external call).
+    function ExpSurvey({ dark, onBack }) {
+      const J = "'Jost', sans-serif";
+      const SURVEY_URL = 'http://www.themorshedgroup.com/survey';
+      const QR = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMzAiIGhlaWdodD0iMzMwIiBjbGFzcz0ic2Vnbm8iPjxnIHRyYW5zZm9ybT0ic2NhbGUoMTApIj48cGF0aCBmaWxsPSIjZmZmIiBkPSJNMCAwaDMzdjMzaC0zM3oiLz48cGF0aCBjbGFzcz0icXJsaW5lIiBzdHJva2U9IiMwMDFhNGEiIGQ9Ik0yIDIuNWg3bTEgMGgxbTEgMGg1bTEgMGgxbTIgMGgybTEgMGg3bS0yOSAxaDFtNSAwaDFtMSAwaDFtMSAwaDNtMSAwaDFtMSAwaDFtNSAwaDFtNSAwaDFtLTI5IDFoMW0xIDBoM20xIDBoMW0yIDBoMW0xIDBoNG01IDBoMW0xIDBoMW0xIDBoM20xIDBoMW0tMjkgMWgxbTEgMGgzbTEgMGgxbTEgMGgzbTEgMGgxbTIgMGgxbTEgMGgxbTQgMGgxbTEgMGgzbTEgMGgxbS0yOSAxaDFtMSAwaDNtMSAwaDFtMiAwaDFtMSAwaDJtMSAwaDNtMiAwaDFtMiAwaDFtMSAwaDNtMSAwaDFtLTI5IDFoMW01IDBoMW0yIDBoMW0yIDBoMm0yIDBoNG0yIDBoMW01IDBoMW0tMjkgMWg3bTEgMGgxbTEgMGgxbTEgMGgxbTEgMGgxbTEgMGgxbTEgMGgxbTEgMGgxbTEgMGg3bS0yMSAxaDFtMSAwaDFtMSAwaDFtMSAwaDVtLTE5IDFoMW0xIDBoMm0xIDBoM20yIDBoMW0yIDBoMW0zIDBoM20yIDBoMW0yIDBoMW0xIDBoMm0tMjkgMWgxbTEgMGgybTEgMGgxbTQgMGgybTEgMGgxbTIgMGgxbTIgMGg2bTMgMGgxbS0yOSAxaDJtMSAwaDVtMSAwaDJtMiAwaDFtMyAwaDJtMyAwaDJtMiAwaDJtLTI4IDFoM20xIDBoMW02IDBoMW0zIDBoMm0xIDBoM20xIDBoMm0xIDBoMW0yIDBoMW0tMjggMWgzbTEgMGgzbTIgMGgxbTEgMGgxbTEgMGg0bTUgMGgxbTEgMGgybS0yNyAxaDJtMiAwaDJtMyAwaDFtMiAwaDFtMSAwaDZtMiAwaDFtNCAwaDJtLTI5IDFoM20xIDBoMW0xIDBoM20xIDBoMm0xIDBoMW01IDBoMW0xIDBoMm0xIDBoNW0tMjkgMWgzbTUgMGgybTEgMGgybTEgMGgzbTEgMGgxbTQgMGgxbTMgMGgxbS0yOCAxaDFtMyAwaDNtMSAwaDFtMiAwaDJtMSAwaDFtMSAwaDFtMiAwaDNtMSAwaDJtMiAwaDFtLTI3IDFoMm0yIDBoMW0xIDBoNG0zIDBoMm0xIDBoMW0yIDBoMW01IDBoMm0tMjggMWgxbTUgMGg0bTMgMGg1bTIgMGgxbTEgMGgybTEgMGgybS0yNSAxaDJtNCAwaDFtNCAwaDNtMSAwaDFtMSAwaDNtNCAwaDFtLTI2IDFoMTFtMSAwaDJtMiAwaDEwbS0xOSAxaDFtMSAwaDFtMSAwaDFtMyAwaDFtMSAwaDNtMyAwaDVtLTI5IDFoN20xIDBoMW0xIDBoMm0yIDBoMW0xIDBoMW0yIDBoMm0xIDBoMW0xIDBoMm0xIDBoMW0tMjggMWgxbTUgMGgxbTEgMGgzbTEgMGg0bTIgMGgxbTEgMGgxbTMgMGgxbTIgMGgybS0yOSAxaDFtMSAwaDNtMSAwaDFtMiAwaDJtMSAwaDFtNCAwaDFtMiAwaDdtLTI3IDFoMW0xIDBoM20xIDBoMW0xIDBoM20yIDBoMW0xIDBoMW01IDBoMW0yIDBoM20xIDBoMW0tMjkgMWgxbTEgMGgzbTEgMGgxbTEgMGg0bTEgMGgybTIgMGgzbTMgMGgxbTIgMGgxbTEgMGgxbS0yOSAxaDFtNSAwaDFtNSAwaDVtMiAwaDJtMSAwaDJtMSAwaDFtMSAwaDFtLTI4IDFoN20xIDBoMW0xIDBoMW00IDBoMW0yIDBoNW0yIDBoMW0xIDBoMSIvPjwvZz48L3N2Zz4K';
+      const titleC   = dark ? '#fff' : '#001A4A';
+      const subC     = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
+      const backC    = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const sectionC = dark ? '#C9A45A' : '#AD832F';
+      const cardBord = dark ? '#152545' : '#EDE7DC';
+      const gold     = dark ? '#C9A45A' : '#AD832F';
+      return (
+        <div style={{ height: '100%', position: 'relative', overflow: 'hidden' }}>
+          <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+            {/* Header */}
+            <div style={{ padding: '11px 14px 7px', display: 'flex', alignItems: 'center', gap: 9 }}>
+              <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: backC }}>
+                <i className="ti ti-chevron-left" style={{ fontSize: 16 }} />
+              </button>
+              <div>
+                <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, color: titleC }}>Exp Survey</div>
+                <div style={{ fontFamily: J, fontSize: 8, marginTop: 1, color: subC }}>Client experience survey</div>
+              </div>
+            </div>
+            {/* Content */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '8px 18px 28px', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
+              <div style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.18em', fontWeight: 600, textTransform: 'uppercase', color: sectionC, marginTop: 8, marginBottom: 12 }}>The Morshed Group</div>
+              <div style={{ fontFamily: J, fontSize: 22, fontWeight: 600, color: titleC, lineHeight: 1.2, marginBottom: 8 }}>TMG Experience Survey</div>
+              <div style={{ fontFamily: J, fontSize: 12, color: subC, lineHeight: 1.6, maxWidth: 280, marginBottom: 22 }}>Scan the QR code or tap the link below to share your experience with The Morshed Group.</div>
+              {/* QR — kept on white so it scans in light or dark mode */}
+              <div style={{ background: '#FFFFFF', borderRadius: 18, border: `1px solid ${cardBord}`, padding: 18, boxShadow: dark ? 'none' : '0 8px 24px rgba(0,26,74,0.08)', marginBottom: 20 }}>
+                <img src={QR} alt="TMG Experience Survey QR code" style={{ display: 'block', width: 224, height: 224 }} />
+              </div>
+              <a href={SURVEY_URL} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontFamily: J, fontSize: 13, fontWeight: 600, color: gold, textDecoration: 'none', marginBottom: 18 }}>
+                <i className="ti ti-link" style={{ fontSize: 15 }} />themorshedgroup.com/survey
+              </a>
+              <a href={SURVEY_URL} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, width: '100%', maxWidth: 280, padding: '13px 16px', borderRadius: 12, background: dark ? '#AD832F' : '#001A4A', color: '#fff', fontFamily: J, fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>
+                <i className="ti ti-external-link" style={{ fontSize: 15 }} />Open survey
+              </a>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     function CompanyDirectory({ dark, onBack }) {
       const J = "'Jost', sans-serif";
       const [query, setQuery] = useState('');
@@ -3636,6 +3683,7 @@ Continue with TMG Gmail
       const moreItems = []
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
+        .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', icon: 'ti-messages' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
       // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
@@ -3908,6 +3956,7 @@ Continue with TMG Gmail
               moreView === 'admin' && isAdmin ? <AdminTab onOpenBuilder={() => setBuilderOpen(true)} />
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
+              : moreView === 'expsurvey' ? <ExpSurvey dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}
             {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (

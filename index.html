@@ -699,6 +699,107 @@ Continue with TMG Gmail
         if (error) { console.error('[AccessDB] save:', error.message); throw error; }
       },
     };
+
+    // ─── Tasks ───────────────────────────────────────────────────────
+    const TASK_STATUS = [
+      { id: 'todo',        label: 'To Do',       color: '#6B6B6B' },
+      { id: 'in_progress', label: 'In Progress', color: '#2A6FD4' },
+      { id: 'stuck',       label: 'Stuck',       color: '#C0392B' },
+      { id: 'done',        label: 'Completed',   color: '#1E6B40' },
+    ];
+    const TASK_PRIORITY = [
+      { id: 'low',    label: 'Low',    color: '#9B9380' },
+      { id: 'medium', label: 'Medium', color: '#B07A00' },
+      { id: 'high',   label: 'High',   color: '#C0392B' },
+    ];
+    const statusLabel   = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).label || s;
+    const statusColor   = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).color || '#6B6B6B';
+    const priorityLabel = (p) => (TASK_PRIORITY.find(x => x.id === p) || {}).label || p;
+    const priorityColor = (p) => (TASK_PRIORITY.find(x => x.id === p) || {}).color || '#9B9380';
+
+    const TaskDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+
+      async loadAll() {
+        const c = this.client(); if (!c) return { tasks: [], peopleByTask: {}, projById: {} };
+        const [tRes, pRes, prRes] = await Promise.all([
+          c.from('tasks').select('*').is('parent_task_id', null).order('created_at', { ascending: false }),
+          c.from('task_people').select('task_id,user_id,role'),
+          c.from('projects').select('id,name'),
+        ]);
+        const peopleByTask = {};
+        (pRes.data || []).forEach(p => { (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p); });
+        const projById = {}; (prRes.data || []).forEach(p => { projById[p.id] = p.name; });
+        return { tasks: tRes.data || [], peopleByTask, projById };
+      },
+
+      async findOrCreateProject(name, user) {
+        const c = this.client(); if (!c || !name || !name.trim()) return null;
+        const nm = name.trim();
+        const { data: ex } = await c.from('projects').select('id').ilike('name', nm).limit(1).maybeSingle();
+        if (ex) return ex.id;
+        const { data, error } = await c.from('projects').insert({ name: nm, created_by: user?.id || null }).select('id').single();
+        if (error) { console.error('[TaskDB] project:', error.message); return null; }
+        return data.id;
+      },
+
+      async create(fields, people, user) {
+        const c = this.client(); if (!c) return null;
+        const { data, error } = await c.from('tasks').insert({
+          title: fields.title, due_at: fields.due_at || null, project_id: fields.project_id || null,
+          priority: fields.priority || 'medium', status: fields.status || 'todo',
+          description: fields.description || null, context: fields.context || null,
+          working_url: fields.working_url || null, email_link: fields.email_link || null,
+          created_by: user?.id || null,
+        }).select().single();
+        if (error) { console.error('[TaskDB] create:', error.message); throw error; }
+        await this.setPeople(data.id, people || {});
+        await this.addActivity(data.id, 'system', 'Task created', user);
+        return data;
+      },
+
+      async update(id, oldTask, fields, user) {
+        const c = this.client(); if (!c) return;
+        const patch = { ...fields, updated_at: new Date().toISOString() };
+        if (fields.status === 'done' && oldTask.status !== 'done') patch.completed_at = new Date().toISOString();
+        const { error } = await c.from('tasks').update(patch).eq('id', id);
+        if (error) { console.error('[TaskDB] update:', error.message); throw error; }
+        const FL = { title: 'Title', due_at: 'Due date', project_id: 'Project', priority: 'Priority', status: 'Status', description: 'Description', context: 'Context', working_url: 'Working URL', email_link: 'Email link' };
+        for (const k of Object.keys(fields)) {
+          if ((oldTask[k] || null) === (fields[k] || null)) continue;
+          let msg;
+          if (k === 'status') msg = 'Status: ' + statusLabel(oldTask.status) + ' → ' + statusLabel(fields.status);
+          else if (k === 'priority') msg = 'Priority: ' + priorityLabel(oldTask.priority) + ' → ' + priorityLabel(fields.priority);
+          else msg = (FL[k] || k) + ' updated';
+          await this.addActivity(id, 'system', msg, user, k);
+        }
+      },
+
+      async setPeople(taskId, people) {  // { assignee:[ids], assigner:[ids] }
+        const c = this.client(); if (!c) return;
+        await c.from('task_people').delete().eq('task_id', taskId).in('role', ['assignee', 'assigner']);
+        const rows = [];
+        (people.assignee || []).forEach(uid => rows.push({ task_id: taskId, user_id: uid, role: 'assignee' }));
+        (people.assigner || []).forEach(uid => rows.push({ task_id: taskId, user_id: uid, role: 'assigner' }));
+        if (rows.length) { const { error } = await c.from('task_people').insert(rows); if (error) console.error('[TaskDB] setPeople:', error.message); }
+      },
+
+      async loadActivity(taskId) {
+        const c = this.client(); if (!c) return [];
+        const { data, error } = await c.from('task_activity').select('*').eq('task_id', taskId).order('created_at', { ascending: true });
+        if (error) { console.error('[TaskDB] activity:', error.message); return []; }
+        return data || [];
+      },
+
+      async addActivity(taskId, kind, content, user, field) {
+        const c = this.client(); if (!c) return;
+        const { error } = await c.from('task_activity').insert({
+          task_id: taskId, kind, content, field: field || null,
+          author_id: user?.id || null, author_name: user?.user_metadata?.full_name || user?.email || null,
+        });
+        if (error) console.error('[TaskDB] addActivity:', error.message);
+      },
+    };
     const CARD = { background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginBottom: 14 };
 
     // App-wide rule: Phone values become tel: links, Email values become mailto: links.
@@ -1327,44 +1428,7 @@ Continue with TMG Gmail
       );
     }
 
-    function SettingsTab({ user, profile, historySide, setHistorySide, dark, setDark, fontScale, setFontScale, embedded }) {
-      const [me, setMe] = useState(profile || null);
-      const [allUsers, setAllUsers] = useState([]);
-      const [editing, setEditing] = useState(false);
-      const [first, setFirst] = useState((profile && profile.first_name) || '');
-      const [last, setLast] = useState((profile && profile.last_name) || '');
-      const [phone, setPhone] = useState((profile && profile.phone) || '');
-      const [country, setCountry] = useState((profile && profile.country) || '');
-      const [timezone, setTimezone] = useState((profile && profile.timezone) || '');
-      const [dob, setDob] = useState((profile && profile.dob) || '');
-      const [pets, setPets] = useState((profile && profile.pets) || []);
-      const [saving, setSaving] = useState(false);
-
-      useEffect(() => { ProfileDB.loadAll().then(setAllUsers); }, []);
-
-      const isAdmin = hasAdmin(me && me.access);
-      const fullName = ((((me && me.first_name) || '') + ' ' + ((me && me.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || 'User';
-      const email = (me && me.email) || (user && user.email) || '';
-      const initial = fullName.charAt(0).toUpperCase();
-      const avatar = (me && me.avatar_url) || (user && user.user_metadata && user.user_metadata.avatar_url) || '';
-      const managerName = (id) => { if (!id) return ''; const m = allUsers.find(u => u.id === id); return m ? ((((m.first_name || '') + ' ' + (m.last_name || '')).trim()) || m.email) : ''; };
-
-      async function saveMine() {
-        setSaving(true);
-        try { await ProfileDB.updateMine({ first_name: first, last_name: last, phone, country, timezone, dob: dob || null, pets }); setMe(prev => ({ ...(prev || {}), first_name: first, last_name: last, phone, country, timezone, dob: dob || null, pets })); setEditing(false); }
-        catch (e) { alert('Could not save: ' + (e.message || e)); }
-        finally { setSaving(false); }
-      }
-
-      const fmtDate = (d) => { if (!d) return ''; try { return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }); } catch (e) { return d; } };
-      const locationText = () => { if (!me) return ''; const c = COUNTRIES.find(x => x.c === me.country); const cn = c ? c.n : (me.country || ''); const city = me.timezone ? tzCity(me.timezone) : ''; return [city, cn].filter(Boolean).join(', '); };
-      const fieldRow = (label, value) => (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '7px 0', borderBottom: `1px solid ${C.border}`, gap: 12 }}>
-          <span style={{ fontSize: '0.72rem', color: C.textSecondary, fontFamily: C.fontSans, flexShrink: 0 }}>{label}</span>
-          <span style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans, fontWeight: 500, textAlign: 'right', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value ? contactLink(label, value) : '—'}</span>
-        </div>
-      );
-      const inputStyle = { width: '100%', padding: '10px 12px', background: C.surfaceHover, border: `1px solid ${C.border}`, borderRadius: 10, color: C.textPrimary, fontSize: '0.87rem', outline: 'none', fontFamily: C.fontSans };
+    function SettingsTab({ historySide, setHistorySide, dark, setDark, fontScale, setFontScale, embedded }) {
       const sideBtn = (val, label, icon) => {
         const on = historySide === val;
         return (
@@ -1384,54 +1448,7 @@ Continue with TMG Gmail
         <div style={embedded ? { padding: '0 16px 16px' } : { padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
           {!embedded && <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Settings</div>}
 
-          {/* My Profile */}
-          <div style={CARD}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14 }}>
-              {avatar
-                ? <img src={avatar} alt={fullName} style={{ width: 48, height: 48, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
-                : <div style={{ width: 48, height: 48, borderRadius: '50%', background: C.navy, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.goldSoft, fontWeight: 300, fontSize: '1.3rem', fontFamily: C.fontSans, flexShrink: 0 }}>{initial}</div>}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '1rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{fullName}</div>
-                <div style={{ color: C.textSecondary, fontSize: '0.8rem', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(me && me.title) || email}</div>
-              </div>
-              <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{accessLabel(me && me.access)}</span>
-            </div>
-            {!editing ? (
-              <React.Fragment>
-                {fieldRow('Employee ID', me && me.employee_id)}
-                {(me && me.hire_date) ? fieldRow('Hire date', fmtDate(me.hire_date)) : null}
-                {fieldRow('Title', me && me.title)}
-                {fieldRow('Reports to', managerName(me && me.reports_to))}
-                {(me && (toRoles(me.access).includes('agent') || me.assigned_tc)) && fieldRow('Assigned TC', managerName(me && me.assigned_tc))}
-                {fieldRow('Phone', me && me.phone)}
-                {fieldRow('Email', email)}
-                {(me && (me.country || me.timezone)) ? fieldRow('Location', locationText()) : null}
-                {(me && me.timezone) ? fieldRow('Local time', localTimeIn(me.timezone)) : null}
-                {(me && me.dob) ? fieldRow('Date of birth', fmtDate(me.dob)) : null}
-                {(me && me.pets && me.pets.length) ? fieldRow('Pets', me.pets.map(petLabel).join('   ')) : null}
-                <button onClick={() => { setFirst((me && me.first_name) || ''); setLast((me && me.last_name) || ''); setPhone((me && me.phone) || ''); setCountry((me && me.country) || ''); setTimezone((me && me.timezone) || ''); setDob((me && me.dob) || ''); setPets((me && me.pets) || []); setEditing(true); }} style={{ width: '100%', padding: 11, marginTop: 12, background: 'none', border: `1px solid ${C.navy}`, borderRadius: 12, color: C.navy, fontSize: '0.9rem', cursor: 'pointer', fontWeight: 500, fontFamily: C.fontSans }}>Edit my info</button>
-              </React.Fragment>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <input placeholder="First name" value={first} onChange={e => setFirst(e.target.value)} style={inputStyle} />
-                <input placeholder="Last name" value={last} onChange={e => setLast(e.target.value)} style={inputStyle} />
-                <input placeholder="Phone" value={phone} onChange={e => setPhone(e.target.value)} style={inputStyle} />
-                <div style={{ fontSize: '0.72rem', color: C.textSecondary, marginTop: 2, fontFamily: C.fontSans }}>Location</div>
-                <select value={country} onChange={e => { setCountry(e.target.value); setTimezone(''); }} style={inputStyle}><option value="">Country…</option>{COUNTRIES.map(c => <option key={c.c} value={c.c}>{c.n}</option>)}</select>
-                {country && (COUNTRY_TZ[country] || []).length > 0 && <select value={timezone} onChange={e => setTimezone(e.target.value)} style={inputStyle}><option value="">City / time zone…</option>{(COUNTRY_TZ[country] || []).map(z => <option key={z} value={z}>{tzCity(z)}</option>)}</select>}
-                {timezone && <div style={{ fontSize: '0.8rem', color: C.textSecondary, paddingLeft: 2 }}>Local time: <b style={{ color: C.textPrimary }}>{localTimeIn(timezone)}</b></div>}
-                <div style={{ fontSize: '0.72rem', color: C.textSecondary, marginTop: 2, fontFamily: C.fontSans }}>Date of birth <span style={{ color: C.textMuted }}>(optional)</span></div>
-                <input type="date" value={dob || ''} onChange={e => setDob(e.target.value)} style={inputStyle} />
-                <div style={{ fontSize: '0.72rem', color: C.textSecondary, marginTop: 2, fontFamily: C.fontSans }}>Pets</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{PETS.map(p => { const on = pets.includes(p.k); return <button key={p.k} type="button" onClick={() => setPets(on ? pets.filter(x => x !== p.k) : [...pets, p.k])} style={{ padding: '7px 11px', borderRadius: 20, border: `1px solid ${on ? C.navy : C.border}`, background: on ? C.navy : C.surface, color: on ? '#fff' : C.textSecondary, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}>{p.e} {p.label}</button>; })}</div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                  <button onClick={saveMine} disabled={saving} style={{ flex: 1, padding: 11, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save'}</button>
-                  <button onClick={() => setEditing(false)} style={{ flex: 1, padding: 11, background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
-                </div>
-                <div style={{ fontSize: '0.7rem', color: C.textMuted, lineHeight: 1.4 }}>Employee ID, title, reports-to, and access are set by an admin.</div>
-              </div>
-            )}
-          </div>
+          {/* My Profile moved into ProfilePanel (cohesive profile-card redesign) */}
 
           {/* Appearance — dark mode + text size (standalone card, separate from Chat History) */}
           <div style={CARD}>
@@ -1733,6 +1750,186 @@ Continue with TMG Gmail
             {actBtn('toggle-settings', 'ti-settings', 'Settings')}
           </div>
           <iframe ref={frameRef} src={src} title="SFFU" style={{ flex: 1, width: '100%', border: 'none', display: 'block' }} />
+        </div>
+      );
+    }
+
+    // ─── Tasks module (full screen, opened from the top-bar Tasks chip) ──
+    function TaskForm({ dark, task, team, onSave, onCancel }) {
+      const t = task || {};
+      const [title, setTitle] = useState(t.title || '');
+      const [due, setDue] = useState(t.due_at ? t.due_at.slice(0, 16) : '');
+      const [project, setProject] = useState(t._projectName || '');
+      const [priority, setPriority] = useState(t.priority || 'medium');
+      const [status, setStatus] = useState(t.status || 'todo');
+      const [assignees, setAssignees] = useState(t._assignees || []);
+      const [assigners, setAssigners] = useState(t._assigners || []);
+      const [workingUrl, setWorkingUrl] = useState(t.working_url || '');
+      const [emailLink, setEmailLink] = useState(t.email_link || '');
+      const [description, setDescription] = useState(t.description || '');
+      const [context, setContext] = useState(t.context || '');
+      const [saving, setSaving] = useState(false);
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const lbl = { fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, margin: '0 0 5px', fontFamily: C.fontSans };
+      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const toggle = (arr, set, id) => set(arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]);
+      const chips = (arr, set) => (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {team.map(m => { const on = arr.includes(m.id); return <button key={m.id} type="button" onClick={() => toggle(arr, set, m.id)} style={{ padding: '6px 10px', borderRadius: 16, border: `1px solid ${on ? C.navy : bord}`, background: on ? C.navy : (dark ? '#06101F' : '#fff'), color: on ? '#fff' : sub, fontSize: '0.76rem', cursor: 'pointer', fontFamily: C.fontSans }}>{m.name}</button>; })}
+          {!team.length && <span style={{ fontSize: '0.74rem', color: sub }}>No teammates loaded.</span>}
+        </div>
+      );
+      const sel = (val, set, opts) => <select value={val} onChange={e => set(e.target.value)} style={inp}>{opts.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}</select>;
+      const field = (label, node) => <div style={{ marginBottom: 13 }}><div style={lbl}>{label}</div>{node}</div>;
+      async function save() { if (!title.trim()) return; setSaving(true); try { await onSave({ title: title.trim(), due, project, priority, status, assignees, assigners, working_url: workingUrl.trim(), email_link: emailLink.trim(), description, context }); } finally { setSaving(false); } }
+      return (
+        <div style={{ padding: '14px 16px 60px' }}>
+          {field('Title', <input value={title} onChange={e => setTitle(e.target.value)} placeholder="What needs doing?" style={inp} />)}
+          {field('Due date & time', <input type="datetime-local" value={due} onChange={e => setDue(e.target.value)} style={inp} />)}
+          {field('Project', <input value={project} onChange={e => setProject(e.target.value)} placeholder="Type a project name" style={inp} />)}
+          <div style={{ display: 'flex', gap: 10 }}>
+            <div style={{ flex: 1 }}>{field('Priority', sel(priority, setPriority, TASK_PRIORITY))}</div>
+            <div style={{ flex: 1 }}>{field('Status', sel(status, setStatus, TASK_STATUS))}</div>
+          </div>
+          {field('Assignees', chips(assignees, setAssignees))}
+          {field('Assigned by', chips(assigners, setAssigners))}
+          {field('Description', <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder="Initial description (auto-filled when generated from AI mode later)" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
+          {field('Context', <textarea value={context} onChange={e => setContext(e.target.value)} rows={2} placeholder="Ongoing updates / notes" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
+          {field('Working URL', <input value={workingUrl} onChange={e => setWorkingUrl(e.target.value)} placeholder="https://…" style={inp} />)}
+          {field('Email link', <input value={emailLink} onChange={e => setEmailLink(e.target.value)} placeholder="name@email.com" style={inp} />)}
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button onClick={save} disabled={saving || !title.trim()} style={{ flex: 1, padding: 12, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !title.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (task ? 'Save changes' : 'Create task')}</button>
+            <button onClick={onCancel} style={{ flex: 1, padding: 12, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
+    function TaskDetail({ dark, task, people, team, user, onEdit, onStatus }) {
+      const [activity, setActivity] = useState([]);
+      const [note, setNote] = useState('');
+      const [busy, setBusy] = useState(false);
+      useEffect(() => { TaskDB.loadActivity(task.id).then(setActivity); }, [task.id]);
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const nameOf = id => (team.find(m => m.id === id) || {}).name || '—';
+      const ppl = role => (people || []).filter(p => p.role === role).map(p => nameOf(p.user_id)).join(', ') || '—';
+      const fmt = d => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+      const row = (k, v) => <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '7px 0', borderBottom: `1px solid ${bord}` }}><span style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, flexShrink: 0 }}>{k}</span><span style={{ fontSize: '0.82rem', color: ink, fontWeight: 500, textAlign: 'right', fontFamily: C.fontSans }}>{v}</span></div>;
+      const kindTag = { system: { t: 'CHANGE', c: '#6B6B6B' }, update: { t: 'UPDATE', c: '#2A6FD4' }, ai: { t: 'AI', c: '#AD832F' } };
+      async function addNote() { if (!note.trim() || busy) return; setBusy(true); try { await TaskDB.addActivity(task.id, 'update', note.trim(), user); setNote(''); setActivity(await TaskDB.loadActivity(task.id)); } finally { setBusy(false); } }
+      return (
+        <div style={{ padding: '14px 16px 60px' }}>
+          <div style={{ fontSize: '1.1rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, marginBottom: 6 }}>{task.title}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: statusColor(task.status) + '22', color: statusColor(task.status), fontFamily: C.fontSans }}>{statusLabel(task.status)}</span>
+            <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: priorityColor(task.priority) + '22', color: priorityColor(task.priority), fontFamily: C.fontSans }}>{priorityLabel(task.priority)}</span>
+            <button onClick={onEdit} style={{ marginLeft: 'auto', fontSize: '0.74rem', fontWeight: 600, color: dark ? '#fff' : C.navy, background: 'none', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 12px', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+            {TASK_STATUS.map(s => <button key={s.id} onClick={async () => { await onStatus(s.id); setActivity(await TaskDB.loadActivity(task.id)); }} style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${task.status === s.id ? s.color : bord}`, background: task.status === s.id ? s.color : (dark ? '#06101F' : '#fff'), color: task.status === s.id ? '#fff' : sub, fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{s.label}</button>)}
+          </div>
+          {row('Due', fmt(task.due_at))}
+          {row('Project', task._projectName || '—')}
+          {row('Assignees', ppl('assignee'))}
+          {row('Assigned by', ppl('assigner'))}
+          {task.working_url ? row('Working URL', <a href={task.working_url} target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Open ↗</a>) : null}
+          {task.email_link ? row('Email', contactLink('Email', task.email_link)) : null}
+          {task.description ? <div style={{ marginTop: 12 }}><div style={{ fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans }}>Description</div><div style={{ fontSize: '0.84rem', color: ink, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{task.description}</div></div> : null}
+          {task.context ? <div style={{ marginTop: 12 }}><div style={{ fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans }}>Context</div><div style={{ fontSize: '0.84rem', color: ink, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{task.context}</div></div> : null}
+          <div style={{ marginTop: 18, marginBottom: 8, fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, fontFamily: C.fontSans }}>Activity</div>
+          {activity.length === 0 && <div style={{ fontSize: '0.78rem', color: sub, fontFamily: C.fontSans }}>No activity yet.</div>}
+          {activity.map(a => { const tag = kindTag[a.kind] || kindTag.update; return (
+            <div key={a.id} style={{ display: 'flex', gap: 8, padding: '8px 0', borderBottom: `1px solid ${bord}` }}>
+              <span style={{ flexShrink: 0, fontSize: '0.52rem', fontWeight: 700, letterSpacing: '0.06em', color: tag.c, background: tag.c + '1A', borderRadius: 6, padding: '2px 6px', height: 'fit-content', fontFamily: C.fontSans }}>{tag.t}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, lineHeight: 1.4 }}>{a.content}</div>
+                <div style={{ fontSize: '0.64rem', color: sub, marginTop: 2, fontFamily: C.fontSans }}>{a.author_name || 'System'} · {fmt(a.created_at)}</div>
+              </div>
+            </div>
+          ); })}
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addNote(); }} placeholder="Add an update…" style={{ flex: 1, padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.84rem', outline: 'none', fontFamily: C.fontSans }} />
+            <button onClick={addNote} disabled={!note.trim() || busy} style={{ padding: '9px 14px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !note.trim() ? 0.5 : 1 }}>Post</button>
+          </div>
+        </div>
+      );
+    }
+
+    function TasksScreen({ dark, user, onClose }) {
+      const [data, setData] = useState({ tasks: [], peopleByTask: {}, projById: {} });
+      const [team, setTeam] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [view, setView] = useState('list');   // list | detail | form
+      const [current, setCurrent] = useState(null);
+      const bg = dark ? '#000D26' : '#FCFBF8', bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const enrich = (t, projById) => ({ ...t, _projectName: t.project_id ? (projById[t.project_id] || '') : '' });
+      const withMetaFrom = (t, d) => { const ppl = d.peopleByTask[t.id] || []; return { ...enrich(t, d.projById), _assignees: ppl.filter(p => p.role === 'assignee').map(p => p.user_id), _assigners: ppl.filter(p => p.role === 'assigner').map(p => p.user_id) }; };
+      const withMeta = (t) => withMetaFrom(t, data);
+      async function reload() {
+        setLoading(true);
+        const [d, tm] = await Promise.all([TaskDB.loadAll(), ProfileDB.loadAll()]);
+        setData(d);
+        setTeam((tm || []).map(p => ({ id: p.id, name: ((((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User') })));
+        setLoading(false);
+        return d;
+      }
+      useEffect(() => { reload(); }, []);
+      async function handleSave(form) {
+        const due_at = form.due ? new Date(form.due).toISOString() : null;
+        const project_id = form.project ? await TaskDB.findOrCreateProject(form.project, user) : null;
+        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null };
+        const people = { assignee: form.assignees, assigner: form.assigners };
+        if (current && current.id) { await TaskDB.update(current.id, current, fields, user); await TaskDB.setPeople(current.id, people); }
+        else { await TaskDB.create(fields, people, user); }
+        await reload(); setView('list'); setCurrent(null);
+      }
+      async function changeStatus(task, status) {
+        await TaskDB.update(task.id, task, { status }, user);
+        const d = await reload();
+        const fresh = (d.tasks || []).find(x => x.id === task.id);
+        if (fresh) setCurrent(fresh);
+      }
+      const left = view === 'list' ? { icon: 'ti-x', label: 'Close', fn: onClose } : { icon: 'ti-chevron-left', label: 'Back', fn: () => { setView('list'); setCurrent(null); } };
+      const titleText = view === 'form' ? (current ? 'Edit task' : 'New task') : view === 'detail' ? 'Task' : 'Tasks';
+      return (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 70, background: bg, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px', paddingTop: 'calc(12px + env(safe-area-inset-top))', background: dark ? '#0A1730' : '#001A4A', flexShrink: 0 }}>
+            <button onClick={left.fn} aria-label={left.label} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center', padding: 0 }}><i className={`ti ${left.icon}`} style={{ fontSize: 22 }} /></button>
+            <span style={{ flex: 1, fontFamily: C.fontSans, fontSize: 15, fontWeight: 600, color: '#fff' }}>{titleText}</span>
+            {view === 'list' && <button onClick={() => { setCurrent(null); setView('form'); }} style={{ display: 'flex', alignItems: 'center', gap: 5, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '6px 12px', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-plus" style={{ fontSize: 14 }} />New</button>}
+          </div>
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            {view === 'form' ? <TaskForm dark={dark} task={current ? withMeta(current) : null} team={team} onSave={handleSave} onCancel={() => setView(current ? 'detail' : 'list')} />
+              : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} onEdit={() => setView('form')} onStatus={(s) => changeStatus(current, s)} />
+              : (
+                <div style={{ padding: '12px 14px 40px' }}>
+                  {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 12 }}>Loading…</div>
+                    : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center' }}>No tasks yet. Tap <b>New</b> to add one.</div>
+                    : TASK_STATUS.map(col => {
+                        const items = data.tasks.filter(t => t.status === col.id);
+                        if (!items.length) return null;
+                        return (
+                          <div key={col.id} style={{ marginBottom: 16 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} /><span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{col.label} · {items.length}</span></div>
+                            {items.map(t => {
+                              const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
+                              return (
+                                <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer' }}>
+                                  <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} />
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+                                    <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
+                                  </div>
+                                  <i className="ti ti-chevron-right" style={{ fontSize: 16, color: sub, flexShrink: 0 }} />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                </div>
+              )}
+          </div>
         </div>
       );
     }
@@ -2661,47 +2858,161 @@ Continue with TMG Gmail
       );
     }
 
-    // ─── Profile / status panel (right slide-out) ────────────────────
-    function ProfilePanel({ dark, user, profile, name, avatar, dotColor, away, statusText, statusEmoji, onToggleAway, onOpenStatus, onClose, historySide, setHistorySide, setDark, fontScale, setFontScale }) {
+    // ─── Profile / status panel (right slide-out) ───────────────────
+    // One cohesive TMG-branded card: accent bar · merged identity header
+    // (no role badge) · status controls · Details · Edit. Appearance /
+    // Chat History / Sign out stay BELOW the card (Settings-embedded).
+    function ProfilePanel({ dark, user, profile, name, avatar, away, statusText, statusEmoji, onToggleAway, onOpenStatus, onClose, historySide, setHistorySide, setDark, fontScale, setFontScale }) {
       const J = "'Jost', sans-serif";
-      const ink = dark ? '#fff' : '#001A4A';
-      const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
-      const bord = dark ? '#0D1E3A' : '#E4DFD4';
-      const statusLine = away ? 'Away' : (statusText ? ((statusEmoji ? statusEmoji + ' ' : '') + statusText) : 'Active');
+      const [me, setMe] = useState(profile || null);
+      const [allUsers, setAllUsers] = useState([]);
+      const [editing, setEditing] = useState(false);
+      const [first, setFirst] = useState((profile && profile.first_name) || '');
+      const [last, setLast] = useState((profile && profile.last_name) || '');
+      const [phone, setPhone] = useState((profile && profile.phone) || '');
+      const [country, setCountry] = useState((profile && profile.country) || '');
+      const [timezone, setTimezone] = useState((profile && profile.timezone) || '');
+      const [dob, setDob] = useState((profile && profile.dob) || '');
+      const [pets, setPets] = useState((profile && profile.pets) || []);
+      const [saving, setSaving] = useState(false);
+      useEffect(() => { ProfileDB.loadAll().then(setAllUsers); }, []);
+
+      const email = (me && me.email) || (user && user.email) || '';
+      const roleLine = (me && me.title) || '';
+      const managerName = (id) => { if (!id) return ''; const m = allUsers.find(u => u.id === id); return m ? ((((m.first_name || '') + ' ' + (m.last_name || '')).trim()) || m.email) : ''; };
+      const locationText = () => { if (!me) return ''; const c = COUNTRIES.find(x => x.c === me.country); const cn = c ? c.n : (me.country || ''); const city = me.timezone ? tzCity(me.timezone) : ''; return [city, cn].filter(Boolean).join(', '); };
+      async function saveMine() {
+        setSaving(true);
+        try { await ProfileDB.updateMine({ first_name: first, last_name: last, phone, country, timezone, dob: dob || null, pets }); setMe(prev => ({ ...(prev || {}), first_name: first, last_name: last, phone, country, timezone, dob: dob || null, pets })); setEditing(false); }
+        catch (e) { alert('Could not save: ' + (e.message || e)); }
+        finally { setSaving(false); }
+      }
+
+      // ── spec palette ──
+      const panelBg     = dark ? '#070F1E' : '#FCFBF8';
+      const panelBorder = dark ? '#152545' : '#EDE7DC';
+      const ink         = dark ? '#fff' : '#001A4A';
+      const keyMuted    = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+      const valMuted    = dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9';
+      const rowBorder   = dark ? '#0D1E3A' : '#F0EBE3';
+      const gold        = dark ? '#C9A45A' : '#AD832F';
+      const ruleCol     = dark ? '#152545' : '#EDE7DC';
+      const ctrlBg      = dark ? '#0A1730' : '#FFFFFF';
+      const ctrlBorder  = dark ? '#152545' : '#E0D8CC';
+      const awayBorder  = dark ? '#152545' : '#EDE7DC';
+      const slideBg     = dark ? '#04091B' : '#F2EEE6';
+      const accentBar   = dark ? 'linear-gradient(90deg, #AD832F, #C9A45A)' : 'linear-gradient(90deg, #001A4A, #AD832F)';
+      const presence    = away ? '#E0A93B' : (dark ? '#5DCAA5' : '#3DAF7E');
+      const presenceTxt = away ? 'AWAY' : 'ACTIVE';
+      const inputStyle  = { width: '100%', padding: '10px 12px', background: ctrlBg, border: `1px solid ${ctrlBorder}`, borderRadius: 10, color: ink, fontSize: 13, outline: 'none', fontFamily: J };
+
+      const detailRow = (label, value, opts) => {
+        opts = opts || {};
+        return (
+          <div key={label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: opts.last ? 'none' : `1px solid ${rowBorder}` }}>
+            <span style={{ fontFamily: J, fontSize: 10, color: keyMuted, flexShrink: 0 }}>{label}</span>
+            <span style={{ fontFamily: J, fontSize: opts.small ? 8.5 : 10, fontWeight: 600, color: opts.muted ? valMuted : ink, textAlign: 'right', marginLeft: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</span>
+          </div>
+        );
+      };
+      const mgr = managerName(me && me.reports_to);
+      const loc = locationText();
+      const petStr = (me && me.pets && me.pets.length) ? me.pets.map(petLabel).join('   ') : '';
+
       return (
         <React.Fragment>
           <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,0,0,0.4)' }} />
-          <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: '88%', maxWidth: 390, zIndex: 71, background: dark ? '#000D26' : '#FCFBF8', boxShadow: '-12px 0 30px rgba(0,0,0,0.28)', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
-            {/* Profile header */}
-            <div style={{ padding: 'calc(16px + env(safe-area-inset-top)) 16px 14px', display: 'flex', alignItems: 'center', gap: 13 }}>
-              <div style={{ position: 'relative', flexShrink: 0 }}>
-                {avatar
-                  ? <img src={avatar} alt="" style={{ width: 52, height: 52, borderRadius: '50%', objectFit: 'cover' }} />
-                  : <div style={{ width: 52, height: 52, borderRadius: '50%', background: C.navy, color: C.goldSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: J, fontWeight: 600, fontSize: 20 }}>{(name || '?').trim().charAt(0).toUpperCase()}</div>}
-                <span style={{ position: 'absolute', right: 1, bottom: 1, width: 14, height: 14, borderRadius: '50%', background: dotColor, border: `2.5px solid ${dark ? '#000D26' : '#FCFBF8'}` }} />
+          <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: '88%', maxWidth: 390, zIndex: 71, background: slideBg, boxShadow: '-12px 0 30px rgba(0,0,0,0.28)', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
+            <div style={{ padding: 'calc(14px + env(safe-area-inset-top)) 16px 0' }}>
+              {/* ─── one cohesive profile panel ─── */}
+              <div style={{ borderRadius: 18, overflow: 'hidden', border: `1px solid ${panelBorder}`, boxShadow: '0 12px 40px rgba(0,26,74,0.12)', background: panelBg }}>
+                {/* 1 · accent bar */}
+                <div style={{ height: 4, background: accentBar }} />
+
+                {/* 2 · merged identity header (no role badge) */}
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 13, padding: '18px 18px 16px' }}>
+                  <div style={{ position: 'relative', flexShrink: 0 }}>
+                    {avatar
+                      ? <img src={avatar} alt="" style={{ width: 58, height: 58, borderRadius: '50%', objectFit: 'cover' }} />
+                      : <div style={{ width: 58, height: 58, borderRadius: '50%', background: C.navy, color: C.goldSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: J, fontWeight: 600, fontSize: 22 }}>{(name || '?').trim().charAt(0).toUpperCase()}</div>}
+                    <span style={{ position: 'absolute', right: 2, bottom: 2, width: 14, height: 14, borderRadius: '50%', background: presence, border: `2.5px solid ${panelBg}` }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
+                    {roleLine && <div style={{ fontFamily: J, fontSize: 10, color: keyMuted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{roleLine}</div>}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: '50%', background: presence }} />
+                      <span style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.08em', fontWeight: 500, color: presence }}>{presenceTxt}</span>
+                    </div>
+                  </div>
+                  <button onClick={onClose} aria-label="Close" style={{ flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer', color: valMuted, fontSize: 17, display: 'flex' }}><i className="ti ti-x" /></button>
+                </div>
+
+                {!editing ? (
+                  <React.Fragment>
+                    {/* 3 · status controls */}
+                    <div style={{ padding: '0 14px 12px' }}>
+                      <button onClick={onOpenStatus} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', borderRadius: 11, border: `1px solid ${ctrlBorder}`, background: ctrlBg, padding: '10px 12px', marginBottom: 8, cursor: 'pointer', fontFamily: J, fontSize: 10, color: (statusText || statusEmoji) ? ink : keyMuted }}>
+                        <i className="ti ti-mood-smile" style={{ fontSize: 15, color: gold }} />
+                        {statusText ? ((statusEmoji ? statusEmoji + ' ' : '') + statusText) : "What's your status?"}
+                      </button>
+                      <button onClick={onToggleAway} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', borderRadius: 11, border: `1px solid ${awayBorder}`, background: ctrlBg, padding: '9px 12px', cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: 500, color: ink }}>
+                        <i className="ti ti-clock-pause" style={{ fontSize: 15, color: away ? '#E0A93B' : gold }} />
+                        {away ? 'Set yourself as active' : 'Set yourself as away'}
+                      </button>
+                    </div>
+
+                    {/* 4 · Details label */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 18px 8px' }}>
+                      <span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.18em', fontWeight: 600, textTransform: 'uppercase', color: gold }}>Details</span>
+                      <span style={{ flex: 1, height: 1, background: ruleCol }} />
+                    </div>
+
+                    {/* 5 · field rows */}
+                    <div style={{ padding: '0 18px' }}>
+                      {detailRow('Employee ID', (me && me.employee_id) || '—', { muted: !(me && me.employee_id) })}
+                      {detailRow('Title', roleLine || '—', { muted: !roleLine })}
+                      {detailRow('Reports to', mgr || '—', { muted: !mgr })}
+                      {detailRow('Phone', (me && me.phone) ? contactLink('Phone', me.phone) : '—', { muted: !(me && me.phone) })}
+                      {detailRow('Email', email ? contactLink('Email', email) : '—', { small: true, muted: !email })}
+                      {detailRow('Location', loc || '—', { muted: !loc })}
+                      {detailRow('Local time', (me && me.timezone) ? localTimeIn(me.timezone) : '—', { muted: !(me && me.timezone) })}
+                      {detailRow('Pets', petStr || '—', { last: true, muted: !petStr })}
+                    </div>
+
+                    {/* 6 · edit button */}
+                    <div style={{ padding: '14px 18px 18px' }}>
+                      <button onClick={() => { setFirst((me && me.first_name) || ''); setLast((me && me.last_name) || ''); setPhone((me && me.phone) || ''); setCountry((me && me.country) || ''); setTimezone((me && me.timezone) || ''); setDob((me && me.dob) || ''); setPets((me && me.pets) || []); setEditing(true); }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, width: '100%', padding: 13, borderRadius: 11, border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', background: dark ? '#AD832F' : '#001A4A', color: '#fff' }}>
+                        <i className="ti ti-pencil" style={{ fontSize: 14 }} />Edit my info
+                      </button>
+                    </div>
+                  </React.Fragment>
+                ) : (
+                  <div style={{ padding: '4px 18px 18px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <input placeholder="First name" value={first} onChange={e => setFirst(e.target.value)} style={inputStyle} />
+                    <input placeholder="Last name" value={last} onChange={e => setLast(e.target.value)} style={inputStyle} />
+                    <input placeholder="Phone" value={phone} onChange={e => setPhone(e.target.value)} style={inputStyle} />
+                    <div style={{ fontFamily: J, fontSize: 10, color: keyMuted, marginTop: 2 }}>Location</div>
+                    <select value={country} onChange={e => { setCountry(e.target.value); setTimezone(''); }} style={inputStyle}><option value="">Country…</option>{COUNTRIES.map(c => <option key={c.c} value={c.c}>{c.n}</option>)}</select>
+                    {country && (COUNTRY_TZ[country] || []).length > 0 && <select value={timezone} onChange={e => setTimezone(e.target.value)} style={inputStyle}><option value="">City / time zone…</option>{(COUNTRY_TZ[country] || []).map(z => <option key={z} value={z}>{tzCity(z)}</option>)}</select>}
+                    {timezone && <div style={{ fontFamily: J, fontSize: 10, color: keyMuted }}>Local time: <b style={{ color: ink }}>{localTimeIn(timezone)}</b></div>}
+                    <div style={{ fontFamily: J, fontSize: 10, color: keyMuted, marginTop: 2 }}>Date of birth <span style={{ opacity: 0.7 }}>(optional)</span></div>
+                    <input type="date" value={dob || ''} onChange={e => setDob(e.target.value)} style={inputStyle} />
+                    <div style={{ fontFamily: J, fontSize: 10, color: keyMuted, marginTop: 2 }}>Pets</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{PETS.map(p => { const on = pets.includes(p.k); return <button key={p.k} type="button" onClick={() => setPets(on ? pets.filter(x => x !== p.k) : [...pets, p.k])} style={{ padding: '7px 11px', borderRadius: 20, border: `1px solid ${on ? C.navy : ctrlBorder}`, background: on ? C.navy : ctrlBg, color: on ? '#fff' : keyMuted, fontSize: 12, cursor: 'pointer', fontFamily: J }}>{p.e} {p.label}</button>; })}</div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                      <button onClick={saveMine} disabled={saving} style={{ flex: 1, padding: 11, background: dark ? '#AD832F' : C.navy, color: '#fff', border: 'none', borderRadius: 11, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: J }}>{saving ? 'Saving…' : 'Save'}</button>
+                      <button onClick={() => setEditing(false)} style={{ flex: 1, padding: 11, background: 'none', color: keyMuted, border: `1px solid ${ctrlBorder}`, borderRadius: 11, fontSize: 13, cursor: 'pointer', fontFamily: J }}>Cancel</button>
+                    </div>
+                    <div style={{ fontFamily: J, fontSize: 9, color: keyMuted, lineHeight: 1.4 }}>Employee ID, title, reports-to, and access are set by an admin.</div>
+                  </div>
+                )}
               </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontFamily: J, fontSize: 17, fontWeight: 600, color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
-                <div style={{ fontFamily: J, fontSize: 12, color: sub, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{statusLine}</div>
-              </div>
-              <button onClick={onClose} aria-label="Close" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 20, display: 'flex', flexShrink: 0 }}><i className="ti ti-x" /></button>
             </div>
-            {/* Status field */}
-            <div style={{ padding: '0 16px 12px' }}>
-              <button onClick={onOpenStatus} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '11px 13px', borderRadius: 11, border: `1px solid ${bord}`, background: dark ? '#0A1730' : '#FFFFFF', cursor: 'pointer', fontFamily: J, fontSize: 13, color: (statusText || statusEmoji) ? ink : sub }}>
-                <i className="ti ti-mood-smile" style={{ fontSize: 17, color: sub }} />
-                {statusText ? ((statusEmoji ? statusEmoji + ' ' : '') + statusText) : "What's your status?"}
-              </button>
-            </div>
-            {/* Set yourself as away */}
-            <div style={{ borderTop: `1px solid ${bord}`, borderBottom: `1px solid ${bord}` }}>
-              <button onClick={onToggleAway} style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', textAlign: 'left', padding: '13px 16px', background: 'none', border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 14, color: ink }}>
-                <i className={`ti ${away ? 'ti-circle-dot' : 'ti-circle-dashed'}`} style={{ fontSize: 19, color: away ? '#E0A93B' : (dark ? '#C9A45A' : '#AD832F') }} />{away ? 'Set yourself as active' : 'Set yourself as away'}
-              </button>
-            </div>
-            {/* Relocated Settings */}
-            <div style={{ paddingTop: 16 }}>
-              <SettingsTab embedded user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />
+
+            {/* ─── below the panel (untouched): Appearance · Chat History · Sign out ─── */}
+            <div style={{ paddingTop: 14 }}>
+              <SettingsTab embedded historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />
             </div>
           </div>
         </React.Fragment>
@@ -3379,7 +3690,7 @@ Continue with TMG Gmail
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); }} tasksOpen={showTasks} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
           {showCalendar && <CalendarPopover dark={dark} onClose={() => setShowCalendar(false)} />}
-          {showTasks && <TasksPopover dark={dark} onClose={() => setShowTasks(false)} />}
+          {showTasks && <TasksScreen dark={dark} user={user} onClose={() => setShowTasks(false)} />}
           {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>

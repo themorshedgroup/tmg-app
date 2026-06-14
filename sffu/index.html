@@ -319,6 +319,24 @@
         if (error) console.error('[DB] insertMessage:', error.message);
       },
 
+      // Sends a manual text via Quo (server-side) AND logs it to the thread.
+      async sendSms(showingId, body) {
+        if (!this.client()) return { ok: true, dev: true };   // dev/local: no real send
+        const token = window.SupabaseAuth?._state?.session?.access_token || '';
+        const res = await fetch('https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/sffu-send', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token,
+            'apikey': 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV',
+          },
+          body: JSON.stringify({ showing_id: showingId, body }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || ('Send failed (' + res.status + ')'));
+        return data;
+      },
+
       async loadProperties() {
         if (!this.client()) return PROPERTIES;
         const { data, error } = await this.client()
@@ -771,10 +789,14 @@
         const txt = replyText.trim();
         if (!txt) return;
         const senderName = user?.user_metadata?.full_name || user?.email || 'You';
-        const msg = { dir: 'out', touch: null, time: 'Just now', body: txt, sentByName: senderName };
-        setLocalThread(t => [...t, msg]);
         setReplyText('');
-        await DB.insertMessage(showing.id, msg, user);
+        try {
+          await DB.sendSms(showing.id, txt);                    // real text via Quo + logged
+          setLocalThread(t => [...t, { dir: 'out', touch: null, time: 'Just now', body: txt, sentByName: senderName }]);
+        } catch (e) {
+          setReplyText(txt);                                    // restore so they can retry
+          alert('Could not send the text: ' + (e.message || e));
+        }
       }
 
       async function handleSaveEdit() {

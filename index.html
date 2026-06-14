@@ -438,6 +438,17 @@ Continue with TMG Gmail
         if (error) { console.error('[ProfileDB] updateMine:', error.message); throw error; }
       },
 
+      // Presence/status (own profile). touchPresence = the "I'm online" heartbeat.
+      async touchPresence() {
+        if (!this.client()) return;
+        try { await this.client().from('profiles').update({ last_seen_at: new Date().toISOString() }).eq('id', this.uid()); } catch (e) {}
+      },
+      async setPresence(fields) {   // { away?, status_text?, status_emoji? }
+        if (!this.client()) return;
+        const { error } = await this.client().from('profiles').update(fields).eq('id', this.uid());
+        if (error) console.error('[ProfileDB] setPresence:', error.message);
+      },
+
       async adminUpdate(id, fields) {
         if (!this.client()) return;
         const mapped = {};
@@ -1316,7 +1327,7 @@ Continue with TMG Gmail
       );
     }
 
-    function SettingsTab({ user, profile, historySide, setHistorySide, dark, setDark, fontScale, setFontScale }) {
+    function SettingsTab({ user, profile, historySide, setHistorySide, dark, setDark, fontScale, setFontScale, embedded }) {
       const [me, setMe] = useState(profile || null);
       const [allUsers, setAllUsers] = useState([]);
       const [editing, setEditing] = useState(false);
@@ -1370,8 +1381,8 @@ Continue with TMG Gmail
       };
 
       return (
-        <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Settings</div>
+        <div style={embedded ? { padding: '0 16px 16px' } : { padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
+          {!embedded && <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Settings</div>}
 
           {/* My Profile */}
           <div style={CARD}>
@@ -2610,7 +2621,7 @@ Continue with TMG Gmail
     }
 
     // ─── Top Bar ─────────────────────────────────────────────────────
-    function TopBar({ dark, onToggleDark, onCalendar, calendarOpen, onTasks, tasksOpen }) {
+    function TopBar({ dark, onToggleDark, onCalendar, calendarOpen, onTasks, tasksOpen, avatar, name, dotColor, onProfile }) {
       // Gold-tinted rounded-square chip; same tint + gold icon in light and dark.
       const iconBtn = (onClick, iconClass, title) => (
         <button
@@ -2639,8 +2650,102 @@ Continue with TMG Gmail
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             {iconBtn(onTasks, 'ti ti-checklist', 'Tasks')}
             {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar')}
+            <button onClick={onProfile} aria-label="Your profile" style={{ position: 'relative', width: 32, height: 32, borderRadius: 9, border: 'none', padding: 0, cursor: 'pointer', background: 'rgba(201,164,90,0.16)', flexShrink: 0 }}>
+              {avatar
+                ? <img src={avatar} alt="" style={{ width: 32, height: 32, borderRadius: 9, objectFit: 'cover', display: 'block' }} />
+                : <span style={{ display: 'flex', width: 32, height: 32, borderRadius: 9, alignItems: 'center', justifyContent: 'center', color: C.goldSoft, fontFamily: C.fontSans, fontWeight: 600, fontSize: 13 }}>{(name || '?').trim().charAt(0).toUpperCase()}</span>}
+              <span style={{ position: 'absolute', right: -2, bottom: -2, width: 11, height: 11, borderRadius: '50%', background: dotColor, border: `2px solid ${dark ? '#0A1730' : '#001A4A'}` }} />
+            </button>
           </div>
         </div>
+      );
+    }
+
+    // ─── Profile / status panel (right slide-out) ────────────────────
+    function ProfilePanel({ dark, user, profile, name, avatar, dotColor, away, statusText, statusEmoji, onToggleAway, onOpenStatus, onClose, historySide, setHistorySide, setDark, fontScale, setFontScale }) {
+      const J = "'Jost', sans-serif";
+      const ink = dark ? '#fff' : '#001A4A';
+      const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const bord = dark ? '#0D1E3A' : '#E4DFD4';
+      const statusLine = away ? 'Away' : (statusText ? ((statusEmoji ? statusEmoji + ' ' : '') + statusText) : 'Active');
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,0,0,0.4)' }} />
+          <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: '88%', maxWidth: 390, zIndex: 71, background: dark ? '#000D26' : '#FCFBF8', boxShadow: '-12px 0 30px rgba(0,0,0,0.28)', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
+            {/* Profile header */}
+            <div style={{ padding: 'calc(16px + env(safe-area-inset-top)) 16px 14px', display: 'flex', alignItems: 'center', gap: 13 }}>
+              <div style={{ position: 'relative', flexShrink: 0 }}>
+                {avatar
+                  ? <img src={avatar} alt="" style={{ width: 52, height: 52, borderRadius: '50%', objectFit: 'cover' }} />
+                  : <div style={{ width: 52, height: 52, borderRadius: '50%', background: C.navy, color: C.goldSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: J, fontWeight: 600, fontSize: 20 }}>{(name || '?').trim().charAt(0).toUpperCase()}</div>}
+                <span style={{ position: 'absolute', right: 1, bottom: 1, width: 14, height: 14, borderRadius: '50%', background: dotColor, border: `2.5px solid ${dark ? '#000D26' : '#FCFBF8'}` }} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontFamily: J, fontSize: 17, fontWeight: 600, color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
+                <div style={{ fontFamily: J, fontSize: 12, color: sub, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{statusLine}</div>
+              </div>
+              <button onClick={onClose} aria-label="Close" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 20, display: 'flex', flexShrink: 0 }}><i className="ti ti-x" /></button>
+            </div>
+            {/* Status field */}
+            <div style={{ padding: '0 16px 12px' }}>
+              <button onClick={onOpenStatus} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '11px 13px', borderRadius: 11, border: `1px solid ${bord}`, background: dark ? '#0A1730' : '#FFFFFF', cursor: 'pointer', fontFamily: J, fontSize: 13, color: (statusText || statusEmoji) ? ink : sub }}>
+                <i className="ti ti-mood-smile" style={{ fontSize: 17, color: sub }} />
+                {statusText ? ((statusEmoji ? statusEmoji + ' ' : '') + statusText) : "What's your status?"}
+              </button>
+            </div>
+            {/* Set yourself as away */}
+            <div style={{ borderTop: `1px solid ${bord}`, borderBottom: `1px solid ${bord}` }}>
+              <button onClick={onToggleAway} style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', textAlign: 'left', padding: '13px 16px', background: 'none', border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 14, color: ink }}>
+                <i className={`ti ${away ? 'ti-circle-dot' : 'ti-circle-dashed'}`} style={{ fontSize: 19, color: away ? '#E0A93B' : (dark ? '#C9A45A' : '#AD832F') }} />{away ? 'Set yourself as active' : 'Set yourself as away'}
+              </button>
+            </div>
+            {/* Relocated Settings */}
+            <div style={{ paddingTop: 16 }}>
+              <SettingsTab embedded user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
+    // ─── Set-status sheet ────────────────────────────────────────────
+    function StatusModal({ dark, initialText, initialEmoji, onSave, onClose }) {
+      const J = "'Jost', sans-serif";
+      const [text, setText] = useState(initialText || '');
+      const [emoji, setEmoji] = useState(initialEmoji || '');
+      const ink = dark ? '#fff' : '#001A4A';
+      const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const bord = dark ? '#152545' : '#E4DFD4';
+      const accent = dark ? '#7A9AFF' : '#2A4FA4';
+      const SUGGEST = [
+        { e: '📅', t: 'In a meeting' }, { e: '🍔', t: 'Out at lunch' }, { e: '🚌', t: 'Commuting' },
+        { e: '🏡', t: 'Working remotely' }, { e: '🤒', t: 'Out sick' }, { e: '🏖️', t: 'On vacation' },
+      ];
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(0,0,0,0.5)' }} />
+          <div style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 81, maxHeight: '88%', background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px' }}>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 15, color: accent }}>Cancel</button>
+              <button onClick={() => onSave(text.trim(), emoji)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 15, fontWeight: 600, color: accent }}>Done</button>
+            </div>
+            <div style={{ padding: '0 16px 24px', overflowY: 'auto' }}>
+              <div style={{ fontFamily: J, fontSize: 22, fontWeight: 600, color: ink, marginBottom: 6 }}>Set your status</div>
+              <div style={{ fontFamily: J, fontSize: 13, color: sub, lineHeight: 1.5, marginBottom: 16 }}>Let your team know what you're up to.</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, border: `1px solid ${bord}`, borderRadius: 12, padding: '4px 8px 4px 4px', marginBottom: 18 }}>
+                <input value={emoji} onChange={e => setEmoji(e.target.value.slice(0, 4))} placeholder="🙂" style={{ width: 44, height: 40, textAlign: 'center', fontSize: 20, border: 'none', outline: 'none', background: 'transparent' }} />
+                <input value={text} onChange={e => setText(e.target.value)} placeholder="What's your status?" style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 15, color: ink }} />
+                {(text || emoji) && <button onClick={() => { setText(''); setEmoji(''); }} aria-label="Clear" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 18, display: 'flex' }}><i className="ti ti-x" /></button>}
+              </div>
+              <div style={{ fontFamily: J, fontSize: 12, color: sub, letterSpacing: '0.04em', marginBottom: 4 }}>Suggestions</div>
+              {SUGGEST.map((s, i) => (
+                <button key={i} onClick={() => { setEmoji(s.e); setText(s.t); }} style={{ display: 'flex', alignItems: 'center', gap: 13, width: '100%', textAlign: 'left', padding: '12px 4px', background: 'none', border: 'none', borderTop: i ? `1px solid ${dark ? '#152545' : '#F0EBE3'}` : 'none', cursor: 'pointer', fontFamily: J, fontSize: 15, color: ink }}>
+                  <span style={{ fontSize: 20, width: 24, textAlign: 'center' }}>{s.e}</span>{s.t}
+                </button>
+              ))}
+            </div>
+          </div>
+        </React.Fragment>
       );
     }
 
@@ -3018,17 +3123,28 @@ Continue with TMG Gmail
       const [accessCfg, setAccessCfg] = useState(DEFAULT_ACCESS);
       const [showCalendar, setShowCalendar] = useState(false);
       const [showTasks, setShowTasks] = useState(false);
+      const [showProfile, setShowProfile] = useState(false);
+      const [showStatus, setShowStatus] = useState(false);
+      const [away, setAway] = useState(!!(profile && profile.away));
+      const [statusText, setStatusText] = useState((profile && profile.status_text) || '');
+      const [statusEmoji, setStatusEmoji] = useState((profile && profile.status_emoji) || '');
 
       // Admin-configurable access: filter the nav + More apps to what this user may see.
       const appSet = profile ? allowedAppSet(profile.access, accessCfg) : null; // null = everything
       const visibleTabs = appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS;
       const isAdmin = hasAdmin(profile && profile.access);
       // "More" menu — Settings always; Shared Drives / Company Directory gated; Admin role-gated.
-      const moreItems = [{ id: 'settings', label: 'Settings', icon: 'ti-settings' }]
+      const moreItems = []
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', icon: 'ti-messages' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
+      // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
+      const myAvatar = (profile && profile.avatar_url) || (user && user.user_metadata && user.user_metadata.avatar_url) || '';
+      const myName = ((((profile && profile.first_name) || '') + ' ' + ((profile && profile.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || (user && user.email) || 'Me';
+      const dotColor = away ? '#E0A93B' : '#2FBF6B';
+      const toggleAway = () => { const v = !away; setAway(v); ProfileDB.setPresence({ away: v }); };
+      const saveStatus = (text, emoji) => { setStatusText(text); setStatusEmoji(emoji); ProfileDB.setPresence({ status_text: text || null, status_emoji: emoji || null }); setShowStatus(false); };
       useEffect(() => {
         if (!visibleTabs.some(t => t.id === activeTab)) setActiveTab((visibleTabs[0] || { id: 'more' }).id);
       }, [profile]);
@@ -3053,7 +3169,7 @@ Continue with TMG Gmail
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
-      const [moreView, setMoreView] = useState('settings');
+      const [moreView, setMoreView] = useState('directory');
       const [moreMenuOpen, setMoreMenuOpen] = useState(false);
 
       const zoneRef = useRef(null);
@@ -3113,6 +3229,16 @@ Continue with TMG Gmail
 
       // Load the per-tool role-access config (gates this user's tabs + More apps).
       useEffect(() => { AccessDB.load().then(c => { if (c) setAccessCfg(normalizeAccess(c)); }); }, []);
+
+      // Presence heartbeat: mark "online" now + every minute while the app is open/foreground.
+      useEffect(() => {
+        ProfileDB.touchPresence();
+        const iv = setInterval(() => { if (!document.hidden) ProfileDB.touchPresence(); }, 60000);
+        const onVis = () => { if (!document.hidden) ProfileDB.touchPresence(); };
+        document.addEventListener('visibilitychange', onVis);
+        window.addEventListener('focus', onVis);
+        return () => { clearInterval(iv); document.removeEventListener('visibilitychange', onVis); window.removeEventListener('focus', onVis); };
+      }, []);
 
       useEffect(() => {
         localStorage.setItem('tmg-mode', mode);
@@ -3251,9 +3377,11 @@ Continue with TMG Gmail
 
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
-          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); }} tasksOpen={showTasks} />
+          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); }} tasksOpen={showTasks} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
           {showCalendar && <CalendarPopover dark={dark} onClose={() => setShowCalendar(false)} />}
           {showTasks && <TasksPopover dark={dark} onClose={() => setShowTasks(false)} />}
+          {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
+          {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>
@@ -3282,7 +3410,7 @@ Continue with TMG Gmail
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
-              : <SettingsTab user={user} profile={profile} historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />)}
+              : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}
             {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
@@ -3301,7 +3429,7 @@ Continue with TMG Gmail
             onChange={(t) => {
               setDrawerOpen(false);
               if (t === 'more') {
-                if (moreItems.length <= 1) { setMoreView('settings'); setActiveTab('more'); }
+                if (moreItems.length <= 1) { setMoreView((moreItems[0] || {}).id || 'directory'); setActiveTab('more'); }
                 else setMoreMenuOpen(o => !o);
                 return;
               }

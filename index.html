@@ -1501,6 +1501,9 @@ Continue with TMG Gmail
     //  • New sign-ups not in the seed are appended (active accounts only).
     // The website headshots are the curated `photo`; clear a person's
     // `photo` to fall back to their account avatar. See buildRoster() below.
+    // People permanently excluded from the directory + any future roster,
+    // even if they sign up later (matched on lowercased full name).
+    const DIRECTORY_EXCLUDE = ['cassandra clemons', 'cassie clemons'];
     const TEAM = [
       { id: 'tarek', name: 'Tarek Morshed', title: 'Chief Realty Officer',
         photo: 'https://themorshedgroup.com/wp-content/uploads/2023/01/tarek-morshed-headshot.jpg',
@@ -1512,9 +1515,6 @@ Continue with TMG Gmail
         employeeId: 'TMG-03', reportsTo: '', phone: '(512) 643-6688', email: 'manager@themorshedgroup.com', location: 'Manila, Philippines', timezone: 'Asia/Manila', pets: '🐶 Dog' },
       { id: 'brad', name: 'Brad Baker', title: 'Real Estate Professional',
         photo: 'https://themorshedgroup.com/wp-content/uploads/2023/01/Brad-Baker-headshot-1.jpg',
-        badge: null, employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
-      { id: 'cassandra', name: 'Cassandra Clemons', title: 'Real Estate Professional',
-        photo: 'https://themorshedgroup.com/wp-content/uploads/2025/08/Cassandra-Cassie-Clemons-headshot.jpg',
         badge: null, employeeId: '', reportsTo: '', phone: '', email: '', location: '', timezone: '', pets: '' },
       { id: 'brett', name: 'Brett Silverman', title: 'Commercial Advisor',
         photo: 'https://themorshedgroup.com/wp-content/uploads/2025/09/Brett-Silverman-headshot.jpg',
@@ -1578,7 +1578,7 @@ Continue with TMG Gmail
 
       // New sign-ups not already in the curated seed (active accounts only).
       const extras = profiles
-        .filter(p => !used.has(p.id) && p.status === 'active' && (fullName(p) || p.email))
+        .filter(p => !used.has(p.id) && p.status === 'active' && (fullName(p) || p.email) && !DIRECTORY_EXCLUDE.includes(fullName(p).trim().toLowerCase()))
         .map(p => ({
           id: p.id, name: fullName(p) || p.email,
           title: p.title || '',
@@ -1861,6 +1861,8 @@ Continue with TMG Gmail
       const [loading, setLoading] = useState(true);
       const [view, setView] = useState('list');   // list | detail | form
       const [current, setCurrent] = useState(null);
+      const [vis, setVis] = useState(false);
+      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
       const bg = dark ? '#000D26' : '#FCFBF8', bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
       const enrich = (t, projById) => ({ ...t, _projectName: t.project_id ? (projById[t.project_id] || '') : '' });
       const withMetaFrom = (t, d) => { const ppl = d.peopleByTask[t.id] || []; return { ...enrich(t, d.projById), _assignees: ppl.filter(p => p.role === 'assignee').map(p => p.user_id), _assigners: ppl.filter(p => p.role === 'assigner').map(p => p.user_id) }; };
@@ -1889,48 +1891,68 @@ Continue with TMG Gmail
         const fresh = (d.tasks || []).find(x => x.id === task.id);
         if (fresh) setCurrent(fresh);
       }
-      const left = view === 'list' ? { icon: 'ti-x', label: 'Close', fn: onClose } : { icon: 'ti-chevron-left', label: 'Back', fn: () => { setView('list'); setCurrent(null); } };
+      const back = () => { if (view === 'form') setView(current ? 'detail' : 'list'); else { setView('list'); setCurrent(null); } };
       const titleText = view === 'form' ? (current ? 'Edit task' : 'New task') : view === 'detail' ? 'Task' : 'Tasks';
       return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 70, background: bg, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px', paddingTop: 'calc(12px + env(safe-area-inset-top))', background: dark ? '#0A1730' : '#001A4A', flexShrink: 0 }}>
-            <button onClick={left.fn} aria-label={left.label} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#fff', display: 'flex', alignItems: 'center', padding: 0 }}><i className={`ti ${left.icon}`} style={{ fontSize: 22 }} /></button>
-            <span style={{ flex: 1, fontFamily: C.fontSans, fontSize: 15, fontWeight: 600, color: '#fff' }}>{titleText}</span>
-            {view === 'list' && <button onClick={() => { setCurrent(null); setView('form'); }} style={{ display: 'flex', alignItems: 'center', gap: 5, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '6px 12px', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-plus" style={{ fontSize: 14 }} />New</button>}
-          </div>
-          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-            {view === 'form' ? <TaskForm dark={dark} task={current ? withMeta(current) : null} team={team} onSave={handleSave} onCancel={() => setView(current ? 'detail' : 'list')} />
-              : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} onEdit={() => setView('form')} onStatus={(s) => changeStatus(current, s)} />
-              : (
-                <div style={{ padding: '12px 14px 40px' }}>
-                  {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 12 }}>Loading…</div>
-                    : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center' }}>No tasks yet. Tap <b>New</b> to add one.</div>
-                    : TASK_STATUS.map(col => {
-                        const items = data.tasks.filter(t => t.status === col.id);
-                        if (!items.length) return null;
-                        return (
-                          <div key={col.id} style={{ marginBottom: 16 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} /><span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{col.label} · {items.length}</span></div>
-                            {items.map(t => {
-                              const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
-                              return (
-                                <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer' }}>
-                                  <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} />
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
-                                    <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
+        <React.Fragment>
+          {/* Overlay — dims content only, sits below the top bar (mirrors the calendar pop-out) */}
+          <div onClick={onClose} style={{ position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', left: 0, right: 0, bottom: 0, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />
+          {/* Popout */}
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', right: 10, width: '75%', zIndex: 60,
+            maxHeight: 'calc(100vh - 80px - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
+            display: 'flex', flexDirection: 'column',
+            borderRadius: 14, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+            background: bg, border: `1px solid ${bord}`,
+            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease',
+          }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                {view === 'list'
+                  ? <i className="ti ti-checklist" style={{ fontSize: 15, color: dark ? '#C9A45A' : '#AD832F' }} />
+                  : <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />}
+                <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleText}</span>
+              </div>
+              {view === 'list'
+                ? <button onClick={() => { setCurrent(null); setView('form'); }} aria-label="New task" style={{ display: 'flex', alignItems: 'center', gap: 4, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '4px 10px', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>
+                : <i className="ti ti-x" onClick={onClose} aria-label="Close" style={{ fontSize: 15, cursor: 'pointer', color: dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9', flexShrink: 0 }} />}
+            </div>
+            {/* Body (scrolls) */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+              {view === 'form' ? <TaskForm dark={dark} task={current ? withMeta(current) : null} team={team} onSave={handleSave} onCancel={() => setView(current ? 'detail' : 'list')} />
+                : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} onEdit={() => setView('form')} onStatus={(s) => changeStatus(current, s)} />
+                : (
+                  <div style={{ padding: '12px 14px 24px' }}>
+                    {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 12 }}>Loading…</div>
+                      : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center' }}>No tasks yet. Tap <b>New</b> to add one.</div>
+                      : TASK_STATUS.map(col => {
+                          const items = data.tasks.filter(t => t.status === col.id);
+                          if (!items.length) return null;
+                          return (
+                            <div key={col.id} style={{ marginBottom: 16 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} /><span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{col.label} · {items.length}</span></div>
+                              {items.map(t => {
+                                const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
+                                return (
+                                  <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer' }}>
+                                    <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} />
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+                                      <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
+                                    </div>
+                                    <i className="ti ti-chevron-right" style={{ fontSize: 16, color: sub, flexShrink: 0 }} />
                                   </div>
-                                  <i className="ti ti-chevron-right" style={{ fontSize: 16, color: sub, flexShrink: 0 }} />
-                                </div>
-                              );
-                            })}
-                          </div>
-                        );
-                      })}
-                </div>
-              )}
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                  </div>
+                )}
+            </div>
           </div>
-        </div>
+        </React.Fragment>
       );
     }
 
@@ -3167,39 +3189,6 @@ Continue with TMG Gmail
                   </div>
                 </div>
               ))}
-            </div>
-          </div>
-        </React.Fragment>
-      );
-    }
-
-    // ─── Tasks Popover ───────────────────────────────────────────────
-    // Mirrors the calendar pop-out. Placeholder body until Tasks ships (Q3).
-    function TasksPopover({ dark, onClose }) {
-      const J = "'Jost', sans-serif";
-      const [vis, setVis] = useState(false);
-      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
-      return (
-        <React.Fragment>
-          {/* Overlay — dims content only, sits below the top bar / pill nav */}
-          <div onClick={onClose} style={{ position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', left: 0, right: 0, bottom: 0, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />
-          {/* Popout */}
-          <div onClick={(e) => e.stopPropagation()} style={{
-            position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', right: 10, width: '75%', zIndex: 60,
-            borderRadius: 14, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
-            background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
-            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease',
-          }}>
-            {/* Header */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '10px 14px', borderBottom: `1px solid ${dark ? '#152545' : '#F0EBE3'}` }}>
-              <i className="ti ti-checklist" style={{ fontSize: 14, color: dark ? '#C9A45A' : '#AD832F' }} />
-              <span style={{ fontFamily: J, fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', color: dark ? '#fff' : '#001A4A' }}>Tasks</span>
-            </div>
-            {/* Body — placeholder until the Tasks feature ships */}
-            <div style={{ padding: '22px 16px', textAlign: 'center' }}>
-              <i className="ti ti-checklist" style={{ fontSize: 26, color: dark ? 'rgba(255,255,255,0.18)' : '#D8D2C6' }} />
-              <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, marginTop: 8, color: dark ? '#fff' : '#001A4A' }}>Tasks are coming soon</div>
-              <div style={{ fontFamily: J, fontSize: 9, lineHeight: 1.6, marginTop: 4, color: dark ? 'rgba(255,255,255,0.35)' : '#9A8F7E' }}>Your to-dos and assignments<br />will live here.</div>
             </div>
           </div>
         </React.Fragment>

@@ -2164,7 +2164,6 @@ Rules:
           {menu && <div onClick={() => setMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 39 }} />}
           {/* Page header */}
           <div style={{ padding: '11px 16px 12px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: MUTE }}><i className="ti ti-chevron-left" style={{ fontSize: 17 }} /></button>
             <div style={{ flex: 1, minWidth: 120 }}>
               <div style={{ fontFamily: J, fontSize: 19, fontWeight: 600, color: NAVY }}>Roadmap</div>
               <div style={{ fontFamily: J, fontSize: 10, marginTop: 1, color: MUTE }}>{subtitle}</div>
@@ -2173,6 +2172,32 @@ Rules:
               <span style={{ fontFamily: J, fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTE, fontWeight: 600 }}>Group by</span>
               <div style={{ display: 'flex', gap: 2, padding: 3, borderRadius: 9, background: '#F0EBE3' }}>{seg('quarter', 'Quarter')}{seg('month', 'Month')}{seg('none', 'None')}</div>
             </div>
+          </div>
+          {/* Month progress tiles — % of each month's due-dated rows that are Completed */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '0 16px 12px' }}>
+            {(() => {
+              const now = new Date();
+              return [0, 1, 2, 3].map(i => {
+                const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+                const y = d.getFullYear(), mo = d.getMonth();
+                let total = 0, done = 0;
+                rows.forEach(r => { if (!r.dueDate) return; const pp = r.dueDate.split('-'); if (+pp[0] === y && (+pp[1] - 1) === mo) { total++; if (r.status === 'completed') done++; } });
+                const pct = total ? Math.round(done / total * 100) : 0, empty = total === 0;
+                const label = d.toLocaleString('en-US', { month: 'long' });
+                return (
+                  <div key={i} style={{ background: '#FFFFFF', border: `1px solid ${LINE}`, borderRadius: 12, padding: '10px 11px' }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 4 }}>
+                      <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: NAVY, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+                      <span style={{ fontFamily: J, fontSize: 14, fontWeight: 700, color: empty ? '#C9C2B2' : NAVY }}>{empty ? '\u2014' : pct + '%'}</span>
+                    </div>
+                    <div style={{ marginTop: 7, height: 6, borderRadius: 4, background: '#F0EBE3', overflow: 'hidden' }}>
+                      <div style={{ width: pct + '%', height: '100%', background: '#0F6E56' }} />
+                    </div>
+                    <div style={{ marginTop: 5, fontFamily: J, fontSize: 8.5, color: MUTE }}>{empty ? 'No tabs' : done + ' / ' + total + ' done'}</div>
+                  </div>
+                );
+              });
+            })()}
           </div>
           {/* Column header */}
           <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 8, alignItems: 'center', padding: '7px 20px', background: '#F5F0E8', borderTop: `1px solid ${LINE}`, borderBottom: `1px solid ${LINE}` }}>

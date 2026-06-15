@@ -4298,8 +4298,21 @@ Rules:
     }
 
     // ─── Root App ────────────────────────────────────────────────────
+    // ── Hash routing: each tab / More-page gets a URL (#roadmap, #calls, …) so
+    // the Back button, refresh, and shareable links work. GitHub-Pages-safe
+    // (hash only, no server config). Overlays (calendar/tasks/profile) close on
+    // Back but aren't deep-linked yet. parseRoute maps a hash → {tab, view}.
+    const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
+    const ROUTE_MORE = ['drives', 'directory', 'projects', 'expsurvey', 'sffu', 'admin', 'roadmap'];
+    function parseRoute(hash) {
+      const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
+      if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
+      if (ROUTE_TABS.indexOf(h) !== -1) return { tab: h, view: null };
+      return { tab: 'chat', view: null };
+    }
+
     function App({ user, profile }) {
-      const [activeTab, setActiveTab] = useState('chat');
+      const [activeTab, setActiveTab] = useState(() => parseRoute(typeof location !== 'undefined' ? location.hash : '').tab);
       const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
       const [fontScale, setFontScale] = useState(() => parseFloat(localStorage.getItem('tmg-fontscale')) || 1);
       const [accessCfg, setAccessCfg] = useState(DEFAULT_ACCESS);
@@ -4356,8 +4369,32 @@ Rules:
       const [taskInstruction, setTaskInstruction] = useState(null); // armed by the Add To-Do pill → next send creates a task
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
-      const [moreView, setMoreView] = useState('directory');
+      const [moreView, setMoreView] = useState(() => parseRoute(typeof location !== 'undefined' ? location.hash : '').view || 'directory');
       const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+
+      // ── URL hash <-> nav state ──
+      const firstSync = useRef(true);
+      useEffect(() => {
+        const apply = () => {
+          const r = parseRoute(location.hash);
+          setActiveTab(r.tab);
+          if (r.tab === 'more' && r.view) setMoreView(r.view);
+          setMoreMenuOpen(false); setDrawerOpen(false);
+          setShowCalendar(false); setShowTasks(false); setShowProfile(false); setShowStatus(false);
+        };
+        window.addEventListener('popstate', apply);
+        window.addEventListener('hashchange', apply);
+        return () => { window.removeEventListener('popstate', apply); window.removeEventListener('hashchange', apply); };
+      }, []);
+      useEffect(() => {
+        if (location.hash.indexOf('=') !== -1) return; // never clobber the OAuth #access_token=... hash
+        const token = activeTab === 'more' ? (moreView || 'directory') : activeTab;
+        if (location.hash.replace(/^#\/?/, '') !== token) {
+          try { firstSync.current ? history.replaceState(null, '', '#' + token) : history.pushState(null, '', '#' + token); }
+          catch (e) { location.hash = token; }
+        }
+        firstSync.current = false;
+      }, [activeTab, moreView]);
 
       const zoneRef = useRef(null);
       const fileInputRef = useRef(null);

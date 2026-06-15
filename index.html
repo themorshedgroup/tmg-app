@@ -1744,30 +1744,16 @@ Continue with TMG Gmail
       return (
         <div style={{ height: '100%', position: 'relative', overflow: 'hidden' }}>
           <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-            {/* Header */}
-            <div style={{ padding: '11px 14px 7px', display: 'flex', alignItems: 'center', gap: 9 }}>
-              <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: backC }}>
-                <i className="ti ti-chevron-left" style={{ fontSize: 16 }} />
-              </button>
-              <div>
-                <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, color: titleC }}>Exp Survey</div>
-                <div style={{ fontFamily: J, fontSize: 8, marginTop: 1, color: subC }}>Client experience survey</div>
-              </div>
-            </div>
             {/* Content */}
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '8px 18px 28px', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
-              <div style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.18em', fontWeight: 600, textTransform: 'uppercase', color: sectionC, marginTop: 8, marginBottom: 12 }}>The Morshed Group</div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '34px 18px 28px', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
               <div style={{ fontFamily: J, fontSize: 22, fontWeight: 600, color: titleC, lineHeight: 1.2, marginBottom: 8 }}>TMG Experience Survey</div>
               <div style={{ fontFamily: J, fontSize: 12, color: subC, lineHeight: 1.6, maxWidth: 280, marginBottom: 22 }}>Scan the QR code or tap the link below to share your experience with The Morshed Group.</div>
               {/* QR — kept on white so it scans in light or dark mode */}
               <div style={{ background: '#FFFFFF', borderRadius: 18, border: `1px solid ${cardBord}`, padding: 18, boxShadow: dark ? 'none' : '0 8px 24px rgba(0,26,74,0.08)', marginBottom: 20 }}>
                 <img src={QR} alt="TMG Experience Survey QR code" style={{ display: 'block', width: 224, height: 224 }} />
               </div>
-              <a href={SURVEY_URL} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontFamily: J, fontSize: 13, fontWeight: 600, color: gold, textDecoration: 'none', marginBottom: 18 }}>
+              <a href={SURVEY_URL} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontFamily: J, fontSize: 13, fontWeight: 600, color: gold, textDecoration: 'none' }}>
                 <i className="ti ti-link" style={{ fontSize: 15 }} />themorshedgroup.com/survey
-              </a>
-              <a href={SURVEY_URL} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, width: '100%', maxWidth: 280, padding: '13px 16px', borderRadius: 12, background: dark ? '#AD832F' : '#001A4A', color: '#fff', fontFamily: J, fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>
-                <i className="ti ti-external-link" style={{ fontSize: 15 }} />Open survey
               </a>
             </div>
           </div>

@@ -2083,6 +2083,7 @@ Continue with TMG Gmail
       const [decisionQuestion, setDecisionQuestion] = useState(t.decision_question || '');
       const [decisionOptions, setDecisionOptions] = useState([]);
       const [saving, setSaving] = useState(false);
+      const [repeatInfo, setRepeatInfo] = useState(false);
       // Load the editable per-user labels + decision options when editing an existing task.
       useEffect(() => {
         if (!t.id) return;
@@ -2128,8 +2129,17 @@ Continue with TMG Gmail
           {field('Title', <input value={title} onChange={e => setTitle(e.target.value)} placeholder="What needs doing?" style={inp} />)}
           <div style={{ display: 'flex', gap: 10 }}>
             <div style={{ flex: 1.3 }}>{field('Due date & time', <input type="datetime-local" value={due} onChange={e => setDue(e.target.value)} style={inp} />)}</div>
-            <div style={{ flex: 1 }}>{field('Repeat', sel(recurrence, setRecurrence, TASK_RECUR))}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ marginBottom: 13 }}>
+                <div style={{ ...lbl, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span>Repeat</span>
+                  <i className="ti ti-info-circle" onClick={() => setRepeatInfo(v => !v)} title="When you mark this task Completed, the next one is created automatically with its due date moved forward by the interval." style={{ fontSize: 13, cursor: 'help', color: sub }} />
+                </div>
+                {sel(recurrence, setRecurrence, TASK_RECUR)}
+              </div>
+            </div>
           </div>
+          {repeatInfo && <div style={{ display: 'flex', gap: 6, fontSize: '0.68rem', color: sub, lineHeight: 1.5, margin: '-4px 0 13px', fontFamily: C.fontSans }}><i className="ti ti-info-circle" style={{ fontSize: 13, flexShrink: 0, marginTop: 1, color: gold }} /><span>When you mark this task <b style={{ color: ink }}>Completed</b>, the next one is created automatically with its due date moved forward.</span></div>}
           {field('Project', <input value={project} onChange={e => setProject(e.target.value)} placeholder="Type a project name" style={inp} />)}
           <div style={{ display: 'flex', gap: 10 }}>
             <div style={{ flex: 1 }}>{field('Priority', sel(priority, setPriority, TASK_PRIORITY))}</div>

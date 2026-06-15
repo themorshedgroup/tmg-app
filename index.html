@@ -520,7 +520,7 @@ Rules:
     // ─── Work Mode pills ─────────────────────────────────────────────
     // Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
     const FALLBACK_PILLS = [
-      { id: 'fb-task',    label: 'Add To Do',            icon: 'ti-checklist',       colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   config: { instruction: TASK_PILL_INSTRUCTION, seed: 'Add To Do: ' }, enabled: true },
+      { id: 'fb-task',    label: 'Add To Do',            icon: 'ti-checklist',       colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   config: { instruction: TASK_PILL_INSTRUCTION, seed: 'To Do: ' }, enabled: true },
       { id: 'fb-kpis',    label: 'Enter KPIs',           icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Enter KPIs' },           enabled: true },
       { id: 'fb-listing', label: 'Listing Presentation', icon: 'ti-presentation',    colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Listing Presentation' }, enabled: true },
       { id: 'fb-showing', label: 'Add Showing',          icon: 'ti-home',            colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Add Showing' },          enabled: true },
@@ -1201,7 +1201,7 @@ Rules:
       return (
         <div>
           <div style={lbl}>Text box prefill <span style={{ textTransform: 'none', fontWeight: 400 }}>(appears in the input when tapped)</span></div>
-          <input value={config.seed !== undefined ? config.seed : 'Add To Do: '} onChange={e => setConfig({ ...config, seed: e.target.value })} placeholder="Add To Do: " style={inp} />
+          <input value={config.seed !== undefined ? config.seed : 'To Do: '} onChange={e => setConfig({ ...config, seed: e.target.value })} placeholder="To Do: " style={inp} />
           <div style={{ ...lbl, marginTop: 14 }}>AI instruction <span style={{ textTransform: 'none', fontWeight: 400 }}>(the command)</span></div>
           <textarea value={instr} onChange={e => setConfig({ ...config, instruction: e.target.value })} rows={12} style={{ ...inp, resize: 'vertical', lineHeight: 1.5, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '0.72rem' }} />
           <div style={{ fontSize: '0.68rem', color: sub, marginTop: 6, lineHeight: 1.5, fontFamily: C.fontSans }}>This exact instruction is sent to the AI when the pill is used. It must tell the AI to end every reply with an <b>ACTION</b> block — the app reads that block to create the task instantly.</div>
@@ -1861,137 +1861,374 @@ Rules:
       );
     }
 
-    // ─── App Roadmap (admin-only, in More) — simple feature tracker ──────
-    // A timeline/table of TMG features: title · type (MVP/Vanity) · status
-    // (To Do / In Progress / Stuck / Completed, reusing TASK_STATUS) · due
-    // date · subtasks. Persists to localStorage (per-device) for now.
-    const ROADMAP_TYPES = [
-      { id: 'mvp',    label: 'MVP',    light: { bg: '#001A4A', fg: '#fff' },                  dark: { bg: '#C9A45A', fg: '#001A4A' } },
-      { id: 'vanity', label: 'Vanity', light: { bg: 'rgba(173,131,47,0.14)', fg: '#AD832F' }, dark: { bg: 'rgba(201,164,90,0.18)', fg: '#C9A45A' } },
+    // ─── App Roadmap (admin-only, in More) — quarter-grouped PM table ─────
+    // Data model (flat, families contiguous): { id, name, status, type,
+    // dueDate|null, parentId|null, order }. Groups are DERIVED from dueDate
+    // (quarter/month) — no separate quarter field. Light mode only (per spec).
+    const RM_STATUS = [
+      { id: 'todo',       label: 'To Do',       bg: '#F1EFE8', text: '#5F5E5A', dot: '#888780' },
+      { id: 'inprogress', label: 'In Progress', bg: '#E6F1FB', text: '#185FA5', dot: '#185FA5' },
+      { id: 'completed',  label: 'Completed',   bg: '#E6F2EC', text: '#0F6E56', dot: '#0F6E56' },
+      { id: 'stuck',      label: 'Stuck',       bg: '#FCEBEB', text: '#A32D2D', dot: '#A32D2D' },
     ];
-    // Seeded from the TMG app's current tabs/features (statuses reflect today's state; all editable).
-    const ROADMAP_SEED = [
-      { title: 'AI Chat',                    status: 'done' },
-      { title: 'Team Chat',                  status: 'todo' },
-      { title: 'Calls',                      status: 'todo' },
-      { title: 'KPIs',                       status: 'todo' },
-      { title: 'Deals',                      status: 'todo' },
-      { title: 'Shared Drives',              status: 'done' },
-      { title: 'Company Directory',          status: 'done' },
-      { title: 'Exp Survey',                 status: 'done' },
-      { title: 'SFFU (Showing Follow-Up)',   status: 'in_progress' },
-      { title: 'Calendar',                   status: 'stuck' },
-      { title: 'Tasks',                      status: 'done' },
-      { title: 'Profile & Status',           status: 'in_progress' },
-      { title: 'Admin (Users & Tab Access)', status: 'done' },
-    ].map((s, i) => ({ id: 'seed-' + i, title: s.title, type: 'mvp', status: s.status, due: '', subtasks: [] }));
+    const RM_TYPES = [
+      { id: 'mvp',    label: 'MVP',    bg: '#001A4A', text: '#FFFFFF' },
+      { id: 'v2',     label: 'V2',     bg: '#F3EBDA', text: '#AD832F' },
+      { id: 'future', label: 'Future', bg: '#F0EBE3', text: '#888888' },
+    ];
+    const rmStatus = (id) => RM_STATUS.find(s => s.id === id) || RM_STATUS[0];
+    const rmType   = (id) => RM_TYPES.find(t => t.id === id) || RM_TYPES[0];
+    const rmPad = (n) => String(n).padStart(2, '0');
+    const RM_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    function rmBucketKey(dateStr, groupBy) {
+      const p = dateStr.split('-'); const y = +p[0], mo = +p[1]; // mo 1..12
+      if (groupBy === 'month') return y + '-' + rmPad(mo);
+      const q = Math.floor((mo - 1) / 3) + 1;
+      return y + '-Q' + q;
+    }
+    function rmGroupInfo(key, groupBy) {
+      if (groupBy === 'month') {
+        const p = key.split('-'); const y = +p[0], mo = +p[1];
+        return { label: RM_MON[mo - 1] + ' ' + y, hint: '', dropDate: y + '-' + rmPad(mo) + '-01' };
+      }
+      const p = key.split('-Q'); const y = +p[0], q = +p[1];
+      const sm = (q - 1) * 3; // 0-based start month
+      return { label: 'Q' + q + ' ' + y, hint: RM_MON[sm] + ' – ' + RM_MON[sm + 2], dropDate: y + '-' + rmPad(sm + 1) + '-01' };
+    }
+    function rmNormalize(rows) {
+      const parents = rows.filter(r => !r.parentId);
+      const out = [];
+      parents.forEach((p, pi) => {
+        out.push({ ...p, parentId: null, order: pi });
+        rows.filter(r => r.parentId === p.id).forEach((c, ci) => out.push({ ...c, order: ci }));
+      });
+      // keep any orphaned children as top-level so nothing is silently dropped
+      rows.filter(r => r.parentId && !parents.some(p => p.id === r.parentId)).forEach((c, i) => out.push({ ...c, parentId: null, order: parents.length + i }));
+      return out;
+    }
+    function rmBlocks(rows) {
+      const blocks = []; let cur = null;
+      rows.forEach(r => {
+        if (!r.parentId) { cur = { pid: r.id, items: [r] }; blocks.push(cur); }
+        else if (cur && r.parentId === cur.pid) { cur.items.push(r); }
+        else { blocks.push({ pid: r.id, items: [r] }); cur = null; }
+      });
+      return blocks;
+    }
+    function rmGroups(rows, groupBy) {
+      const parents = rows.filter(r => !r.parentId);
+      const fam = (p) => ({ parent: p, children: rows.filter(r => r.parentId === p.id) });
+      const families = parents.map(fam);
+      if (groupBy === 'none') {
+        const sorted = families.slice().sort((a, b) => {
+          const da = a.parent.dueDate, db = b.parent.dueDate;
+          if (!da && !db) return 0; if (!da) return 1; if (!db) return -1;
+          return da < db ? -1 : da > db ? 1 : 0;
+        });
+        return [{ key: '__all', flat: true, families: sorted }];
+      }
+      const map = new Map();
+      families.forEach(f => {
+        const key = f.parent.dueDate ? rmBucketKey(f.parent.dueDate, groupBy) : '__unscheduled';
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(f);
+      });
+      const dated = [...map.keys()].filter(k => k !== '__unscheduled').sort();
+      const groups = dated.map(k => ({ key: k, info: rmGroupInfo(k, groupBy), families: map.get(k) }));
+      if (map.has('__unscheduled')) groups.push({ key: '__unscheduled', unscheduled: true, families: map.get('__unscheduled') });
+      return groups;
+    }
+    function rmGroupProgress(group) {
+      let total = 0, done = 0;
+      group.families.forEach(f => {
+        total++; if (f.parent.status === 'completed') done++;
+        f.children.forEach(c => { total++; if (c.status === 'completed') done++; });
+      });
+      return total ? Math.round(done / total * 100) : 0;
+    }
+    function rmMoveFamily(rows, dragId, targetId, pos, newDue) {
+      const blocks = rmBlocks(rows);
+      const di = blocks.findIndex(b => b.pid === dragId);
+      if (di < 0) return rows;
+      const dblock = blocks.splice(di, 1)[0];
+      if (newDue !== undefined) dblock.items[0] = { ...dblock.items[0], dueDate: newDue };
+      const ti = blocks.findIndex(b => b.pid === targetId);
+      if (ti < 0) blocks.push(dblock);
+      else blocks.splice(pos === 'after' ? ti + 1 : ti, 0, dblock);
+      return rmNormalize(blocks.reduce((a, b) => a.concat(b.items), []));
+    }
+    function rmMoveToGroupEnd(rows, dragId, newDue) {
+      const blocks = rmBlocks(rows);
+      const di = blocks.findIndex(b => b.pid === dragId);
+      if (di < 0) return rows;
+      const dblock = blocks.splice(di, 1)[0];
+      dblock.items[0] = { ...dblock.items[0], dueDate: newDue };
+      blocks.push(dblock);
+      return rmNormalize(blocks.reduce((a, b) => a.concat(b.items), []));
+    }
+    function rmMigrate(oldArr) {
+      const mapS = { todo: 'todo', in_progress: 'inprogress', stuck: 'stuck', done: 'completed' };
+      const mapT = { mvp: 'mvp', vanity: 'future' };
+      const rows = [];
+      (oldArr || []).forEach(it => {
+        const pid = it.id || ('p' + rows.length);
+        rows.push({ id: pid, name: it.title || '', status: mapS[it.status] || 'todo', type: mapT[it.type] || 'mvp', dueDate: it.due || null, parentId: null, order: 0 });
+        (it.subtasks || []).forEach(s => rows.push({ id: s.id || ('c' + rows.length), name: s.title || '', status: s.done ? 'completed' : 'todo', type: 'mvp', dueDate: null, parentId: pid, order: 0 }));
+      });
+      return rmNormalize(rows);
+    }
+    function rmSeed() {
+      const P = (id, name, status, type, dueDate) => ({ id, name, status, type, dueDate, parentId: null, order: 0 });
+      const C = (id, pid, name, status, type, dueDate) => ({ id, name, status, type, dueDate, parentId: pid, order: 0 });
+      return rmNormalize([
+        P('ai', 'AI Chat', 'completed', 'mvp', '2026-04-10'),
+        P('drives', 'Shared Drives', 'completed', 'mvp', '2026-04-20'),
+        P('dir', 'Company Directory', 'completed', 'mvp', '2026-05-05'),
+        P('tasks', 'Tasks', 'completed', 'mvp', '2026-05-15'),
+        P('admin', 'Admin (Users & Tab Access)', 'completed', 'mvp', '2026-05-25'),
+        P('exp', 'Exp Survey', 'completed', 'mvp', '2026-06-01'),
+        P('profile', 'Profile & Status', 'inprogress', 'mvp', '2026-06-20'),
+        P('sffu', 'SFFU (Showing Follow-Up)', 'inprogress', 'mvp', '2026-07-10'),
+        C('sffu-1', 'sffu', 'Deploy sffu-sender', 'todo', 'mvp', null),
+        C('sffu-2', 'sffu', 'Add Quo webhook', 'todo', 'mvp', null),
+        P('cal', 'Calendar', 'stuck', 'mvp', '2026-07-15'),
+        C('cal-1', 'cal', 'Deploy google-calendar fn', 'stuck', 'mvp', '2026-07-12'),
+        C('cal-2', 'cal', 'Set GOOGLE_CLIENT_SECRET', 'todo', 'mvp', '2026-07-14'),
+        P('team', 'Team Chat', 'todo', 'v2', '2026-08-01'),
+        P('calls', 'Calls', 'todo', 'v2', '2026-10-05'),
+        P('kpis', 'KPIs', 'todo', 'future', null),
+        P('deals', 'Deals', 'todo', 'future', null),
+      ]);
+    }
 
     function AppRoadmap({ dark, onBack }) {
       const J = "'Jost', sans-serif";
-      const KEY = 'tmg-roadmap-v1';
-      const [items, setItems] = useState(() => {
-        try { const raw = localStorage.getItem(KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p) && p.length) return p; } } catch (e) {}
-        return ROADMAP_SEED;
+      const RM_KEY = 'tmg-roadmap-v2', RM_OLD = 'tmg-roadmap-v1';
+      const [rows, setRows] = useState(() => {
+        try { const v2 = localStorage.getItem(RM_KEY); if (v2) { const p = JSON.parse(v2); if (Array.isArray(p)) return rmNormalize(p); } } catch (e) {}
+        try { const v1 = localStorage.getItem(RM_OLD); if (v1) { const p = JSON.parse(v1); if (Array.isArray(p) && p.length && p.some(it => (it.due && it.due.length) || (it.subtasks && it.subtasks.length))) return rmMigrate(p); } } catch (e) {}
+        return rmSeed();
       });
+      const [groupBy, setGroupBy] = useState('quarter');
+      const [collapsedP, setCollapsedP] = useState({});
+      const [collapsedG, setCollapsedG] = useState({});
+      const [menu, setMenu] = useState(null);     // { id, field }
       const [newTitle, setNewTitle] = useState('');
-      useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(items)); } catch (e) {} }, [items]);
+      const [dragId, setDragId] = useState(null);
+      const [dropHint, setDropHint] = useState(null);
+      useEffect(() => { try { localStorage.setItem(RM_KEY, JSON.stringify(rows)); } catch (e) {} }, [rows]);
 
       const uid = () => 'r' + Math.random().toString(36).slice(2, 9);
-      const update = (id, patch) => setItems(its => its.map(t => t.id === id ? { ...t, ...patch } : t));
-      const remove = (id) => setItems(its => its.filter(t => t.id !== id));
-      const move = (id, dir) => setItems(its => { const i = its.findIndex(t => t.id === id); const j = i + dir; if (i < 0 || j < 0 || j >= its.length) return its; const a = its.slice(); const [it] = a.splice(i, 1); a.splice(j, 0, it); return a; });
-      const addItem = () => { const t = newTitle.trim(); if (!t) return; setItems(its => [...its, { id: uid(), title: t, type: 'mvp', status: 'todo', due: '', subtasks: [] }]); setNewTitle(''); };
-      const addSub = (id) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: [...(x.subtasks || []), { id: uid(), title: '', done: false }] } : x));
-      const updSub = (id, sid, patch) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: (x.subtasks || []).map(s => s.id === sid ? { ...s, ...patch } : s) } : x));
-      const delSub = (id, sid) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: (x.subtasks || []).filter(s => s.id !== sid) } : x));
+      const todayISO = (() => { const d = new Date(); return d.getFullYear() + '-' + rmPad(d.getMonth() + 1) + '-' + rmPad(d.getDate()); })();
+      const fmtDate = (s) => { try { return new Date(s + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch (e) { return s; } };
 
-      const titleC  = dark ? '#fff' : '#001A4A';
-      const subC    = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
-      const backC   = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
-      const dim      = dark ? '#1C2C4A' : '#E4DFD4';
-      const bord    = dark ? '#152545' : '#E4DFD4';
-      const rowBord = dark ? '#0D1E3A' : '#F0EBE3';
-      const gold    = dark ? '#C9A45A' : '#AD832F';
-      const headBg  = dark ? '#0A1730' : '#F0EBE3';
-      const cellBg  = dark ? '#070F1E' : '#FFFFFF';
-      const fmtDue  = (d) => { if (!d) return ''; try { return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch (e) { return d; } };
-      const typeOf  = (id) => ROADMAP_TYPES.find(t => t.id === id) || ROADMAP_TYPES[0];
+      const updateRow = (id, patch) => setRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
+      const deleteRow = (id) => setRows(prev => { const row = prev.find(r => r.id === id); if (!row) return prev; return rmNormalize(row.parentId ? prev.filter(r => r.id !== id) : prev.filter(r => r.id !== id && r.parentId !== id)); });
+      const addTab = () => { const n = newTitle.trim(); if (!n) return; setRows(prev => rmNormalize(prev.concat([{ id: uid(), name: n, status: 'todo', type: 'mvp', dueDate: null, parentId: null, order: 0 }]))); setNewTitle(''); };
+      const addSub = (pid) => { setRows(prev => { const blocks = rmBlocks(prev); const b = blocks.find(x => x.pid === pid); if (!b) return prev; b.items.push({ id: uid(), name: '', status: 'todo', type: 'mvp', dueDate: null, parentId: pid, order: 0 }); return rmNormalize(blocks.reduce((a, x) => a.concat(x.items), [])); }); setCollapsedP(c => { const n = { ...c }; delete n[pid]; return n; }); };
 
-      const COLS = '20px minmax(0,1fr) 80px 46px 54px 22px';
-      const cellInput = { width: '100%', boxSizing: 'border-box', border: 'none', outline: 'none', background: 'transparent', fontFamily: J, color: titleC, padding: 0 };
-      const headCell = { fontFamily: J, fontSize: 7.5, letterSpacing: '0.1em', fontWeight: 700, textTransform: 'uppercase', color: gold, whiteSpace: 'nowrap' };
+      // drag (parents only)
+      const isParent = (id) => rows.some(r => r.id === id && !r.parentId);
+      const onDragStart = (e, id) => { setDragId(id); try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); } catch (_) {} };
+      const onRowOver = (e, id) => { if (!dragId || !isParent(id) || id === dragId) return; e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); setDropHint({ id, pos: (e.clientY - r.top) < r.height / 2 ? 'before' : 'after' }); };
+      const onRowDrop = (e, targetId) => {
+        e.preventDefault();
+        const dId = dragId, hint = dropHint; setDragId(null); setDropHint(null);
+        if (!dId || !isParent(targetId) || dId === targetId) return;
+        setRows(prev => {
+          const target = prev.find(r => r.id === targetId), dragged = prev.find(r => r.id === dId);
+          if (!target || !dragged) return prev;
+          const tB = target.dueDate ? rmBucketKey(target.dueDate, groupBy) : '__unscheduled';
+          const dB = dragged.dueDate ? rmBucketKey(dragged.dueDate, groupBy) : '__unscheduled';
+          let newDue;
+          if (tB !== dB) newDue = target.dueDate ? rmGroupInfo(tB, groupBy).dropDate : null;
+          return rmMoveFamily(prev, dId, targetId, hint && hint.pos === 'after' ? 'after' : 'before', newDue);
+        });
+      };
+      const onGroupDrop = (e, key) => {
+        e.preventDefault();
+        const dId = dragId; setDragId(null); setDropHint(null);
+        if (!dId) return;
+        const newDue = key === '__unscheduled' ? null : rmGroupInfo(key, groupBy).dropDate;
+        setRows(prev => rmMoveToGroupEnd(prev, dId, newDue));
+      };
+
+      const groups = rmGroups(rows, groupBy);
+      const tabCount = rows.filter(r => !r.parentId).length;
+      const subtitle = tabCount + ' tabs · ' + (groupBy === 'none' ? 'flat list' : 'grouped by due date');
+
+      // ── palette (light only) ──
+      const NAVY = '#001A4A', GOLD = '#AD832F', PAPER = '#FCFBF8', LINE = '#EDE7DC', MUTE = '#B4B2A9';
+      const COLS = '1fr 130px 80px 96px 40px';
+
+      const seg = (id, label) => {
+        const on = groupBy === id;
+        return <button key={id} onClick={() => setGroupBy(id)} style={{ padding: '5px 12px', border: 'none', borderRadius: 7, cursor: 'pointer', fontFamily: J, fontSize: 11, fontWeight: on ? 600 : 500, background: on ? NAVY : 'transparent', color: on ? '#fff' : '#6B6B6B' }}>{label}</button>;
+      };
+
+      const statusPill = (r) => {
+        const s = rmStatus(r.status), open = menu && menu.id === r.id && menu.field === 'status';
+        return (
+          <span style={{ position: 'relative', display: 'inline-block' }}>
+            <button onClick={() => setMenu(open ? null : { id: r.id, field: 'status' })} style={{ display: 'flex', alignItems: 'center', gap: 6, width: 112, boxSizing: 'border-box', padding: '5px 8px', borderRadius: 8, border: 'none', cursor: 'pointer', background: s.bg, color: s.text, fontFamily: J, fontSize: 11, fontWeight: 600 }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: s.dot, flexShrink: 0 }} />
+              <span style={{ flex: 1, textAlign: 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.label}</span>
+              <i className="ti ti-chevron-down" style={{ fontSize: 12, opacity: 0.7 }} />
+            </button>
+            {open && (
+              <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 40, background: '#fff', border: `1px solid ${LINE}`, borderRadius: 9, boxShadow: '0 10px 28px rgba(0,26,74,0.16)', padding: 4, width: 138 }}>
+                {RM_STATUS.map(o => (
+                  <button key={o.id} onClick={() => { updateRow(r.id, { status: o.id }); setMenu(null); }} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', padding: '7px 8px', borderRadius: 6, border: 'none', background: r.status === o.id ? '#F5F0E8' : 'transparent', cursor: 'pointer', fontFamily: J, fontSize: 11, fontWeight: 600, color: o.text }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: o.dot }} />{o.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
+        );
+      };
+
+      const typeBadge = (r) => {
+        const t = rmType(r.type), open = menu && menu.id === r.id && menu.field === 'type';
+        return (
+          <span style={{ position: 'relative', display: 'inline-block' }}>
+            <button onClick={() => setMenu(open ? null : { id: r.id, field: 'type' })} style={{ padding: '4px 9px', borderRadius: 7, border: 'none', cursor: 'pointer', background: t.bg, color: t.text, fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.03em' }}>{t.label}</button>
+            {open && (
+              <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: '50%', transform: 'translateX(-50%)', zIndex: 40, background: '#fff', border: `1px solid ${LINE}`, borderRadius: 9, boxShadow: '0 10px 28px rgba(0,26,74,0.16)', padding: 4, width: 92 }}>
+                {RM_TYPES.map(o => (
+                  <button key={o.id} onClick={() => { updateRow(r.id, { type: o.id }); setMenu(null); }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', padding: '6px 6px', borderRadius: 6, border: 'none', background: r.type === o.id ? '#F5F0E8' : 'transparent', cursor: 'pointer', marginBottom: 2 }}>
+                    <span style={{ padding: '3px 9px', borderRadius: 6, background: o.bg, color: o.text, fontFamily: J, fontSize: 9, fontWeight: 600 }}>{o.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
+        );
+      };
+
+      const dueCell = (r) => {
+        const past = r.dueDate && r.dueDate < todayISO;
+        const danger = r.status === 'stuck' || past;
+        if (r.dueDate) {
+          return (
+            <label style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 8px', borderRadius: 7, border: `1px solid ${danger ? '#F0997B' : '#E4DFD4'}`, background: '#fff', cursor: 'pointer', maxWidth: '100%', boxSizing: 'border-box' }}>
+              <i className="ti ti-calendar-event" style={{ fontSize: 12, color: danger ? '#A32D2D' : GOLD, flexShrink: 0 }} />
+              <span style={{ fontFamily: J, fontSize: 10.5, fontWeight: 500, color: danger ? '#A32D2D' : '#6B6B6B', whiteSpace: 'nowrap' }}>{fmtDate(r.dueDate)}</span>
+              <input type="date" value={r.dueDate} onChange={e => updateRow(r.id, { dueDate: e.target.value || null })} style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', cursor: 'pointer' }} />
+            </label>
+          );
+        }
+        return (
+          <label style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 8px', borderRadius: 7, border: '1px dashed #D8CDB8', cursor: 'pointer', boxSizing: 'border-box' }}>
+            <i className="ti ti-plus" style={{ fontSize: 12, color: '#C4A97A' }} />
+            <span style={{ fontFamily: J, fontSize: 10, fontWeight: 500, color: '#C4A97A', whiteSpace: 'nowrap' }}>Set date</span>
+            <input type="date" value="" onChange={e => updateRow(r.id, { dueDate: e.target.value || null })} style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', cursor: 'pointer' }} />
+          </label>
+        );
+      };
+
+      const renderRow = (r, opts) => {
+        const isSub = !!r.parentId, hasKids = opts.hasKids, expanded = opts.expanded;
+        return (
+          <div key={r.id} className="rm-row" draggable={!isSub} onDragStart={!isSub ? (e => onDragStart(e, r.id)) : undefined}
+            onDragOver={!isSub ? (e => onRowOver(e, r.id)) : undefined} onDrop={!isSub ? (e => onRowDrop(e, r.id)) : undefined}
+            style={{ position: 'relative', display: 'grid', gridTemplateColumns: COLS, alignItems: 'center', gap: 8, padding: '9px 20px', borderBottom: '1px solid #F4EFE7', background: isSub ? '#FBF9F4' : 'transparent', borderTop: dropHint && dropHint.id === r.id && dropHint.pos === 'before' ? `2px solid ${NAVY}` : '2px solid transparent', boxShadow: dropHint && dropHint.id === r.id && dropHint.pos === 'after' ? `inset 0 -2px 0 ${NAVY}` : 'none' }}>
+            {!isSub && <i className="ti ti-grip-vertical rm-grip" style={{ position: 'absolute', left: 4, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: '#D4CFC2', cursor: 'grab' }} />}
+            {/* name cell */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, paddingLeft: isSub ? 34 : 0 }}>
+              {!isSub && (hasKids
+                ? <button onClick={() => setCollapsedP(c => ({ ...c, [r.id]: !c[r.id] }))} aria-label="Toggle subtasks" style={{ width: 18, flexShrink: 0, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: GOLD, display: 'flex' }}><i className={`ti ti-chevron-${expanded ? 'down' : 'right'}`} style={{ fontSize: 14 }} /></button>
+                : <span style={{ width: 18, flexShrink: 0 }} />)}
+              {isSub && <i className="ti ti-corner-down-right" style={{ fontSize: 13, color: '#C9C2B2', flexShrink: 0 }} />}
+              <input value={r.name} onChange={e => updateRow(r.id, { name: e.target.value })} placeholder={isSub ? 'Subtask' : 'Tab name'} style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 13, fontWeight: isSub ? 400 : 500, color: NAVY, padding: 0 }} />
+            </div>
+            {/* status */}
+            <div>{statusPill(r)}</div>
+            {/* type */}
+            <div style={{ display: 'flex', justifyContent: 'center' }}>{typeBadge(r)}</div>
+            {/* due */}
+            <div>{dueCell(r)}</div>
+            {/* actions */}
+            <div className="rm-actions" style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2 }}>
+              {!isSub && <button className="rm-actbtn" onClick={() => addSub(r.id)} aria-label="Add subtask" title="Add subtask" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-plus" style={{ fontSize: 13 }} /></button>}
+              <button className="rm-actbtn" onClick={() => deleteRow(r.id)} aria-label="Delete" title="Delete" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-x" style={{ fontSize: 13 }} /></button>
+            </div>
+          </div>
+        );
+      };
 
       return (
-        <div style={{ height: '100%', position: 'relative', overflow: 'hidden' }}>
-          <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-            {/* Header */}
-            <div style={{ padding: '11px 14px 8px', display: 'flex', alignItems: 'center', gap: 9 }}>
-              <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: backC }}>
-                <i className="ti ti-chevron-left" style={{ fontSize: 16 }} />
-              </button>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, color: titleC }}>Roadmap</div>
-                <div style={{ fontFamily: J, fontSize: 8, marginTop: 1, color: subC }}>{items.length} tabs</div>
-              </div>
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: PAPER }}>
+          <style>{`.rm-row:hover{background:#FBF8F2 !important;} .rm-row .rm-grip{opacity:0;transition:opacity .12s;} .rm-row:hover .rm-grip{opacity:1;} .rm-row .rm-actions{opacity:0;transition:opacity .12s;} .rm-row:hover .rm-actions{opacity:1;} .rm-actbtn:hover{background:#F0EBE3 !important;}`}</style>
+          {menu && <div onClick={() => setMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 39 }} />}
+          {/* Page header */}
+          <div style={{ padding: '11px 16px 12px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: MUTE }}><i className="ti ti-chevron-left" style={{ fontSize: 17 }} /></button>
+            <div style={{ flex: 1, minWidth: 120 }}>
+              <div style={{ fontFamily: J, fontSize: 19, fontWeight: 600, color: NAVY }}>Roadmap</div>
+              <div style={{ fontFamily: J, fontSize: 10, marginTop: 1, color: MUTE }}>{subtitle}</div>
             </div>
-            {/* Sheet */}
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '0 12px 24px' }}>
-              {/* Column header */}
-              <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 5, alignItems: 'center', padding: '7px 8px', background: headBg, borderRadius: 8, position: 'sticky', top: 0, zIndex: 1 }}>
-                <span />
-                <span style={headCell}>Tab</span>
-                <span style={headCell}>Status</span>
-                <span style={headCell}>Type</span>
-                <span style={headCell}>Due</span>
-                <span />
-              </div>
-              {/* Rows */}
-              {items.map((t, idx) => {
-                const ty = typeOf(t.type);
-                const tc = dark ? ty.dark : ty.light;
-                return (
-                  <div key={t.id} style={{ borderBottom: `1px solid ${rowBord}` }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 5, alignItems: 'center', padding: '5px 8px' }}>
-                      {/* reorder up/down */}
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                        <button onClick={() => move(t.id, -1)} disabled={idx === 0} aria-label="Move up" style={{ background: 'none', border: 'none', padding: 0, cursor: idx === 0 ? 'default' : 'pointer', color: idx === 0 ? dim : backC, display: 'flex', lineHeight: 0 }}><i className="ti ti-chevron-up" style={{ fontSize: 13 }} /></button>
-                        <button onClick={() => move(t.id, 1)} disabled={idx === items.length - 1} aria-label="Move down" style={{ background: 'none', border: 'none', padding: 0, cursor: idx === items.length - 1 ? 'default' : 'pointer', color: idx === items.length - 1 ? dim : backC, display: 'flex', lineHeight: 0 }}><i className="ti ti-chevron-down" style={{ fontSize: 13 }} /></button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontFamily: J, fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTE, fontWeight: 600 }}>Group by</span>
+              <div style={{ display: 'flex', gap: 2, padding: 3, borderRadius: 9, background: '#F0EBE3' }}>{seg('quarter', 'Quarter')}{seg('month', 'Month')}{seg('none', 'None')}</div>
+            </div>
+          </div>
+          {/* Column header */}
+          <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 8, alignItems: 'center', padding: '7px 20px', background: '#F5F0E8', borderTop: `1px solid ${LINE}`, borderBottom: `1px solid ${LINE}` }}>
+            {['Tab', 'Status', 'Type', 'Due'].map((h, i) => <span key={h} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 700, textTransform: 'uppercase', color: GOLD, textAlign: i === 2 ? 'center' : 'left' }}>{h}</span>)}
+            <span />
+          </div>
+          {/* Body */}
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {groups.map(g => {
+              const gcoll = !!collapsedG[g.key];
+              return (
+                <React.Fragment key={g.key}>
+                  {!g.flat && (
+                    g.unscheduled ? (
+                      <div onDragOver={e => { if (dragId) e.preventDefault(); }} onDrop={e => onGroupDrop(e, g.key)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 20px', background: '#F7F3EC', borderBottom: `1px solid ${LINE}` }}>
+                        <button onClick={() => setCollapsedG(c => ({ ...c, [g.key]: !c[g.key] }))} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: '#9A7B3A', display: 'flex' }}><i className={`ti ti-chevron-${gcoll ? 'right' : 'down'}`} style={{ fontSize: 14 }} /></button>
+                        <span style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: '#9A7B3A' }}>Unscheduled</span>
+                        <span style={{ fontFamily: J, fontSize: 10, fontWeight: 700, color: '#9A7B3A', background: '#EFE6D4', borderRadius: 20, padding: '1px 8px' }}>{g.families.length}</span>
+                        <span style={{ flex: 1 }} />
+                        <span style={{ fontFamily: J, fontSize: 10, color: '#C4A97A', fontStyle: 'italic' }}>Set a due date to schedule</span>
                       </div>
-                      {/* tab name (editable cell) */}
-                      <input value={t.title} onChange={e => update(t.id, { title: e.target.value })} placeholder="Tab name" style={{ ...cellInput, fontSize: 12, fontWeight: 600 }} />
-                      {/* status dropdown */}
-                      <select value={t.status} onChange={e => update(t.id, { status: e.target.value })} style={{ width: '100%', boxSizing: 'border-box', border: `1px solid ${bord}`, borderRadius: 6, padding: '4px 2px 4px 5px', background: cellBg, fontFamily: J, fontSize: 9, fontWeight: 600, color: statusColor(t.status), outline: 'none', cursor: 'pointer' }}>
-                        {TASK_STATUS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-                      </select>
-                      {/* type toggle badge */}
-                      <button onClick={() => update(t.id, { type: t.type === 'mvp' ? 'vanity' : 'mvp' })} title="Toggle MVP / Vanity" style={{ width: '100%', boxSizing: 'border-box', padding: '5px 0', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 8.5, fontWeight: 700, letterSpacing: '0.04em', background: tc.bg, color: tc.fg }}>{ty.label}</button>
-                      {/* due date */}
-                      <label style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', height: 26, borderRadius: 6, border: `1px solid ${bord}`, background: cellBg, cursor: 'pointer', overflow: 'hidden' }}>
-                        <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: t.due ? titleC : subC, whiteSpace: 'nowrap' }}>{t.due ? fmtDue(t.due) : '＋'}</span>
-                        <input type="date" value={t.due || ''} onChange={e => update(t.id, { due: e.target.value })} style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', height: '100%', border: 'none', cursor: 'pointer', padding: 0 }} />
-                      </label>
-                      {/* add subtask / delete tab */}
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
-                        <button onClick={() => addSub(t.id)} aria-label="Add subtask" title="Add subtask" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: gold, display: 'flex', lineHeight: 0 }}><i className="ti ti-plus" style={{ fontSize: 14 }} /></button>
-                        <button onClick={() => { if (window.confirm('Remove "' + (t.title || 'this tab') + '" from the roadmap?')) remove(t.id); }} aria-label="Delete tab" title="Delete tab" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: backC, display: 'flex', lineHeight: 0 }}><i className="ti ti-x" style={{ fontSize: 12 }} /></button>
+                    ) : (
+                      <div onDragOver={e => { if (dragId) e.preventDefault(); }} onDrop={e => onGroupDrop(e, g.key)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 20px', background: '#FAF6EF', borderBottom: `1px solid ${LINE}` }}>
+                        <button onClick={() => setCollapsedG(c => ({ ...c, [g.key]: !c[g.key] }))} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: GOLD, display: 'flex' }}><i className={`ti ti-chevron-${gcoll ? 'right' : 'down'}`} style={{ fontSize: 14 }} /></button>
+                        <span style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: NAVY }}>{g.info.label}</span>
+                        <span style={{ fontFamily: J, fontSize: 10, color: MUTE }}>{g.info.hint}</span>
+                        <span style={{ fontFamily: J, fontSize: 10, fontWeight: 700, color: GOLD, background: '#F3EBDA', borderRadius: 20, padding: '1px 8px' }}>{g.families.length}</span>
+                        <span style={{ flex: 1 }} />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                          <div style={{ width: 64, height: 5, borderRadius: 4, background: '#F0EBE3', overflow: 'hidden' }}><div style={{ width: rmGroupProgress(g) + '%', height: '100%', background: '#0F6E56' }} /></div>
+                          <span style={{ fontFamily: J, fontSize: 10, fontWeight: 700, color: '#0F6E56', width: 30, textAlign: 'right' }}>{rmGroupProgress(g)}%</span>
+                        </div>
                       </div>
-                    </div>
-                    {/* subtasks */}
-                    {(t.subtasks || []).map(s => (
-                      <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 8px 3px 30px' }}>
-                        <button onClick={() => updSub(t.id, s.id, { done: !s.done })} aria-label="Toggle subtask" style={{ width: 16, height: 16, borderRadius: 4, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', border: s.done ? 'none' : `1.5px solid ${bord}`, background: s.done ? '#16A34A' : 'transparent', padding: 0 }}>{s.done && <i className="ti ti-check" style={{ fontSize: 10, color: '#fff' }} />}</button>
-                        <input value={s.title} onChange={e => updSub(t.id, s.id, { title: e.target.value })} placeholder="Subtask" style={{ ...cellInput, flex: 1, fontSize: 11, color: s.done ? subC : titleC, textDecoration: s.done ? 'line-through' : 'none' }} />
-                        <button onClick={() => delSub(t.id, s.id)} aria-label="Remove subtask" style={{ background: 'none', border: 'none', cursor: 'pointer', color: backC, fontSize: 15, display: 'flex', flexShrink: 0, lineHeight: 0 }}><i className="ti ti-minus" /></button>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })}
-              {/* add a tab */}
-              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                <input value={newTitle} onChange={e => setNewTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addItem(); }} placeholder="Add a tab…" style={{ flex: 1, minWidth: 0, padding: '9px 12px', borderRadius: 9, border: `1px solid ${bord}`, background: cellBg, color: titleC, fontFamily: J, fontSize: 12, outline: 'none' }} />
-                <button onClick={addItem} style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, padding: '0 14px', borderRadius: 9, border: 'none', background: dark ? '#AD832F' : '#001A4A', color: '#fff', cursor: 'pointer', fontFamily: J, fontSize: 12, fontWeight: 600 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add</button>
-              </div>
+                    )
+                  )}
+                  {!gcoll && g.families.map(f => {
+                    const exp = !collapsedP[f.parent.id], kids = f.children.length > 0;
+                    return (
+                      <React.Fragment key={f.parent.id}>
+                        {renderRow(f.parent, { hasKids: kids, expanded: exp })}
+                        {kids && exp && f.children.map(c => renderRow(c, {}))}
+                        {exp && kids && (
+                          <div className="rm-row" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 20px 6px 74px', borderBottom: '1px solid #F4EFE7', background: '#FBF9F4' }}>
+                            <button onClick={() => addSub(f.parent.id)} style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: '#C4A97A', fontFamily: J, fontSize: 11, fontWeight: 500 }}><i className="ti ti-plus" style={{ fontSize: 13 }} />Add subtask</button>
+                          </div>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </React.Fragment>
+              );
+            })}
+            {/* Footer add-a-tab */}
+            <div style={{ display: 'flex', gap: 8, padding: '14px 20px 24px' }}>
+              <input value={newTitle} onChange={e => setNewTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addTab(); }} placeholder="Add a tab..." style={{ flex: 1, minWidth: 0, padding: '9px 12px', borderRadius: 10, border: `1px solid #E4DFD4`, background: '#fff', color: NAVY, fontFamily: J, fontSize: 12, outline: 'none' }} />
+              <button onClick={addTab} style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, padding: '0 16px', borderRadius: 10, border: 'none', background: NAVY, color: '#fff', cursor: 'pointer', fontFamily: J, fontSize: 12, fontWeight: 600 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add</button>
             </div>
           </div>
         </div>
@@ -2525,87 +2762,6 @@ Rules:
                       : <React.Fragment>{sortTabs}{renderList()}</React.Fragment>}
                   </div>
                 )}
-            </div>
-          </div>
-        </React.Fragment>
-      );
-    }
-
-    // ─── Add To-Do pop-out (Work Mode task pill) ─────────────────────
-    // A compact pop-out (below the header, above the bottom nav) — not a full screen.
-    // Input is pre-seeded; on send, the AI (instruction from the pill) creates the task.
-    function AddTodoPopover({ dark, user, pill, bottomOffset, onClose }) {
-      const instruction = (pill && pill.config && pill.config.instruction) || TASK_PILL_INSTRUCTION;
-      const seed = (pill && pill.config && pill.config.seed !== undefined) ? pill.config.seed : 'Add To Do: ';
-      const [text, setText] = useState(seed);
-      const [msgs, setMsgs] = useState([]);
-      const [busy, setBusy] = useState(false);
-      const [vis, setVis] = useState(false);
-      const scRef = useRef(null), taRef = useRef(null);
-      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
-      useEffect(() => { if (taRef.current) { taRef.current.focus(); const n = taRef.current.value.length; try { taRef.current.setSelectionRange(n, n); } catch (e) {} } }, []);
-      useEffect(() => { if (scRef.current) scRef.current.scrollTop = scRef.current.scrollHeight; }, [msgs, busy]);
-      const bg = dark ? '#000D26' : '#FCFBF8', card = dark ? '#0A1730' : '#fff', bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', gold = dark ? '#C9A45A' : '#AD832F';
-      async function send() {
-        const t = text.trim();
-        if (!t || busy) return;
-        const next = [...msgs, { role: 'user', content: t }];
-        setMsgs(next); setText(''); setBusy(true);
-        try {
-          const sys = instruction + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.';
-          const reply = await callAI(next.map(m => ({ role: m.role, content: m.content })), sys);
-          let display = reply, created = null;
-          const mm = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
-          if (mm) {
-            display = reply.slice(0, mm.index).trim();
-            try {
-              const parsed = JSON.parse(mm[1]);
-              if (parsed && String(parsed.type).toUpperCase() === 'ADD' && parsed.payload) {
-                created = await createTaskFromAI(parsed.payload, user);
-                if (!display) display = created ? ('Done — added “' + (parsed.payload.title || 'task') + '” to your Tasks.') : 'Hmm, I couldn’t create that — try again.';
-              }
-            } catch (e) { /* keep stripped text */ }
-          }
-          if (!display) display = reply;
-          setMsgs(prev => [...prev, { role: 'assistant', content: display, created: !!created }]);
-        } catch (e) {
-          setMsgs(prev => [...prev, { role: 'assistant', content: String(e.message || e), error: true }]);
-        } finally { setBusy(false); }
-      }
-      return (
-        <React.Fragment>
-          {/* Overlay — dims only between the header and the bottom zone (nav stays clear) */}
-          <div onClick={onClose} style={{ position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', left: 0, right: 0, bottom: bottomOffset, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />
-          {/* Pop-out */}
-          <div onClick={(e) => e.stopPropagation()} style={{
-            position: 'fixed', top: 'calc(68px + env(safe-area-inset-top))', left: 12, right: 12, zIndex: 60,
-            maxHeight: 'calc(100vh - 84px - env(safe-area-inset-top) - ' + bottomOffset + 'px)',
-            display: 'flex', flexDirection: 'column', borderRadius: 16, overflow: 'hidden',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.20)', background: bg, border: '1px solid ' + bord,
-            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid ' + bord, flexShrink: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <i className="ti ti-checklist" style={{ fontSize: 16, color: gold }} />
-                <span style={{ fontFamily: C.fontSans, fontSize: 13, fontWeight: 700, letterSpacing: '0.02em', color: ink }}>Add To-Do</span>
-              </div>
-              <i className="ti ti-x" onClick={onClose} aria-label="Close" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
-            </div>
-            <div ref={scRef} style={{ flex: 1, minHeight: 70, overflowY: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {msgs.length === 0 && <div style={{ fontSize: '0.78rem', color: sub, lineHeight: 1.5, fontFamily: C.fontSans }}>Type or dictate your to-do below, then send — I’ll add it to Tasks. Include a due date.</div>}
-              {msgs.map((m, i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                  <div style={{ maxWidth: '85%', padding: '8px 11px', borderRadius: 12, fontSize: '0.84rem', lineHeight: 1.4, fontFamily: C.fontSans, whiteSpace: 'pre-wrap', background: m.role === 'user' ? C.navy : card, color: m.role === 'user' ? '#fff' : (m.error ? '#C0392B' : ink), border: m.role === 'user' ? 'none' : '1px solid ' + bord }}>
-                    {m.content}
-                    {m.created && <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, padding: '3px 8px', borderRadius: 8, background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA', color: gold, fontSize: '0.66rem', fontWeight: 600, width: 'fit-content' }}><i className="ti ti-checklist" style={{ fontSize: 12 }} />Added to Tasks</div>}
-                  </div>
-                </div>
-              ))}
-              {busy && <div style={{ fontSize: '0.76rem', color: sub, fontFamily: C.fontSans }}>Working…</div>}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 12px', borderTop: '1px solid ' + bord, flexShrink: 0 }}>
-              <textarea ref={taRef} value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} rows={1} placeholder="Add To Do: …" style={{ flex: 1, resize: 'none', maxHeight: 96, padding: '9px 12px', borderRadius: 18, border: '1px solid ' + bord, background: dark ? '#06101F' : '#F7F4EE', color: ink, fontSize: '0.86rem', lineHeight: 1.4, outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' }} />
-              <button onClick={send} disabled={busy || !text.trim()} aria-label="Send" style={{ width: 38, height: 38, borderRadius: '50%', flexShrink: 0, border: 'none', cursor: 'pointer', background: C.navy, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: !text.trim() ? 0.5 : 1 }}><i className="ti ti-arrow-up" style={{ fontSize: 18 }} /></button>
             </div>
           </div>
         </React.Fragment>
@@ -4197,8 +4353,7 @@ Rules:
       const [pills, setPills] = useState(null);
       const [builderOpen, setBuilderOpen] = useState(false);
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
-      const [showAddTodo, setShowAddTodo] = useState(false); // the Add To-Do pop-out
-      const [todoPill, setTodoPill] = useState(null);         // the task pill that opened it (carries the AI instruction)
+      const [taskInstruction, setTaskInstruction] = useState(null); // armed by the Add To-Do pill → next send creates a task
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
       const [moreView, setMoreView] = useState('directory');
@@ -4334,9 +4489,27 @@ Rules:
 
           await ConvDB.insertMessage(convId, 'user', text || '', uploaded);
           const apiMsgs = history.map(m => ({ role: m.role, content: toApiContent(m) }));
-          const reply = await callAI(apiMsgs);
-          setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
-          await ConvDB.insertMessage(convId, 'assistant', reply);
+          const sys = taskInstruction ? (taskInstruction + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.') : undefined;
+          const reply = await callAI(apiMsgs, sys);
+          // Add To-Do mode: the AI ends with an ACTION block — read it, create the task, hide the JSON.
+          let display = reply;
+          if (taskInstruction) {
+            const mm = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
+            if (mm) {
+              display = reply.slice(0, mm.index).trim();
+              try {
+                const parsed = JSON.parse(mm[1]);
+                if (parsed && String(parsed.type).toUpperCase() === 'ADD' && parsed.payload) {
+                  const created = await createTaskFromAI(parsed.payload, user);
+                  if (!display) display = created ? ('Done — added “' + (parsed.payload.title || 'task') + '” to your Tasks.') : 'I couldn’t create that — please try again.';
+                  if (created) setTaskInstruction(null); // task created → leave to-do mode
+                }
+              } catch (e) { /* keep the stripped conversational text */ }
+            }
+          }
+          if (!display) display = reply;
+          setMessages(prev => [...prev, { role: 'assistant', content: display }]);
+          await ConvDB.insertMessage(convId, 'assistant', display);
           if (isFirst) {
             const seed = text || (uploaded[0] && uploaded[0].name) || 'Shared a file';
             const title = await generateTitle(seed);
@@ -4364,6 +4537,7 @@ Rules:
         setMessages([]);
         setCurrentConvId(null);
         setWorkRequest(null);
+        setTaskInstruction(null);
         setInput(localStorage.getItem('tmg-draft-new') || '');
       }
 
@@ -4376,6 +4550,7 @@ Rules:
         const conv = conversations.find(c => c.id === id);
         setDrawerOpen(false);
         setCurrentConvId(id);
+        setTaskInstruction(null);
         setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
         if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
@@ -4389,7 +4564,14 @@ Rules:
         if (!pill) return;
         if (pill.type === 'form') { setActivePill({ pill, kind: 'form' }); return; }
         if (pill.type === 'steps') { setActivePill({ pill, kind: 'steps' }); return; }
-        if (pill.type === 'task') { setTodoPill(pill); setShowAddTodo(true); return; }
+        if (pill.type === 'task') {
+          setTaskInstruction((pill.config && pill.config.instruction) || TASK_PILL_INSTRUCTION);
+          let seed = pill.config && pill.config.seed;
+          if (!seed || seed === 'Add To Do: ') seed = 'To Do: ';   // default + upgrade the old prefill
+          setInput(seed);
+          setTimeout(() => { const el = document.querySelector('.tmg-ai-input'); if (el) { el.focus(); try { const n = el.value.length; el.setSelectionRange(n, n); } catch (e) {} } }, 30);
+          return;
+        }
         const text = (pill.config && pill.config.prompt) || pill.label; // prompt (default)
         runSend(text, { type: 'work' });
       }
@@ -4428,7 +4610,6 @@ Rules:
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); setTasksFocus(null); }} tasksOpen={showTasks} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
           {showCalendar && <CalendarPopover dark={dark} onClose={() => setShowCalendar(false)} />}
           {showTasks && <TasksScreen dark={dark} user={user} initialTask={tasksFocus} onClose={() => { setShowTasks(false); setTasksFocus(null); }} />}
-          {showAddTodo && <AddTodoPopover dark={dark} user={user} pill={todoPill} bottomOffset={zoneH} onClose={() => { setShowAddTodo(false); setTodoPill(null); }} />}
           {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>

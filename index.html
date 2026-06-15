@@ -2744,32 +2744,75 @@ Rules:
     }
 
     // Manage your own labels (rename / delete across all your tasks).
+    // User-level label palette (names sync to tasks via task_labels; colors are
+    // a personal display preference kept in localStorage). Tasks can be shared,
+    // so each teammate manages their own labels/colors.
+    const LABEL_COLORS = ['#E24B4A', '#E0A93B', '#378ADD', '#7F77DD', '#1D9E75', '#E07B00', '#D4537E', '#6B7280', '#2BA8A0', '#9B5DE5', '#3BB0C9', '#7FB800'];
+    const labelKey = (uid) => 'tmg-labels-' + (uid || 'anon');
+
     function LabelManager({ dark, user, onClose }) {
-      const [labels, setLabels] = useState(null);   // null = loading
-      const [editing, setEditing] = useState(null);
-      const [draft, setDraft] = useState('');
-      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
-      const gold = dark ? '#C9A45A' : '#AD832F';
-      async function load() { setLabels(await TaskDB.myLabelNames(user && user.id)); }
-      useEffect(() => { load(); }, []);
-      async function rename(oldL) { const v = draft.trim(); if (!v || v === oldL) { setEditing(null); return; } await TaskDB.renameLabel(user && user.id, oldL, v); setEditing(null); setDraft(''); await load(); }
-      async function del(l) { await TaskDB.deleteLabel(user && user.id, l); await load(); }
+      const J = C.fontSans;
+      const uid = user && user.id;
+      const [items, setItems] = useState(null);   // [{ name, color, _orig }]
+      const [origNames, setOrigNames] = useState([]);
+      const [saving, setSaving] = useState(false);
+      const ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', bord = dark ? '#152545' : '#E4DFD4';
+      const fieldBg = dark ? '#06101F' : '#FFFFFF', rowBg = dark ? '#0A1730' : '#F7F4EE';
+
+      useEffect(() => {
+        (async () => {
+          let saved = [];
+          try { saved = JSON.parse(localStorage.getItem(labelKey(uid)) || '[]') || []; } catch (e) {}
+          const names = await TaskDB.myLabelNames(uid);
+          const have = {}; saved.forEach(s => { have[s.name] = true; });
+          const merged = saved.map(s => ({ name: s.name, color: s.color || LABEL_COLORS[1], _orig: s.name }));
+          names.forEach(n => { if (!have[n]) merged.push({ name: n, color: LABEL_COLORS[1], _orig: n }); });
+          setItems(merged); setOrigNames(names);
+        })();
+      }, []);
+
+      const update = (i, patch) => setItems(its => its.map((x, j) => j === i ? { ...x, ...patch } : x));
+      const add = () => setItems(its => [...(its || []), { name: '', color: LABEL_COLORS[0], _orig: null }]);
+      const remove = (i) => setItems(its => its.filter((_, j) => j !== i));
+
+      async function save() {
+        setSaving(true);
+        const clean = (items || []).map(x => ({ name: (x.name || '').trim(), color: x.color, _orig: x._orig })).filter(x => x.name);
+        const seen = {}, final = [];
+        clean.forEach(x => { const k = x.name.toLowerCase(); if (!seen[k]) { seen[k] = 1; final.push(x); } });
+        try {
+          for (const x of final) { if (x._orig && x._orig !== x.name && origNames.indexOf(x._orig) !== -1) await TaskDB.renameLabel(uid, x._orig, x.name); }
+          const keep = new Set(final.map(x => x.name)), keepOrig = new Set(final.map(x => x._orig).filter(Boolean));
+          for (const n of origNames) { if (!keep.has(n) && !keepOrig.has(n)) await TaskDB.deleteLabel(uid, n); }
+        } catch (e) { console.error('[LabelManager] sync:', e); }
+        try { localStorage.setItem(labelKey(uid), JSON.stringify(final.map(x => ({ name: x.name, color: x.color })))); } catch (e) {}
+        setSaving(false); onClose();
+      }
+
       return (
-        <div style={{ padding: '12px 14px 24px' }}>
-          <div style={{ fontSize: '0.72rem', color: sub, lineHeight: 1.5, marginBottom: 12, fontFamily: C.fontSans }}>Your personal labels — renaming or deleting one updates it across all your tasks. Each teammate manages their own.</div>
-          {labels === null ? <div style={{ color: sub, fontSize: '0.82rem', padding: 8 }}>Loading…</div>
-            : labels.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: '16px 8px', textAlign: 'center' }}>No labels yet. Add labels on a task and they'll show up here.</div>
-            : labels.map(l => (
-              <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 10px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 10, marginBottom: 7 }}>
-                {editing === l
-                  ? <input autoFocus value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') rename(l); if (e.key === 'Escape') setEditing(null); }} style={{ flex: 1, padding: '6px 9px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 8, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans }} />
-                  : <span style={{ flex: 1, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.84rem', color: ink, fontFamily: C.fontSans }}><i className="ti ti-tag" style={{ fontSize: 14, color: gold }} />{l}</span>}
-                {editing === l
-                  ? <i className="ti ti-check" onClick={() => rename(l)} title="Save" style={{ fontSize: 17, cursor: 'pointer', color: dark ? '#3FB36B' : '#1E6B40' }} />
-                  : <i className="ti ti-pencil" onClick={() => { setEditing(l); setDraft(l); }} title="Rename" style={{ fontSize: 15, cursor: 'pointer', color: sub }} />}
-                <i className="ti ti-trash" onClick={() => del(l)} title="Delete" style={{ fontSize: 15, cursor: 'pointer', color: sub }} />
+        <div style={{ padding: '12px 14px 24px', fontFamily: J }}>
+          <div style={{ fontSize: '0.72rem', color: sub, lineHeight: 1.5, marginBottom: 12 }}>Your personal labels — names sync across your tasks, colors are just yours. Each teammate manages their own.</div>
+          {items === null ? <div style={{ color: sub, fontSize: '0.82rem', padding: 8 }}>Loading…</div>
+            : (<React.Fragment>
+              {items.length === 0 && <div style={{ color: sub, fontSize: '0.8rem', padding: '6px 2px 12px' }}>No labels yet — tap “Add label” to create one.</div>}
+              {items.map((it, i) => (
+                <div key={i} style={{ background: rowBg, border: `1px solid ${bord}`, borderRadius: 12, padding: 10, marginBottom: 9 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                    <span style={{ width: 26, height: 26, borderRadius: 8, flexShrink: 0, background: it.color }} />
+                    <input value={it.name} onChange={e => update(i, { name: e.target.value })} placeholder="Label name" style={{ flex: 1, minWidth: 0, padding: '8px 11px', background: fieldBg, border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: J }} />
+                    <i className="ti ti-x" onClick={() => remove(i)} title="Remove" style={{ fontSize: 16, cursor: 'pointer', color: sub, flexShrink: 0 }} />
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 9 }}>
+                    {LABEL_COLORS.map(c => { const on = it.color === c; return <button key={c} onClick={() => update(i, { color: c })} aria-label="Pick color" style={{ width: 26, height: 26, borderRadius: 8, cursor: 'pointer', background: c, border: on ? `2px solid ${ink}` : '2px solid transparent', padding: 0 }} />; })}
+                  </div>
+                </div>
+              ))}
+              <button onClick={add} style={{ width: '100%', padding: 10, borderRadius: 10, border: `1px dashed ${bord}`, background: 'none', color: sub, cursor: 'pointer', fontFamily: J, fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 14 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add label</button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={onClose} style={{ flex: 1, padding: 11, borderRadius: 11, border: `1px solid ${bord}`, background: 'none', color: sub, cursor: 'pointer', fontFamily: J, fontSize: '0.85rem', fontWeight: 600 }}>Cancel</button>
+                <button onClick={save} disabled={saving} style={{ flex: 1, padding: 11, borderRadius: 11, border: 'none', background: C.navy, color: '#fff', cursor: saving ? 'default' : 'pointer', fontFamily: J, fontSize: '0.85rem', fontWeight: 600 }}>{saving ? 'Saving…' : 'Save changes'}</button>
               </div>
-            ))}
+            </React.Fragment>)}
         </div>
       );
     }
@@ -2781,6 +2824,7 @@ Rules:
       const [view, setView] = useState('list');   // list | detail | form | labels
       const [current, setCurrent] = useState(null);
       const [sortBy, setSortBy] = useState('status');   // status | due | label
+      const [labelColors, setLabelColors] = useState({});
       const [vis, setVis] = useState(false);
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
       useEffect(() => { if (initialTask) { setCurrent(initialTask); setView('detail'); } }, [initialTask]);
@@ -2797,6 +2841,7 @@ Rules:
         return d;
       }
       useEffect(() => { reload(); }, []);
+      useEffect(() => { if (view === 'list') { try { const p = JSON.parse(localStorage.getItem(labelKey(user && user.id)) || '[]') || []; const m = {}; p.forEach(x => { m[x.name] = x.color; }); setLabelColors(m); } catch (e) {} } }, [view]);
       async function handleSave(form) {
         const due_at = form.due ? new Date(form.due).toISOString() : null;
         const project_id = form.project ? await TaskDB.findOrCreateProject(form.project, user) : null;
@@ -2827,7 +2872,7 @@ Rules:
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
               <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
-              {myLabels.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>{myLabels.map(l => <span key={l} style={{ padding: '1px 6px', borderRadius: 10, background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA', color: dark ? '#C9A45A' : '#AD832F', fontSize: '0.58rem', fontWeight: 600, fontFamily: C.fontSans }}>{l}</span>)}</div>}
+              {myLabels.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>{myLabels.map(l => { const lc = labelColors[l]; return <span key={l} style={{ padding: '1px 6px', borderRadius: 10, background: lc ? lc + '26' : (dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA'), color: lc || (dark ? '#C9A45A' : '#AD832F'), fontSize: '0.58rem', fontWeight: 600, fontFamily: C.fontSans }}>{l}</span>; })}</div>}
             </div>
             {showStatus && <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusColor(t.status) + '22', color: statusColor(t.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(t.status)}</span>}
             <i className="ti ti-chevron-right" style={{ fontSize: 16, color: sub, flexShrink: 0 }} />
@@ -2885,7 +2930,8 @@ Rules:
                 <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleText}</span>
               </div>
               {view === 'list'
-                ? <div style={{ display: 'flex', alignItems: 'center', gap: 11, flexShrink: 0 }}>
+                ? <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0 }}>
+                    <select value={sortBy} onChange={e => setSortBy(e.target.value)} title="Sort tasks by" style={{ fontFamily: C.fontSans, fontSize: '0.66rem', fontWeight: 600, color: dark ? '#C9A45A' : '#AD832F', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 4px 4px 7px', cursor: 'pointer', outline: 'none' }}><option value="status">Status</option><option value="due">Due date</option><option value="label">Label</option></select>
                     <i className="ti ti-tag" onClick={() => setView('labels')} title="Manage labels" style={{ fontSize: 16, cursor: 'pointer', color: dark ? '#C9A45A' : '#AD832F' }} />
                     <button onClick={() => { setCurrent(null); setView('form'); }} aria-label="New task" style={{ display: 'flex', alignItems: 'center', gap: 4, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '4px 10px', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>
                   </div>
@@ -2900,7 +2946,7 @@ Rules:
                   <div style={{ padding: '12px 14px 24px' }}>
                     {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 12 }}>Loading…</div>
                       : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center' }}>No tasks yet. Tap <b>New</b> to add one.</div>
-                      : <React.Fragment>{sortTabs}{renderList()}</React.Fragment>}
+                      : <React.Fragment>{renderList()}</React.Fragment>}
                   </div>
                 )}
             </div>

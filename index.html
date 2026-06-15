@@ -2201,7 +2201,8 @@ Rules:
         return (
           <div key={r.id} className="rm-row"
             onDragOver={!isSub ? (e => onRowOver(e, r.id)) : undefined} onDrop={!isSub ? (e => onRowDrop(e, r.id)) : undefined}
-            style={{ position: 'relative', display: 'grid', gridTemplateColumns: COLS, alignItems: 'center', gap: 8, padding: '9px 20px', borderBottom: '1px solid #F4EFE7', background: isSub ? '#FBF9F4' : 'transparent', borderTop: dropHint && dropHint.id === r.id && dropHint.pos === 'before' ? `2px solid ${NAVY}` : '2px solid transparent', boxShadow: dropHint && dropHint.id === r.id && dropHint.pos === 'after' ? `inset 0 -2px 0 ${NAVY}` : 'none' }}>
+            onClick={(e) => { if (e.target.closest('button, input, select, textarea, label, a, .rm-grip')) return; setEditId(r.id); }}
+            style={{ position: 'relative', cursor: 'pointer', display: 'grid', gridTemplateColumns: COLS, alignItems: 'center', gap: 8, padding: '9px 20px', borderBottom: '1px solid #F4EFE7', background: isSub ? '#FBF9F4' : 'transparent', borderTop: dropHint && dropHint.id === r.id && dropHint.pos === 'before' ? `2px solid ${NAVY}` : '2px solid transparent', boxShadow: dropHint && dropHint.id === r.id && dropHint.pos === 'after' ? `inset 0 -2px 0 ${NAVY}` : 'none' }}>
             {!isSub && <i className="ti ti-grip-vertical rm-grip" draggable onDragStart={e => onDragStart(e, r.id)} onDragEnd={() => { setDragId(null); setDropHint(null); }} style={{ position: 'absolute', left: 4, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: '#D4CFC2', cursor: 'grab', zIndex: 1 }} />}
             {/* name cell */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, paddingLeft: isSub ? 34 : 0 }}>
@@ -2223,7 +2224,6 @@ Rules:
             {/* actions */}
             <div className="rm-actions" style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2 }}>
               {!isSub && <button className="rm-actbtn" onClick={() => addSub(r.id)} aria-label="Add subtask" title="Add subtask" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-plus" style={{ fontSize: 13 }} /></button>}
-              <button className="rm-actbtn" onClick={() => setEditId(r.id)} aria-label="Edit" title="Edit" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-pencil" style={{ fontSize: 13 }} /></button>
               <button className="rm-actbtn" onClick={() => { if (window.confirm('Delete \"' + (r.name || 'this item') + '\"' + (isSub ? '' : ' and its subtasks') + '?')) deleteRow(r.id); }} aria-label="Delete" title="Delete" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-x" style={{ fontSize: 13 }} /></button>
             </div>
           </div>
@@ -2268,6 +2268,8 @@ Rules:
                     <option value="">\u2014 Top level (its own tab) \u2014</option>
                     {topTabs.map(t => <option key={t.id} value={t.id}>{t.name || '(untitled)'}</option>)}
                   </select>
+                  <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: GOLD, marginBottom: 6 }}>Notes</div>
+                  <textarea value={er.notes || ''} onChange={e => updateRow(er.id, { notes: e.target.value })} rows={5} placeholder="Add notes\u2026" style={{ width: '100%', boxSizing: 'border-box', padding: '9px 11px', borderRadius: 9, border: `1px solid ${LINE}`, background: '#fff', color: NAVY, fontFamily: J, fontSize: 12.5, lineHeight: 1.5, outline: 'none', resize: 'vertical', minHeight: 90, marginBottom: 18 }} />
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button onClick={() => { if (window.confirm('Delete "' + (er.name || 'this item') + '"' + (isSubE ? '' : ' and its subtasks') + '?')) { deleteRow(er.id); setEditId(null); } }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '10px 12px', borderRadius: 10, border: '1px solid #F0D9D9', background: 'none', color: '#DC2626', cursor: 'pointer', fontFamily: J, fontSize: 12, fontWeight: 600 }}><i className="ti ti-trash" style={{ fontSize: 14 }} />Delete</button>
                     <button onClick={() => setEditId(null)} style={{ flex: 1, padding: 10, borderRadius: 10, border: 'none', background: NAVY, color: '#fff', cursor: 'pointer', fontFamily: J, fontSize: 13, fontWeight: 600 }}>Done</button>

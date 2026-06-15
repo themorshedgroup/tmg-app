@@ -521,11 +521,72 @@ Rules:
 - Resolve relative dates ("Friday", "tomorrow", "next week") to an absolute YYYY-MM-DD using today's date given in the conversation.
 - Keep the conversational part brief and friendly.`;
 
+    // ─── Enter KPI (Work Mode) ───────────────────────────────────────
+    // KPI_LIVE=false → both flows only PREVIEW what would be sent (no network call).
+    // Flip to true once createAgentKpi() points at the live zoho-crm edge function (Phase B).
+    const KPI_LIVE = false;
+    const KPI_OPTIONS = ['Touch Call', 'Follow Up Call', 'Notes', 'Hotzone Action/s', 'Pop-by', 'Lunch'];
+    const OTHER_KPI_OPTIONS = ['—']; // placeholder — real Zoho "Other KPI" picklist TBD
+    const MAX_KPI_PERSONS = 10;
+
+    // Phase B seam: wire this to the zoho-crm edge function (mirrors callCalendar). Stub while KPI_LIVE is false.
+    async function createAgentKpi(payload) { throw new Error('Zoho not wired yet'); }
+
+    // Note-flow instruction: the AI parses a pasted KPI note and ends every reply with one ACTION block
+    // (mirrors TASK_PILL_INSTRUCTION). The parsing rules are a first draft — refine with real note examples.
+    const KPI_NOTE_INSTRUCTION =
+`You are the TMG KPI assistant. The agent will paste a short note describing real-estate prospecting activity. Turn it into ONE normalized KPI submission. Have a brief, natural conversation — ask only for what's genuinely missing, never interrogate. The message may begin with "KPI:" — treat that as a prefix.
+
+Each note lists one or more PEOPLE and what was done with each. Map each person's activity to exactly ONE of these KPI types (one KPI per person):
+"Touch Call", "Follow Up Call", "Notes", "Hotzone Action/s", "Pop-by", "Lunch".
+Mapping hints: "called"/"call" -> "Touch Call" (use "Follow Up Call" only if they say follow-up); "note"/"left a note" -> "Notes"; "popped by"/"drop by" -> "Pop-by"; "lunch" -> "Lunch"; "hotzone"/"door-knock" -> "Hotzone Action/s" (then capture how many as a number). If one person has several activities, pick the single most significant one and you may briefly confirm.
+
+Also capture if present: kpi_date ("YYYY-MM-DD"; default to today if none given); ctc_hours (a number) if CTC / call-time hours are mentioned; "Other KPIs" that don't fit the six types as {kpi, count}. Names are FREE TEXT — do NOT match them against any contact list; record the name as written. Up to 10 people per submission.
+
+## How to reply
+End EVERY reply with exactly ONE action block on its own final line, with nothing after it:
+ACTION:{"type":"KPI","payload":{ ...the fields you have... }}
+
+The payload shape MUST be:
+{ "kpi_date":"YYYY-MM-DD", "ctc_hours": <number or null>,
+  "persons":[ { "name":"...", "kpi":"<one of the six>", "hotzone_count": <number, only for Hotzone Action/s> } ],
+  "others":[ { "kpi":"...", "count": <number> } ] }
+
+Rules:
+- Use "KPI" only once you have at least kpi_date and one person with a name and a KPI type — that submits it. Then confirm in one short sentence, e.g. Logged KPIs for 3 people on 2026-06-16.
+- If the first message already has enough, submit in your FIRST reply — no follow-up questions.
+- If something important is missing or ambiguous (follow-up vs touch call, or a hotzone count), ask ONE short question and end with: ACTION:{"type":"NONE","payload":{}}
+- Resolve relative dates ("today","yesterday","Monday") to YYYY-MM-DD using today's date given in the conversation.
+- Keep replies short and friendly. Do NOT use markdown formatting.`;
+
+    // Plain-text KPI summary for the chat bubble (the chat renders raw text — no markdown).
+    function formatKpiPreview(p) {
+      const L = [];
+      L.push('KPI ENTRY');
+      L.push('Owner: ' + (p.owner || '—'));
+      L.push('Date: ' + (p.kpi_date || '—'));
+      L.push('CTC Hours: ' + (p.ctc_hours == null || p.ctc_hours === '' ? '—' : p.ctc_hours));
+      L.push('');
+      const persons = p.persons || [];
+      L.push('People (' + persons.length + '):');
+      persons.forEach(function (x, i) {
+        L.push('  ' + (i + 1) + '. ' + (x.name || '—') + ' — ' + (x.kpi || '—') +
+          (x.kpi === 'Hotzone Action/s' ? ' (' + (x.hotzone_count || 0) + ' actions)' : ''));
+      });
+      if (p.others && p.others.length) {
+        L.push('');
+        L.push('Other KPIs:');
+        p.others.forEach(function (o) { L.push('  • ' + o.kpi + ': ' + o.count); });
+      }
+      return L.join('\n');
+    }
+
+
     // ─── Work Mode pills ─────────────────────────────────────────────
     // Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
     const FALLBACK_PILLS = [
       { id: 'fb-task',    label: 'Add To Do',            icon: 'ti-checklist',       colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   config: { instruction: TASK_PILL_INSTRUCTION, seed: 'To Do: ' }, enabled: true },
-      { id: 'fb-kpis',    label: 'Enter KPIs',           icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Enter KPIs' },           enabled: true },
+      { id: 'fb-kpis',    label: 'Enter KPI',           icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { kpi: true, prompt: 'Enter KPI' },           enabled: true },
       { id: 'fb-listing', label: 'Listing Presentation', icon: 'ti-presentation',    colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Listing Presentation' }, enabled: true },
       { id: 'fb-showing', label: 'Add Showing',          icon: 'ti-home',            colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Add Showing' },          enabled: true },
       { id: 'fb-comm',    label: 'Commission Log',       icon: 'ti-currency-dollar', colorLight: '#0F6E56', colorDark: '#5DCAA5',               type: 'prompt', config: { prompt: 'Commission Log' },       enabled: true },
@@ -1542,6 +1603,118 @@ Rules:
               {idx > 0 && <button onClick={back} style={{ flex: 1, padding: 11, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.88rem', cursor: 'pointer', fontFamily: C.fontSans }}>Back</button>}
               <button onClick={next} style={{ flex: 2, padding: 11, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{idx < steps.length - 1 ? 'Next' : 'Send'}</button>
             </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Enter KPI — step 1: choose the form or the paste-a-note flow.
+    function ChoiceSheet({ dark, pill, onClose, onForm, onNote }) {
+      const bord = dark ? '#152545' : C.border;
+      const panelBg = dark ? '#0A1730' : '#FFFFFF';
+      const txt = dark ? '#fff' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const btn = { display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '14px 16px', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, marginTop: 10, textAlign: 'left' };
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 55, background: 'rgba(0,13,38,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '18px 18px calc(20px + env(safe-area-inset-bottom))' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 8 }}>
+              <i className={`ti ${pill.icon}`} style={{ fontSize: 20, color: dark ? pill.colorDark : pill.colorLight }} />
+              <div style={{ flex: 1, fontFamily: C.fontSans, fontSize: '1rem', fontWeight: 600, color: txt }}>Enter KPI</div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 20, display: 'flex' }}><i className="ti ti-x" /></button>
+            </div>
+            <div style={{ fontSize: '0.85rem', color: sub, marginBottom: 4, fontFamily: C.fontSans }}>Fill out the form, or paste a note?</div>
+            <button onClick={onForm} style={{ ...btn, background: dark ? C.gold : C.navy, color: '#fff', border: 'none' }}><i className="ti ti-forms" style={{ fontSize: 18 }} />Fill out the form</button>
+            <button onClick={onNote} style={{ ...btn, background: 'none', color: txt, border: `1px solid ${bord}` }}><i className="ti ti-notes" style={{ fontSize: 18 }} />Paste a note</button>
+          </div>
+        </div>
+      );
+    }
+
+    // Enter KPI — step 2 (form path): the in-chat recreation of the Zoho "Create Agent KPI" form.
+    function KpiSheet({ dark, pill, ownerName, onClose, onSubmit }) {
+      const _t = new Date(); const today = _t.getFullYear() + '-' + String(_t.getMonth() + 1).padStart(2, '0') + '-' + String(_t.getDate()).padStart(2, '0');
+      const [kpiDate, setKpiDate] = useState(today);
+      const [ctcHours, setCtcHours] = useState('');
+      const [persons, setPersons] = useState([{ name: '', kpi: 'Touch Call', hotzone: '' }]);
+      const [others, setOthers] = useState([]);
+      const [agree, setAgree] = useState(false);
+      const bord = dark ? '#152545' : C.border;
+      const panelBg = dark ? '#0A1730' : '#FFFFFF';
+      const txt = dark ? '#fff' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const inp = { width: '100%', padding: '10px 12px', background: dark ? '#06101F' : C.surfaceHover, border: `1px solid ${bord}`, borderRadius: 10, color: dark ? '#fff' : C.textPrimary, fontSize: '0.88rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const lbl = { fontSize: '0.66rem', color: sub, letterSpacing: '0.05em', marginBottom: 5, fontFamily: C.fontSans, fontWeight: 600 };
+      const sectionLbl = { fontSize: '0.6rem', color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, margin: '16px 0 8px', fontFamily: C.fontSans };
+      const removeBtn = { background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 16, display: 'flex', padding: 4 };
+      const addBtn = { display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: `1px dashed ${bord}`, borderRadius: 10, padding: '8px 12px', color: dark ? C.goldSoft : C.gold, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, marginTop: 4 };
+
+      const updatePerson = (i, k, v) => setPersons(ps => ps.map((p, j) => j === i ? { ...p, [k]: v, ...(k === 'kpi' && v !== 'Hotzone Action/s' ? { hotzone: '' } : {}) } : p));
+      const addPerson = () => setPersons(ps => ps.length < MAX_KPI_PERSONS ? [...ps, { name: '', kpi: 'Touch Call', hotzone: '' }] : ps);
+      const removePerson = i => setPersons(ps => ps.filter((_, j) => j !== i));
+      const updateOther = (i, k, v) => setOthers(os => os.map((o, j) => j === i ? { ...o, [k]: v } : o));
+      const addOther = () => setOthers(os => os.length < 3 ? [...os, { kpi: OTHER_KPI_OPTIONS[0], count: '' }] : os);
+      const removeOther = i => setOthers(os => os.filter((_, j) => j !== i));
+
+      function submit() {
+        if (!agree) { alert('Please confirm "Ready to submit".'); return; }
+        if (!kpiDate) { alert('Please choose a KPI date.'); return; }
+        const cleanPersons = persons.filter(p => p.name.trim()).map(p => ({
+          name: p.name.trim(), kpi: p.kpi,
+          ...(p.kpi === 'Hotzone Action/s' ? { hotzone_count: Number(p.hotzone) || 0 } : {}),
+        }));
+        if (!cleanPersons.length) { alert('Add at least one person with a name.'); return; }
+        const cleanOthers = others.filter(o => o.kpi && o.kpi !== '—' && o.count !== '').map(o => ({ kpi: o.kpi, count: Number(o.count) || 0 }));
+        onSubmit({ owner: ownerName, kpi_date: kpiDate, ctc_hours: ctcHours === '' ? null : Number(ctcHours), persons: cleanPersons, others: cleanOthers });
+      }
+
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 55, background: 'rgba(0,13,38,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '18px 18px calc(20px + env(safe-area-inset-bottom))', maxHeight: '88vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 12 }}>
+              <i className={`ti ${pill.icon}`} style={{ fontSize: 20, color: dark ? pill.colorDark : pill.colorLight }} />
+              <div style={{ flex: 1, fontFamily: C.fontSans, fontSize: '1rem', fontWeight: 600, color: txt }}>Enter KPI</div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 20, display: 'flex' }}><i className="ti ti-x" /></button>
+            </div>
+
+            <div style={{ fontSize: '0.72rem', color: sub, marginBottom: 12, fontFamily: C.fontSans }}>Owner: <span style={{ color: txt, fontWeight: 600 }}>{ownerName}</span></div>
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1 }}><div style={lbl}>KPI DATE</div><input type="date" value={kpiDate} onChange={e => setKpiDate(e.target.value)} style={inp} /></div>
+              <div style={{ flex: 1 }}><div style={lbl}>CTC HOURS</div><input type="number" min="0" step="0.5" value={ctcHours} onChange={e => setCtcHours(e.target.value)} style={inp} placeholder="—" /></div>
+            </div>
+
+            <div style={sectionLbl}>People</div>
+            {persons.map((p, i) => (
+              <div key={i} style={{ border: `1px solid ${bord}`, borderRadius: 12, padding: 12, marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+                  <div style={{ flex: 1, fontSize: '0.7rem', fontWeight: 700, color: sub, letterSpacing: '0.04em', fontFamily: C.fontSans }}>PERSON {i + 1}</div>
+                  {persons.length > 1 && <button onClick={() => removePerson(i)} style={removeBtn}><i className="ti ti-trash" /></button>}
+                </div>
+                <div style={{ marginBottom: 8 }}><div style={lbl}>NAME</div><input type="text" value={p.name} onChange={e => updatePerson(i, 'name', e.target.value)} style={inp} placeholder="Contact name" /></div>
+                <div><div style={lbl}>APPLICABLE KPI</div><select value={p.kpi} onChange={e => updatePerson(i, 'kpi', e.target.value)} style={inp}>{KPI_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}</select></div>
+                {p.kpi === 'Hotzone Action/s' && <div style={{ marginTop: 8 }}><div style={lbl}>NUMBER OF HOTZONE ACTIONS</div><input type="number" min="0" value={p.hotzone} onChange={e => updatePerson(i, 'hotzone', e.target.value)} style={inp} /></div>}
+              </div>
+            ))}
+            {persons.length < MAX_KPI_PERSONS
+              ? <button onClick={addPerson} style={addBtn}><i className="ti ti-plus" />Add person</button>
+              : <div style={{ fontSize: '0.7rem', color: sub, fontFamily: C.fontSans }}>Maximum of {MAX_KPI_PERSONS} people.</div>}
+
+            <div style={sectionLbl}>Other KPIs</div>
+            {others.map((o, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 8 }}>
+                <div style={{ flex: 2 }}><select value={o.kpi} onChange={e => updateOther(i, 'kpi', e.target.value)} style={inp}>{OTHER_KPI_OPTIONS.map(x => <option key={x} value={x}>{x}</option>)}</select></div>
+                <div style={{ flex: 1 }}><input type="number" min="0" value={o.count} onChange={e => updateOther(i, 'count', e.target.value)} style={inp} placeholder="Count" /></div>
+                <button onClick={() => removeOther(i)} style={removeBtn}><i className="ti ti-trash" /></button>
+              </div>
+            ))}
+            {others.length < 3 && <button onClick={addOther} style={addBtn}><i className="ti ti-plus" />Add other KPI</button>}
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 18, fontSize: '0.82rem', color: txt, fontFamily: C.fontSans, cursor: 'pointer' }}>
+              <input type="checkbox" checked={agree} onChange={e => setAgree(e.target.checked)} />
+              Ready to submit — once saved in Zoho it can't be edited.
+            </label>
+            <button onClick={submit} disabled={!agree} style={{ width: '100%', padding: 12, marginTop: 12, background: agree ? (dark ? C.gold : C.navy) : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: agree ? 'pointer' : 'not-allowed', fontFamily: C.fontSans }}>Submit KPI</button>
           </div>
         </div>
       );
@@ -4620,6 +4793,7 @@ Rules:
       const [builderOpen, setBuilderOpen] = useState(false);
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
       const [taskInstruction, setTaskInstruction] = useState(null); // armed by the Add To-Do pill → next send creates a task
+      const [kpiInstruction, setKpiInstruction] = useState(null); // armed by Enter KPI "paste a note" → next sends parse a KPI
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
       const [moreView, setMoreView] = useState(() => parseRoute(typeof location !== 'undefined' ? location.hash : '').view || 'directory');
@@ -4779,7 +4953,8 @@ Rules:
 
           await ConvDB.insertMessage(convId, 'user', text || '', uploaded);
           const apiMsgs = history.map(m => ({ role: m.role, content: toApiContent(m) }));
-          const sys = taskInstruction ? (taskInstruction + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.') : undefined;
+          const armed = taskInstruction || kpiInstruction;
+          const sys = armed ? (armed + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.') : undefined;
           const reply = await callAI(apiMsgs, sys);
           // Add To-Do mode: the AI ends with an ACTION block — read it, create the task, hide the JSON.
           let display = reply;
@@ -4793,6 +4968,21 @@ Rules:
                   const created = await createTaskFromAI(parsed.payload, user);
                   if (!display) display = created ? ('Done — added “' + (parsed.payload.title || 'task') + '” to your Tasks.') : 'I couldn’t create that — please try again.';
                   if (created) setTaskInstruction(null); // task created → leave to-do mode
+                }
+              } catch (e) { /* keep the stripped conversational text */ }
+            }
+          } else if (kpiInstruction) {
+            // Enter KPI "paste a note": the AI ends with an ACTION block — read it, preview/submit, hide the JSON.
+            const mm = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
+            if (mm) {
+              display = reply.slice(0, mm.index).trim();
+              try {
+                const parsed = JSON.parse(mm[1]);
+                if (parsed && String(parsed.type).toUpperCase() === 'KPI' && parsed.payload) {
+                  const payload = { ...parsed.payload, owner: myName }; // owner is app-side, never from the model
+                  const preview = await submitKpi(payload, 'note', { silent: true });
+                  display = (display ? display + '\n\n' : '') + preview;
+                  setKpiInstruction(null); // one submission ends note mode
                 }
               } catch (e) { /* keep the stripped conversational text */ }
             }
@@ -4828,6 +5018,7 @@ Rules:
         setCurrentConvId(null);
         setWorkRequest(null);
         setTaskInstruction(null);
+        setKpiInstruction(null);
         setInput(localStorage.getItem('tmg-draft-new') || '');
       }
 
@@ -4841,6 +5032,7 @@ Rules:
         setDrawerOpen(false);
         setCurrentConvId(id);
         setTaskInstruction(null);
+        setKpiInstruction(null);
         setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
         if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
@@ -4852,9 +5044,11 @@ Rules:
       // Tap a work-mode pill → run its configured behavior.
       function dispatchPill(pill) {
         if (!pill) return;
+        if (pill.id === 'fb-kpis' || (pill.config && pill.config.kpi)) { setActivePill({ pill, kind: 'kpi-choice' }); return; }
         if (pill.type === 'form') { setActivePill({ pill, kind: 'form' }); return; }
         if (pill.type === 'steps') { setActivePill({ pill, kind: 'steps' }); return; }
         if (pill.type === 'task') {
+          setKpiInstruction(null);
           setTaskInstruction((pill.config && pill.config.instruction) || TASK_PILL_INSTRUCTION);
           let seed = pill.config && pill.config.seed;
           if (!seed || seed === 'Add To Do: ') seed = 'To Do: ';   // default + upgrade the old prefill
@@ -4864,6 +5058,38 @@ Rules:
         }
         const text = (pill.config && pill.config.prompt) || pill.label; // prompt (default)
         runSend(text, { type: 'work' });
+      }
+
+      // Enter KPI — "paste a note" flow: arm the parser + seed the input (mirrors the task-pill arm).
+      function startKpiNote() {
+        setTaskInstruction(null);
+        setKpiInstruction(KPI_NOTE_INSTRUCTION);
+        setInput('KPI: ');
+        setTimeout(() => { const el = document.querySelector('.tmg-ai-input'); if (el) { el.focus(); try { const n = el.value.length; el.setSelectionRange(n, n); } catch (e) {} } }, 30);
+      }
+
+      // Both KPI flows funnel here. KPI_LIVE=false → preview only (no network). opts.silent → return the
+      // preview text so the note flow's runSend can persist it; otherwise append it to the chat (form flow).
+      async function submitKpi(payload, source, opts = {}) {
+        const preview = formatKpiPreview(payload);
+        if (KPI_LIVE) {
+          try {
+            const res = await createAgentKpi(payload);
+            const ok = 'Submitted to Zoho — Agent KPI created' + (res && res.id ? ' (id ' + res.id + ')' : '') + '.\n\n' + preview;
+            if (opts.silent) return ok;
+            setMessages(prev => [...prev, { role: 'assistant', content: ok }]);
+            return ok;
+          } catch (e) {
+            const err = 'Could not submit to Zoho: ' + (e.message || e) + '\n\nHere is what would have been sent:\n\n' + preview;
+            if (opts.silent) return err;
+            setMessages(prev => [...prev, { role: 'assistant', content: err, error: true }]);
+            return err;
+          }
+        }
+        const msg = 'Here is your KPI summary (preview — not yet sent to Zoho):\n\n' + preview;
+        if (opts.silent) return msg;
+        setMessages(prev => [...prev, { role: 'assistant', content: msg }]);
+        return msg;
       }
 
       function startWorkRequest(key) {
@@ -4992,6 +5218,12 @@ Rules:
           )}
           {activePill && activePill.kind === 'steps' && (
             <StepSheet dark={dark} pill={activePill.pill} onClose={() => setActivePill(null)} onComplete={(ans) => { const text = composeFromTemplate(activePill.pill.config.template, ans, activePill.pill.config.steps); setActivePill(null); runSend(text, { type: 'work' }); }} />
+          )}
+          {activePill && activePill.kind === 'kpi-choice' && (
+            <ChoiceSheet dark={dark} pill={activePill.pill} onClose={() => setActivePill(null)} onForm={() => setActivePill({ pill: activePill.pill, kind: 'kpi-form' })} onNote={() => { setActivePill(null); startKpiNote(); }} />
+          )}
+          {activePill && activePill.kind === 'kpi-form' && (
+            <KpiSheet dark={dark} pill={activePill.pill} ownerName={myName} onClose={() => setActivePill(null)} onSubmit={(payload) => { setActivePill(null); submitKpi(payload, 'form'); }} />
           )}
         </div>
       );

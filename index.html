@@ -1879,6 +1879,12 @@ Rules:
     ];
     const rmStatus = (id) => RM_STATUS.find(s => s.id === id) || RM_STATUS[0];
     const rmType   = (id) => RM_TYPES.find(t => t.id === id) || RM_TYPES[0];
+    const RM_DIFF = [
+      { id: 'easy',   label: 'Easy',   bg: '#E6F2EC', text: '#0F6E56' },
+      { id: 'normal', label: 'Normal', bg: '#FAEEDA', text: '#BA7517' },
+      { id: 'hard',   label: 'Hard',   bg: '#FCEBEB', text: '#A32D2D' },
+    ];
+    const rmDiff = (id) => RM_DIFF.find(d => d.id === id) || RM_DIFF[1];
     const rmPad = (n) => String(n).padStart(2, '0');
     const RM_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -2033,20 +2039,37 @@ Rules:
         return rmEnsureAdditions(rmSeed());
       });
       const [groupBy, setGroupBy] = useState('quarter');
-      const [collapsedP, setCollapsedP] = useState({});
-      const [collapsedG, setCollapsedG] = useState({});
+      const [collapsedP, setCollapsedP] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-rm-collapsedP') || '{}') || {}; } catch (e) { return {}; } });
+      const [collapsedG, setCollapsedG] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-rm-collapsedG') || '{}') || {}; } catch (e) { return {}; } });
       const [menu, setMenu] = useState(null);     // { id, field }
       const [newTitle, setNewTitle] = useState('');
+      const [focusId, setFocusId] = useState(null);
+      const [editId, setEditId] = useState(null);
       const [dragId, setDragId] = useState(null);
       const [dropHint, setDropHint] = useState(null);
       useEffect(() => { try { localStorage.setItem(RM_KEY, JSON.stringify(rows)); } catch (e) {} }, [rows]);
+      useEffect(() => { try { localStorage.setItem('tmg-rm-collapsedP', JSON.stringify(collapsedP)); } catch (e) {} }, [collapsedP]);
+      useEffect(() => { try { localStorage.setItem('tmg-rm-collapsedG', JSON.stringify(collapsedG)); } catch (e) {} }, [collapsedG]);
 
       const uid = () => 'r' + Math.random().toString(36).slice(2, 9);
       const todayISO = (() => { const d = new Date(); return d.getFullYear() + '-' + rmPad(d.getMonth() + 1) + '-' + rmPad(d.getDate()); })();
       const fmtDate = (s) => { try { return new Date(s + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch (e) { return s; } };
 
       const updateRow = (id, patch) => setRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
+      const addSiblingAfter = (row) => {
+        const id = uid();
+        setRows(prev => {
+          const idx = prev.findIndex(r => r.id === row.id);
+          if (idx < 0) return prev;
+          const nw = row.parentId
+            ? { id, name: '', status: 'todo', type: 'mvp', dueDate: null, parentId: row.parentId, order: 0 }
+            : { id, name: '', status: 'todo', type: 'mvp', dueDate: row.dueDate, parentId: null, order: 0 };
+          const copy = prev.slice(); copy.splice(idx + 1, 0, nw); return rmNormalize(copy);
+        });
+        setFocusId(id);
+      };
       const deleteRow = (id) => setRows(prev => { const row = prev.find(r => r.id === id); if (!row) return prev; return rmNormalize(row.parentId ? prev.filter(r => r.id !== id) : prev.filter(r => r.id !== id && r.parentId !== id)); });
+      const moveRow = (id, newParentId) => setRows(prev => { const np = newParentId || null; return rmNormalize(prev.map(r => r.id === id ? { ...r, parentId: np } : (np && r.parentId === id ? { ...r, parentId: np } : r))); });
       const addTab = () => { const n = newTitle.trim(); if (!n) return; setRows(prev => rmNormalize(prev.concat([{ id: uid(), name: n, status: 'todo', type: 'mvp', dueDate: null, parentId: null, order: 0 }]))); setNewTitle(''); };
       const addSub = (pid) => { setRows(prev => { const blocks = rmBlocks(prev); const b = blocks.find(x => x.pid === pid); if (!b) return prev; b.items.push({ id: uid(), name: '', status: 'todo', type: 'mvp', dueDate: null, parentId: pid, order: 0 }); return rmNormalize(blocks.reduce((a, x) => a.concat(x.items), [])); }); setCollapsedP(c => { const n = { ...c }; delete n[pid]; return n; }); };
 
@@ -2082,7 +2105,7 @@ Rules:
 
       // ── palette (light only) ──
       const NAVY = '#001A4A', GOLD = '#AD832F', PAPER = '#FCFBF8', LINE = '#EDE7DC', MUTE = '#B4B2A9';
-      const COLS = '1fr 130px 80px 96px 40px';
+      const COLS = '1fr 130px 80px 88px 96px 68px';
 
       const seg = (id, label) => {
         const on = groupBy === id;
@@ -2129,6 +2152,27 @@ Rules:
         );
       };
 
+      const diffBadge = (r) => {
+        const d = rmDiff(r.difficulty), open = menu && menu.id === r.id && menu.field === 'difficulty';
+        return (
+          <span style={{ position: 'relative', display: 'inline-block' }}>
+            <button onClick={() => setMenu(open ? null : { id: r.id, field: 'difficulty' })} style={{ display: 'flex', alignItems: 'center', gap: 4, width: 84, boxSizing: 'border-box', padding: '4px 8px', borderRadius: 7, border: 'none', cursor: 'pointer', background: d.bg, color: d.text, fontFamily: J, fontSize: 9.5, fontWeight: 600 }}>
+              <span style={{ flex: 1, textAlign: 'left' }}>{d.label}</span>
+              <i className="ti ti-chevron-down" style={{ fontSize: 11, opacity: 0.7 }} />
+            </button>
+            {open && (
+              <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 40, background: '#fff', border: `1px solid ${LINE}`, borderRadius: 9, boxShadow: '0 10px 28px rgba(0,26,74,0.16)', padding: 4, width: 104 }}>
+                {RM_DIFF.map(o => (
+                  <button key={o.id} onClick={() => { updateRow(r.id, { difficulty: o.id }); setMenu(null); }} style={{ display: 'flex', alignItems: 'center', width: '100%', textAlign: 'left', padding: '6px 7px', borderRadius: 6, border: 'none', background: (r.difficulty || 'normal') === o.id ? '#F5F0E8' : 'transparent', cursor: 'pointer', marginBottom: 2 }}>
+                    <span style={{ padding: '3px 9px', borderRadius: 6, background: o.bg, color: o.text, fontFamily: J, fontSize: 9.5, fontWeight: 600 }}>{o.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
+        );
+      };
+
       const dueCell = (r) => {
         const past = r.dueDate && r.dueDate < todayISO;
         const danger = r.status === 'stuck' || past;
@@ -2152,6 +2196,8 @@ Rules:
 
       const renderRow = (r, opts) => {
         const isSub = !!r.parentId, hasKids = opts.hasKids, expanded = opts.expanded;
+        const kids = isSub ? [] : rows.filter(x => x.parentId === r.id);
+        const kpct = kids.length ? Math.round(kids.filter(x => x.status === 'completed').length / kids.length * 100) : 0;
         return (
           <div key={r.id} className="rm-row"
             onDragOver={!isSub ? (e => onRowOver(e, r.id)) : undefined} onDrop={!isSub ? (e => onRowDrop(e, r.id)) : undefined}
@@ -2163,18 +2209,22 @@ Rules:
                 ? <button onClick={() => setCollapsedP(c => ({ ...c, [r.id]: !c[r.id] }))} aria-label="Toggle subtasks" style={{ width: 18, flexShrink: 0, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: GOLD, display: 'flex' }}><i className={`ti ti-chevron-${expanded ? 'down' : 'right'}`} style={{ fontSize: 14 }} /></button>
                 : <span style={{ width: 18, flexShrink: 0 }} />)}
               {isSub && <i className="ti ti-corner-down-right" style={{ fontSize: 13, color: '#C9C2B2', flexShrink: 0 }} />}
-              <input value={r.name} onChange={e => updateRow(r.id, { name: e.target.value })} placeholder={isSub ? 'Subtask' : 'Tab name'} style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 13, fontWeight: isSub ? 400 : 500, color: NAVY, padding: 0 }} />
+              <input value={r.name} ref={el => { if (el && focusId === r.id) { el.focus(); setFocusId(null); } }} onChange={e => updateRow(r.id, { name: e.target.value })} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSiblingAfter(r); } }} placeholder={isSub ? 'Subtask' : 'Tab name'} style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 13, fontWeight: isSub ? 400 : 500, color: NAVY, padding: 0 }} />
+              {!isSub && kids.length > 0 && (<div title={kids.filter(x => x.status === 'completed').length + '/' + kids.length + ' subtasks done'} style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}><div style={{ width: 44, height: 5, borderRadius: 3, background: '#F0EBE3', overflow: 'hidden' }}><div style={{ width: kpct + '%', height: '100%', background: '#0F6E56' }} /></div><span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 700, color: kpct ? '#0F6E56' : '#C9C2B2' }}>{kpct}%</span></div>)}
             </div>
             {/* status */}
             <div>{statusPill(r)}</div>
             {/* type */}
             <div style={{ display: 'flex', justifyContent: 'center' }}>{typeBadge(r)}</div>
+            {/* difficulty */}
+            <div>{diffBadge(r)}</div>
             {/* due */}
             <div>{dueCell(r)}</div>
             {/* actions */}
             <div className="rm-actions" style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2 }}>
               {!isSub && <button className="rm-actbtn" onClick={() => addSub(r.id)} aria-label="Add subtask" title="Add subtask" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-plus" style={{ fontSize: 13 }} /></button>}
-              <button className="rm-actbtn" onClick={() => deleteRow(r.id)} aria-label="Delete" title="Delete" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-x" style={{ fontSize: 13 }} /></button>
+              <button className="rm-actbtn" onClick={() => setEditId(r.id)} aria-label="Edit" title="Edit" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-pencil" style={{ fontSize: 13 }} /></button>
+              <button className="rm-actbtn" onClick={() => { if (window.confirm('Delete \"' + (r.name || 'this item') + '\"' + (isSub ? '' : ' and its subtasks') + '?')) deleteRow(r.id); }} aria-label="Delete" title="Delete" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', cursor: 'pointer', color: MUTE, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-x" style={{ fontSize: 13 }} /></button>
             </div>
           </div>
         );
@@ -2182,8 +2232,50 @@ Rules:
 
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: PAPER }}>
-          <style>{`.rm-row:hover{background:#FBF8F2 !important;} .rm-row .rm-grip{opacity:0;transition:opacity .12s;} .rm-row:hover .rm-grip{opacity:1;} .rm-row .rm-actions{opacity:0;transition:opacity .12s;} .rm-row:hover .rm-actions{opacity:1;} .rm-actbtn:hover{background:#F0EBE3 !important;}`}</style>
+          <style>{`.rm-row:hover{background:#FBF8F2 !important;} .rm-row .rm-grip{opacity:0;transition:opacity .12s;} .rm-row:hover .rm-grip{opacity:1;} .rm-row .rm-actions{opacity:0;transition:opacity .12s;} .rm-row:hover .rm-actions{opacity:1;} .rm-actbtn:hover{background:#F0EBE3 !important;} @media (hover: none){.rm-row .rm-actions,.rm-row .rm-grip{opacity:1 !important;}}`}</style>
           {menu && <div onClick={() => setMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 39 }} />}
+          {editId && (() => {
+            const er = rows.find(x => x.id === editId);
+            if (!er) return null;
+            const isSubE = !!er.parentId;
+            const topTabs = rows.filter(x => !x.parentId && x.id !== editId);
+            return (
+              <React.Fragment>
+                <div onClick={() => setEditId(null)} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(0,13,38,0.4)' }} />
+                <div style={{ position: 'fixed', zIndex: 81, left: '50%', top: '50%', transform: 'translate(-50%, -50%)', width: '88%', maxWidth: 380, background: '#FCFBF8', border: `1px solid ${LINE}`, borderRadius: 16, boxShadow: '0 18px 50px rgba(0,26,74,0.22)', padding: 18, maxHeight: '86%', overflowY: 'auto' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+                    <span style={{ fontFamily: J, fontSize: 15, fontWeight: 600, color: NAVY }}>Edit {isSubE ? 'subtask' : 'tab'}</span>
+                    <button onClick={() => setEditId(null)} aria-label="Close" style={{ background: 'none', border: 'none', cursor: 'pointer', color: MUTE, display: 'flex' }}><i className="ti ti-x" style={{ fontSize: 18 }} /></button>
+                  </div>
+                  <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: GOLD, marginBottom: 5 }}>Name</div>
+                  <input value={er.name} onChange={e => updateRow(er.id, { name: e.target.value })} style={{ width: '100%', boxSizing: 'border-box', padding: '9px 11px', borderRadius: 9, border: `1px solid ${LINE}`, background: '#fff', color: NAVY, fontFamily: J, fontSize: 13, outline: 'none', marginBottom: 14 }} />
+                  <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: GOLD, marginBottom: 6 }}>Status</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
+                    {RM_STATUS.map(o => { const on = er.status === o.id; return <button key={o.id} onClick={() => updateRow(er.id, { status: o.id })} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: on ? 700 : 500, border: `1px solid ${on ? o.dot : LINE}`, background: on ? o.bg : 'transparent', color: o.text }}><span style={{ width: 6, height: 6, borderRadius: '50%', background: o.dot }} />{o.label}</button>; })}
+                  </div>
+                  <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: GOLD, marginBottom: 6 }}>Type</div>
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+                    {RM_TYPES.map(o => { const on = er.type === o.id; return <button key={o.id} onClick={() => updateRow(er.id, { type: o.id })} style={{ padding: '6px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: on ? 700 : 500, border: `1px solid ${on ? 'transparent' : LINE}`, background: on ? o.bg : 'transparent', color: on ? o.text : '#888' }}>{o.label}</button>; })}
+                  </div>
+                  <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: GOLD, marginBottom: 6 }}>Difficulty</div>
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+                    {RM_DIFF.map(o => { const on = (er.difficulty || 'normal') === o.id; return <button key={o.id} onClick={() => updateRow(er.id, { difficulty: o.id })} style={{ padding: '6px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: on ? 700 : 500, border: `1px solid ${on ? 'transparent' : LINE}`, background: on ? o.bg : 'transparent', color: on ? o.text : '#888' }}>{o.label}</button>; })}
+                  </div>
+                  <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: GOLD, marginBottom: 6 }}>Due date</div>
+                  <input type="date" value={er.dueDate || ''} onClick={e => { try { e.currentTarget.showPicker(); } catch (err) {} }} onChange={e => updateRow(er.id, { dueDate: e.target.value || null })} style={{ width: '100%', boxSizing: 'border-box', padding: '8px 11px', borderRadius: 9, border: `1px solid ${LINE}`, background: '#fff', color: NAVY, fontFamily: J, fontSize: 12, outline: 'none', marginBottom: 14 }} />
+                  <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: GOLD, marginBottom: 6 }}>Move under</div>
+                  <select value={er.parentId || ''} onChange={e => moveRow(er.id, e.target.value)} style={{ width: '100%', boxSizing: 'border-box', padding: '9px 11px', borderRadius: 9, border: `1px solid ${LINE}`, background: '#fff', color: NAVY, fontFamily: J, fontSize: 12, outline: 'none', marginBottom: 18 }}>
+                    <option value="">\u2014 Top level (its own tab) \u2014</option>
+                    {topTabs.map(t => <option key={t.id} value={t.id}>{t.name || '(untitled)'}</option>)}
+                  </select>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button onClick={() => { if (window.confirm('Delete "' + (er.name || 'this item') + '"' + (isSubE ? '' : ' and its subtasks') + '?')) { deleteRow(er.id); setEditId(null); } }} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '10px 12px', borderRadius: 10, border: '1px solid #F0D9D9', background: 'none', color: '#DC2626', cursor: 'pointer', fontFamily: J, fontSize: 12, fontWeight: 600 }}><i className="ti ti-trash" style={{ fontSize: 14 }} />Delete</button>
+                    <button onClick={() => setEditId(null)} style={{ flex: 1, padding: 10, borderRadius: 10, border: 'none', background: NAVY, color: '#fff', cursor: 'pointer', fontFamily: J, fontSize: 13, fontWeight: 600 }}>Done</button>
+                  </div>
+                </div>
+              </React.Fragment>
+            );
+          })()}
           {/* Page header */}
           <div style={{ padding: '11px 16px 12px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <div style={{ flex: 1, minWidth: 120 }}>
@@ -2223,7 +2315,7 @@ Rules:
           </div>
           {/* Column header */}
           <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 8, alignItems: 'center', padding: '7px 20px', background: '#F5F0E8', borderTop: `1px solid ${LINE}`, borderBottom: `1px solid ${LINE}` }}>
-            {['Tab', 'Status', 'Type', 'Due'].map((h, i) => <span key={h} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 700, textTransform: 'uppercase', color: GOLD, textAlign: i === 2 ? 'center' : 'left' }}>{h}</span>)}
+            {['Tab', 'Status', 'Type', 'Difficulty', 'Due'].map((h, i) => <span key={h} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 700, textTransform: 'uppercase', color: GOLD, textAlign: i === 2 ? 'center' : 'left' }}>{h}</span>)}
             <span />
           </div>
           {/* Body */}

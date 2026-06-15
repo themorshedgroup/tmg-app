@@ -369,6 +369,226 @@ Continue with TMG Gmail
       },
     };
 
+
+    // ─── Team Chat ("Chat") data layer + safe renderer ───────────────
+    // Mirrors ConvDB (client()/uid(), fail-open reads, throwing writes). RLS does the
+    // access filtering server-side. On localhost (no _client) a small in-memory dev
+    // fixture drives the UI so the preview is testable; never persisted, never in prod.
+    const ChatDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      uid() { return window.SupabaseAuth?._state?.session?.user?.id || (this.client() ? null : 'dev-user-id'); },
+      _ws: null,
+      _devData: null,
+
+      _dev() {
+        if (this._devData) return this._devData;
+        const now = Date.now();
+        const ago = (ms) => new Date(now - ms).toISOString();
+        this._devData = {
+          channels: [
+            { id: 'devc1', name: 'general',    type: 'public',  topic: 'Company-wide announcements', is_archived: false },
+            { id: 'devc2', name: 'deals',      type: 'public',  topic: 'Active listings & offers',   is_archived: false },
+            { id: 'devc3', name: 'leadership', type: 'private', topic: 'Owners only',                 is_archived: false },
+          ],
+          conversations: [
+            { id: 'devd1', type: 'dm',       title: null,      memberIds: ['dev-user-id', 'dev-tarek'] },
+            { id: 'devg1', type: 'group_dm', title: 'Ops Team', memberIds: ['dev-user-id', 'dev-tarek', 'dev-alex'] },
+          ],
+          messages: {
+            devc1: [
+              { id: 'm1', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'Welcome to the new Chat! 🎉 Notes at https://themorshedgroup.com', created_at: ago(3600000) },
+              { id: 'm2', channel_id: 'devc1', author_id: 'dev-user-id',  content: 'Looks great. @Tarek can you review the #deals pipeline?', created_at: ago(1800000) },
+              { id: 'm3', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'XSS test: <img src=x onerror=alert(1)> <script>alert(1)<\/script> javascript:alert(1)', created_at: ago(600000), edited_at: ago(300000) },
+            ],
+            devd1: [
+              { id: 'd1', conversation_id: 'devd1', author_id: 'dev-tarek', content: 'Hey — got a sec to sync on Forest Hill?', created_at: ago(900000) },
+            ],
+          },
+        };
+        return this._devData;
+      },
+
+      async loadRoster() {
+        if (!this.client()) return [
+          { id: 'dev-user-id', first_name: 'Symon', last_name: 'Yongco',  avatar_url: '', access: ['admin'],      away: false },
+          { id: 'dev-tarek',   first_name: 'Tarek', last_name: 'Morshed', avatar_url: '', access: ['admin'],      away: false },
+          { id: 'dev-alex',    first_name: 'Alex',  last_name: 'Rivera',  avatar_url: '', access: ['operations'], away: true },
+          { id: 'dev-brett',   first_name: 'Brett', last_name: 'Cole',    avatar_url: '', access: ['agent'],      away: false },
+        ];
+        try { return await ProfileDB.loadAll(); } catch (e) { return []; }
+      },
+
+      async defaultWorkspaceId() {
+        if (this._ws) return this._ws;
+        if (!this.client()) { this._ws = 'dev-ws'; return this._ws; }
+        const { data } = await this.client().from('chat_workspaces').select('id').limit(1).maybeSingle();
+        this._ws = data?.id || null;
+        return this._ws;
+      },
+
+      _mapChannel(r) { return { id: r.id, name: r.name, topic: r.topic || '', type: r.type, is_archived: !!r.is_archived }; },
+
+      async listChannels() {
+        if (!this.client()) return this._dev().channels.slice();
+        const { data, error } = await this.client().from('chat_channels').select('*')
+          .eq('is_archived', false).order('name', { ascending: true });
+        if (error) { console.error('[ChatDB] listChannels:', error.message); return []; }
+        return (data || []).map(this._mapChannel);
+      },
+
+      async listConversations() {
+        if (!this.client()) return this._dev().conversations.slice();
+        const me = this.uid();
+        const { data: mine, error: e1 } = await this.client().from('chat_conversation_members')
+          .select('conversation_id').eq('user_id', me);
+        if (e1) { console.error('[ChatDB] convs:', e1.message); return []; }
+        const ids = (mine || []).map(r => r.conversation_id);
+        if (!ids.length) return [];
+        const { data: convs } = await this.client().from('chat_conversations').select('*').in('id', ids);
+        const { data: mems } = await this.client().from('chat_conversation_members')
+          .select('conversation_id,user_id').in('conversation_id', ids);
+        const byConv = {};
+        (mems || []).forEach(m => { (byConv[m.conversation_id] = byConv[m.conversation_id] || []).push(m.user_id); });
+        return (convs || []).map(c => ({ id: c.id, type: c.type, title: c.title || null, memberIds: byConv[c.id] || [] }));
+      },
+
+      async loadMessages(scope, opts = {}) {
+        const limit = opts.limit || 60;
+        if (!this.client()) return (this._dev().messages[scope.id] || []).slice();
+        const col = scope.kind === 'channel' ? 'channel_id' : 'conversation_id';
+        const { data, error } = await this.client().from('chat_messages').select('*')
+          .eq(col, scope.id).is('thread_parent_id', null)
+          .order('created_at', { ascending: true }).limit(limit);
+        if (error) { console.error('[ChatDB] loadMessages:', error.message); return []; }
+        return data || [];
+      },
+
+      async sendMessage(scope, { content, clientId }) {
+        if (!this.client()) {
+          const d = this._dev();
+          const row = { id: 'dev-' + (clientId || Date.now()), author_id: this.uid(), content, client_id: clientId, created_at: new Date().toISOString(),
+            channel_id: scope.kind === 'channel' ? scope.id : null, conversation_id: scope.kind === 'conversation' ? scope.id : null };
+          (d.messages[scope.id] = d.messages[scope.id] || []).push(row);
+          return row;
+        }
+        const ws = await this.defaultWorkspaceId();
+        const base = { workspace_id: ws, author_id: this.uid(), content, client_id: clientId || null };
+        if (scope.kind === 'channel') base.channel_id = scope.id; else base.conversation_id = scope.id;
+        const { data, error } = await this.client().from('chat_messages').insert(base).select().single();
+        if (error) { console.error('[ChatDB] send:', error.message); throw error; }
+        return data;
+      },
+
+      async createChannel({ name, type, topic }) {
+        if (!this.client()) { const ch = { id: 'devc-' + Date.now(), name, type: type || 'public', topic: topic || '', is_archived: false }; this._dev().channels.push(ch); return ch; }
+        const ws = await this.defaultWorkspaceId();
+        const { data, error } = await this.client().from('chat_channels')
+          .insert({ workspace_id: ws, name, type: type || 'public', topic: topic || null, created_by: this.uid() }).select().single();
+        if (error) { console.error('[ChatDB] createChannel:', error.message); throw error; }
+        const { error: me } = await this.client().from('chat_channel_members')
+          .insert({ channel_id: data.id, user_id: this.uid(), role: 'owner' });
+        if (me && me.code !== '23505') console.error('[ChatDB] owner member:', me.message);
+        return this._mapChannel(data);
+      },
+
+      async joinChannel(channelId) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('chat_channel_members')
+          .insert({ channel_id: channelId, user_id: this.uid(), role: 'member' });
+        if (error && error.code !== '23505') console.error('[ChatDB] join:', error.message);
+      },
+      async leaveChannel(channelId) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('chat_channel_members')
+          .delete().eq('channel_id', channelId).eq('user_id', this.uid());
+        if (error) console.error('[ChatDB] leave:', error.message);
+      },
+
+      async createDM(otherId) {
+        if (!this.client()) { const cv = { id: 'devd-' + Date.now(), type: 'dm', title: null, memberIds: [this.uid(), otherId] }; this._dev().conversations.push(cv); return cv; }
+        const me = this.uid();
+        const existing = (await this.listConversations()).find(cv => cv.type === 'dm'
+          && cv.memberIds.length === 2 && cv.memberIds.includes(me) && cv.memberIds.includes(otherId));
+        if (existing) return existing;
+        const ws = await this.defaultWorkspaceId();
+        const { data: conv, error } = await this.client().from('chat_conversations')
+          .insert({ workspace_id: ws, type: 'dm', created_by: me }).select().single();
+        if (error) { console.error('[ChatDB] createDM:', error.message); throw error; }
+        const { error: me2 } = await this.client().from('chat_conversation_members')
+          .insert([{ conversation_id: conv.id, user_id: me }, { conversation_id: conv.id, user_id: otherId }]);
+        if (me2) console.error('[ChatDB] dm members:', me2.message);
+        return { id: conv.id, type: 'dm', title: null, memberIds: [me, otherId] };
+      },
+
+      async createGroupDM(userIds, title) {
+        const me = this.uid();
+        const members = Array.from(new Set([me, ...userIds]));
+        if (!this.client()) { const cv = { id: 'devg-' + Date.now(), type: 'group_dm', title: title || null, memberIds: members }; this._dev().conversations.push(cv); return cv; }
+        const ws = await this.defaultWorkspaceId();
+        const { data: conv, error } = await this.client().from('chat_conversations')
+          .insert({ workspace_id: ws, type: 'group_dm', title: title || null, created_by: me }).select().single();
+        if (error) { console.error('[ChatDB] createGroupDM:', error.message); throw error; }
+        const { error: me2 } = await this.client().from('chat_conversation_members')
+          .insert(members.map(u => ({ conversation_id: conv.id, user_id: u })));
+        if (me2) console.error('[ChatDB] group members:', me2.message);
+        return { id: conv.id, type: 'group_dm', title: title || null, memberIds: members };
+      },
+
+      // Realtime: subscribe to one open scope's message stream (RLS-filtered by the client JWT).
+      subscribeScope(scope, { onInsert, onUpdate }) {
+        const c = this.client(); if (!c || !scope) return null;
+        const col = scope.kind === 'channel' ? 'channel_id' : 'conversation_id';
+        const ch = c.channel('chat:' + scope.kind + ':' + scope.id)
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages', filter: col + '=eq.' + scope.id }, (p) => onInsert && onInsert(p.new))
+          .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_messages', filter: col + '=eq.' + scope.id }, (p) => onUpdate && onUpdate(p.new))
+          .subscribe();
+        return ch;
+      },
+      unsubscribe(ch) { const c = this.client(); if (ch && c) c.removeChannel(ch); },
+    };
+
+    // XSS-safe message renderer → React nodes (text auto-escaped; <a> only for http/https;
+    // @mention and #channel become styled chips). NEVER uses dangerouslySetInnerHTML.
+    function chatSafeHref(raw) {
+      try { const u = new URL(raw); return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : null; }
+      catch (e) { return null; }
+    }
+    function renderMessageContent(text, ctx) {
+      ctx = ctx || {};
+      const s = String(text == null ? '' : text);
+      const matches = [];
+      let m;
+      const URL_RE = /\bhttps?:\/\/[^\s<>()]+[^\s<>().,!?;:'"]/g;
+      while ((m = URL_RE.exec(s))) matches.push({ start: m.index, end: m.index + m[0].length, type: 'url', text: m[0] });
+      const MEN_RE = /@\[([0-9a-fA-F-]{36})\]|@([A-Za-z0-9._-]+)/g;
+      while ((m = MEN_RE.exec(s))) matches.push({ start: m.index, end: m.index + m[0].length, type: 'mention', id: m[1] || null, handle: m[2] || null });
+      const CH_RE = /(^|[\s.,!?])#([a-z0-9][a-z0-9-]*)/g;
+      while ((m = CH_RE.exec(s))) { const st = m.index + (m[1] || '').length; matches.push({ start: st, end: st + 1 + m[2].length, type: 'channel', name: m[2] }); }
+      matches.sort((a, b) => a.start - b.start);
+      const out = []; let idx = 0, key = 0, lastEnd = 0;
+      const chip = ctx.chipColor || (ctx.dark ? '#C9A45A' : '#AD832F');
+      const link = ctx.linkColor || (ctx.dark ? '#7FB2FF' : '#2F6FE0');
+      for (let i = 0; i < matches.length; i++) {
+        const t = matches[i];
+        if (t.start < lastEnd) continue;            // drop overlaps
+        if (t.start > idx) out.push(s.slice(idx, t.start));
+        if (t.type === 'url') {
+          const href = chatSafeHref(t.text);
+          out.push(href
+            ? React.createElement('a', { key: key++, href, target: '_blank', rel: 'noopener noreferrer', style: { color: link, textDecoration: 'underline', wordBreak: 'break-all' } }, t.text)
+            : t.text);
+        } else if (t.type === 'mention') {
+          let nm = (t.id && ctx.byId && ctx.byId[t.id]) ? ctx.byId[t.id] : null;
+          out.push(React.createElement('span', { key: key++, style: { color: chip, fontWeight: 600 } }, '@' + (nm || t.handle || 'unknown')));
+        } else {
+          out.push(React.createElement('span', { key: key++, style: { color: chip, fontWeight: 600 } }, '#' + t.name));
+        }
+        idx = t.end; lastEnd = t.end;
+      }
+      if (idx < s.length) out.push(s.slice(idx));
+      return out;
+    }
+
     // ─── Profiles / access ───────────────────────────────────────────
     // Per-tool access: which configurable roles can open each tool/app.
     // Admins are always on. Operations is a configurable role like the others.
@@ -3372,263 +3592,272 @@ Rules:
       luciana: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Luciana-Pilco-headshot.jpg',
     };
 
-    function ChatTab({ dark }) {
+    // ─── Team Chat ("Chat") — real, realtime, backed by ChatDB ───────
+    function NewChannelModal({ dark, isAdmin, onClose, onCreated }) {
       const J = "'Jost', sans-serif";
-      const bg          = dark ? '#000D26' : '#FCFBF8';
-      const bannerBg    = dark ? '#7F1D1D' : '#9B1C1C';
-      const headTitle   = dark ? '#FFFFFF' : '#001A4A';
-      const composeBg   = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
-      const composeCol  = dark ? '#C9A45A' : '#AD832F';
-      const searchBg    = dark ? '#0A1730' : '#F5F2EE';
-      const searchCol   = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
-      const pinnedBord  = dark ? '#0D1E3A' : '#F0EBE3';
-      const pinnedLabel = dark ? '#C9A45A' : '#AD832F';
-      const pinnedName  = dark ? 'rgba(255,255,255,0.6)' : '#001A4A';
-      const rowBord     = dark ? '#0D1E3A' : '#F5F2EE';
-      const threadName  = dark ? '#FFFFFF' : '#001A4A';
-      const previewCol  = dark ? 'rgba(255,255,255,0.35)' : '#888888';
-      const timeCol     = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
-
-      const seg = (t, key) => <span key={key} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, color: '#fff', textTransform: 'uppercase' }}>{t}</span>;
-      const sep = (key) => <span key={key} style={{ fontFamily: J, fontSize: 9, color: 'rgba(255,255,255,0.45)' }}>·</span>;
-
-      const PinnedContact = ({ photo, name, online, unread, onClick }) => (
-        <div onClick={onClick} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-          <div style={{ position: 'relative', width: 44, height: 44 }}>
-            <img src={photo} alt={name} style={{ width: 44, height: 44, borderRadius: '50%', objectFit: 'cover', display: 'block' }} />
-            {online && <div style={{ position: 'absolute', bottom: 0, right: 0, width: 10, height: 10, borderRadius: '50%', background: '#3DAF7E', border: `2px solid ${bg}` }} />}
-            {unread > 0 && <div style={{ position: 'absolute', top: -2, right: -2, minWidth: 16, height: 16, borderRadius: 8, background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px' }}>{unread}</div>}
+      const panelBg = dark ? '#0A1730' : '#FFFFFF', txt = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.55)' : '#6B6B6B', bord = dark ? '#152545' : '#E4DFD4', inpBg = dark ? '#06101F' : '#F3EBDA';
+      const [name, setName] = useState(''); const [type, setType] = useState(isAdmin ? 'public' : 'private'); const [topic, setTopic] = useState(''); const [busy, setBusy] = useState(false);
+      const inp = { width: '100%', padding: '10px 12px', background: inpBg, border: `1px solid ${bord}`, borderRadius: 10, color: dark ? '#fff' : '#001A4A', fontSize: '0.85rem', outline: 'none', fontFamily: J, boxSizing: 'border-box' };
+      const create = async () => {
+        const nm = name.trim().replace(/^#/, '').replace(/\s+/g, '-').toLowerCase();
+        if (!nm) { alert('Give the channel a name.'); return; }
+        setBusy(true);
+        try { const ch = await ChatDB.createChannel({ name: nm, type, topic: topic.trim() }); onCreated(ch); }
+        catch (e) { alert('Could not create channel: ' + (e.message || e)); } finally { setBusy(false); }
+      };
+      const tBtn = (val, label, icon, disabled) => (
+        <button onClick={() => !disabled && setType(val)} disabled={disabled} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px', borderRadius: 10, cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: J, fontSize: '0.8rem', fontWeight: 600, border: `1px solid ${type === val ? (dark ? '#C9A45A' : '#AD832F') : bord}`, background: type === val ? (dark ? 'rgba(173,131,47,0.18)' : '#F3EBDA') : 'transparent', color: disabled ? (dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9') : (type === val ? (dark ? '#C9A45A' : '#AD832F') : txt) }}>
+          <i className={`ti ${icon}`} style={{ fontSize: 15 }} />{label}
+        </button>
+      );
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 60, background: 'rgba(0,13,38,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '18px 18px calc(20px + env(safe-area-inset-bottom))' }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ flex: 1, fontFamily: J, fontSize: '1rem', fontWeight: 600, color: txt }}>New channel</div>
+              <button onClick={onClose} aria-label="Close" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 20, display: 'flex' }}><i className="ti ti-x" /></button>
+            </div>
+            <div style={{ fontSize: '0.62rem', letterSpacing: '0.05em', color: sub, fontWeight: 600, marginBottom: 5, fontFamily: J }}>NAME</div>
+            <input autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="e.g. listings" style={{ ...inp, marginBottom: 12 }} />
+            <div style={{ display: 'flex', gap: 8, marginBottom: type === 'public' && !isAdmin ? 6 : 12 }}>
+              {tBtn('public', 'Public', 'ti-hash', !isAdmin)}
+              {tBtn('private', 'Private', 'ti-lock', false)}
+            </div>
+            {!isAdmin && <div style={{ fontSize: '0.68rem', color: sub, marginBottom: 12, fontFamily: J }}>Only admins can create public channels. You can create a private one.</div>}
+            <div style={{ fontSize: '0.62rem', letterSpacing: '0.05em', color: sub, fontWeight: 600, marginBottom: 5, fontFamily: J }}>TOPIC <span style={{ fontWeight: 400 }}>(optional)</span></div>
+            <input value={topic} onChange={e => setTopic(e.target.value)} placeholder="What's this channel about?" style={{ ...inp, marginBottom: 16 }} />
+            <button onClick={create} disabled={busy} style={{ width: '100%', padding: 12, background: dark ? '#AD832F' : '#001A4A', color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: busy ? 'wait' : 'pointer', fontFamily: J }}>{busy ? 'Creating…' : 'Create channel'}</button>
           </div>
-          <div style={{ fontFamily: J, fontSize: 8, fontWeight: 500, letterSpacing: '0.06em', color: pinnedName }}>{name}</div>
         </div>
       );
+    }
 
-      const Single = ({ photo }) => (
-        <img src={photo} style={{ width: 36, height: 36, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, display: 'block' }} />
-      );
-      const Group = ({ a, b }) => (
-        <div style={{ position: 'relative', width: 36, height: 36, flexShrink: 0 }}>
-          <img src={a} style={{ position: 'absolute', top: 0, left: 0, width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${bg}` }} />
-          <img src={b} style={{ position: 'absolute', bottom: 0, right: 0, width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${bg}` }} />
+    function NewDMModal({ dark, roster, me, onClose, onCreated }) {
+      const J = "'Jost', sans-serif";
+      const panelBg = dark ? '#0A1730' : '#FFFFFF', txt = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.55)' : '#6B6B6B', bord = dark ? '#152545' : '#E4DFD4', inpBg = dark ? '#06101F' : '#F3EBDA';
+      const [q, setQ] = useState(''); const [picked, setPicked] = useState([]); const [busy, setBusy] = useState(false);
+      const nameOf = (p) => (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'Member';
+      const people = roster.filter(p => p.id !== me);
+      const ql = q.trim().toLowerCase();
+      const shown = people.filter(p => !ql || nameOf(p).toLowerCase().includes(ql) || (p.email || '').toLowerCase().includes(ql));
+      const toggle = (id) => setPicked(ps => ps.includes(id) ? ps.filter(x => x !== id) : [...ps, id]);
+      const start = async () => {
+        if (!picked.length || busy) return; setBusy(true);
+        try { const cv = picked.length === 1 ? await ChatDB.createDM(picked[0]) : await ChatDB.createGroupDM(picked); onCreated(cv); }
+        catch (e) { alert('Could not start chat: ' + (e.message || e)); } finally { setBusy(false); }
+      };
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 60, background: 'rgba(0,13,38,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '18px 18px calc(16px + env(safe-area-inset-bottom))', maxHeight: '78vh', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
+              <div style={{ flex: 1, fontFamily: J, fontSize: '1rem', fontWeight: 600, color: txt }}>New message</div>
+              <button onClick={onClose} aria-label="Close" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 20, display: 'flex' }}><i className="ti ti-x" /></button>
+            </div>
+            <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="Search people…" style={{ width: '100%', padding: '10px 12px', background: inpBg, border: `1px solid ${bord}`, borderRadius: 10, color: dark ? '#fff' : '#001A4A', fontSize: '0.85rem', outline: 'none', fontFamily: J, boxSizing: 'border-box', marginBottom: 10 }} />
+            <div style={{ flex: 1, overflowY: 'auto', minHeight: 80 }}>
+              {shown.length === 0 && <div style={{ fontFamily: J, fontSize: '0.8rem', color: sub, textAlign: 'center', padding: 20 }}>No people found.</div>}
+              {shown.map(p => {
+                const on = picked.includes(p.id);
+                return (
+                  <div key={p.id} onClick={() => toggle(p.id)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 6px', cursor: 'pointer', borderRadius: 10, background: on ? (dark ? 'rgba(173,131,47,0.12)' : '#F3EBDA') : 'transparent' }}>
+                    <Avatar photo={p.avatar_url} name={nameOf(p)} size={34} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: J, fontSize: '0.85rem', fontWeight: 500, color: txt, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{nameOf(p)}</div>
+                      {p.title && <div style={{ fontFamily: J, fontSize: '0.7rem', color: sub }}>{p.title}</div>}
+                    </div>
+                    <i className={`ti ${on ? 'ti-circle-check-filled' : 'ti-circle'}`} style={{ fontSize: 20, color: on ? (dark ? '#C9A45A' : '#AD832F') : (dark ? 'rgba(255,255,255,0.2)' : '#D8D2C6') }} />
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={start} disabled={!picked.length || busy} style={{ width: '100%', padding: 12, marginTop: 10, background: picked.length ? (dark ? '#AD832F' : '#001A4A') : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: picked.length ? 'pointer' : 'not-allowed', fontFamily: J }}>{busy ? 'Starting…' : (picked.length > 1 ? `Start group chat (${picked.length})` : 'Start chat')}</button>
+          </div>
         </div>
       );
-      const Emoji = ({ e }) => (
-        <div style={{ width: 36, height: 36, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', fontSize: 18 }}>{e}</div>
-      );
+    }
 
-      // Thread-view tokens
-      const tvBarBg     = dark ? '#070F1E' : '#FFFFFF';
-      const tvBarBord   = dark ? '#0D1E3A' : '#F0EBE3';
-      const tvMsgBg     = dark ? '#070F1E' : '#FCFBF8';
-      const tvBackCol   = dark ? 'rgba(255,255,255,0.3)' : 'rgba(0,26,74,0.4)';
-      const tvActionCol = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
-      const tvDivLine   = dark ? '#0D1E3A' : '#E4DFD4';
-      const tvDivText   = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
-      const tvTimeCol   = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
-      const theirBg     = dark ? '#0A1E44' : '#FFFFFF';
-      const theirCol    = dark ? '#FFFFFF' : '#001A4A';
-      const theirBord   = dark ? 'none' : '1px solid #E4DFD4';
-      const mineBg      = dark ? '#AD832F' : '#001A4A';
-      const reactBg     = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
-      const reactCol    = dark ? '#C9A45A' : '#AD832F';
-      const senderGold  = dark ? '#C9A45A' : '#AD832F';
-      const senderMuted = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
-      const inBarBg     = dark ? '#070F1E' : '#F5F0E8';
-      const inBarBord   = dark ? '#0D1E3A' : '#E0D8CC';
-      const inFieldBg   = dark ? '#0A1730' : '#FFFFFF';
-      const inFieldBord = dark ? '#152545' : '#E0D8CC';
-      const inPlaceCol  = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
-      const sendBg      = dark ? '#AD832F' : '#001A4A';
+    function ChatConversation({ dark, scope, me, rosterById, nameOf, photoOf, awayOf, onBack }) {
+      const J = "'Jost', sans-serif";
+      const barBg = dark ? '#070F1E' : '#FFFFFF', barBord = dark ? '#0D1E3A' : '#F0EBE3', msgBg = dark ? '#070F1E' : '#FCFBF8';
+      const backCol = dark ? 'rgba(255,255,255,0.4)' : 'rgba(0,26,74,0.4)', titleCol = dark ? '#fff' : '#001A4A', subCol = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
+      const theirBg = dark ? '#0A1E44' : '#FFFFFF', theirCol = dark ? '#fff' : '#001A4A', theirBord = dark ? 'none' : '1px solid #E4DFD4';
+      const mineBg = dark ? '#AD832F' : '#001A4A', timeCol = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9', senderGold = dark ? '#C9A45A' : '#AD832F';
+      const inBarBg = dark ? '#070F1E' : '#F5F0E8', inBarBord = dark ? '#0D1E3A' : '#E0D8CC', inFieldBg = dark ? '#0A1730' : '#FFFFFF', inFieldBord = dark ? '#152545' : '#E0D8CC', inPlace = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9', sendBg = dark ? '#AD832F' : '#001A4A';
+      const isGroup = scope.kind === 'channel' || (scope.conv && scope.conv.type === 'group_dm');
 
-      const [shown, setShown] = useState(null);
-      const [open, setOpen] = useState(false);
-      const openThread = (t) => { if (t) { setShown(t); setOpen(true); } };
-      const back = () => setOpen(false);
+      const [messages, setMessages] = useState([]); const [loading, setLoading] = useState(true);
+      const [text, setText] = useState(''); const [sending, setSending] = useState(false);
+      const listRef = useRef(null);
+      const scrollDown = () => { const el = listRef.current; if (el) el.scrollTop = el.scrollHeight; };
 
-      const SENDERS = {
-        tarek: { name: 'Tarek', photo: TCHAT_PHOTOS.tarek },
-        brad:  { name: 'Brad',  photo: TCHAT_PHOTOS.brad },
-        brett: { name: 'Brett', photo: TCHAT_PHOTOS.brett },
-        kyle:  { name: 'Kyle',  photo: TCHAT_PHOTOS.kyle },
-        me:    { name: 'You',   photo: TCHAT_PHOTOS.symon },
+      useEffect(() => {
+        let active = true; setLoading(true);
+        ChatDB.loadMessages(scope).then(ms => { if (active) { setMessages(ms); setLoading(false); setTimeout(scrollDown, 40); } });
+        const ch = ChatDB.subscribeScope(scope, {
+          onInsert: (row) => setMessages(prev => {
+            if (prev.some(x => (row.client_id && x.client_id === row.client_id) || x.id === row.id))
+              return prev.map(x => ((row.client_id && x.client_id === row.client_id) || x.id === row.id) ? row : x);
+            return [...prev, row];
+          }),
+          onUpdate: (row) => setMessages(prev => prev.map(x => x.id === row.id ? row : x)),
+        });
+        return () => { active = false; ChatDB.unsubscribe(ch); };
+      }, [scope.id]);
+      useEffect(() => { scrollDown(); }, [messages.length]);
+
+      const send = async () => {
+        const body = text.trim(); if (!body || sending) return;
+        const clientId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('c' + Date.now() + Math.round(performance.now()));
+        const optimistic = { id: 'tmp-' + clientId, author_id: me, content: body, client_id: clientId, created_at: new Date().toISOString(), _pending: true };
+        setMessages(prev => [...prev, optimistic]); setText(''); setSending(true);
+        try { const row = await ChatDB.sendMessage(scope, { content: body, clientId }); setMessages(prev => prev.map(x => x.client_id === clientId ? row : x)); }
+        catch (e) { setMessages(prev => prev.map(x => x.client_id === clientId ? { ...x, _pending: false, _failed: true } : x)); }
+        finally { setSending(false); setTimeout(scrollDown, 40); }
       };
-      const VIEW = {
-        t2: { status: 'Online', date: 'Today', messages: [
-          { from: 'tarek', text: 'Can you pull the Forest Hill offer summary before the 3pm call?', time: '9:41 AM' },
-          { from: 'me',    text: "On it — I'll have it in the shared drive by 2:30.", time: '9:43 AM' },
-          { from: 'tarek', text: "Perfect. Also — what's the status on the Jinx Ave feedback follow-up?", time: '9:44 AM' },
-          { from: 'me',    text: 'SFFU triggered the follow-up 2hrs post-showing. 3 of 5 buyers have responded. The team is handling the rest.', time: '9:46 AM' },
-          { from: 'tarek', text: "Good. Let's debrief after the call.", time: '9:48 AM', reaction: { emoji: '👍', count: 1 } },
-        ] },
-        t1: { members: 'Tarek, Brad, Brett, Kyle', date: 'Today', messages: [
-          { from: 'tarek', text: "New showing booked on Jinx Ave — 2pm tomorrow. Let's make sure the prep is solid.", time: '10:02 AM' },
-          { from: 'brad',  text: "On it — I'll confirm the property access and lockbox code.", time: '10:14 AM' },
-          { from: 'me',    text: "SFFU will auto-trigger the feedback form 2hrs after the showing ends. I'll monitor response rate.", time: '10:17 AM' },
-          { from: 'brad',  text: 'FYI — Westlake closing docs are signed and in. Commission hits end of week.', time: '10:22 AM', reaction: { emoji: '🎉', count: 4 } },
-          { from: 'brett', text: 'Commercial comp deck for Thursday is updated — shared in Drive.', time: '10:31 AM' },
-        ] },
-        t5: { date: 'Yesterday', messages: [
-          { from: 'brett', text: 'Sent the commercial comp report over — let me know if you need anything adjusted before the client meeting.', time: 'Yesterday' },
-          { from: 'me',    text: "Got it, looks solid. I'll flag anything before EOD.", time: 'Yesterday' },
-        ] },
-      };
+      const onKey = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
+      const fmtTime = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
+      const ctx = { dark, byId: Object.keys(rosterById).reduce((o, id) => { o[id] = nameOf(id); return o; }, {}) };
 
-      const threads = [
-        { id: 'c1', kind: 'channel', emoji: '📣', name: 'Announcements', preview: 'Tarek: Q3 kickoff is set for July 8 — details inside', time: '9:15a', unread: 0 },
-        { id: 'c2', kind: 'channel', emoji: '🏅', name: 'Great Shares', preview: 'Brett: Closed the Mueller condo! 🎉', time: 'Yest', unread: 0 },
-        { id: 'c3', kind: 'channel', emoji: '😂', name: 'Memes', preview: 'Brad: when the buyer ghosts after 3 showings 💀', time: 'Mon', unread: 0 },
-        { id: 't1', kind: 'group', a: TCHAT_PHOTOS.tarek, b: TCHAT_PHOTOS.brad, name: 'TMG Agents', preview: 'Brad: New showing on Jinx Ave just booked...', time: '10:02a', unread: 1 },
-        { id: 't2', kind: 'dm', photo: TCHAT_PHOTOS.tarek, name: 'Tarek', preview: "Let's sync on the Forest Hill offer at 3...", time: '9:48a', unread: 0 },
-        { id: 't3', kind: 'dm', photo: TCHAT_PHOTOS.brad, name: 'Brad', preview: 'Westlake closing docs are signed and in...', time: '8:30a', unread: 2 },
-        { id: 't5', kind: 'dm', photo: TCHAT_PHOTOS.brett, name: 'Brett', preview: 'Sent the commercial comp report over...', time: 'Yest', unread: 0 },
-        { id: 't6', kind: 'group', a: TCHAT_PHOTOS.alex, b: TCHAT_PHOTOS.luciana, name: 'Ops & Admin', preview: 'Luciana: Screening shortlist is ready...', time: 'Mon', unread: 0 },
-        { id: 't7', kind: 'dm', photo: TCHAT_PHOTOS.alex, name: 'Alexa', preview: '3 files cleared to close this week...', time: 'Mon', unread: 0 },
-        { id: 't8', kind: 'dm', photo: TCHAT_PHOTOS.kyle, name: 'Kyle', preview: 'Following up on the Forest Hill listing...', time: 'Sun', unread: 0 },
-        { id: 't9', kind: 'dm', photo: TCHAT_PHOTOS.luciana, name: 'Luciana', preview: "Calendar's updated for next week's listings...", time: 'Sun', unread: 0 },
-      ];
-      const byId = (id) => threads.find(x => x.id === id);
-      const listAvatar = (t) => t.kind === 'channel' ? <Emoji e={t.emoji} /> : t.kind === 'group' ? <Group a={t.a} b={t.b} /> : <Single photo={t.photo} />;
-
-      const headerAvatar = (t, view) => {
-        if (t.kind === 'group') return (
-          <div style={{ position: 'relative', width: 32, height: 32, flexShrink: 0 }}>
-            <img src={t.a} style={{ position: 'absolute', top: 0, left: 0, width: 20, height: 20, borderRadius: '50%', objectFit: 'cover', border: `1.5px solid ${tvBarBg}` }} />
-            <img src={t.b} style={{ position: 'absolute', bottom: 0, right: 0, width: 20, height: 20, borderRadius: '50%', objectFit: 'cover', border: `1.5px solid ${tvBarBg}` }} />
+      return (
+        <React.Fragment>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 14px', borderBottom: `1px solid ${barBord}`, background: barBg, flexShrink: 0 }}>
+            <button onClick={onBack} aria-label="Back" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: backCol, display: 'flex', flexShrink: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 18 }} /></button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{scope.title}</div>
+              {scope.kind === 'channel' && scope.topic ? <div style={{ fontFamily: J, fontSize: 8, color: subCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{scope.topic}</div> : null}
+            </div>
           </div>
-        );
-        if (t.kind === 'channel') return (
-          <div style={{ width: 32, height: 32, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', fontSize: 16 }}>{t.emoji}</div>
-        );
+          <div ref={listRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '12px 12px', display: 'flex', flexDirection: 'column', gap: 8, background: msgBg }}>
+            {loading && <div style={{ fontFamily: J, fontSize: 10, color: subCol, textAlign: 'center', padding: 16 }}>Loading…</div>}
+            {!loading && messages.length === 0 && <div style={{ fontFamily: J, fontSize: 11, color: subCol, textAlign: 'center', padding: 24 }}>No messages yet. Say hello 👋</div>}
+            {messages.map((mm, i) => {
+              const mine = mm.author_id === me;
+              const prev = messages[i - 1];
+              const showSender = isGroup && !mine && (!prev || prev.author_id !== mm.author_id);
+              return (
+                <div key={mm.id} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {showSender && <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.06em', fontWeight: 600, marginLeft: 28, color: senderGold }}>{nameOf(mm.author_id)}</div>}
+                  <div style={{ display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'flex-end', gap: 6 }}>
+                    {!mine ? <Avatar photo={photoOf(mm.author_id)} name={nameOf(mm.author_id)} size={22} /> : <div style={{ width: 1 }} />}
+                    <div style={{ maxWidth: '78%', padding: '7px 10px', fontFamily: J, fontSize: 11, lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-word', borderRadius: mine ? '12px 12px 3px 12px' : '12px 12px 12px 3px', background: mine ? mineBg : theirBg, color: mine ? '#fff' : theirCol, border: mine ? 'none' : theirBord, opacity: mm._pending ? 0.6 : 1 }}>
+                      {renderMessageContent(mm.content, mine ? { dark, byId: ctx.byId, chipColor: '#fff', linkColor: '#fff' } : ctx)}
+                      {mm.edited_at && <span style={{ fontSize: 8, opacity: 0.6, marginLeft: 5 }}>(edited)</span>}
+                    </div>
+                  </div>
+                  <div style={{ fontFamily: J, fontSize: 7, color: mm._failed ? '#C0392B' : timeCol, textAlign: mine ? 'right' : 'left', marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0 }}>
+                    {mm._failed ? 'Failed to send' : (mm._pending ? 'Sending…' : fmtTime(mm.created_at))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ flexShrink: 0, borderTop: `1px solid ${inBarBord}`, background: inBarBg, padding: '8px 12px calc(10px + env(safe-area-inset-bottom))', display: 'flex', alignItems: 'flex-end', gap: 7 }}>
+            <textarea value={text} onChange={e => setText(e.target.value)} onKeyDown={onKey} rows={1} placeholder={'Message ' + scope.title} aria-label={'Message ' + scope.title} style={{ flex: 1, resize: 'none', maxHeight: 96, minHeight: 34, borderRadius: 17, padding: '8px 12px', fontFamily: J, fontSize: 11, lineHeight: 1.4, color: dark ? '#fff' : '#001A4A', background: inFieldBg, border: `1px solid ${inFieldBord}`, outline: 'none', boxSizing: 'border-box' }} />
+            <button onClick={send} disabled={!text.trim() || sending} aria-label="Send" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: text.trim() ? 'pointer' : 'default', flexShrink: 0, background: text.trim() ? sendBg : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-arrow-up" style={{ fontSize: 15 }} /></button>
+          </div>
+        </React.Fragment>
+      );
+    }
+
+    function ChatTab({ dark, profile }) {
+      const J = "'Jost', sans-serif";
+      const bg = dark ? '#000D26' : '#FCFBF8', headTitle = dark ? '#FFFFFF' : '#001A4A';
+      const composeBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', composeCol = dark ? '#C9A45A' : '#AD832F';
+      const searchBg = dark ? '#0A1730' : '#F5F2EE', searchCol = dark ? 'rgba(255,255,255,0.4)' : '#8A8676';
+      const rowBord = dark ? '#0D1E3A' : '#F5F2EE', sectionCol = dark ? '#C9A45A' : '#AD832F';
+      const nameCol = dark ? '#FFFFFF' : '#001A4A', previewCol = dark ? 'rgba(255,255,255,0.35)' : '#888888';
+      const me = (window.SupabaseAuth?._state?.session?.user?.id) || 'dev-user-id';
+      const isAdmin = hasAdmin(profile && profile.access);
+
+      const [roster, setRoster] = useState([]); const [channels, setChannels] = useState([]); const [convs, setConvs] = useState([]);
+      const [loadingList, setLoadingList] = useState(true);
+      const [scope, setScope] = useState(null); const [modal, setModal] = useState(null); const [menu, setMenu] = useState(false); const [q, setQ] = useState('');
+
+      const rosterById = {}; roster.forEach(p => { rosterById[p.id] = p; });
+      const nameOf = (id) => { const p = rosterById[id]; return p ? (((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || 'Member') : 'Member'; };
+      const photoOf = (id) => { const p = rosterById[id]; return (p && p.avatar_url) || ''; };
+      const awayOf = (id) => { const p = rosterById[id]; return !!(p && p.away); };
+      const convTitle = (cv) => cv.title || (cv.memberIds.filter(id => id !== me).map(nameOf).join(', ')) || 'Direct Message';
+
+      const refresh = () => { setLoadingList(true); Promise.all([ChatDB.loadRoster(), ChatDB.listChannels(), ChatDB.listConversations()]).then(([r, ch, cv]) => { setRoster(r || []); setChannels(ch || []); setConvs(cv || []); setLoadingList(false); }); };
+      useEffect(() => { refresh(); }, []);
+
+      const openChannel = async (ch) => { if (ch.type === 'public') { try { await ChatDB.joinChannel(ch.id); } catch (e) {} } setScope({ kind: 'channel', id: ch.id, title: '#' + ch.name, topic: ch.topic, channel: ch }); };
+      const openConv = (cv) => setScope({ kind: 'conversation', id: cv.id, title: convTitle(cv), conv: cv });
+
+      const ql = q.trim().toLowerCase();
+      const fch = channels.filter(c => !ql || c.name.toLowerCase().includes(ql) || (c.topic || '').toLowerCase().includes(ql));
+      const publicCh = fch.filter(c => c.type === 'public'), privateCh = fch.filter(c => c.type === 'private');
+      const fcv = convs.filter(c => !ql || convTitle(c).toLowerCase().includes(ql));
+      const nothing = !loadingList && !publicCh.length && !privateCh.length && !fcv.length;
+
+      const Section = ({ label }) => <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.18em', fontWeight: 600, color: sectionCol, padding: '12px 14px 5px' }}>{label}</div>;
+      const ChannelRow = (c) => (
+        <div key={c.id} onClick={() => openChannel(c)} role="button" tabIndex={0} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}` }}>
+          <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', color: composeCol }}><i className={`ti ${c.type === 'private' ? 'ti-lock' : 'ti-hash'}`} style={{ fontSize: 16 }} /></div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
+            {c.topic ? <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 1 }}>{c.topic}</div> : null}
+          </div>
+        </div>
+      );
+      const ConvRow = (cv) => {
+        const others = cv.memberIds.filter(id => id !== me);
+        const single = others.length <= 1;
         return (
-          <div style={{ position: 'relative', width: 32, height: 32, flexShrink: 0 }}>
-            <img src={t.photo} style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', display: 'block' }} />
-            {view && view.status === 'Online' && <div style={{ position: 'absolute', bottom: 0, right: 0, width: 8, height: 8, borderRadius: '50%', background: '#3DAF7E', border: `1.5px solid ${tvBarBg}` }} />}
+          <div key={cv.id} onClick={() => openConv(cv)} role="button" tabIndex={0} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}` }}>
+            {single
+              ? <div style={{ position: 'relative', flexShrink: 0 }}><Avatar photo={photoOf(others[0])} name={nameOf(others[0])} size={34} />{!awayOf(others[0]) && <span style={{ position: 'absolute', bottom: 0, right: 0, width: 9, height: 9, borderRadius: '50%', background: '#2FBF6B', border: `2px solid ${bg}` }} />}</div>
+              : <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', color: composeCol }}><i className="ti ti-users" style={{ fontSize: 16 }} /></div>}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{convTitle(cv)}</div>
+              <div style={{ fontFamily: J, fontSize: 9, color: previewCol, marginTop: 1 }}>{cv.type === 'group_dm' ? (cv.memberIds.length + ' members') : 'Direct message'}</div>
+            </div>
           </div>
         );
-      };
-      const statusLine = (t, view) => {
-        if (t.kind === 'dm' && view && view.status === 'Online') return <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.1em', color: '#3DAF7E', marginTop: 1 }}>● Online</div>;
-        if (t.kind !== 'dm' && view && view.members) return <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.1em', color: senderMuted, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{view.members}</div>;
-        return null;
       };
 
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-          {/* Coming Soon banner (always visible) */}
-          <div style={{ background: bannerBg, padding: '7px 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, flexShrink: 0 }}>
-            {seg('Coming Soon', 's1')}{sep('p1')}{seg('Team Chat', 's2')}{sep('p2')}{seg('Q3 2026', 's3')}
-          </div>
-
           <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-            {/* ── List layer ── */}
             <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: bg }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px 8px', flexShrink: 0 }}>
-                <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Chats</div>
-                <button style={{ width: 28, height: 28, borderRadius: '50%', border: 'none', cursor: 'pointer', background: composeBg, color: composeCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <i className="ti ti-edit" style={{ fontSize: 15 }} />
-                </button>
-              </div>
-              <div style={{ margin: '0 14px 10px', background: searchBg, borderRadius: 10, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
-                <i className="ti ti-search" style={{ fontSize: 14, color: searchCol }} />
-                <span style={{ fontFamily: J, fontSize: 10, color: searchCol }}>Search</span>
-              </div>
-              <div style={{ padding: '0 14px 10px', borderBottom: `1px solid ${pinnedBord}`, flexShrink: 0 }}>
-                <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.18em', fontWeight: 500, color: pinnedLabel, marginBottom: 8 }}>PINNED</div>
-                <div style={{ display: 'flex', gap: 14 }}>
-                  <PinnedContact photo={TCHAT_PHOTOS.tarek} name="Tarek" online unread={3} onClick={() => openThread(byId('t2'))} />
-                  <PinnedContact photo={TCHAT_PHOTOS.brett} name="Brett" onClick={() => openThread(byId('t5'))} />
-                  <PinnedContact photo={TCHAT_PHOTOS.alex} name="Alexa" onClick={() => openThread(byId('t7'))} />
-                </div>
-              </div>
-              <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-                {threads.map((t, i) => (
-                  <div key={t.id} onClick={() => openThread(t)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: i === threads.length - 1 ? 'none' : `1px solid ${rowBord}` }}>
-                    {listAvatar(t)}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: threadName, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.name}</div>
-                      <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{t.preview}</div>
-                    </div>
-                    <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                      <div style={{ fontFamily: J, fontSize: 8, color: timeCol }}>{t.time}</div>
-                      {t.unread > 0 && <div style={{ minWidth: 16, height: 16, borderRadius: 8, background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px' }}>{t.unread}</div>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* ── Thread-view layer (slides in from right) ── */}
-            <div style={{
-              position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: tvMsgBg,
-              transform: open ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 220ms ease',
-              boxShadow: open && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none',
-              pointerEvents: open ? 'auto' : 'none',
-            }}>
-              {shown && (() => {
-                const view = VIEW[shown.id];
-                const msgs = (view && view.messages) || [];
-                const isGroup = shown.kind !== 'dm';
-                const lastTheir = [...msgs].reverse().find(m => m.from !== 'me');
-                return (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px 8px', flexShrink: 0, position: 'relative' }}>
+                <div style={{ fontFamily: J, fontSize: 14, fontWeight: 600, color: headTitle }}>Chat</div>
+                <button onClick={() => setMenu(m => !m)} aria-label="New conversation" style={{ width: 28, height: 28, borderRadius: '50%', border: 'none', cursor: 'pointer', background: composeBg, color: composeCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><i className="ti ti-edit" style={{ fontSize: 15 }} /></button>
+                {menu && (
                   <React.Fragment>
-                    {/* Thread top bar */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 14px', borderBottom: `1px solid ${tvBarBord}`, background: tvBarBg, flexShrink: 0 }}>
-                      <button onClick={back} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: tvBackCol, display: 'flex', alignItems: 'center', flexShrink: 0 }}>
-                        <i className="ti ti-chevron-left" style={{ fontSize: 16 }} />
-                      </button>
-                      {headerAvatar(shown, view)}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: dark ? '#fff' : '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{shown.name}</div>
-                        {statusLine(shown, view)}
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 9, color: tvActionCol, flexShrink: 0 }}>
-                        <i className="ti ti-phone" style={{ fontSize: 15 }} />
-                        <i className={`ti ${isGroup ? 'ti-info-circle' : 'ti-video'}`} style={{ fontSize: 15 }} />
-                      </div>
-                    </div>
-                    {/* Message area */}
-                    <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 10, background: tvMsgBg }}>
-                      {msgs.length > 0 && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <div style={{ flex: 1, height: 1, background: tvDivLine }} />
-                          <span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.12em', textTransform: 'uppercase', color: tvDivText }}>{view.date}</span>
-                          <div style={{ flex: 1, height: 1, background: tvDivLine }} />
-                        </div>
-                      )}
-                      {msgs.map((m, i) => {
-                        const mine = m.from === 'me';
-                        const prev = msgs[i - 1];
-                        const showSender = isGroup && !mine && (!prev || prev.from !== m.from);
-                        const s = SENDERS[m.from] || SENDERS.me;
-                        const recent = lastTheir && m.from === lastTheir.from;
-                        return (
-                          <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                            {showSender && <div style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.1em', fontWeight: 600, marginBottom: 2, marginLeft: 28, color: recent ? senderGold : senderMuted }}>{s.name}</div>}
-                            <div style={{ display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'flex-end', gap: 6 }}>
-                              <img src={mine ? SENDERS.me.photo : s.photo} style={{ width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, display: 'block' }} />
-                              <div style={{ maxWidth: '78%', padding: '7px 9px', fontFamily: J, fontSize: 9, lineHeight: 1.45, borderRadius: mine ? '12px 12px 3px 12px' : '12px 12px 12px 3px', background: mine ? mineBg : theirBg, color: mine ? '#fff' : theirCol, border: mine ? 'none' : theirBord }}>{m.text}</div>
-                            </div>
-                            <div style={{ fontFamily: J, fontSize: 7, color: tvTimeCol, textAlign: mine ? 'right' : 'left', marginLeft: mine ? 0 : 28, marginRight: mine ? 28 : 0 }}>{m.time}</div>
-                            {m.reaction && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, alignSelf: 'flex-start', marginLeft: 28, marginTop: 2, padding: '2px 6px', borderRadius: 10, fontFamily: J, fontSize: 8, background: reactBg, color: reactCol }}>{m.reaction.emoji} {m.reaction.count}</div>}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {/* Chat input */}
-                    <div style={{ flexShrink: 0, borderTop: `1px solid ${inBarBord}`, background: inBarBg, padding: '8px 12px 10px', display: 'flex', alignItems: 'center', gap: 7 }}>
-                      <div style={{ flex: 1, borderRadius: 20, height: 34, padding: '0 10px', display: 'flex', alignItems: 'center', gap: 6, background: inFieldBg, border: `1px solid ${inFieldBord}` }}>
-                        <span style={{ flex: 1, fontFamily: J, fontSize: 9, color: inPlaceCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Message {shown.name}...</span>
-                        <i className="ti ti-paperclip" style={{ fontSize: 14, color: inPlaceCol, flexShrink: 0 }} />
-                      </div>
-                      <button style={{ width: 30, height: 30, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, background: sendBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <i className="ti ti-arrow-up" style={{ fontSize: 13 }} />
-                      </button>
+                    <div onClick={() => setMenu(false)} style={{ position: 'fixed', inset: 0, zIndex: 39 }} />
+                    <div style={{ position: 'absolute', top: 40, right: 14, zIndex: 40, background: dark ? '#0A1730' : '#fff', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`, borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.18)', overflow: 'hidden', minWidth: 168 }}>
+                      <button onClick={() => { setMenu(false); setModal('newdm'); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '11px 14px', background: 'none', border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 12, color: dark ? '#fff' : '#001A4A', textAlign: 'left' }}><i className="ti ti-message-plus" style={{ fontSize: 16, color: composeCol }} />New message</button>
+                      <button onClick={() => { setMenu(false); setModal('newchannel'); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '11px 14px', background: 'none', border: 'none', borderTop: `1px solid ${dark ? '#152545' : '#F0EBE3'}`, cursor: 'pointer', fontFamily: J, fontSize: 12, color: dark ? '#fff' : '#001A4A', textAlign: 'left' }}><i className="ti ti-plus" style={{ fontSize: 16, color: composeCol }} />New channel</button>
                     </div>
                   </React.Fragment>
-                );
-              })()}
+                )}
+              </div>
+              <div style={{ margin: '0 14px 6px', background: searchBg, borderRadius: 10, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
+                <i className="ti ti-search" style={{ fontSize: 14, color: searchCol }} />
+                <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search channels & people" aria-label="Search" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 10, color: dark ? '#fff' : '#001A4A' }} />
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                {loadingList && <div style={{ fontFamily: J, fontSize: 10, color: searchCol, textAlign: 'center', padding: 24 }}>Loading…</div>}
+                {nothing && <div style={{ fontFamily: J, fontSize: 11, color: previewCol, textAlign: 'center', padding: '32px 24px', lineHeight: 1.6 }}>No conversations yet.<br />Tap <i className="ti ti-edit" style={{ fontSize: 12 }} /> to start a message or create a channel.</div>}
+                {(publicCh.length > 0) && <Section label="CHANNELS" />}
+                {publicCh.map(ChannelRow)}
+                {(privateCh.length > 0) && <Section label="PRIVATE CHANNELS" />}
+                {privateCh.map(ChannelRow)}
+                {(fcv.length > 0) && <Section label="DIRECT MESSAGES" />}
+                {fcv.map(ConvRow)}
+                <div style={{ height: 12 }} />
+              </div>
+            </div>
+
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: dark ? '#070F1E' : '#FCFBF8', transform: scope ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 220ms ease', boxShadow: scope && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none', pointerEvents: scope ? 'auto' : 'none' }}>
+              {scope && <ChatConversation key={scope.id} dark={dark} scope={scope} me={me} rosterById={rosterById} nameOf={nameOf} photoOf={photoOf} awayOf={awayOf} onBack={() => setScope(null)} />}
             </div>
           </div>
+
+          {modal === 'newchannel' && <NewChannelModal dark={dark} isAdmin={isAdmin} onClose={() => setModal(null)} onCreated={(ch) => { setModal(null); refresh(); openChannel(ch); }} />}
+          {modal === 'newdm' && <NewDMModal dark={dark} roster={roster} me={me} onClose={() => setModal(null)} onCreated={(cv) => { setModal(null); refresh(); openConv(cv); }} />}
         </div>
       );
     }
@@ -5148,7 +5377,7 @@ Rules:
                 )}
               </div>
             )}
-            {activeTab === 'teamchat' && <ChatTab dark={dark} />}
+            {activeTab === 'teamchat' && <ChatTab dark={dark} profile={profile} />}
             {activeTab === 'calls' && <CallsTab dark={dark} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'more' && (

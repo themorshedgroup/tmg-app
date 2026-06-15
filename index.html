@@ -2009,12 +2009,28 @@ Rules:
       return rmNormalize(rows);
     }
 
+    // One-time merge: append dictated features onto existing saved data
+    // (idempotent — only adds what isn't already there). Bumped via RM_KEY.
+    function rmEnsureAdditions(rows) {
+      let out = rows.slice();
+      const topByName = (name, fid) => out.find(r => !r.parentId && (r.name === name || r.id === fid));
+      const hasChild = (pid, name) => out.some(r => r.parentId === pid && r.name === name);
+      const addChild = (pid, name) => { if (pid && !hasChild(pid, name)) out.push({ id: pid + '-x' + out.length, name: name, status: 'todo', type: 'mvp', dueDate: null, parentId: pid, order: 0 }); };
+      const ai = topByName('AI Chat', 't0'); if (ai) addChild(ai.id, 'Projects (Files + Contacts)');
+      const tc = topByName('Team Chat', 't1'); if (tc) { ['Direct Messaging', 'Group Chat', 'Assigned Tasks'].forEach(n => addChild(tc.id, n)); }
+      let crm = topByName('CRM', 'crm');
+      if (!crm) { out.push({ id: 'crm', name: 'CRM', status: 'todo', type: 'mvp', dueDate: null, parentId: null, order: 0 }); crm = out[out.length - 1]; }
+      addChild(crm.id, 'Contacts'); addChild(crm.id, 'Deals');
+      return rmNormalize(out);
+    }
+
     function AppRoadmap({ dark, onBack }) {
       const J = "'Jost', sans-serif";
-      const RM_KEY = 'tmg-roadmap-v3';
+      const RM_KEY = 'tmg-roadmap-v4', RM_PREV = 'tmg-roadmap-v3';
       const [rows, setRows] = useState(() => {
         try { const raw = localStorage.getItem(RM_KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p) && p.length) return rmNormalize(p); } } catch (e) {}
-        return rmSeed();
+        try { const prev = localStorage.getItem(RM_PREV); if (prev) { const p = JSON.parse(prev); if (Array.isArray(p) && p.length) return rmEnsureAdditions(rmNormalize(p)); } } catch (e) {}
+        return rmEnsureAdditions(rmSeed());
       });
       const [groupBy, setGroupBy] = useState('quarter');
       const [collapsedP, setCollapsedP] = useState({});

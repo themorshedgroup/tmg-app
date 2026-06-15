@@ -711,15 +711,15 @@ Continue with TMG Gmail
 
     // ─── Tasks ───────────────────────────────────────────────────────
     const TASK_STATUS = [
-      { id: 'todo',        label: 'To Do',       color: '#6B6B6B' },
-      { id: 'in_progress', label: 'In Progress', color: '#2A6FD4' },
-      { id: 'stuck',       label: 'Stuck',       color: '#C0392B' },
-      { id: 'done',        label: 'Completed',   color: '#1E6B40' },
+      { id: 'todo',        label: 'To Do',       color: '#64748B' },  // slate — not started
+      { id: 'in_progress', label: 'In Progress', color: '#2563EB' },  // blue — active
+      { id: 'stuck',       label: 'Stuck',       color: '#DC2626' },  // red — blocked
+      { id: 'done',        label: 'Completed',   color: '#16A34A' },  // green — done
     ];
     const TASK_PRIORITY = [
-      { id: 'low',    label: 'Low',    color: '#9B9380' },
-      { id: 'medium', label: 'Medium', color: '#B07A00' },
-      { id: 'high',   label: 'High',   color: '#C0392B' },
+      { id: 'low',    label: 'Low',    color: '#CA9A04' },  // yellow
+      { id: 'medium', label: 'Medium', color: '#E07B00' },  // orange
+      { id: 'high',   label: 'High',   color: '#DC2626' },  // red
     ];
     const TASK_RECUR = [
       { id: 'none',    label: 'Does not repeat' },
@@ -737,16 +737,19 @@ Continue with TMG Gmail
       client() { return window.SupabaseAuth?._client || null; },
 
       async loadAll() {
-        const c = this.client(); if (!c) return { tasks: [], peopleByTask: {}, projById: {} };
-        const [tRes, pRes, prRes] = await Promise.all([
+        const c = this.client(); if (!c) return { tasks: [], peopleByTask: {}, projById: {}, labelsByTask: {} };
+        const [tRes, pRes, prRes, lRes] = await Promise.all([
           c.from('tasks').select('*').is('parent_task_id', null).order('created_at', { ascending: false }),
           c.from('task_people').select('task_id,user_id,role'),
           c.from('projects').select('id,name'),
+          c.from('task_labels').select('task_id,user_id,label'),
         ]);
         const peopleByTask = {};
         (pRes.data || []).forEach(p => { (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p); });
+        const labelsByTask = {};
+        (lRes.data || []).forEach(l => { (labelsByTask[l.task_id] = labelsByTask[l.task_id] || []).push(l); });
         const projById = {}; (prRes.data || []).forEach(p => { projById[p.id] = p.name; });
-        return { tasks: tRes.data || [], peopleByTask, projById };
+        return { tasks: tRes.data || [], peopleByTask, projById, labelsByTask };
       },
 
       async findOrCreateProject(name, user) {
@@ -868,6 +871,30 @@ Continue with TMG Gmail
       },
       async createSubtask(parentId, title, user) {
         return this.create({ title: title.trim(), status: 'todo', priority: 'medium', parent_task_id: parentId }, {}, user);
+      },
+
+      // Label management — a user's distinct label names across all their tasks.
+      async myLabelNames(userId) {
+        const c = this.client(); if (!c) return [];
+        const { data } = await c.from('task_labels').select('label').eq('user_id', userId);
+        return Array.from(new Set((data || []).map(r => r.label))).sort((a, b) => a.localeCompare(b));
+      },
+      async renameLabel(userId, oldLabel, newLabel) {
+        const c = this.client(); if (!c || !newLabel.trim()) return;
+        const { error } = await c.from('task_labels').update({ label: newLabel.trim() }).eq('user_id', userId).eq('label', oldLabel);
+        if (error) console.error('[TaskDB] renameLabel:', error.message);
+      },
+      async deleteLabel(userId, label) {
+        const c = this.client(); if (!c) return;
+        const { error } = await c.from('task_labels').delete().eq('user_id', userId).eq('label', label);
+        if (error) console.error('[TaskDB] deleteLabel:', error.message);
+      },
+
+      // Projects
+      async loadProjects() {
+        const c = this.client(); if (!c) return [];
+        const { data } = await c.from('projects').select('id,name').eq('archived', false).order('name', { ascending: true });
+        return data || [];
       },
 
       async loadActivity(taskId) {
@@ -1737,6 +1764,168 @@ Continue with TMG Gmail
       );
     }
 
+    // ─── App Roadmap (admin-only, in More) — simple feature tracker ──────
+    // A timeline/table of TMG features: title · type (MVP/Vanity) · status
+    // (To Do / In Progress / Stuck / Completed, reusing TASK_STATUS) · due
+    // date · subtasks. Persists to localStorage (per-device) for now.
+    const ROADMAP_TYPES = [
+      { id: 'mvp',    label: 'MVP',    light: { bg: '#001A4A', fg: '#fff' },                  dark: { bg: '#C9A45A', fg: '#001A4A' } },
+      { id: 'vanity', label: 'Vanity', light: { bg: 'rgba(173,131,47,0.14)', fg: '#AD832F' }, dark: { bg: 'rgba(201,164,90,0.18)', fg: '#C9A45A' } },
+    ];
+    // Seeded from the TMG app's current tabs/features (statuses reflect today's state; all editable).
+    const ROADMAP_SEED = [
+      { title: 'AI Chat',                    status: 'done' },
+      { title: 'Team Chat',                  status: 'todo' },
+      { title: 'Calls',                      status: 'todo' },
+      { title: 'KPIs',                       status: 'todo' },
+      { title: 'Deals',                      status: 'todo' },
+      { title: 'Shared Drives',              status: 'done' },
+      { title: 'Company Directory',          status: 'done' },
+      { title: 'Exp Survey',                 status: 'done' },
+      { title: 'SFFU (Showing Follow-Up)',   status: 'in_progress' },
+      { title: 'Calendar',                   status: 'stuck' },
+      { title: 'Tasks',                      status: 'done' },
+      { title: 'Profile & Status',           status: 'in_progress' },
+      { title: 'Admin (Users & Tab Access)', status: 'done' },
+    ].map((s, i) => ({ id: 'seed-' + i, title: s.title, type: 'mvp', status: s.status, due: '', subtasks: [] }));
+
+    // Inline add-a-subtask input (own state so typing doesn't re-render the whole list).
+    function SubAdd({ onAdd, cardBord, fieldBg, titleC, subC, J }) {
+      const [v, setV] = useState('');
+      const go = () => { if (!v.trim()) return; onAdd(v); setV(''); };
+      return (
+        <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+          <input value={v} onChange={e => setV(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') go(); }} placeholder="Add subtask…" style={{ flex: 1, minWidth: 0, padding: '7px 10px', borderRadius: 8, border: `1px dashed ${cardBord}`, background: fieldBg, color: titleC, fontFamily: J, fontSize: 11, outline: 'none' }} />
+          <button onClick={go} aria-label="Add subtask" style={{ flexShrink: 0, width: 30, borderRadius: 8, border: `1px solid ${cardBord}`, background: 'none', color: subC, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-plus" style={{ fontSize: 14 }} /></button>
+        </div>
+      );
+    }
+
+    function AppRoadmap({ dark, onBack }) {
+      const J = "'Jost', sans-serif";
+      const KEY = 'tmg-roadmap-v1';
+      const [items, setItems] = useState(() => {
+        try { const raw = localStorage.getItem(KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p) && p.length) return p; } } catch (e) {}
+        return ROADMAP_SEED;
+      });
+      const [openId, setOpenId] = useState(null);
+      const [newTitle, setNewTitle] = useState('');
+      useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(items)); } catch (e) {} }, [items]);
+
+      const uid = () => 'r' + Math.random().toString(36).slice(2, 9);
+      const update = (id, patch) => setItems(its => its.map(t => t.id === id ? { ...t, ...patch } : t));
+      const remove = (id) => { setItems(its => its.filter(t => t.id !== id)); setOpenId(o => (o === id ? null : o)); };
+      const addItem = () => { const t = newTitle.trim(); if (!t) return; const id = uid(); setItems(its => [...its, { id, title: t, type: 'mvp', status: 'todo', due: '', subtasks: [] }]); setNewTitle(''); setOpenId(id); };
+      const addSub = (id, title) => { const t = (title || '').trim(); if (!t) return; setItems(its => its.map(x => x.id === id ? { ...x, subtasks: [...(x.subtasks || []), { id: uid(), title: t, done: false }] } : x)); };
+      const toggleSub = (id, sid) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: (x.subtasks || []).map(s => s.id === sid ? { ...s, done: !s.done } : s) } : x));
+      const removeSub = (id, sid) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: (x.subtasks || []).filter(s => s.id !== sid) } : x));
+
+      const titleC   = dark ? '#fff' : '#001A4A';
+      const subC     = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+      const backC    = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const cardBg   = dark ? '#0A1730' : '#FFFFFF';
+      const cardBord = dark ? '#152545' : '#EDE7DC';
+      const rowBord  = dark ? '#0D1E3A' : '#F0EBE3';
+      const gold     = dark ? '#C9A45A' : '#AD832F';
+      const fieldBg  = dark ? '#070F1E' : '#F7F4EE';
+      const chipBg   = dark ? '#0A1730' : '#F0EBE3';
+
+      const typeOf = (id) => ROADMAP_TYPES.find(t => t.id === id) || ROADMAP_TYPES[0];
+      const fmtDue = (d) => { if (!d) return ''; try { return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch (e) { return d; } };
+
+      return (
+        <div style={{ height: '100%', position: 'relative', overflow: 'hidden' }}>
+          <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+            {/* Header */}
+            <div style={{ padding: '11px 14px 7px', display: 'flex', alignItems: 'center', gap: 9 }}>
+              <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: backC }}>
+                <i className="ti ti-chevron-left" style={{ fontSize: 16 }} />
+              </button>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, color: titleC }}>Roadmap</div>
+                <div style={{ fontFamily: J, fontSize: 8, marginTop: 1, color: subC }}>{items.length} features</div>
+              </div>
+            </div>
+            {/* Status summary */}
+            <div style={{ display: 'flex', gap: 6, padding: '2px 14px 8px', flexWrap: 'wrap' }}>
+              {TASK_STATUS.map(s => (
+                <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 8px', borderRadius: 8, background: chipBg }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: s.color }} />
+                  <span style={{ fontFamily: J, fontSize: 9, fontWeight: 700, color: titleC }}>{items.filter(t => t.status === s.id).length}</span>
+                  <span style={{ fontFamily: J, fontSize: 9, color: subC }}>{s.label}</span>
+                </div>
+              ))}
+            </div>
+            {/* List */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '2px 14px 24px' }}>
+              {items.map(t => {
+                const isOpen = openId === t.id;
+                const ty = typeOf(t.type);
+                const tc = dark ? ty.dark : ty.light;
+                const doneN = (t.subtasks || []).filter(s => s.done).length;
+                return (
+                  <div key={t.id} style={{ marginBottom: 8, borderRadius: 12, border: `1px solid ${cardBord}`, background: cardBg, overflow: 'hidden' }}>
+                    <button onClick={() => setOpenId(isOpen ? null : t.id)} style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: '11px 12px', background: 'none', border: 'none', cursor: 'pointer' }}>
+                      <span style={{ width: 9, height: 9, borderRadius: '50%', background: statusColor(t.status), flexShrink: 0 }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: titleC, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+                        <div style={{ fontFamily: J, fontSize: 9, color: subC, marginTop: 2 }}>{statusLabel(t.status)}{t.due ? ' · ' + fmtDue(t.due) : ''}{(t.subtasks || []).length ? ' · ' + doneN + '/' + t.subtasks.length + ' subtasks' : ''}</div>
+                      </div>
+                      <span style={{ flexShrink: 0, fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '3px 7px', borderRadius: 6, background: tc.bg, color: tc.fg }}>{ty.label}</span>
+                      <i className={`ti ti-chevron-${isOpen ? 'up' : 'down'}`} style={{ fontSize: 14, color: backC, flexShrink: 0 }} />
+                    </button>
+                    {isOpen && (
+                      <div style={{ padding: '4px 12px 14px', borderTop: `1px solid ${rowBord}` }}>
+                        <input value={t.title} onChange={e => update(t.id, { title: e.target.value })} style={{ width: '100%', boxSizing: 'border-box', marginTop: 10, padding: '9px 11px', borderRadius: 9, border: `1px solid ${cardBord}`, background: fieldBg, color: titleC, fontFamily: J, fontSize: 12, outline: 'none' }} />
+                        <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: gold, margin: '12px 0 6px' }}>Status</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                          {TASK_STATUS.map(s => { const on = t.status === s.id; return (
+                            <button key={s.id} onClick={() => update(t.id, { status: s.id })} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: on ? 700 : 500, border: `1px solid ${on ? s.color : cardBord}`, background: on ? s.color : 'transparent', color: on ? '#fff' : subC }}>
+                              <span style={{ width: 6, height: 6, borderRadius: '50%', background: on ? '#fff' : s.color }} />{s.label}
+                            </button>
+                          ); })}
+                        </div>
+                        <div style={{ display: 'flex', gap: 14, marginTop: 12, flexWrap: 'wrap' }}>
+                          <div>
+                            <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: gold, marginBottom: 6 }}>Type</div>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              {ROADMAP_TYPES.map(ty2 => { const on = t.type === ty2.id; const c2 = dark ? ty2.dark : ty2.light; return (
+                                <button key={ty2.id} onClick={() => update(t.id, { type: ty2.id })} style={{ padding: '6px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: on ? 700 : 500, border: `1px solid ${on ? 'transparent' : cardBord}`, background: on ? c2.bg : 'transparent', color: on ? c2.fg : subC }}>{ty2.label}</button>
+                              ); })}
+                            </div>
+                          </div>
+                          <div style={{ flex: 1, minWidth: 120 }}>
+                            <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: gold, marginBottom: 6 }}>Due date</div>
+                            <input type="date" value={t.due || ''} onChange={e => update(t.id, { due: e.target.value })} style={{ width: '100%', boxSizing: 'border-box', padding: '7px 10px', borderRadius: 8, border: `1px solid ${cardBord}`, background: fieldBg, color: titleC, fontFamily: J, fontSize: 11, outline: 'none' }} />
+                          </div>
+                        </div>
+                        <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: gold, margin: '14px 0 4px' }}>Subtasks</div>
+                        {(t.subtasks || []).map(s => (
+                          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
+                            <button onClick={() => toggleSub(t.id, s.id)} aria-label="Toggle subtask" style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', border: s.done ? 'none' : `1.5px solid ${cardBord}`, background: s.done ? '#16A34A' : 'transparent', padding: 0 }}>
+                              {s.done && <i className="ti ti-check" style={{ fontSize: 11, color: '#fff' }} />}
+                            </button>
+                            <span style={{ flex: 1, fontFamily: J, fontSize: 11, color: s.done ? subC : titleC, textDecoration: s.done ? 'line-through' : 'none' }}>{s.title}</span>
+                            <button onClick={() => removeSub(t.id, s.id)} aria-label="Delete subtask" style={{ background: 'none', border: 'none', cursor: 'pointer', color: backC, fontSize: 13, display: 'flex', flexShrink: 0 }}><i className="ti ti-x" /></button>
+                          </div>
+                        ))}
+                        <SubAdd onAdd={(v) => addSub(t.id, v)} cardBord={cardBord} fieldBg={fieldBg} titleC={titleC} subC={subC} J={J} />
+                        <button onClick={() => { if (window.confirm('Remove "' + t.title + '" from the roadmap?')) remove(t.id); }} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 14, padding: '7px 10px', borderRadius: 8, border: `1px solid ${dark ? '#3A1620' : '#F0D9D9'}`, background: 'none', color: '#DC2626', cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: 600 }}><i className="ti ti-trash" style={{ fontSize: 13 }} />Delete feature</button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                <input value={newTitle} onChange={e => setNewTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addItem(); }} placeholder="Add a feature…" style={{ flex: 1, minWidth: 0, padding: '10px 12px', borderRadius: 9, border: `1px solid ${cardBord}`, background: cardBg, color: titleC, fontFamily: J, fontSize: 12, outline: 'none' }} />
+                <button onClick={addItem} style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, padding: '0 14px', borderRadius: 9, border: 'none', background: dark ? '#AD832F' : '#001A4A', color: '#fff', cursor: 'pointer', fontFamily: J, fontSize: 12, fontWeight: 600 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     // ─── Exp Survey (opened from the More menu, under Company Directory) ─
     // Contents of the "TMG Experience Survey URL & QR Code" PDF: the survey
     // link + a self-contained QR (generated for the same URL; no external call).
@@ -1962,7 +2151,7 @@ Continue with TMG Gmail
           {field('Description', <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder="Initial description (auto-filled when generated from AI mode later)" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
           {field('Context', <textarea value={context} onChange={e => setContext(e.target.value)} rows={2} placeholder="Ongoing updates / notes" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
           {field('Working URL', <input value={workingUrl} onChange={e => setWorkingUrl(e.target.value)} placeholder="https://…" style={inp} />)}
-          {field('Email link', <input value={emailLink} onChange={e => setEmailLink(e.target.value)} placeholder="name@email.com" style={inp} />)}
+          {field('Email link', <input value={emailLink} onChange={e => setEmailLink(e.target.value)} placeholder="https://… (link to the email)" style={inp} />)}
           {/* Decision section */}
           <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
@@ -2042,7 +2231,7 @@ Continue with TMG Gmail
           {row('Assignees', ppl('assignee'))}
           {row('Assigned by', ppl('assigner'))}
           {task.working_url ? row('Working URL', <a href={task.working_url} target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Open ↗</a>) : null}
-          {task.email_link ? row('Email', contactLink('Email', task.email_link)) : null}
+          {task.email_link ? row('Email link', <a href={task.email_link} target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Open ↗</a>) : null}
           {task.description ? <div style={{ marginTop: 12 }}><div style={{ fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans }}>Description</div><div style={{ fontSize: '0.84rem', color: ink, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{task.description}</div></div> : null}
           {task.context ? <div style={{ marginTop: 12 }}><div style={{ fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans }}>Context</div><div style={{ fontSize: '0.84rem', color: ink, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{task.context}</div></div> : null}
           {/* Decision */}
@@ -2094,14 +2283,47 @@ Continue with TMG Gmail
       );
     }
 
-    function TasksScreen({ dark, user, onClose }) {
-      const [data, setData] = useState({ tasks: [], peopleByTask: {}, projById: {} });
+    // Manage your own labels (rename / delete across all your tasks).
+    function LabelManager({ dark, user, onClose }) {
+      const [labels, setLabels] = useState(null);   // null = loading
+      const [editing, setEditing] = useState(null);
+      const [draft, setDraft] = useState('');
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const gold = dark ? '#C9A45A' : '#AD832F';
+      async function load() { setLabels(await TaskDB.myLabelNames(user && user.id)); }
+      useEffect(() => { load(); }, []);
+      async function rename(oldL) { const v = draft.trim(); if (!v || v === oldL) { setEditing(null); return; } await TaskDB.renameLabel(user && user.id, oldL, v); setEditing(null); setDraft(''); await load(); }
+      async function del(l) { await TaskDB.deleteLabel(user && user.id, l); await load(); }
+      return (
+        <div style={{ padding: '12px 14px 24px' }}>
+          <div style={{ fontSize: '0.72rem', color: sub, lineHeight: 1.5, marginBottom: 12, fontFamily: C.fontSans }}>Your personal labels — renaming or deleting one updates it across all your tasks. Each teammate manages their own.</div>
+          {labels === null ? <div style={{ color: sub, fontSize: '0.82rem', padding: 8 }}>Loading…</div>
+            : labels.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: '16px 8px', textAlign: 'center' }}>No labels yet. Add labels on a task and they'll show up here.</div>
+            : labels.map(l => (
+              <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 10px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 10, marginBottom: 7 }}>
+                {editing === l
+                  ? <input autoFocus value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') rename(l); if (e.key === 'Escape') setEditing(null); }} style={{ flex: 1, padding: '6px 9px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 8, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans }} />
+                  : <span style={{ flex: 1, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.84rem', color: ink, fontFamily: C.fontSans }}><i className="ti ti-tag" style={{ fontSize: 14, color: gold }} />{l}</span>}
+                {editing === l
+                  ? <i className="ti ti-check" onClick={() => rename(l)} title="Save" style={{ fontSize: 17, cursor: 'pointer', color: dark ? '#3FB36B' : '#1E6B40' }} />
+                  : <i className="ti ti-pencil" onClick={() => { setEditing(l); setDraft(l); }} title="Rename" style={{ fontSize: 15, cursor: 'pointer', color: sub }} />}
+                <i className="ti ti-trash" onClick={() => del(l)} title="Delete" style={{ fontSize: 15, cursor: 'pointer', color: sub }} />
+              </div>
+            ))}
+        </div>
+      );
+    }
+
+    function TasksScreen({ dark, user, onClose, initialTask }) {
+      const [data, setData] = useState({ tasks: [], peopleByTask: {}, projById: {}, labelsByTask: {} });
       const [team, setTeam] = useState([]);
       const [loading, setLoading] = useState(true);
-      const [view, setView] = useState('list');   // list | detail | form
+      const [view, setView] = useState('list');   // list | detail | form | labels
       const [current, setCurrent] = useState(null);
+      const [sortBy, setSortBy] = useState('status');   // status | due | label
       const [vis, setVis] = useState(false);
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
+      useEffect(() => { if (initialTask) { setCurrent(initialTask); setView('detail'); } }, [initialTask]);
       const bg = dark ? '#000D26' : '#FCFBF8', bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
       const enrich = (t, projById) => ({ ...t, _projectName: t.project_id ? (projById[t.project_id] || '') : '' });
       const withMetaFrom = (t, d) => { const ppl = d.peopleByTask[t.id] || []; return { ...enrich(t, d.projById), _assignees: ppl.filter(p => p.role === 'assignee').map(p => p.user_id), _assigners: ppl.filter(p => p.role === 'assigner').map(p => p.user_id), _decisionMakers: ppl.filter(p => p.role === 'decision_maker').map(p => p.user_id) }; };
@@ -2133,7 +2355,54 @@ Continue with TMG Gmail
         setCurrent(fresh || { ...task, status });   // subtasks aren't in the top-level list — fall back to optimistic
       }
       const back = () => { if (view === 'form') setView(current ? 'detail' : 'list'); else { setView('list'); setCurrent(null); } };
-      const titleText = view === 'form' ? (current ? 'Edit task' : 'New task') : view === 'detail' ? 'Task' : 'Tasks';
+      const titleText = view === 'form' ? (current ? 'Edit task' : 'New task') : view === 'detail' ? 'Task' : view === 'labels' ? 'Manage labels' : 'Tasks';
+      const myLabelsFor = (id) => (data.labelsByTask[id] || []).filter(l => l.user_id === (user && user.id)).map(l => l.label);
+      const groupHead = (color, text) => <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: color }} /><span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{text}</span></div>;
+      const taskRow = (t, showStatus) => {
+        const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
+        const myLabels = myLabelsFor(t.id);
+        return (
+          <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} title={priorityLabel(t.priority)} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+              <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
+              {myLabels.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>{myLabels.map(l => <span key={l} style={{ padding: '1px 6px', borderRadius: 10, background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA', color: dark ? '#C9A45A' : '#AD832F', fontSize: '0.58rem', fontWeight: 600, fontFamily: C.fontSans }}>{l}</span>)}</div>}
+            </div>
+            {showStatus && <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusColor(t.status) + '22', color: statusColor(t.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(t.status)}</span>}
+            <i className="ti ti-chevron-right" style={{ fontSize: 16, color: sub, flexShrink: 0 }} />
+          </div>
+        );
+      };
+      const sortTabs = (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          {[['status', 'Status'], ['due', 'Due date'], ['label', 'Label']].map(([id, label]) => (
+            <button key={id} onClick={() => setSortBy(id)} style={{ flex: 1, padding: '6px 8px', borderRadius: 8, border: `1px solid ${sortBy === id ? C.navy : bord}`, background: sortBy === id ? C.navy : (dark ? '#0A1730' : '#fff'), color: sortBy === id ? '#fff' : sub, fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{label}</button>
+          ))}
+        </div>
+      );
+      const renderList = () => {
+        if (sortBy === 'due') {
+          const sorted = [...data.tasks].sort((a, b) => { if (!a.due_at && !b.due_at) return 0; if (!a.due_at) return 1; if (!b.due_at) return -1; return new Date(a.due_at) - new Date(b.due_at); });
+          return <div>{groupHead(dark ? '#C9A45A' : '#AD832F', 'By due date · ' + sorted.length)}{sorted.map(t => taskRow(t, true))}</div>;
+        }
+        if (sortBy === 'label') {
+          const groups = {}; const unlabeled = [];
+          data.tasks.forEach(t => { const ls = myLabelsFor(t.id); if (!ls.length) unlabeled.push(t); else ls.forEach(l => { (groups[l] = groups[l] || []).push(t); }); });
+          const names = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+          return (
+            <React.Fragment>
+              {names.map(n => <div key={n} style={{ marginBottom: 16 }}>{groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length)}{groups[n].map(t => taskRow(t, true))}</div>)}
+              {unlabeled.length > 0 && <div style={{ marginBottom: 16 }}>{groupHead(sub, 'Unlabeled · ' + unlabeled.length)}{unlabeled.map(t => taskRow(t, true))}</div>}
+            </React.Fragment>
+          );
+        }
+        return TASK_STATUS.map(col => {
+          const items = data.tasks.filter(t => t.status === col.id);
+          if (!items.length) return null;
+          return <div key={col.id} style={{ marginBottom: 16 }}>{groupHead(col.color, col.label + ' · ' + items.length)}{items.map(t => taskRow(t, false))}</div>;
+        });
+      };
       return (
         <React.Fragment>
           {/* Overlay — dims content only, sits below the top bar (mirrors the calendar pop-out) */}
@@ -2156,44 +2425,97 @@ Continue with TMG Gmail
                 <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleText}</span>
               </div>
               {view === 'list'
-                ? <button onClick={() => { setCurrent(null); setView('form'); }} aria-label="New task" style={{ display: 'flex', alignItems: 'center', gap: 4, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '4px 10px', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>
+                ? <div style={{ display: 'flex', alignItems: 'center', gap: 11, flexShrink: 0 }}>
+                    <i className="ti ti-tag" onClick={() => setView('labels')} title="Manage labels" style={{ fontSize: 16, cursor: 'pointer', color: dark ? '#C9A45A' : '#AD832F' }} />
+                    <button onClick={() => { setCurrent(null); setView('form'); }} aria-label="New task" style={{ display: 'flex', alignItems: 'center', gap: 4, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '4px 10px', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>
+                  </div>
                 : <i className="ti ti-x" onClick={onClose} aria-label="Close" style={{ fontSize: 15, cursor: 'pointer', color: dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9', flexShrink: 0 }} />}
             </div>
             {/* Body (scrolls) */}
             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
               {view === 'form' ? <TaskForm dark={dark} task={current ? withMeta(current) : null} team={team} user={user} onSave={handleSave} onCancel={() => setView(current ? 'detail' : 'list')} />
                 : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} onEdit={() => setView('form')} onStatus={(s) => changeStatus(current, s)} onOpenSubtask={(child) => { setCurrent(child); setView('detail'); }} />
+                : view === 'labels' ? <LabelManager dark={dark} user={user} onClose={() => setView('list')} />
                 : (
                   <div style={{ padding: '12px 14px 24px' }}>
                     {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 12 }}>Loading…</div>
                       : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center' }}>No tasks yet. Tap <b>New</b> to add one.</div>
-                      : TASK_STATUS.map(col => {
-                          const items = data.tasks.filter(t => t.status === col.id);
-                          if (!items.length) return null;
-                          return (
-                            <div key={col.id} style={{ marginBottom: 16 }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} /><span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{col.label} · {items.length}</span></div>
-                              {items.map(t => {
-                                const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
-                                return (
-                                  <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer' }}>
-                                    <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} />
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                      <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
-                                      <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
-                                    </div>
-                                    <i className="ti ti-chevron-right" style={{ fontSize: 16, color: sub, flexShrink: 0 }} />
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          );
-                        })}
+                      : <React.Fragment>{sortTabs}{renderList()}</React.Fragment>}
                   </div>
                 )}
             </div>
           </div>
         </React.Fragment>
+      );
+    }
+
+    // ─── Projects (opened from the More menu) ────────────────────────
+    function ProjectsTab({ dark, user, onBack, onOpenTask }) {
+      const [data, setData] = useState(null);   // null = loading
+      const [adding, setAdding] = useState(false);
+      const [newName, setNewName] = useState('');
+      const J = "'Jost', sans-serif";
+      const headingC = dark ? '#fff' : '#001A4A';
+      const subC = dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9';
+      const cardBg = dark ? '#0A1730' : '#fff';
+      const bord = dark ? '#152545' : '#EDE7DC';
+      const ink = dark ? '#fff' : '#001A4A';
+      const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const gold = dark ? '#C9A45A' : '#AD832F';
+      async function load() { setData(await TaskDB.loadAll()); }
+      useEffect(() => { load(); }, []);
+      async function createProject() { const n = newName.trim(); if (!n) return; await TaskDB.createProject(n, user); setNewName(''); setAdding(false); await load(); }
+      let groups = [];
+      if (data) {
+        const byId = {};
+        Object.keys(data.projById || {}).forEach(id => { byId[id] = { id, name: data.projById[id], tasks: [] }; });
+        const noProj = { id: null, name: 'No project', tasks: [] };
+        (data.tasks || []).forEach(t => { if (t.project_id && byId[t.project_id]) byId[t.project_id].tasks.push(t); else noProj.tasks.push(t); });
+        groups = Object.values(byId).sort((a, b) => a.name.localeCompare(b.name));
+        if (noProj.tasks.length) groups.push(noProj);
+      }
+      const statusChips = (tasks) => {
+        const counts = {}; tasks.forEach(t => { counts[t.status] = (counts[t.status] || 0) + 1; });
+        return TASK_STATUS.filter(s => counts[s.id]).map(s => (
+          <span key={s.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '0.6rem', fontWeight: 600, color: s.color, fontFamily: J }}><span style={{ width: 6, height: 6, borderRadius: '50%', background: s.color }} />{counts[s.id]} {s.label}</span>
+        ));
+      };
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '12px 16px 8px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: headingC }}><i className="ti ti-chevron-left" style={{ fontSize: 22 }} /></button>
+            <span style={{ flex: 1, fontFamily: J, fontSize: 17, fontWeight: 600, letterSpacing: '0.02em', color: headingC }}>Projects</span>
+            <button onClick={() => setAdding(a => !a)} style={{ display: 'flex', alignItems: 'center', gap: 4, background: gold, color: '#fff', border: 'none', borderRadius: 20, padding: '5px 11px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', fontFamily: J }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>
+          </div>
+          {adding && (
+            <div style={{ margin: '4px 16px 8px', display: 'flex', gap: 8 }}>
+              <input autoFocus value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') createProject(); }} placeholder="Project name…" style={{ flex: 1, padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: J }} />
+              <button onClick={createProject} style={{ padding: '0 14px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', fontFamily: J }}>Add</button>
+            </div>
+          )}
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 16px 20px' }}>
+            {data === null ? <div style={{ color: sub, fontSize: '0.84rem', padding: 12 }}>Loading…</div>
+              : groups.length === 0 ? <div style={{ color: sub, fontSize: '0.84rem', padding: 24, textAlign: 'center' }}>No projects yet. Tap <b>New</b>, or add a project when creating a task.</div>
+              : groups.map(g => (
+                <div key={g.id || 'none'} style={{ background: cardBg, border: `1px solid ${bord}`, borderRadius: 14, padding: '12px 14px', marginBottom: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: g.tasks.length ? 8 : 2 }}>
+                    <i className="ti ti-folder" style={{ fontSize: 16, color: gold }} />
+                    <span style={{ flex: 1, fontFamily: J, fontSize: 14, fontWeight: 600, color: ink }}>{g.name}</span>
+                    <span style={{ fontFamily: J, fontSize: 11, color: sub }}>{g.tasks.length} {g.tasks.length === 1 ? 'task' : 'tasks'}</span>
+                  </div>
+                  {g.tasks.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 8 }}>{statusChips(g.tasks)}</div>}
+                  {g.tasks.map(t => (
+                    <div key={t.id} onClick={() => onOpenTask && onOpenTask(t)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 0', borderTop: `1px solid ${bord}`, cursor: 'pointer' }}>
+                      <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} />
+                      <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 12.5, color: ink, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+                      <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusColor(t.status) + '22', color: statusColor(t.status), fontFamily: J, flexShrink: 0 }}>{statusLabel(t.status)}</span>
+                    </div>
+                  ))}
+                  {g.tasks.length === 0 && <div style={{ fontFamily: J, fontSize: 11, color: subC, paddingTop: 2 }}>No tasks yet.</div>}
+                </div>
+              ))}
+          </div>
+        </div>
       );
     }
 
@@ -3664,6 +3986,7 @@ Continue with TMG Gmail
       const [accessCfg, setAccessCfg] = useState(DEFAULT_ACCESS);
       const [showCalendar, setShowCalendar] = useState(false);
       const [showTasks, setShowTasks] = useState(false);
+      const [tasksFocus, setTasksFocus] = useState(null);   // a task to open directly (e.g. from the Projects tab)
       const [showProfile, setShowProfile] = useState(false);
       const [showStatus, setShowStatus] = useState(false);
       const [away, setAway] = useState(!!(profile && profile.away));
@@ -3678,9 +4001,11 @@ Continue with TMG Gmail
       const moreItems = []
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
+        .concat([{ id: 'projects', label: 'Projects', icon: 'ti-folder' }])
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', icon: 'ti-messages' }] : [])
-        .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : []);
+        .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
+        .concat(isAdmin ? [{ id: 'roadmap', label: 'Roadmap', icon: 'ti-sitemap' }] : []);
       // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
       const myAvatar = (profile && profile.avatar_url) || (user && user.user_metadata && user.user_metadata.avatar_url) || '';
       const myName = ((((profile && profile.first_name) || '') + ' ' + ((profile && profile.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || (user && user.email) || 'Me';
@@ -3919,9 +4244,9 @@ Continue with TMG Gmail
 
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
-          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); }} tasksOpen={showTasks} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
+          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); setTasksFocus(null); }} tasksOpen={showTasks} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
           {showCalendar && <CalendarPopover dark={dark} onClose={() => setShowCalendar(false)} />}
-          {showTasks && <TasksScreen dark={dark} user={user} onClose={() => setShowTasks(false)} />}
+          {showTasks && <TasksScreen dark={dark} user={user} initialTask={tasksFocus} onClose={() => { setShowTasks(false); setTasksFocus(null); }} />}
           {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
@@ -3949,8 +4274,10 @@ Continue with TMG Gmail
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'more' && (
               moreView === 'admin' && isAdmin ? <AdminTab onOpenBuilder={() => setBuilderOpen(true)} />
+              : moreView === 'roadmap' && isAdmin ? <AppRoadmap dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
+              : moreView === 'projects' ? <ProjectsTab dark={dark} user={user} onBack={() => setMoreMenuOpen(true)} onOpenTask={(t) => { setTasksFocus(t); setShowTasks(true); }} />
               : moreView === 'expsurvey' ? <ExpSurvey dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}

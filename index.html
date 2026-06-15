@@ -520,7 +520,7 @@ Rules:
     // ─── Work Mode pills ─────────────────────────────────────────────
     // Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
     const FALLBACK_PILLS = [
-      { id: 'fb-task',    label: 'New Task',             icon: 'ti-checklist',       colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   config: { instruction: TASK_PILL_INSTRUCTION, greeting: 'Sure — tell me about the task. What needs doing, and when is it due?' }, enabled: true },
+      { id: 'fb-task',    label: 'Add To Do',            icon: 'ti-checklist',       colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   config: { instruction: TASK_PILL_INSTRUCTION, seed: 'Add To Do: ' }, enabled: true },
       { id: 'fb-kpis',    label: 'Enter KPIs',           icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Enter KPIs' },           enabled: true },
       { id: 'fb-listing', label: 'Listing Presentation', icon: 'ti-presentation',    colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Listing Presentation' }, enabled: true },
       { id: 'fb-showing', label: 'Add Showing',          icon: 'ti-home',            colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Add Showing' },          enabled: true },
@@ -1200,8 +1200,8 @@ Rules:
       const instr = config.instruction !== undefined ? config.instruction : TASK_PILL_INSTRUCTION;
       return (
         <div>
-          <div style={lbl}>Opening line <span style={{ textTransform: 'none', fontWeight: 400 }}>(optional)</span></div>
-          <input value={config.greeting || ''} onChange={e => setConfig({ ...config, greeting: e.target.value })} placeholder="Sure — tell me about the task." style={inp} />
+          <div style={lbl}>Text box prefill <span style={{ textTransform: 'none', fontWeight: 400 }}>(appears in the input when tapped)</span></div>
+          <input value={config.seed !== undefined ? config.seed : 'Add To Do: '} onChange={e => setConfig({ ...config, seed: e.target.value })} placeholder="Add To Do: " style={inp} />
           <div style={{ ...lbl, marginTop: 14 }}>AI instruction <span style={{ textTransform: 'none', fontWeight: 400 }}>(the command)</span></div>
           <textarea value={instr} onChange={e => setConfig({ ...config, instruction: e.target.value })} rows={12} style={{ ...inp, resize: 'vertical', lineHeight: 1.5, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '0.72rem' }} />
           <div style={{ fontSize: '0.68rem', color: sub, marginTop: 6, lineHeight: 1.5, fontFamily: C.fontSans }}>This exact instruction is sent to the AI when the pill is used. It must tell the AI to end every reply with an <b>ACTION</b> block — the app reads that block to create the task instantly.</div>
@@ -2525,6 +2525,87 @@ Rules:
                       : <React.Fragment>{sortTabs}{renderList()}</React.Fragment>}
                   </div>
                 )}
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
+    // ─── Add To-Do pop-out (Work Mode task pill) ─────────────────────
+    // A compact pop-out (below the header, above the bottom nav) — not a full screen.
+    // Input is pre-seeded; on send, the AI (instruction from the pill) creates the task.
+    function AddTodoPopover({ dark, user, pill, bottomOffset, onClose }) {
+      const instruction = (pill && pill.config && pill.config.instruction) || TASK_PILL_INSTRUCTION;
+      const seed = (pill && pill.config && pill.config.seed !== undefined) ? pill.config.seed : 'Add To Do: ';
+      const [text, setText] = useState(seed);
+      const [msgs, setMsgs] = useState([]);
+      const [busy, setBusy] = useState(false);
+      const [vis, setVis] = useState(false);
+      const scRef = useRef(null), taRef = useRef(null);
+      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
+      useEffect(() => { if (taRef.current) { taRef.current.focus(); const n = taRef.current.value.length; try { taRef.current.setSelectionRange(n, n); } catch (e) {} } }, []);
+      useEffect(() => { if (scRef.current) scRef.current.scrollTop = scRef.current.scrollHeight; }, [msgs, busy]);
+      const bg = dark ? '#000D26' : '#FCFBF8', card = dark ? '#0A1730' : '#fff', bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', gold = dark ? '#C9A45A' : '#AD832F';
+      async function send() {
+        const t = text.trim();
+        if (!t || busy) return;
+        const next = [...msgs, { role: 'user', content: t }];
+        setMsgs(next); setText(''); setBusy(true);
+        try {
+          const sys = instruction + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.';
+          const reply = await callAI(next.map(m => ({ role: m.role, content: m.content })), sys);
+          let display = reply, created = null;
+          const mm = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
+          if (mm) {
+            display = reply.slice(0, mm.index).trim();
+            try {
+              const parsed = JSON.parse(mm[1]);
+              if (parsed && String(parsed.type).toUpperCase() === 'ADD' && parsed.payload) {
+                created = await createTaskFromAI(parsed.payload, user);
+                if (!display) display = created ? ('Done — added “' + (parsed.payload.title || 'task') + '” to your Tasks.') : 'Hmm, I couldn’t create that — try again.';
+              }
+            } catch (e) { /* keep stripped text */ }
+          }
+          if (!display) display = reply;
+          setMsgs(prev => [...prev, { role: 'assistant', content: display, created: !!created }]);
+        } catch (e) {
+          setMsgs(prev => [...prev, { role: 'assistant', content: String(e.message || e), error: true }]);
+        } finally { setBusy(false); }
+      }
+      return (
+        <React.Fragment>
+          {/* Overlay — dims only between the header and the bottom zone (nav stays clear) */}
+          <div onClick={onClose} style={{ position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', left: 0, right: 0, bottom: bottomOffset, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />
+          {/* Pop-out */}
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'fixed', top: 'calc(68px + env(safe-area-inset-top))', left: 12, right: 12, zIndex: 60,
+            maxHeight: 'calc(100vh - 84px - env(safe-area-inset-top) - ' + bottomOffset + 'px)',
+            display: 'flex', flexDirection: 'column', borderRadius: 16, overflow: 'hidden',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.20)', background: bg, border: '1px solid ' + bord,
+            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid ' + bord, flexShrink: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <i className="ti ti-checklist" style={{ fontSize: 16, color: gold }} />
+                <span style={{ fontFamily: C.fontSans, fontSize: 13, fontWeight: 700, letterSpacing: '0.02em', color: ink }}>Add To-Do</span>
+              </div>
+              <i className="ti ti-x" onClick={onClose} aria-label="Close" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
+            </div>
+            <div ref={scRef} style={{ flex: 1, minHeight: 70, overflowY: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {msgs.length === 0 && <div style={{ fontSize: '0.78rem', color: sub, lineHeight: 1.5, fontFamily: C.fontSans }}>Type or dictate your to-do below, then send — I’ll add it to Tasks. Include a due date.</div>}
+              {msgs.map((m, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                  <div style={{ maxWidth: '85%', padding: '8px 11px', borderRadius: 12, fontSize: '0.84rem', lineHeight: 1.4, fontFamily: C.fontSans, whiteSpace: 'pre-wrap', background: m.role === 'user' ? C.navy : card, color: m.role === 'user' ? '#fff' : (m.error ? '#C0392B' : ink), border: m.role === 'user' ? 'none' : '1px solid ' + bord }}>
+                    {m.content}
+                    {m.created && <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, padding: '3px 8px', borderRadius: 8, background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA', color: gold, fontSize: '0.66rem', fontWeight: 600, width: 'fit-content' }}><i className="ti ti-checklist" style={{ fontSize: 12 }} />Added to Tasks</div>}
+                  </div>
+                </div>
+              ))}
+              {busy && <div style={{ fontSize: '0.76rem', color: sub, fontFamily: C.fontSans }}>Working…</div>}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, padding: '10px 12px', borderTop: '1px solid ' + bord, flexShrink: 0 }}>
+              <textarea ref={taRef} value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} rows={1} placeholder="Add To Do: …" style={{ flex: 1, resize: 'none', maxHeight: 96, padding: '9px 12px', borderRadius: 18, border: '1px solid ' + bord, background: dark ? '#06101F' : '#F7F4EE', color: ink, fontSize: '0.86rem', lineHeight: 1.4, outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' }} />
+              <button onClick={send} disabled={busy || !text.trim()} aria-label="Send" style={{ width: 38, height: 38, borderRadius: '50%', flexShrink: 0, border: 'none', cursor: 'pointer', background: C.navy, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: !text.trim() ? 0.5 : 1 }}><i className="ti ti-arrow-up" style={{ fontSize: 18 }} /></button>
             </div>
           </div>
         </React.Fragment>
@@ -4116,7 +4197,8 @@ Rules:
       const [pills, setPills] = useState(null);
       const [builderOpen, setBuilderOpen] = useState(false);
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
-      const [taskInstruction, setTaskInstruction] = useState(null); // set → Work Mode is creating a task (AI instruction from the pill)
+      const [showAddTodo, setShowAddTodo] = useState(false); // the Add To-Do pop-out
+      const [todoPill, setTodoPill] = useState(null);         // the task pill that opened it (carries the AI instruction)
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
       const [moreView, setMoreView] = useState('directory');
@@ -4155,6 +4237,21 @@ Rules:
 
       const refreshPills = () => PillDB.list().then(setPills);
       useEffect(() => { refreshPills(); }, []);
+      // First-run: materialize the default pills into the DB so they're editable in Admin
+      // (incl. the Add To-Do task pill). Guarded so deleting all pills won't respawn them.
+      const pillsSeededRef = useRef(false);
+      useEffect(() => {
+        if (!isAdmin || pills === null || pills.length > 0 || pillsSeededRef.current) return;
+        if (localStorage.getItem('tmg-pills-seeded')) return;
+        pillsSeededRef.current = true;
+        (async () => {
+          try {
+            for (let i = 0; i < FALLBACK_PILLS.length; i++) await PillDB.create({ ...FALLBACK_PILLS[i], sortOrder: i });
+            localStorage.setItem('tmg-pills-seeded', '1');
+            refreshPills();
+          } catch (e) { console.warn('[pills] seed:', e); }
+        })();
+      }, [pills, isAdmin]);
       // Effective pills: DB pills when present, else the built-in fallback; only enabled ones show.
       const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false);
       useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
@@ -4236,27 +4333,10 @@ Rules:
           setMessages(history);
 
           await ConvDB.insertMessage(convId, 'user', text || '', uploaded);
-          const apiMsgs = history.filter(m => !m._seed).map(m => ({ role: m.role, content: toApiContent(m) }));
-          const sys = taskInstruction ? (taskInstruction + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.') : undefined;
-          const reply = await callAI(apiMsgs, sys);
-          // Task mode: the AI ends its reply with an ACTION block — read it, create the task, hide the JSON.
-          let display = reply;
-          if (taskInstruction) {
-            const m = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
-            if (m) {
-              display = reply.slice(0, m.index).trim();
-              try {
-                const parsed = JSON.parse(m[1]);
-                if (parsed && String(parsed.type).toUpperCase() === 'ADD' && parsed.payload) {
-                  const created = await createTaskFromAI(parsed.payload, user);
-                  if (!display) display = created ? ('Done — added “' + (parsed.payload.title || 'task') + '” to your Tasks.') : 'I tried to create the task but ran into an error — please try again.';
-                }
-              } catch (e) { /* keep the stripped conversational text */ }
-            }
-          }
-          if (!display) display = reply;
-          setMessages(prev => [...prev, { role: 'assistant', content: display }]);
-          await ConvDB.insertMessage(convId, 'assistant', display);
+          const apiMsgs = history.map(m => ({ role: m.role, content: toApiContent(m) }));
+          const reply = await callAI(apiMsgs);
+          setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+          await ConvDB.insertMessage(convId, 'assistant', reply);
           if (isFirst) {
             const seed = text || (uploaded[0] && uploaded[0].name) || 'Shared a file';
             const title = await generateTitle(seed);
@@ -4284,7 +4364,6 @@ Rules:
         setMessages([]);
         setCurrentConvId(null);
         setWorkRequest(null);
-        setTaskInstruction(null);
         setInput(localStorage.getItem('tmg-draft-new') || '');
       }
 
@@ -4297,7 +4376,6 @@ Rules:
         const conv = conversations.find(c => c.id === id);
         setDrawerOpen(false);
         setCurrentConvId(id);
-        setTaskInstruction(null);
         setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
         if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
@@ -4311,13 +4389,7 @@ Rules:
         if (!pill) return;
         if (pill.type === 'form') { setActivePill({ pill, kind: 'form' }); return; }
         if (pill.type === 'steps') { setActivePill({ pill, kind: 'steps' }); return; }
-        if (pill.type === 'task') {
-          setCurrentConvId(null);
-          setWorkRequest(null);
-          setTaskInstruction((pill.config && pill.config.instruction) || TASK_PILL_INSTRUCTION);
-          setMessages([{ role: 'assistant', content: (pill.config && pill.config.greeting) || 'Sure — tell me about the task. What needs doing, and when is it due?', _seed: true }]);
-          return;
-        }
+        if (pill.type === 'task') { setTodoPill(pill); setShowAddTodo(true); return; }
         const text = (pill.config && pill.config.prompt) || pill.label; // prompt (default)
         runSend(text, { type: 'work' });
       }
@@ -4356,6 +4428,7 @@ Rules:
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); setTasksFocus(null); }} tasksOpen={showTasks} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
           {showCalendar && <CalendarPopover dark={dark} onClose={() => setShowCalendar(false)} />}
           {showTasks && <TasksScreen dark={dark} user={user} initialTask={tasksFocus} onClose={() => { setShowTasks(false); setTasksFocus(null); }} />}
+          {showAddTodo && <AddTodoPopover dark={dark} user={user} pill={todoPill} bottomOffset={zoneH} onClose={() => { setShowAddTodo(false); setTodoPill(null); }} />}
           {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>

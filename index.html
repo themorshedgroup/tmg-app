@@ -368,8 +368,8 @@ Continue with TMG Gmail
 
     // ─── Profiles / access ───────────────────────────────────────────
     // Per-tool access: which configurable roles can open each tool/app.
-    // Admin & Operations are always on. Editable in Admin → Tab Access,
-    // persisted in the app_access table (see app-access.sql).
+    // Admins are always on. Operations is a configurable role like the others.
+    // Editable in Admin → Tab Access, persisted in app_access (see app-access.sql).
     const ACCESS_APPS = [
       { id: 'chat',      label: 'AI Chat',           icon: 'ti-sparkles' },
       { id: 'teamchat',  label: 'Team Chat',         icon: 'ti-message' },
@@ -381,20 +381,29 @@ Continue with TMG Gmail
       { id: 'sffu',      label: 'SFFU',              icon: 'ti-messages' },
     ];
     const ACCESS_ROLES = [
-      { id: 'agent', label: 'Sales Agent' },
-      { id: 'tc',    label: 'Transaction Coordinator' },
+      { id: 'operations', label: 'Operations' },
+      { id: 'agent',      label: 'Sales Agent' },
+      { id: 'tc',         label: 'Transaction Coordinator' },
     ];
+    // Operations defaults to ON for every tool (preserving its old all-access),
+    // but is now editable per-tool like Sales Agent / Transaction Coordinator.
     const DEFAULT_ACCESS = {
-      chat: ['agent', 'tc'], teamchat: ['agent', 'tc'],
-      calls: ['agent'], kpis: ['agent'], deals: ['agent'],
-      drives: ['agent', 'tc'], directory: ['agent', 'tc'], sffu: ['tc'],
+      chat: ['operations', 'agent', 'tc'], teamchat: ['operations', 'agent', 'tc'],
+      calls: ['operations', 'agent'], kpis: ['operations', 'agent'], deals: ['operations', 'agent'],
+      drives: ['operations', 'agent', 'tc'], directory: ['operations', 'agent', 'tc'], sffu: ['operations', 'tc'],
     };
-    // Fill any missing/invalid apps with defaults; keep only known roles.
+    // Fill any missing/invalid apps with defaults; keep only configurable roles.
     function normalizeAccess(cfg) {
+      const valid = (r) => r === 'operations' || r === 'agent' || r === 'tc';
+      // A config saved before Operations was configurable lists no 'operations'
+      // anywhere → backfill it ON for every tool (preserve its old always-on access).
+      const legacy = cfg && !ACCESS_APPS.some(a => Array.isArray(cfg[a.id]) && cfg[a.id].includes('operations'));
       const out = {};
       ACCESS_APPS.forEach(a => {
-        const v = (cfg && Array.isArray(cfg[a.id])) ? cfg[a.id] : DEFAULT_ACCESS[a.id];
-        out[a.id] = (v || []).filter(r => r === 'agent' || r === 'tc');
+        let v = ((cfg && Array.isArray(cfg[a.id])) ? cfg[a.id] : DEFAULT_ACCESS[a.id]) || [];
+        v = v.filter(valid);
+        if (legacy && !v.includes('operations')) v = ['operations', ...v];
+        out[a.id] = v;
       });
       return out;
     }
@@ -670,12 +679,12 @@ Continue with TMG Gmail
     const toRoles = (a) => (Array.isArray(a) ? a : (a ? [a] : [])).filter(r => r && r !== 'pending');
     const hasAdmin = (a) => toRoles(a).some(r => r === 'admin' || r === 'operations');
     const accessLabel = (a) => { const r = toRoles(a); return r.length ? r.map(x => ACCESS_LABEL[x] || x).join(' · ') : 'Pending'; };
-    // Apps this user may open. null = everything (admins/operations, or no role set).
+    // Apps this user may open. null = everything (admins, or no role set).
     // Otherwise a Set of app ids; 'more' + 'settings' are always available separately.
     function allowedAppSet(a, cfg) {
       const roles = toRoles(a);
-      if (!roles.length) return null;                                        // no roles → all (fallback)
-      if (roles.some(r => r === 'admin' || r === 'operations')) return null; // admin/ops → all
+      if (!roles.length) return null;                    // no roles → all (fallback)
+      if (roles.some(r => r === 'admin')) return null;   // admins → all (operations is configurable)
       const set = new Set();
       ACCESS_APPS.forEach(app => {
         const appRoles = (cfg && Array.isArray(cfg[app.id])) ? cfg[app.id] : (DEFAULT_ACCESS[app.id] || []);
@@ -1470,7 +1479,7 @@ Continue with TMG Gmail
                         })}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', background: C.bg }}>
                           <i className="ti ti-lock" style={{ fontSize: 12, color: C.gold }} />
-                          <span style={{ fontSize: '0.68rem', fontWeight: 500, color: C.textMuted, fontFamily: C.fontSans }}>Admin &amp; Operations — always on</span>
+                          <span style={{ fontSize: '0.68rem', fontWeight: 500, color: C.textMuted, fontFamily: C.fontSans }}>Admins — always on</span>
                         </div>
                       </div>
                     )}

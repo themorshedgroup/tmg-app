@@ -198,7 +198,7 @@ Continue with TMG Gmail
     }
 
     // Sends the running conversation to the ai-chat Edge Function and returns the reply text.
-    async function callAI(messages) {
+    async function callAI(messages, sysOverride) {
       const res = await fetch(AI_ENDPOINT, {
         method: 'POST',
         headers: {
@@ -206,7 +206,7 @@ Continue with TMG Gmail
           'Authorization': 'Bearer ' + authToken(),
           'apikey': SUPABASE_ANON,
         },
-        body: JSON.stringify({ messages, system: SYSTEM_PROMPT, max_tokens: 4096 }),
+        body: JSON.stringify({ messages, system: sysOverride || SYSTEM_PROMPT, max_tokens: 4096 }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) {
@@ -486,9 +486,41 @@ Continue with TMG Gmail
       { key: 'listing_presentation', label: 'Request Listing Presentation', short: 'Listing' },
     ];
 
+    // The AI instruction (the "command") that powers a Task pill. Stored INSIDE the
+    // pill's config so it's editable in the pill builder — this is just the default.
+    // The AI ends every reply with one ACTION block; the app reads it to create the task.
+    const TASK_PILL_INSTRUCTION =
+`You are the TMG task assistant. Turn what the user tells you into ONE task on the team's shared task board. Have a short, natural conversation — ask only for what's missing and important, never interrogate.
+
+Before creating a task you need at least a TITLE and a DUE DATE. If there's no due date yet, ask for one. Everything else is optional.
+
+Fields you can capture into the payload:
+- title (short)
+- dueDate ("YYYY-MM-DD"); dueTime ("HH:MM", 24-hour) only if a time was given
+- priority: "low" | "medium" | "high"  (default "medium")
+- status: "todo" | "in_progress" | "stuck" | "done"  (default "todo")
+- project (a short name)
+- assignees: array of the people's names who will do it
+- assigners: array of the people's names who asked for it
+- description: a concise 1–2 sentence summary of the task (this becomes the task's Description)
+- context: any extra background/notes
+- workingUrl, emailLink: links, only if mentioned
+- decisionQuestion, decisionOptions (array of strings), decisionMaker (a name): only if this task is about making a decision
+
+## How to reply
+End EVERY reply with exactly ONE action block on its own final line, with nothing after it:
+ACTION:{"type":"ADD","payload":{ ...the fields you have... }}
+
+Rules:
+- Use "ADD" only once you have at least a title AND a dueDate — that creates the task immediately. Then confirm in one short sentence, e.g. Done — added "<title>", due <date>.
+- If you still need something (like the due date), ask your question and end with: ACTION:{"type":"NONE","payload":{}}
+- Resolve relative dates ("Friday", "tomorrow", "next week") to an absolute YYYY-MM-DD using today's date given in the conversation.
+- Keep the conversational part brief and friendly.`;
+
     // ─── Work Mode pills ─────────────────────────────────────────────
     // Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
     const FALLBACK_PILLS = [
+      { id: 'fb-task',    label: 'New Task',             icon: 'ti-checklist',       colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   config: { instruction: TASK_PILL_INSTRUCTION, greeting: 'Sure — tell me about the task. What needs doing, and when is it due?' }, enabled: true },
       { id: 'fb-kpis',    label: 'Enter KPIs',           icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Enter KPIs' },           enabled: true },
       { id: 'fb-listing', label: 'Listing Presentation', icon: 'ti-presentation',    colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Listing Presentation' }, enabled: true },
       { id: 'fb-showing', label: 'Add Showing',          icon: 'ti-home',            colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Add Showing' },          enabled: true },
@@ -913,6 +945,53 @@ Continue with TMG Gmail
         if (error) console.error('[TaskDB] addActivity:', error.message);
       },
     };
+
+    // Turn an AI "ADD" payload (from a Task pill's ACTION block) into a real task.
+    // Names are matched to teammates; unmatched names are skipped (left blank).
+    async function createTaskFromAI(payload, user) {
+      if (!payload) return null;
+      const roster = await ProfileDB.loadAll();
+      const nameToId = {};
+      (roster || []).forEach(p => {
+        const full = (((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || '').toLowerCase();
+        const first = (p.first_name || '').toLowerCase();
+        if (full) nameToId[full] = p.id;
+        if (first && !nameToId[first]) nameToId[first] = p.id;
+      });
+      const matchIds = (arr) => (Array.isArray(arr) ? arr : (arr ? [arr] : [])).map(n => nameToId[(n || '').toLowerCase().trim()]).filter(Boolean);
+      let due_at = null;
+      if (payload.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(payload.dueDate)) {
+        const t = (payload.dueTime && /^\d{1,2}:\d{2}$/.test(payload.dueTime)) ? payload.dueTime : '09:00';
+        const d = new Date(payload.dueDate + 'T' + (t.length === 4 ? '0' + t : t));
+        if (!isNaN(d)) due_at = d.toISOString();
+      }
+      const project_id = payload.project ? await TaskDB.findOrCreateProject(payload.project, user) : null;
+      const fields = {
+        title: (payload.title || 'Untitled task').trim(),
+        due_at, project_id,
+        priority: ['low', 'medium', 'high'].includes(payload.priority) ? payload.priority : 'medium',
+        status: ['todo', 'in_progress', 'stuck', 'done'].includes(payload.status) ? payload.status : 'todo',
+        description: payload.description || payload.summary || null,
+        context: payload.context || null,
+        working_url: payload.workingUrl || null,
+        email_link: payload.emailLink || null,
+        decision_question: payload.decisionQuestion || null,
+        recurrence: 'none',
+      };
+      const people = {
+        assignee: matchIds(payload.assignees),
+        assigner: matchIds(payload.assigners),
+        decision_maker: matchIds(payload.decisionMakers || payload.decisionMaker),
+      };
+      const created = await TaskDB.create(fields, people, user);
+      if (created && created.id) {
+        const opts = (payload.decisionOptions || []).map(o => (typeof o === 'string' ? { body: o, is_chosen: false } : { body: (o && o.body) || '', is_chosen: !!(o && o.is_chosen) }));
+        if (opts.length) await TaskDB.setDecisionOptions(created.id, opts);
+        await TaskDB.addActivity(created.id, 'ai', 'Created from Work Mode (AI)', user);
+      }
+      return created;
+    }
+
     const CARD = { background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginBottom: 14 };
 
     // App-wide rule: Phone values become tel: links, Email values become mailto: links.
@@ -1115,6 +1194,21 @@ Continue with TMG Gmail
       );
     }
 
+    // Task pill: the AI instruction (the "command") lives here, inside the pill's config.
+    function TaskConfigEditor({ config, setConfig, inp, lbl, sub }) {
+      useEffect(() => { if (config.instruction === undefined) setConfig({ ...config, instruction: TASK_PILL_INSTRUCTION }); }, []);
+      const instr = config.instruction !== undefined ? config.instruction : TASK_PILL_INSTRUCTION;
+      return (
+        <div>
+          <div style={lbl}>Opening line <span style={{ textTransform: 'none', fontWeight: 400 }}>(optional)</span></div>
+          <input value={config.greeting || ''} onChange={e => setConfig({ ...config, greeting: e.target.value })} placeholder="Sure — tell me about the task." style={inp} />
+          <div style={{ ...lbl, marginTop: 14 }}>AI instruction <span style={{ textTransform: 'none', fontWeight: 400 }}>(the command)</span></div>
+          <textarea value={instr} onChange={e => setConfig({ ...config, instruction: e.target.value })} rows={12} style={{ ...inp, resize: 'vertical', lineHeight: 1.5, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '0.72rem' }} />
+          <div style={{ fontSize: '0.68rem', color: sub, marginTop: 6, lineHeight: 1.5, fontFamily: C.fontSans }}>This exact instruction is sent to the AI when the pill is used. It must tell the AI to end every reply with an <b>ACTION</b> block — the app reads that block to create the task instantly.</div>
+        </div>
+      );
+    }
+
     function FormConfigEditor({ config, setConfig, inp, lbl, sub, bord }) {
       const fields = config.fields || [];
       const setFields = (fs) => setConfig({ ...config, fields: fs });
@@ -1206,6 +1300,7 @@ Continue with TMG Gmail
       function validate() {
         if (!label.trim()) return 'Please enter a label.';
         if (type === 'prompt' && !(config.prompt || '').trim()) return 'Please enter the AI instruction.';
+        if (type === 'task' && !((config.instruction !== undefined ? config.instruction : TASK_PILL_INSTRUCTION) || '').trim()) return 'Please enter the AI instruction.';
         if (type === 'form') {
           const fs = config.fields || [];
           if (!fs.length) return 'Add at least one field.';
@@ -1258,11 +1353,13 @@ Continue with TMG Gmail
             <div style={lbl}>What happens when tapped</div>
             <select value={type} onChange={e => setType(e.target.value)} style={inp}>
               <option value="prompt">Send an AI prompt</option>
+              <option value="task">Create a task (AI)</option>
               <option value="form">Open a form</option>
               <option value="steps">Guided questions</option>
             </select>
             <div style={{ marginTop: 14 }}>
               {type === 'prompt' && <PromptConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} />}
+              {type === 'task' && <TaskConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} />}
               {type === 'form' && <FormConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} bord={bord} />}
               {type === 'steps' && <StepsConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} bord={bord} />}
             </div>
@@ -1281,7 +1378,7 @@ Continue with TMG Gmail
       const bord = dark ? '#152545' : C.border;
       const txt = dark ? '#FFFFFF' : C.navy;
       const sub = dark ? 'rgba(255,255,255,0.5)' : C.textSecondary;
-      const typeLabel = { prompt: 'Prompt', form: 'Form', steps: 'Steps' }[pill.type] || pill.type;
+      const typeLabel = { prompt: 'Prompt', task: 'Task', form: 'Form', steps: 'Steps' }[pill.type] || pill.type;
       const arrow = (dir, disabled, fn) => <button onClick={fn} disabled={disabled} style={{ background: 'none', border: 'none', cursor: disabled ? 'default' : 'pointer', color: disabled ? (dark ? 'rgba(255,255,255,0.15)' : '#D8D2C6') : sub, fontSize: 15, padding: 0, display: 'flex' }}><i className={`ti ti-chevron-${dir}`} /></button>;
       return (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: cardBg, border: `1px solid ${bord}`, borderRadius: 12, padding: '10px 12px', marginBottom: 8, opacity: pill.enabled === false ? 0.55 : 1 }}>
@@ -1789,18 +1886,6 @@ Continue with TMG Gmail
       { title: 'Admin (Users & Tab Access)', status: 'done' },
     ].map((s, i) => ({ id: 'seed-' + i, title: s.title, type: 'mvp', status: s.status, due: '', subtasks: [] }));
 
-    // Inline add-a-subtask input (own state so typing doesn't re-render the whole list).
-    function SubAdd({ onAdd, cardBord, fieldBg, titleC, subC, J }) {
-      const [v, setV] = useState('');
-      const go = () => { if (!v.trim()) return; onAdd(v); setV(''); };
-      return (
-        <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-          <input value={v} onChange={e => setV(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') go(); }} placeholder="Add subtask…" style={{ flex: 1, minWidth: 0, padding: '7px 10px', borderRadius: 8, border: `1px dashed ${cardBord}`, background: fieldBg, color: titleC, fontFamily: J, fontSize: 11, outline: 'none' }} />
-          <button onClick={go} aria-label="Add subtask" style={{ flexShrink: 0, width: 30, borderRadius: 8, border: `1px solid ${cardBord}`, background: 'none', color: subC, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-plus" style={{ fontSize: 14 }} /></button>
-        </div>
-      );
-    }
-
     function AppRoadmap({ dark, onBack }) {
       const J = "'Jost', sans-serif";
       const KEY = 'tmg-roadmap-v1';
@@ -1808,116 +1893,103 @@ Continue with TMG Gmail
         try { const raw = localStorage.getItem(KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p) && p.length) return p; } } catch (e) {}
         return ROADMAP_SEED;
       });
-      const [openId, setOpenId] = useState(null);
       const [newTitle, setNewTitle] = useState('');
       useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(items)); } catch (e) {} }, [items]);
 
       const uid = () => 'r' + Math.random().toString(36).slice(2, 9);
       const update = (id, patch) => setItems(its => its.map(t => t.id === id ? { ...t, ...patch } : t));
-      const remove = (id) => { setItems(its => its.filter(t => t.id !== id)); setOpenId(o => (o === id ? null : o)); };
-      const addItem = () => { const t = newTitle.trim(); if (!t) return; const id = uid(); setItems(its => [...its, { id, title: t, type: 'mvp', status: 'todo', due: '', subtasks: [] }]); setNewTitle(''); setOpenId(id); };
-      const addSub = (id, title) => { const t = (title || '').trim(); if (!t) return; setItems(its => its.map(x => x.id === id ? { ...x, subtasks: [...(x.subtasks || []), { id: uid(), title: t, done: false }] } : x)); };
-      const toggleSub = (id, sid) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: (x.subtasks || []).map(s => s.id === sid ? { ...s, done: !s.done } : s) } : x));
-      const removeSub = (id, sid) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: (x.subtasks || []).filter(s => s.id !== sid) } : x));
+      const remove = (id) => setItems(its => its.filter(t => t.id !== id));
+      const move = (id, dir) => setItems(its => { const i = its.findIndex(t => t.id === id); const j = i + dir; if (i < 0 || j < 0 || j >= its.length) return its; const a = its.slice(); const [it] = a.splice(i, 1); a.splice(j, 0, it); return a; });
+      const addItem = () => { const t = newTitle.trim(); if (!t) return; setItems(its => [...its, { id: uid(), title: t, type: 'mvp', status: 'todo', due: '', subtasks: [] }]); setNewTitle(''); };
+      const addSub = (id) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: [...(x.subtasks || []), { id: uid(), title: '', done: false }] } : x));
+      const updSub = (id, sid, patch) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: (x.subtasks || []).map(s => s.id === sid ? { ...s, ...patch } : s) } : x));
+      const delSub = (id, sid) => setItems(its => its.map(x => x.id === id ? { ...x, subtasks: (x.subtasks || []).filter(s => s.id !== sid) } : x));
 
-      const titleC   = dark ? '#fff' : '#001A4A';
-      const subC     = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
-      const backC    = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
-      const cardBg   = dark ? '#0A1730' : '#FFFFFF';
-      const cardBord = dark ? '#152545' : '#EDE7DC';
-      const rowBord  = dark ? '#0D1E3A' : '#F0EBE3';
-      const gold     = dark ? '#C9A45A' : '#AD832F';
-      const fieldBg  = dark ? '#070F1E' : '#F7F4EE';
-      const chipBg   = dark ? '#0A1730' : '#F0EBE3';
+      const titleC  = dark ? '#fff' : '#001A4A';
+      const subC    = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+      const backC   = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const dim      = dark ? '#1C2C4A' : '#E4DFD4';
+      const bord    = dark ? '#152545' : '#E4DFD4';
+      const rowBord = dark ? '#0D1E3A' : '#F0EBE3';
+      const gold    = dark ? '#C9A45A' : '#AD832F';
+      const headBg  = dark ? '#0A1730' : '#F0EBE3';
+      const cellBg  = dark ? '#070F1E' : '#FFFFFF';
+      const fmtDue  = (d) => { if (!d) return ''; try { return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch (e) { return d; } };
+      const typeOf  = (id) => ROADMAP_TYPES.find(t => t.id === id) || ROADMAP_TYPES[0];
 
-      const typeOf = (id) => ROADMAP_TYPES.find(t => t.id === id) || ROADMAP_TYPES[0];
-      const fmtDue = (d) => { if (!d) return ''; try { return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch (e) { return d; } };
+      const COLS = '20px minmax(0,1fr) 80px 46px 54px 22px';
+      const cellInput = { width: '100%', boxSizing: 'border-box', border: 'none', outline: 'none', background: 'transparent', fontFamily: J, color: titleC, padding: 0 };
+      const headCell = { fontFamily: J, fontSize: 7.5, letterSpacing: '0.1em', fontWeight: 700, textTransform: 'uppercase', color: gold, whiteSpace: 'nowrap' };
 
       return (
         <div style={{ height: '100%', position: 'relative', overflow: 'hidden' }}>
           <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
             {/* Header */}
-            <div style={{ padding: '11px 14px 7px', display: 'flex', alignItems: 'center', gap: 9 }}>
+            <div style={{ padding: '11px 14px 8px', display: 'flex', alignItems: 'center', gap: 9 }}>
               <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: backC }}>
                 <i className="ti ti-chevron-left" style={{ fontSize: 16 }} />
               </button>
               <div style={{ flex: 1 }}>
                 <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, color: titleC }}>Roadmap</div>
-                <div style={{ fontFamily: J, fontSize: 8, marginTop: 1, color: subC }}>{items.length} features</div>
+                <div style={{ fontFamily: J, fontSize: 8, marginTop: 1, color: subC }}>{items.length} tabs</div>
               </div>
             </div>
-            {/* Status summary */}
-            <div style={{ display: 'flex', gap: 6, padding: '2px 14px 8px', flexWrap: 'wrap' }}>
-              {TASK_STATUS.map(s => (
-                <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 8px', borderRadius: 8, background: chipBg }}>
-                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: s.color }} />
-                  <span style={{ fontFamily: J, fontSize: 9, fontWeight: 700, color: titleC }}>{items.filter(t => t.status === s.id).length}</span>
-                  <span style={{ fontFamily: J, fontSize: 9, color: subC }}>{s.label}</span>
-                </div>
-              ))}
-            </div>
-            {/* List */}
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '2px 14px 24px' }}>
-              {items.map(t => {
-                const isOpen = openId === t.id;
+            {/* Sheet */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '0 12px 24px' }}>
+              {/* Column header */}
+              <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 5, alignItems: 'center', padding: '7px 8px', background: headBg, borderRadius: 8, position: 'sticky', top: 0, zIndex: 1 }}>
+                <span />
+                <span style={headCell}>Tab</span>
+                <span style={headCell}>Status</span>
+                <span style={headCell}>Type</span>
+                <span style={headCell}>Due</span>
+                <span />
+              </div>
+              {/* Rows */}
+              {items.map((t, idx) => {
                 const ty = typeOf(t.type);
                 const tc = dark ? ty.dark : ty.light;
-                const doneN = (t.subtasks || []).filter(s => s.done).length;
                 return (
-                  <div key={t.id} style={{ marginBottom: 8, borderRadius: 12, border: `1px solid ${cardBord}`, background: cardBg, overflow: 'hidden' }}>
-                    <button onClick={() => setOpenId(isOpen ? null : t.id)} style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: '11px 12px', background: 'none', border: 'none', cursor: 'pointer' }}>
-                      <span style={{ width: 9, height: 9, borderRadius: '50%', background: statusColor(t.status), flexShrink: 0 }} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: titleC, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
-                        <div style={{ fontFamily: J, fontSize: 9, color: subC, marginTop: 2 }}>{statusLabel(t.status)}{t.due ? ' · ' + fmtDue(t.due) : ''}{(t.subtasks || []).length ? ' · ' + doneN + '/' + t.subtasks.length + ' subtasks' : ''}</div>
+                  <div key={t.id} style={{ borderBottom: `1px solid ${rowBord}` }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 5, alignItems: 'center', padding: '5px 8px' }}>
+                      {/* reorder up/down */}
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                        <button onClick={() => move(t.id, -1)} disabled={idx === 0} aria-label="Move up" style={{ background: 'none', border: 'none', padding: 0, cursor: idx === 0 ? 'default' : 'pointer', color: idx === 0 ? dim : backC, display: 'flex', lineHeight: 0 }}><i className="ti ti-chevron-up" style={{ fontSize: 13 }} /></button>
+                        <button onClick={() => move(t.id, 1)} disabled={idx === items.length - 1} aria-label="Move down" style={{ background: 'none', border: 'none', padding: 0, cursor: idx === items.length - 1 ? 'default' : 'pointer', color: idx === items.length - 1 ? dim : backC, display: 'flex', lineHeight: 0 }}><i className="ti ti-chevron-down" style={{ fontSize: 13 }} /></button>
                       </div>
-                      <span style={{ flexShrink: 0, fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '3px 7px', borderRadius: 6, background: tc.bg, color: tc.fg }}>{ty.label}</span>
-                      <i className={`ti ti-chevron-${isOpen ? 'up' : 'down'}`} style={{ fontSize: 14, color: backC, flexShrink: 0 }} />
-                    </button>
-                    {isOpen && (
-                      <div style={{ padding: '4px 12px 14px', borderTop: `1px solid ${rowBord}` }}>
-                        <input value={t.title} onChange={e => update(t.id, { title: e.target.value })} style={{ width: '100%', boxSizing: 'border-box', marginTop: 10, padding: '9px 11px', borderRadius: 9, border: `1px solid ${cardBord}`, background: fieldBg, color: titleC, fontFamily: J, fontSize: 12, outline: 'none' }} />
-                        <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: gold, margin: '12px 0 6px' }}>Status</div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                          {TASK_STATUS.map(s => { const on = t.status === s.id; return (
-                            <button key={s.id} onClick={() => update(t.id, { status: s.id })} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 10px', borderRadius: 8, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: on ? 700 : 500, border: `1px solid ${on ? s.color : cardBord}`, background: on ? s.color : 'transparent', color: on ? '#fff' : subC }}>
-                              <span style={{ width: 6, height: 6, borderRadius: '50%', background: on ? '#fff' : s.color }} />{s.label}
-                            </button>
-                          ); })}
-                        </div>
-                        <div style={{ display: 'flex', gap: 14, marginTop: 12, flexWrap: 'wrap' }}>
-                          <div>
-                            <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: gold, marginBottom: 6 }}>Type</div>
-                            <div style={{ display: 'flex', gap: 6 }}>
-                              {ROADMAP_TYPES.map(ty2 => { const on = t.type === ty2.id; const c2 = dark ? ty2.dark : ty2.light; return (
-                                <button key={ty2.id} onClick={() => update(t.id, { type: ty2.id })} style={{ padding: '6px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: on ? 700 : 500, border: `1px solid ${on ? 'transparent' : cardBord}`, background: on ? c2.bg : 'transparent', color: on ? c2.fg : subC }}>{ty2.label}</button>
-                              ); })}
-                            </div>
-                          </div>
-                          <div style={{ flex: 1, minWidth: 120 }}>
-                            <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: gold, marginBottom: 6 }}>Due date</div>
-                            <input type="date" value={t.due || ''} onChange={e => update(t.id, { due: e.target.value })} style={{ width: '100%', boxSizing: 'border-box', padding: '7px 10px', borderRadius: 8, border: `1px solid ${cardBord}`, background: fieldBg, color: titleC, fontFamily: J, fontSize: 11, outline: 'none' }} />
-                          </div>
-                        </div>
-                        <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', fontWeight: 600, textTransform: 'uppercase', color: gold, margin: '14px 0 4px' }}>Subtasks</div>
-                        {(t.subtasks || []).map(s => (
-                          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0' }}>
-                            <button onClick={() => toggleSub(t.id, s.id)} aria-label="Toggle subtask" style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', border: s.done ? 'none' : `1.5px solid ${cardBord}`, background: s.done ? '#16A34A' : 'transparent', padding: 0 }}>
-                              {s.done && <i className="ti ti-check" style={{ fontSize: 11, color: '#fff' }} />}
-                            </button>
-                            <span style={{ flex: 1, fontFamily: J, fontSize: 11, color: s.done ? subC : titleC, textDecoration: s.done ? 'line-through' : 'none' }}>{s.title}</span>
-                            <button onClick={() => removeSub(t.id, s.id)} aria-label="Delete subtask" style={{ background: 'none', border: 'none', cursor: 'pointer', color: backC, fontSize: 13, display: 'flex', flexShrink: 0 }}><i className="ti ti-x" /></button>
-                          </div>
-                        ))}
-                        <SubAdd onAdd={(v) => addSub(t.id, v)} cardBord={cardBord} fieldBg={fieldBg} titleC={titleC} subC={subC} J={J} />
-                        <button onClick={() => { if (window.confirm('Remove "' + t.title + '" from the roadmap?')) remove(t.id); }} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 14, padding: '7px 10px', borderRadius: 8, border: `1px solid ${dark ? '#3A1620' : '#F0D9D9'}`, background: 'none', color: '#DC2626', cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: 600 }}><i className="ti ti-trash" style={{ fontSize: 13 }} />Delete feature</button>
+                      {/* tab name (editable cell) */}
+                      <input value={t.title} onChange={e => update(t.id, { title: e.target.value })} placeholder="Tab name" style={{ ...cellInput, fontSize: 12, fontWeight: 600 }} />
+                      {/* status dropdown */}
+                      <select value={t.status} onChange={e => update(t.id, { status: e.target.value })} style={{ width: '100%', boxSizing: 'border-box', border: `1px solid ${bord}`, borderRadius: 6, padding: '4px 2px 4px 5px', background: cellBg, fontFamily: J, fontSize: 9, fontWeight: 600, color: statusColor(t.status), outline: 'none', cursor: 'pointer' }}>
+                        {TASK_STATUS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                      </select>
+                      {/* type toggle badge */}
+                      <button onClick={() => update(t.id, { type: t.type === 'mvp' ? 'vanity' : 'mvp' })} title="Toggle MVP / Vanity" style={{ width: '100%', boxSizing: 'border-box', padding: '5px 0', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 8.5, fontWeight: 700, letterSpacing: '0.04em', background: tc.bg, color: tc.fg }}>{ty.label}</button>
+                      {/* due date */}
+                      <label style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', height: 26, borderRadius: 6, border: `1px solid ${bord}`, background: cellBg, cursor: 'pointer', overflow: 'hidden' }}>
+                        <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: t.due ? titleC : subC, whiteSpace: 'nowrap' }}>{t.due ? fmtDue(t.due) : '＋'}</span>
+                        <input type="date" value={t.due || ''} onChange={e => update(t.id, { due: e.target.value })} style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', height: '100%', border: 'none', cursor: 'pointer', padding: 0 }} />
+                      </label>
+                      {/* add subtask / delete tab */}
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+                        <button onClick={() => addSub(t.id)} aria-label="Add subtask" title="Add subtask" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: gold, display: 'flex', lineHeight: 0 }}><i className="ti ti-plus" style={{ fontSize: 14 }} /></button>
+                        <button onClick={() => { if (window.confirm('Remove "' + (t.title || 'this tab') + '" from the roadmap?')) remove(t.id); }} aria-label="Delete tab" title="Delete tab" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: backC, display: 'flex', lineHeight: 0 }}><i className="ti ti-x" style={{ fontSize: 12 }} /></button>
                       </div>
-                    )}
+                    </div>
+                    {/* subtasks */}
+                    {(t.subtasks || []).map(s => (
+                      <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 8px 3px 30px' }}>
+                        <button onClick={() => updSub(t.id, s.id, { done: !s.done })} aria-label="Toggle subtask" style={{ width: 16, height: 16, borderRadius: 4, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', border: s.done ? 'none' : `1.5px solid ${bord}`, background: s.done ? '#16A34A' : 'transparent', padding: 0 }}>{s.done && <i className="ti ti-check" style={{ fontSize: 10, color: '#fff' }} />}</button>
+                        <input value={s.title} onChange={e => updSub(t.id, s.id, { title: e.target.value })} placeholder="Subtask" style={{ ...cellInput, flex: 1, fontSize: 11, color: s.done ? subC : titleC, textDecoration: s.done ? 'line-through' : 'none' }} />
+                        <button onClick={() => delSub(t.id, s.id)} aria-label="Remove subtask" style={{ background: 'none', border: 'none', cursor: 'pointer', color: backC, fontSize: 15, display: 'flex', flexShrink: 0, lineHeight: 0 }}><i className="ti ti-minus" /></button>
+                      </div>
+                    ))}
                   </div>
                 );
               })}
-              <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-                <input value={newTitle} onChange={e => setNewTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addItem(); }} placeholder="Add a feature…" style={{ flex: 1, minWidth: 0, padding: '10px 12px', borderRadius: 9, border: `1px solid ${cardBord}`, background: cardBg, color: titleC, fontFamily: J, fontSize: 12, outline: 'none' }} />
+              {/* add a tab */}
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <input value={newTitle} onChange={e => setNewTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addItem(); }} placeholder="Add a tab…" style={{ flex: 1, minWidth: 0, padding: '9px 12px', borderRadius: 9, border: `1px solid ${bord}`, background: cellBg, color: titleC, fontFamily: J, fontSize: 12, outline: 'none' }} />
                 <button onClick={addItem} style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, padding: '0 14px', borderRadius: 9, border: 'none', background: dark ? '#AD832F' : '#001A4A', color: '#fff', cursor: 'pointer', fontFamily: J, fontSize: 12, fontWeight: 600 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add</button>
               </div>
             </div>
@@ -4044,6 +4116,7 @@ Continue with TMG Gmail
       const [pills, setPills] = useState(null);
       const [builderOpen, setBuilderOpen] = useState(false);
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
+      const [taskInstruction, setTaskInstruction] = useState(null); // set → Work Mode is creating a task (AI instruction from the pill)
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
       const [moreView, setMoreView] = useState('directory');
@@ -4163,10 +4236,27 @@ Continue with TMG Gmail
           setMessages(history);
 
           await ConvDB.insertMessage(convId, 'user', text || '', uploaded);
-          const apiMsgs = history.map(m => ({ role: m.role, content: toApiContent(m) }));
-          const reply = await callAI(apiMsgs);
-          setMessages(prev => [...prev, { role: 'assistant', content: reply }]);
-          await ConvDB.insertMessage(convId, 'assistant', reply);
+          const apiMsgs = history.filter(m => !m._seed).map(m => ({ role: m.role, content: toApiContent(m) }));
+          const sys = taskInstruction ? (taskInstruction + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.') : undefined;
+          const reply = await callAI(apiMsgs, sys);
+          // Task mode: the AI ends its reply with an ACTION block — read it, create the task, hide the JSON.
+          let display = reply;
+          if (taskInstruction) {
+            const m = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
+            if (m) {
+              display = reply.slice(0, m.index).trim();
+              try {
+                const parsed = JSON.parse(m[1]);
+                if (parsed && String(parsed.type).toUpperCase() === 'ADD' && parsed.payload) {
+                  const created = await createTaskFromAI(parsed.payload, user);
+                  if (!display) display = created ? ('Done — added “' + (parsed.payload.title || 'task') + '” to your Tasks.') : 'I tried to create the task but ran into an error — please try again.';
+                }
+              } catch (e) { /* keep the stripped conversational text */ }
+            }
+          }
+          if (!display) display = reply;
+          setMessages(prev => [...prev, { role: 'assistant', content: display }]);
+          await ConvDB.insertMessage(convId, 'assistant', display);
           if (isFirst) {
             const seed = text || (uploaded[0] && uploaded[0].name) || 'Shared a file';
             const title = await generateTitle(seed);
@@ -4194,6 +4284,7 @@ Continue with TMG Gmail
         setMessages([]);
         setCurrentConvId(null);
         setWorkRequest(null);
+        setTaskInstruction(null);
         setInput(localStorage.getItem('tmg-draft-new') || '');
       }
 
@@ -4206,6 +4297,7 @@ Continue with TMG Gmail
         const conv = conversations.find(c => c.id === id);
         setDrawerOpen(false);
         setCurrentConvId(id);
+        setTaskInstruction(null);
         setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
         if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
@@ -4219,6 +4311,13 @@ Continue with TMG Gmail
         if (!pill) return;
         if (pill.type === 'form') { setActivePill({ pill, kind: 'form' }); return; }
         if (pill.type === 'steps') { setActivePill({ pill, kind: 'steps' }); return; }
+        if (pill.type === 'task') {
+          setCurrentConvId(null);
+          setWorkRequest(null);
+          setTaskInstruction((pill.config && pill.config.instruction) || TASK_PILL_INSTRUCTION);
+          setMessages([{ role: 'assistant', content: (pill.config && pill.config.greeting) || 'Sure — tell me about the task. What needs doing, and when is it due?', _seed: true }]);
+          return;
+        }
         const text = (pill.config && pill.config.prompt) || pill.label; // prompt (default)
         runSend(text, { type: 'work' });
       }

@@ -2171,7 +2171,7 @@ Rules:
           {/* Page header */}
           <div style={{ padding: '11px 16px 12px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <div style={{ flex: 1, minWidth: 120 }}>
-              <div style={{ fontFamily: J, fontSize: 19, fontWeight: 600, color: NAVY }}>Roadmap</div>
+              <div style={{ fontFamily: J, fontSize: 19, fontWeight: 600, color: NAVY }}>App Masterplan</div>
               <div style={{ fontFamily: J, fontSize: 10, marginTop: 1, color: MUTE }}>{subtitle}</div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -4368,7 +4368,7 @@ Rules:
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', icon: 'ti-messages' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
-        .concat(isAdmin ? [{ id: 'roadmap', label: 'Roadmap', icon: 'ti-sitemap' }] : []);
+        .concat(isAdmin ? [{ id: 'roadmap', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
       // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
       const myAvatar = (profile && profile.avatar_url) || (user && user.user_metadata && user.user_metadata.avatar_url) || '';
       const myName = ((((profile && profile.first_name) || '') + ' ' + ((profile && profile.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || (user && user.email) || 'Me';

@@ -2209,8 +2209,8 @@ Rules:
                 ? <button onClick={() => setCollapsedP(c => ({ ...c, [r.id]: !c[r.id] }))} aria-label="Toggle subtasks" style={{ width: 18, flexShrink: 0, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: GOLD, display: 'flex' }}><i className={`ti ti-chevron-${expanded ? 'down' : 'right'}`} style={{ fontSize: 14 }} /></button>
                 : <span style={{ width: 18, flexShrink: 0 }} />)}
               {isSub && <i className="ti ti-corner-down-right" style={{ fontSize: 13, color: '#C9C2B2', flexShrink: 0 }} />}
-              <input value={r.name} ref={el => { if (el && focusId === r.id) { el.focus(); setFocusId(null); } }} onChange={e => updateRow(r.id, { name: e.target.value })} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSiblingAfter(r); } }} placeholder={isSub ? 'Subtask' : 'Tab name'} style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 13, fontWeight: isSub ? 400 : 500, color: NAVY, padding: 0 }} />
-              {!isSub && kids.length > 0 && (<div title={kids.filter(x => x.status === 'completed').length + '/' + kids.length + ' subtasks done'} style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}><div style={{ width: 44, height: 5, borderRadius: 3, background: '#F0EBE3', overflow: 'hidden' }}><div style={{ width: kpct + '%', height: '100%', background: '#0F6E56' }} /></div><span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 700, color: kpct ? '#0F6E56' : '#C9C2B2' }}>{kpct}%</span></div>)}
+              <input value={r.name} ref={el => { if (el && focusId === r.id) { el.focus(); setFocusId(null); } }} onChange={e => updateRow(r.id, { name: e.target.value })} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSiblingAfter(r); } }} placeholder={isSub ? 'Subtask' : 'Tab name'} style={{ flex: '0 1 auto', fieldSizing: 'content', minWidth: 60, maxWidth: 240, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 13, fontWeight: isSub ? 400 : 500, color: NAVY, padding: 0 }} />
+              {!isSub && kids.length > 0 && (<div title={kids.filter(x => x.status === 'completed').length + '/' + kids.length + ' subtasks done'} style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, marginLeft: 8 }}><div style={{ width: 44, height: 5, borderRadius: 3, background: '#F0EBE3', overflow: 'hidden' }}><div style={{ width: kpct + '%', height: '100%', background: '#0F6E56' }} /></div><span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 700, color: kpct ? '#0F6E56' : '#C9C2B2' }}>{kpct}%</span></div>)}
             </div>
             {/* status */}
             <div>{statusPill(r)}</div>
@@ -4442,7 +4442,7 @@ Rules:
     // (hash only, no server config). Overlays (calendar/tasks/profile) close on
     // Back but aren't deep-linked yet. parseRoute maps a hash → {tab, view}.
     const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
-    const ROUTE_MORE = ['drives', 'directory', 'projects', 'expsurvey', 'sffu', 'admin', 'roadmap'];
+    const ROUTE_MORE = ['drives', 'directory', 'projects', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
@@ -4472,11 +4472,11 @@ Rules:
       const moreItems = []
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
-        .concat([{ id: 'projects', label: 'Projects', icon: 'ti-folder' }])
+        .concat([{ id: 'projects', label: 'Projects', icon: 'ti-list-check' }])
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', icon: 'ti-messages' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
-        .concat(isAdmin ? [{ id: 'roadmap', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
+        .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
       // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
       const myAvatar = (profile && profile.avatar_url) || (user && user.user_metadata && user.user_metadata.avatar_url) || '';
       const myName = ((((profile && profile.first_name) || '') + ' ' + ((profile && profile.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || (user && user.email) || 'Me';
@@ -4813,7 +4813,7 @@ Rules:
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'more' && (
               moreView === 'admin' && isAdmin ? <AdminTab onOpenBuilder={() => setBuilderOpen(true)} />
-              : moreView === 'roadmap' && isAdmin ? <AppRoadmap dark={dark} onBack={() => setMoreMenuOpen(true)} />
+              : moreView === 'app-masterplan' && isAdmin ? <AppRoadmap dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'projects' ? <ProjectsTab dark={dark} user={user} onBack={() => setMoreMenuOpen(true)} onOpenTask={(t) => { setTasksFocus(t); setShowTasks(true); }} />

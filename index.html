@@ -1979,35 +1979,40 @@ Rules:
       return rmNormalize(rows);
     }
     function rmSeed() {
-      const P = (id, name, status, type, dueDate) => ({ id, name, status, type, dueDate, parentId: null, order: 0 });
-      const C = (id, pid, name, status, type, dueDate) => ({ id, name, status, type, dueDate, parentId: pid, order: 0 });
-      return rmNormalize([
-        P('ai', 'AI Chat', 'completed', 'mvp', '2026-04-10'),
-        P('drives', 'Shared Drives', 'completed', 'mvp', '2026-04-20'),
-        P('dir', 'Company Directory', 'completed', 'mvp', '2026-05-05'),
-        P('tasks', 'Tasks', 'completed', 'mvp', '2026-05-15'),
-        P('admin', 'Admin (Users & Tab Access)', 'completed', 'mvp', '2026-05-25'),
-        P('exp', 'Exp Survey', 'completed', 'mvp', '2026-06-01'),
-        P('profile', 'Profile & Status', 'inprogress', 'mvp', '2026-06-20'),
-        P('sffu', 'SFFU (Showing Follow-Up)', 'inprogress', 'mvp', '2026-07-10'),
-        C('sffu-1', 'sffu', 'Deploy sffu-sender', 'todo', 'mvp', null),
-        C('sffu-2', 'sffu', 'Add Quo webhook', 'todo', 'mvp', null),
-        P('cal', 'Calendar', 'stuck', 'mvp', '2026-07-15'),
-        C('cal-1', 'cal', 'Deploy google-calendar fn', 'stuck', 'mvp', '2026-07-12'),
-        C('cal-2', 'cal', 'Set GOOGLE_CLIENT_SECRET', 'todo', 'mvp', '2026-07-14'),
-        P('team', 'Team Chat', 'todo', 'v2', '2026-08-01'),
-        P('calls', 'Calls', 'todo', 'v2', '2026-10-05'),
-        P('kpis', 'KPIs', 'todo', 'future', null),
-        P('deals', 'Deals', 'todo', 'future', null),
-      ]);
+      const DEF = [
+        { n: 'AI Chat', s: 'completed', t: 'mvp', subs: [['AI Mode (general assistant)', 'completed'], ['Work Mode (guided pills)', 'completed'], ['Prompt pills', 'completed'], ['Form-type pills', 'completed'], ['Guided-steps pills', 'completed'], ['Chat history (pin / archive / rename / delete)', 'completed'], ['Attachments (files / photos / PDF)', 'completed'], ['Auto-grow message box', 'completed'], ['Claude AI proxy + usage tracking', 'completed']] },
+        { n: 'Team Chat', s: 'todo', t: 'future', subs: [['Message threads preview', 'inprogress']] },
+        { n: 'Calls', s: 'todo', t: 'future', subs: [['Recent calls preview', 'inprogress']] },
+        { n: 'KPIs', s: 'todo', t: 'future', subs: [['Sales goals / KPI preview', 'inprogress']] },
+        { n: 'Deals', s: 'todo', t: 'future', subs: [['Coming-soon placeholder', 'todo']] },
+        { n: 'Shared Drives', s: 'completed', t: 'mvp', subs: [['8 Google Drive folder tiles', 'completed'], ['Admin + Agents folder links', 'completed']] },
+        { n: 'Company Directory', s: 'completed', t: 'mvp', subs: [['Live roster (Supabase + curated)', 'completed'], ['Search', 'completed'], ['Role badges', 'completed'], ['Per-person profile pages', 'completed'], ['Clickable phone (tel:) / email (mailto:)', 'completed']] },
+        { n: 'Exp Survey', s: 'completed', t: 'mvp', subs: [['Survey QR code', 'completed'], ['Survey link', 'completed']] },
+        { n: 'SFFU (Showing Follow-Up)', s: 'inprogress', t: 'mvp', subs: [['Embedded app (iframe)', 'completed'], ['Add property / add showing', 'completed'], ['SMS follow-up engine (Quo)', 'inprogress']] },
+        { n: 'Calendar', s: 'stuck', t: 'mvp', subs: [['Week view UI', 'completed'], ['Google Calendar sync', 'stuck']] },
+        { n: 'Tasks', s: 'completed', t: 'mvp', subs: [['Statuses + priority', 'completed'], ['Subtasks', 'completed'], ['Recurrence (daily / weekly / monthly)', 'completed'], ['Assignees + labels', 'completed'], ['Decision tasks', 'completed'], ['Activity log', 'completed']] },
+        { n: 'Profile & Status', s: 'completed', t: 'mvp', subs: [['Avatar chip + presence dot', 'completed'], ['Status (emoji + text)', 'completed'], ['Set away (green / amber)', 'completed'], ['Profile details + edit', 'completed']] },
+        { n: 'Admin', s: 'completed', t: 'mvp', subs: [['Manage Users (roles / access)', 'completed'], ['Tab Access (per-role)', 'completed'], ['Work Mode Builder', 'completed'], ['Usage stats', 'completed']] },
+        { n: 'Settings', s: 'completed', t: 'mvp', subs: [['Dark mode', 'completed'], ['Text-size slider', 'completed'], ['Chat history side', 'completed'], ['Sign out', 'completed']] },
+        { n: 'Roadmap', s: 'inprogress', t: 'mvp', subs: [['Quarter grouping', 'completed'], ['Month progress tiles', 'completed'], ['Drag to reschedule', 'completed'], ['Subtasks', 'completed']] },
+        { n: 'Auth / Account', s: 'completed', t: 'mvp', subs: [['Google SSO', 'completed'], ['Email + OTP / MFA', 'completed'], ['Access gating (pending / active)', 'completed']] },
+      ];
+      let i = 0;
+      const dueFor = () => { const off = ((i * 50 + 23) % 163); i++; const d = new Date(2026, 0, 1 + off); return d.getFullYear() + '-' + rmPad(d.getMonth() + 1) + '-' + rmPad(d.getDate()); };
+      const rows = [];
+      DEF.forEach((tab, ti) => {
+        const pid = 't' + ti;
+        rows.push({ id: pid, name: tab.n, status: tab.s, type: tab.t, dueDate: dueFor(), parentId: null, order: 0 });
+        (tab.subs || []).forEach((sub, si) => rows.push({ id: pid + '-' + si, name: sub[0], status: sub[1], type: sub[2] || tab.t, dueDate: dueFor(), parentId: pid, order: 0 }));
+      });
+      return rmNormalize(rows);
     }
 
     function AppRoadmap({ dark, onBack }) {
       const J = "'Jost', sans-serif";
-      const RM_KEY = 'tmg-roadmap-v2', RM_OLD = 'tmg-roadmap-v1';
+      const RM_KEY = 'tmg-roadmap-v3';
       const [rows, setRows] = useState(() => {
-        try { const v2 = localStorage.getItem(RM_KEY); if (v2) { const p = JSON.parse(v2); if (Array.isArray(p)) return rmNormalize(p); } } catch (e) {}
-        try { const v1 = localStorage.getItem(RM_OLD); if (v1) { const p = JSON.parse(v1); if (Array.isArray(p) && p.length && p.some(it => (it.due && it.due.length) || (it.subtasks && it.subtasks.length))) return rmMigrate(p); } } catch (e) {}
+        try { const raw = localStorage.getItem(RM_KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p) && p.length) return rmNormalize(p); } } catch (e) {}
         return rmSeed();
       });
       const [groupBy, setGroupBy] = useState('quarter');
@@ -2112,7 +2117,7 @@ Rules:
         const danger = r.status === 'stuck' || past;
         if (r.dueDate) {
           return (
-            <label style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 8px', borderRadius: 7, border: `1px solid ${danger ? '#F0997B' : '#E4DFD4'}`, background: '#fff', cursor: 'pointer', maxWidth: '100%', boxSizing: 'border-box' }}>
+            <label onClick={e => { const inp = e.currentTarget.querySelector('input'); if (inp && inp.showPicker) { try { inp.showPicker(); } catch (er) {} } }} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 8px', borderRadius: 7, border: `1px solid ${danger ? '#F0997B' : '#E4DFD4'}`, background: '#fff', cursor: 'pointer', maxWidth: '100%', boxSizing: 'border-box' }}>
               <i className="ti ti-calendar-event" style={{ fontSize: 12, color: danger ? '#A32D2D' : GOLD, flexShrink: 0 }} />
               <span style={{ fontFamily: J, fontSize: 10.5, fontWeight: 500, color: danger ? '#A32D2D' : '#6B6B6B', whiteSpace: 'nowrap' }}>{fmtDate(r.dueDate)}</span>
               <input type="date" value={r.dueDate} onChange={e => updateRow(r.id, { dueDate: e.target.value || null })} style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', cursor: 'pointer' }} />
@@ -2120,7 +2125,7 @@ Rules:
           );
         }
         return (
-          <label style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 8px', borderRadius: 7, border: '1px dashed #D8CDB8', cursor: 'pointer', boxSizing: 'border-box' }}>
+          <label onClick={e => { const inp = e.currentTarget.querySelector('input'); if (inp && inp.showPicker) { try { inp.showPicker(); } catch (er) {} } }} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 4, padding: '4px 8px', borderRadius: 7, border: '1px dashed #D8CDB8', cursor: 'pointer', boxSizing: 'border-box' }}>
             <i className="ti ti-plus" style={{ fontSize: 12, color: '#C4A97A' }} />
             <span style={{ fontFamily: J, fontSize: 10, fontWeight: 500, color: '#C4A97A', whiteSpace: 'nowrap' }}>Set date</span>
             <input type="date" value="" onChange={e => updateRow(r.id, { dueDate: e.target.value || null })} style={{ position: 'absolute', inset: 0, opacity: 0, width: '100%', cursor: 'pointer' }} />
@@ -2131,10 +2136,10 @@ Rules:
       const renderRow = (r, opts) => {
         const isSub = !!r.parentId, hasKids = opts.hasKids, expanded = opts.expanded;
         return (
-          <div key={r.id} className="rm-row" draggable={!isSub} onDragStart={!isSub ? (e => onDragStart(e, r.id)) : undefined}
+          <div key={r.id} className="rm-row"
             onDragOver={!isSub ? (e => onRowOver(e, r.id)) : undefined} onDrop={!isSub ? (e => onRowDrop(e, r.id)) : undefined}
             style={{ position: 'relative', display: 'grid', gridTemplateColumns: COLS, alignItems: 'center', gap: 8, padding: '9px 20px', borderBottom: '1px solid #F4EFE7', background: isSub ? '#FBF9F4' : 'transparent', borderTop: dropHint && dropHint.id === r.id && dropHint.pos === 'before' ? `2px solid ${NAVY}` : '2px solid transparent', boxShadow: dropHint && dropHint.id === r.id && dropHint.pos === 'after' ? `inset 0 -2px 0 ${NAVY}` : 'none' }}>
-            {!isSub && <i className="ti ti-grip-vertical rm-grip" style={{ position: 'absolute', left: 4, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: '#D4CFC2', cursor: 'grab' }} />}
+            {!isSub && <i className="ti ti-grip-vertical rm-grip" draggable onDragStart={e => onDragStart(e, r.id)} onDragEnd={() => { setDragId(null); setDropHint(null); }} style={{ position: 'absolute', left: 4, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: '#D4CFC2', cursor: 'grab', zIndex: 1 }} />}
             {/* name cell */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, paddingLeft: isSub ? 34 : 0 }}>
               {!isSub && (hasKids

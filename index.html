@@ -797,7 +797,7 @@ Rules:
 
       async create(fields, people, user) {
         const c = this.client(); if (!c) return null;
-        const { data, error } = await c.from('tasks').insert({
+        const base = {
           title: fields.title, due_at: fields.due_at || null, project_id: fields.project_id || null,
           priority: fields.priority || 'medium', status: fields.status || 'todo',
           description: fields.description || null, context: fields.context || null,
@@ -805,7 +805,11 @@ Rules:
           decision_question: fields.decision_question || null, recurrence: fields.recurrence || 'none',
           parent_task_id: fields.parent_task_id || null,
           created_by: user?.id || null,
-        }).select().single();
+        };
+        const wd = { weekly_priority: fields.weekly_priority || null, weekly_rank: fields.weekly_rank || null, daily_priority: fields.daily_priority || null, daily_rank: fields.daily_rank || null };
+        let res = await c.from('tasks').insert({ ...base, ...wd }).select().single();
+        if (res.error && /column|schema cache|PGRST204|42703/i.test((res.error.message || '') + (res.error.code || ''))) res = await c.from('tasks').insert(base).select().single();
+        const { data, error } = res;
         if (error) { console.error('[TaskDB] create:', error.message); throw error; }
         await this.setPeople(data.id, people || {});
         await this.addActivity(data.id, 'system', fields.parent_task_id ? 'Subtask created' : 'Task created', user);
@@ -816,10 +820,15 @@ Rules:
         const c = this.client(); if (!c) return;
         const patch = { ...fields, updated_at: new Date().toISOString() };
         if (fields.status === 'done' && oldTask.status !== 'done') patch.completed_at = new Date().toISOString();
-        const { error } = await c.from('tasks').update(patch).eq('id', id);
+        let { error } = await c.from('tasks').update(patch).eq('id', id);
+        if (error && /column|schema cache|PGRST204|42703/i.test((error.message || '') + (error.code || ''))) {
+          const p2 = { ...patch }; delete p2.weekly_priority; delete p2.weekly_rank; delete p2.daily_priority; delete p2.daily_rank;
+          ({ error } = await c.from('tasks').update(p2).eq('id', id));
+        }
         if (error) { console.error('[TaskDB] update:', error.message); throw error; }
         const FL = { title: 'Title', due_at: 'Due date', project_id: 'Project', priority: 'Priority', status: 'Status', description: 'Description', context: 'Context', working_url: 'Working URL', email_link: 'Email link', decision_question: 'Decision question', recurrence: 'Recurrence' };
         for (const k of Object.keys(fields)) {
+          if (k === 'weekly_priority' || k === 'weekly_rank' || k === 'daily_priority' || k === 'daily_rank') continue;
           if ((oldTask[k] || null) === (fields[k] || null)) continue;
           let msg;
           if (k === 'status') msg = 'Status: ' + statusLabel(oldTask.status) + ' → ' + statusLabel(fields.status);
@@ -2515,9 +2524,17 @@ Rules:
     // ─── Tasks module (full screen, opened from the top-bar Tasks chip) ──
     function TaskForm({ dark, task, team, user, onSave, onCancel }) {
       const t = task || {};
+      const uid = user && user.id;
+      const _dd = t.due_at ? new Date(t.due_at) : null;
+      const _p2 = (n) => String(n).padStart(2, '0');
+      const _initDate = _dd ? (_dd.getFullYear() + '-' + _p2(_dd.getMonth() + 1) + '-' + _p2(_dd.getDate())) : '';
+      const _initHM = _dd ? (_p2(_dd.getHours()) + ':' + _p2(_dd.getMinutes())) : '';
       const [title, setTitle] = useState(t.title || '');
-      const [due, setDue] = useState(t.due_at ? t.due_at.slice(0, 16) : '');
-      const [recurrence, setRecurrence] = useState(t.recurrence || 'none');
+      const [dueDate, setDueDate] = useState(_initDate);
+      const [dueTime, setDueTime] = useState(_initHM && _initHM !== '00:00' ? _initHM : '09:00');
+      const [hasTime, setHasTime] = useState(!!(_initHM && _initHM !== '00:00'));
+      const [repeats, setRepeats] = useState(!!(t.recurrence && t.recurrence !== 'none'));
+      const [recurrence, setRecurrence] = useState(t.recurrence && t.recurrence !== 'none' ? t.recurrence : 'weekly');
       const [project, setProject] = useState(t._projectName || '');
       const [priority, setPriority] = useState(t.priority || 'medium');
       const [status, setStatus] = useState(t.status || 'todo');
@@ -2533,13 +2550,21 @@ Rules:
       const [decisionQuestion, setDecisionQuestion] = useState(t.decision_question || '');
       const [decisionOptions, setDecisionOptions] = useState([]);
       const [saving, setSaving] = useState(false);
-      const [repeatInfo, setRepeatInfo] = useState(false);
-      // Load the editable per-user labels + decision options when editing an existing task.
+      // W/D planning — stored per-user, per-task in localStorage for now (wired to the calendar later)
+      const [weeklyPriority, setWeeklyPriority] = useState(t.weekly_priority || '');
+      const [weeklyRank, setWeeklyRank] = useState(t.weekly_rank != null ? String(t.weekly_rank) : '');
+      const [dailyPriority, setDailyPriority] = useState(t.daily_priority || '');
+      const [dailyRank, setDailyRank] = useState(t.daily_rank != null ? String(t.daily_rank) : '');
+      const [planOpen, setPlanOpen] = useState(!!(t.weekly_priority || t.weekly_rank != null || t.daily_priority || t.daily_rank != null));
+      const [decisionOpen, setDecisionOpen] = useState(false);
+
       useEffect(() => {
         if (!t.id) return;
-        TaskDB.loadLabels(t.id).then(rows => setMyLabels((rows || []).filter(r => r.user_id === (user && user.id)).map(r => r.label)));
+        TaskDB.loadLabels(t.id).then(rows => setMyLabels((rows || []).filter(r => r.user_id === uid).map(r => r.label)));
         TaskDB.loadDecisionOptions(t.id).then(rows => setDecisionOptions((rows || []).map(r => ({ body: r.body, is_chosen: r.is_chosen }))));
+        if (t.decision_question) setDecisionOpen(true);
       }, [t.id]);
+
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
       const gold = dark ? '#C9A45A' : '#AD832F';
       const lbl = { fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, margin: '0 0 5px', fontFamily: C.fontSans };
@@ -2553,48 +2578,86 @@ Rules:
       );
       const sel = (val, set, opts) => <select value={val} onChange={e => set(e.target.value)} style={inp}>{opts.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}</select>;
       const field = (label, node) => <div style={{ marginBottom: 13 }}><div style={lbl}>{label}</div>{node}</div>;
-      // Labels (this user's own)
       const addLabel = () => { const v = labelInput.trim(); if (!v) return; setMyLabels(l => l.includes(v) ? l : [...l, v]); setLabelInput(''); };
       const removeLabel = (v) => setMyLabels(l => l.filter(x => x !== v));
-      // Decision options
       const addOpt = () => setDecisionOptions(o => [...o, { body: '', is_chosen: false }]);
       const updateOpt = (i, v) => setDecisionOptions(o => o.map((x, j) => j === i ? { ...x, body: v } : x));
       const removeOpt = (i) => setDecisionOptions(o => o.filter((_, j) => j !== i));
       const setChosen = (i) => setDecisionOptions(o => o.map((x, j) => ({ ...x, is_chosen: j === i ? !x.is_chosen : false })));
+
+      const mondayOpts = (() => {
+        const opts = [{ id: '', label: '— Pick a week —' }];
+        const d = new Date(); const o = (d.getDay() + 6) % 7; d.setDate(d.getDate() - o); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - 7);
+        for (let i = 0; i < 18; i++) { const iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); opts.push({ id: iso, label: 'Wk of ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) }); d.setDate(d.getDate() + 7); }
+        return opts;
+      })();
+      const RANKS = [{ id: '', label: '—' }, { id: '1', label: 'Rank 1' }, { id: '2', label: 'Rank 2' }, { id: '3', label: 'Rank 3' }];
+      const REPEAT_OPTS = TASK_RECUR.filter(r => r.id !== 'none');
+
       async function save() {
         if (!title.trim()) return;
         setSaving(true);
         try {
+          const due = dueDate ? (dueDate + 'T' + (hasTime && dueTime ? dueTime : '00:00')) : '';
           await onSave({
-            title: title.trim(), due, recurrence, project, priority, status,
+            title: title.trim(), due, recurrence: repeats ? recurrence : 'none', project, priority, status,
             assignees, assigners, working_url: workingUrl.trim(), email_link: emailLink.trim(),
             description, context, labels: myLabels,
             decisionMakers, decisionQuestion: decisionQuestion.trim(),
             decisionOptions: decisionOptions.filter(o => (o.body || '').trim()),
+            planning: { wp: weeklyPriority, wr: weeklyRank, dp: dailyPriority, dr: dailyRank },
           });
         } finally { setSaving(false); }
       }
+
+      const sectionHeader = (open, setOpen, icon, label) => (
+        <button type="button" onClick={() => setOpen(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}>
+          <i className={`ti ${icon}`} style={{ fontSize: 15, color: gold }} />
+          <span style={{ flex: 1, fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>{label}</span>
+          <i className={`ti ti-chevron-${open ? 'up' : 'down'}`} style={{ fontSize: 15, color: sub }} />
+        </button>
+      );
+
       return (
         <div style={{ padding: '14px 16px 40px' }}>
-          {field('Title', <input value={title} onChange={e => setTitle(e.target.value)} placeholder="What needs doing?" style={inp} />)}
-          <div style={{ display: 'flex', gap: 10 }}>
-            <div style={{ flex: 1.3 }}>{field('Due date & time', <input type="datetime-local" value={due} onChange={e => setDue(e.target.value)} style={inp} />)}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ marginBottom: 13 }}>
-                <div style={{ ...lbl, display: 'flex', alignItems: 'center', gap: 5 }}>
-                  <span>Repeat</span>
-                  <i className="ti ti-info-circle" onClick={() => setRepeatInfo(v => !v)} title="When you mark this task Completed, the next one is created automatically with its due date moved forward by the interval." style={{ fontSize: 13, cursor: 'help', color: sub }} />
-                </div>
-                {sel(recurrence, setRecurrence, TASK_RECUR)}
+          {/* W/D Planning (collapsible) */}
+          <div style={{ marginBottom: 13 }}>
+            {sectionHeader(planOpen, setPlanOpen, 'ti-target', 'W/D Planning')}
+            {planOpen && <div style={{ marginTop: 10 }}>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1.5 }}>{field('Weekly priority', sel(weeklyPriority, setWeeklyPriority, mondayOpts))}</div>
+                <div style={{ flex: 1 }}>{field('Weekly rank', sel(weeklyRank, setWeeklyRank, RANKS))}</div>
               </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1.5 }}>{field('Daily priority', <input type="date" value={dailyPriority} onChange={e => setDailyPriority(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={inp} />)}</div>
+                <div style={{ flex: 1 }}>{field('Daily rank', sel(dailyRank, setDailyRank, RANKS))}</div>
+              </div>
+            </div>}
+          </div>
+          {/* Title */}
+          {field('Title', <input value={title} onChange={e => setTitle(e.target.value)} placeholder="What needs doing?" style={inp} />)}
+          {/* Due date (date only) + Time / Repeat toggles */}
+          <div style={{ marginBottom: 13 }}>
+            <div style={lbl}>Due date</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={{ ...inp, flex: '1 1 150px' }} />
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={hasTime} onChange={e => setHasTime(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Time</label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={repeats} onChange={e => setRepeats(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Repeat</label>
             </div>
+            {hasTime && <input type="time" value={dueTime} onChange={e => setDueTime(e.target.value)} style={{ ...inp, marginTop: 8 }} />}
+            {repeats && <div style={{ marginTop: 8 }}>{sel(recurrence, setRecurrence, REPEAT_OPTS)}<div style={{ fontSize: '0.66rem', color: sub, lineHeight: 1.5, marginTop: 5, fontFamily: C.fontSans }}>When marked Completed, the next one is created automatically with the due date moved forward.</div></div>}
           </div>
-          {repeatInfo && <div style={{ display: 'flex', gap: 6, fontSize: '0.68rem', color: sub, lineHeight: 1.5, margin: '-4px 0 13px', fontFamily: C.fontSans }}><i className="ti ti-info-circle" style={{ fontSize: 13, flexShrink: 0, marginTop: 1, color: gold }} /><span>When you mark this task <b style={{ color: ink }}>Completed</b>, the next one is created automatically with its due date moved forward.</span></div>}
-          {field('Project', <input value={project} onChange={e => setProject(e.target.value)} placeholder="Type a project name" style={inp} />)}
+          {/* People */}
+          {field('Assignees', chips(assignees, setAssignees))}
+          {field('Assigned by', chips(assigners, setAssigners))}
+          {/* Status + Priority side by side */}
           <div style={{ display: 'flex', gap: 10 }}>
-            <div style={{ flex: 1 }}>{field('Priority', sel(priority, setPriority, TASK_PRIORITY))}</div>
             <div style={{ flex: 1 }}>{field('Status', sel(status, setStatus, TASK_STATUS))}</div>
+            <div style={{ flex: 1 }}>{field('Priority', sel(priority, setPriority, TASK_PRIORITY))}</div>
           </div>
+          {/* Project */}
+          {field('Project', <input value={project} onChange={e => setProject(e.target.value)} placeholder="Type a project name" style={inp} />)}
+          {/* Labels */}
           {field('Your labels', (
             <div>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -2606,33 +2669,32 @@ Rules:
               </div>}
             </div>
           ))}
-          {field('Assignees', chips(assignees, setAssignees))}
-          {field('Assigned by', chips(assigners, setAssigners))}
+          {/* Details */}
           {field('Description', <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder="Initial description (auto-filled when generated from AI mode later)" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
           {field('Context', <textarea value={context} onChange={e => setContext(e.target.value)} rows={2} placeholder="Ongoing updates / notes" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
           {field('Working URL', <input value={workingUrl} onChange={e => setWorkingUrl(e.target.value)} placeholder="https://…" style={inp} />)}
           {field('Email link', <input value={emailLink} onChange={e => setEmailLink(e.target.value)} placeholder="https://… (link to the email)" style={inp} />)}
-          {/* Decision section */}
-          <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
-              <i className="ti ti-gavel" style={{ fontSize: 15, color: gold }} />
-              <span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>Decision</span>
-            </div>
-            {field('Decision maker(s)', chips(decisionMakers, setDecisionMakers))}
-            {field('Question', <input value={decisionQuestion} onChange={e => setDecisionQuestion(e.target.value)} placeholder="What needs to be decided?" style={inp} />)}
-            {field('Options', (
-              <div>
-                {decisionOptions.map((o, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    <i className={o.is_chosen ? 'ti ti-circle-check-filled' : 'ti ti-circle'} onClick={() => setChosen(i)} title="Mark as chosen" style={{ fontSize: 19, cursor: 'pointer', color: o.is_chosen ? (dark ? '#3FB36B' : '#1E6B40') : sub, flexShrink: 0 }} />
-                    <input value={o.body} onChange={e => updateOpt(i, e.target.value)} placeholder={'Option ' + String.fromCharCode(65 + i)} style={inp} />
-                    <i className="ti ti-trash" onClick={() => removeOpt(i)} style={{ fontSize: 15, cursor: 'pointer', color: sub, flexShrink: 0 }} />
-                  </div>
-                ))}
-                <button type="button" onClick={addOpt} style={{ marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 5, padding: '7px 12px', background: 'none', border: `1px dashed ${bord}`, borderRadius: 9, color: sub, fontSize: '0.78rem', cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-plus" style={{ fontSize: 13 }} />Add option</button>
-              </div>
-            ))}
+          {/* Decision (collapsible) */}
+          <div style={{ marginTop: 4, marginBottom: 4 }}>
+            {sectionHeader(decisionOpen, setDecisionOpen, 'ti-gavel', 'Decision')}
+            {decisionOpen && <div style={{ marginTop: 10 }}>
+              {field('Decision maker(s)', chips(decisionMakers, setDecisionMakers))}
+              {field('Question', <input value={decisionQuestion} onChange={e => setDecisionQuestion(e.target.value)} placeholder="What needs to be decided?" style={inp} />)}
+              {field('Options', (
+                <div>
+                  {decisionOptions.map((o, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                      <i className={o.is_chosen ? 'ti ti-circle-check-filled' : 'ti ti-circle'} onClick={() => setChosen(i)} title="Mark as chosen" style={{ fontSize: 19, cursor: 'pointer', color: o.is_chosen ? (dark ? '#3FB36B' : '#1E6B40') : sub, flexShrink: 0 }} />
+                      <input value={o.body} onChange={e => updateOpt(i, e.target.value)} placeholder={'Option ' + String.fromCharCode(65 + i)} style={inp} />
+                      <i className="ti ti-trash" onClick={() => removeOpt(i)} style={{ fontSize: 15, cursor: 'pointer', color: sub, flexShrink: 0 }} />
+                    </div>
+                  ))}
+                  <button type="button" onClick={addOpt} style={{ marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 5, padding: '7px 12px', background: 'none', border: `1px dashed ${bord}`, borderRadius: 9, color: sub, fontSize: '0.78rem', cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-plus" style={{ fontSize: 13 }} />Add option</button>
+                </div>
+              ))}
+            </div>}
           </div>
+          {/* Save / Cancel */}
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
             <button onClick={save} disabled={saving || !title.trim()} style={{ flex: 1, padding: 12, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !title.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (task ? 'Save changes' : 'Create task')}</button>
             <button onClick={onCancel} style={{ flex: 1, padding: 12, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
@@ -2845,7 +2907,8 @@ Rules:
       async function handleSave(form) {
         const due_at = form.due ? new Date(form.due).toISOString() : null;
         const project_id = form.project ? await TaskDB.findOrCreateProject(form.project, user) : null;
-        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null, decision_question: form.decisionQuestion || null, recurrence: form.recurrence || 'none' };
+        const pl = form.planning || {};
+        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null, decision_question: form.decisionQuestion || null, recurrence: form.recurrence || 'none', weekly_priority: pl.wp || null, weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null, daily_priority: pl.dp || null, daily_rank: pl.dr ? parseInt(pl.dr, 10) : null };
         const people = { assignee: form.assignees, assigner: form.assigners, decision_maker: form.decisionMakers || [] };
         let taskId;
         if (current && current.id) { await TaskDB.update(current.id, current, fields, user); await TaskDB.setPeople(current.id, people); taskId = current.id; }

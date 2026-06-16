@@ -24,9 +24,10 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
         options: {
+          // Plain Google sign-in. (The Calendar scope / offline access was removed —
+          // it's part of the parked Google Calendar feature whose backend isn't set up,
+          // and requesting that unconfigured sensitive scope broke the OAuth return.)
           redirectTo: _cleanUrl,
-          scopes: 'https://www.googleapis.com/auth/calendar.readonly',
-          queryParams: { access_type: 'offline', prompt: 'consent', hd: 'themorshedgroup.com' },
         },
       });
       if (error) {

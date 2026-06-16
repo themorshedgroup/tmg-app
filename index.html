@@ -379,6 +379,7 @@ Continue with TMG Gmail
       uid() { return window.SupabaseAuth?._state?.session?.user?.id || (this.client() ? null : 'dev-user-id'); },
       _ws: null,
       _devData: null,
+      _devRead: {},
 
       _dev() {
         if (this._devData) return this._devData;
@@ -396,12 +397,18 @@ Continue with TMG Gmail
           ],
           messages: {
             devc1: [
-              { id: 'm1', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'Welcome to the new Chat! 🎉 Notes at https://themorshedgroup.com', created_at: ago(3600000) },
-              { id: 'm2', channel_id: 'devc1', author_id: 'dev-user-id',  content: 'Looks great. @Tarek can you review the #deals pipeline?', created_at: ago(1800000) },
-              { id: 'm3', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'XSS test: <img src=x onerror=alert(1)> <script>alert(1)<\/script> javascript:alert(1)', created_at: ago(600000), edited_at: ago(300000) },
+              { id: 'm1', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'Welcome to the new Chat! 🎉 Notes at https://themorshedgroup.com', created_at: ago(3600000), reactions: [{ emoji: '🎉', user_id: 'dev-user-id' }, { emoji: '🎉', user_id: 'dev-alex' }], reply_count: 2 },
+              { id: 'm2', channel_id: 'devc1', author_id: 'dev-user-id',  content: 'Looks great. @Tarek can you review the #deals pipeline?', created_at: ago(1800000), reactions: [], reply_count: 0 },
+              { id: 'm3', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'XSS test: <img src=x onerror=alert(1)> <script>alert(1)<\/script> javascript:alert(1)', created_at: ago(600000), edited_at: ago(300000), reactions: [], reply_count: 0 },
             ],
             devd1: [
-              { id: 'd1', conversation_id: 'devd1', author_id: 'dev-tarek', content: 'Hey — got a sec to sync on Forest Hill?', created_at: ago(900000) },
+              { id: 'd1', conversation_id: 'devd1', author_id: 'dev-tarek', content: 'Hey — got a sec to sync on Forest Hill?', created_at: ago(900000), reactions: [], reply_count: 0 },
+            ],
+          },
+          threads: {
+            m1: [
+              { id: 'mt1', channel_id: 'devc1', thread_parent_id: 'm1', author_id: 'dev-user-id', content: 'Love it 🙌', created_at: ago(3500000), reactions: [] },
+              { id: 'mt2', channel_id: 'devc1', thread_parent_id: 'm1', author_id: 'dev-alex',     content: 'Finally!', created_at: ago(3400000), reactions: [] },
             ],
           },
         };
@@ -452,31 +459,127 @@ Continue with TMG Gmail
         return (convs || []).map(c => ({ id: c.id, type: c.type, title: c.title || null, memberIds: byConv[c.id] || [] }));
       },
 
+      _scopeCol(scope) { return scope.kind === 'channel' ? 'channel_id' : 'conversation_id'; },
+
       async loadMessages(scope, opts = {}) {
         const limit = opts.limit || 60;
         if (!this.client()) return (this._dev().messages[scope.id] || []).slice();
-        const col = scope.kind === 'channel' ? 'channel_id' : 'conversation_id';
+        const col = this._scopeCol(scope);
         const { data, error } = await this.client().from('chat_messages').select('*')
           .eq(col, scope.id).is('thread_parent_id', null)
           .order('created_at', { ascending: true }).limit(limit);
         if (error) { console.error('[ChatDB] loadMessages:', error.message); return []; }
-        return data || [];
+        const msgs = data || [];
+        if (msgs.length) await this._enrich(scope, msgs);
+        return msgs;
       },
 
-      async sendMessage(scope, { content, clientId }) {
+      // attach reactions[] and reply_count to a set of messages
+      async _enrich(scope, msgs) {
+        const col = this._scopeCol(scope);
+        const ids = msgs.map(m => m.id);
+        const { data: rx } = await this.client().from('chat_message_reactions').select('message_id,emoji,user_id').in('message_id', ids);
+        const rxBy = {}; (rx || []).forEach(r => { (rxBy[r.message_id] = rxBy[r.message_id] || []).push({ emoji: r.emoji, user_id: r.user_id }); });
+        const { data: rep } = await this.client().from('chat_messages').select('thread_parent_id').eq(col, scope.id).not('thread_parent_id', 'is', null).in('thread_parent_id', ids);
+        const repBy = {}; (rep || []).forEach(r => { repBy[r.thread_parent_id] = (repBy[r.thread_parent_id] || 0) + 1; });
+        msgs.forEach(m => { m.reactions = rxBy[m.id] || []; m.reply_count = repBy[m.id] || 0; });
+      },
+
+      async threadReplies(scope, parentId) {
+        if (!this.client()) return (this._dev().threads[parentId] || []).slice();
+        const { data, error } = await this.client().from('chat_messages').select('*')
+          .eq('thread_parent_id', parentId).order('created_at', { ascending: true });
+        if (error) { console.error('[ChatDB] threadReplies:', error.message); return []; }
+        const msgs = data || [];
+        if (msgs.length) await this._enrich(scope, msgs);
+        return msgs;
+      },
+
+      async sendMessage(scope, { content, clientId, threadParentId }) {
         if (!this.client()) {
           const d = this._dev();
-          const row = { id: 'dev-' + (clientId || Date.now()), author_id: this.uid(), content, client_id: clientId, created_at: new Date().toISOString(),
-            channel_id: scope.kind === 'channel' ? scope.id : null, conversation_id: scope.kind === 'conversation' ? scope.id : null };
-          (d.messages[scope.id] = d.messages[scope.id] || []).push(row);
+          const row = { id: 'dev-' + (clientId || Date.now()), author_id: this.uid(), content, client_id: clientId, created_at: new Date().toISOString(), reactions: [], reply_count: 0,
+            channel_id: scope.kind === 'channel' ? scope.id : null, conversation_id: scope.kind === 'conversation' ? scope.id : null, thread_parent_id: threadParentId || null };
+          if (threadParentId) { (d.threads[threadParentId] = d.threads[threadParentId] || []).push(row); const pm = (d.messages[scope.id] || []).find(m => m.id === threadParentId); if (pm) pm.reply_count = (pm.reply_count || 0) + 1; }
+          else (d.messages[scope.id] = d.messages[scope.id] || []).push(row);
           return row;
         }
         const ws = await this.defaultWorkspaceId();
-        const base = { workspace_id: ws, author_id: this.uid(), content, client_id: clientId || null };
+        const base = { workspace_id: ws, author_id: this.uid(), content, client_id: clientId || null, thread_parent_id: threadParentId || null };
         if (scope.kind === 'channel') base.channel_id = scope.id; else base.conversation_id = scope.id;
         const { data, error } = await this.client().from('chat_messages').insert(base).select().single();
         if (error) { console.error('[ChatDB] send:', error.message); throw error; }
         return data;
+      },
+
+      async editMessage(id, content) {
+        if (!this.client()) {
+          const d = this._dev(); const stamp = new Date().toISOString();
+          Object.keys(d.messages).forEach(k => d.messages[k].forEach(m => { if (m.id === id) { m.content = content; m.edited_at = stamp; } }));
+          Object.keys(d.threads).forEach(k => d.threads[k].forEach(m => { if (m.id === id) { m.content = content; m.edited_at = stamp; } }));
+          return;
+        }
+        const { error } = await this.client().from('chat_messages').update({ content, edited_at: new Date().toISOString() }).eq('id', id);
+        if (error) { console.error('[ChatDB] edit:', error.message); throw error; }
+      },
+
+      async react(messageId, emoji) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('chat_message_reactions').insert({ message_id: messageId, user_id: this.uid(), emoji });
+        if (error && error.code !== '23505') console.error('[ChatDB] react:', error.message);
+      },
+      async unreact(messageId, emoji) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('chat_message_reactions').delete().eq('message_id', messageId).eq('user_id', this.uid()).eq('emoji', emoji);
+        if (error) console.error('[ChatDB] unreact:', error.message);
+      },
+
+      async insertMentions(messageId, mentions) {
+        if (!this.client() || !mentions.length) return;
+        const rows = mentions.map(m => ({ message_id: messageId, mention_type: m.type, mentioned_user_id: m.userId || null, mentioned_channel_id: m.channelId || null }));
+        const { error } = await this.client().from('chat_mentions').insert(rows);
+        if (error) console.error('[ChatDB] mentions:', error.message);
+      },
+
+      async markRead(scope, lastMessageId) {
+        if (!this.client()) { this._devRead[scope.id] = Date.now(); return; }
+        const tbl = scope.kind === 'channel' ? 'chat_channel_members' : 'chat_conversation_members';
+        const col = scope.kind === 'channel' ? 'channel_id' : 'conversation_id';
+        const patch = { last_read_at: new Date().toISOString() };
+        if (lastMessageId && !String(lastMessageId).startsWith('tmp-')) patch.last_read_message_id = lastMessageId;
+        const { error } = await this.client().from(tbl).update(patch).eq(col, scope.id).eq('user_id', this.uid());
+        if (error) console.error('[ChatDB] markRead:', error.message);
+      },
+
+      // { total, mentions, byScope: { id: {unread, mentions} } } — polled (privacy-safe; no global stream)
+      async unreadSummary() {
+        if (!this.client()) {
+          const d = this._dev(); const byScope = {}; let total = 0, mentions = 0; const me = this.uid();
+          const scan = (id, msgs) => { const since = this._devRead[id] || 0; const u = (msgs || []).filter(m => m.author_id !== me && new Date(m.created_at).getTime() > since).length; if (u) { byScope[id] = { unread: u, mentions: 0 }; total += u; } };
+          d.channels.forEach(c => scan(c.id, d.messages[c.id]));
+          d.conversations.forEach(c => scan(c.id, d.messages[c.id]));
+          return { total, mentions, byScope };
+        }
+        const me = this.uid();
+        const out = { total: 0, mentions: 0, byScope: {} };
+        try {
+          const cm = await this.client().from('chat_channel_members').select('channel_id,last_read_at').eq('user_id', me);
+          const vm = await this.client().from('chat_conversation_members').select('conversation_id,last_read_at').eq('user_id', me);
+          const scopes = [].concat((cm.data || []).map(r => ({ kind: 'channel', id: r.channel_id, col: 'channel_id', since: r.last_read_at })),
+                                   (vm.data || []).map(r => ({ kind: 'conversation', id: r.conversation_id, col: 'conversation_id', since: r.last_read_at })));
+          await Promise.all(scopes.map(async s => {
+            let q = this.client().from('chat_messages').select('id', { count: 'exact', head: true }).eq(s.col, s.id).neq('author_id', me);
+            if (s.since) q = q.gt('created_at', s.since);
+            const { count } = await q;
+            if (count) { out.byScope[s.id] = { unread: count, mentions: 0 }; out.total += count; }
+          }));
+          // unread mentions of me (best-effort: mentions whose message is newer than that scope's last_read)
+          const sinceById = {}; scopes.forEach(s => { sinceById[s.id] = s.since ? new Date(s.since).getTime() : 0; });
+          const { data: mn } = await this.client().from('chat_mentions')
+            .select('message:chat_messages(channel_id,conversation_id,created_at,author_id)').eq('mentioned_user_id', me).limit(200);
+          (mn || []).forEach(r => { const m = r.message; if (!m || m.author_id === me) return; const sid = m.channel_id || m.conversation_id; const t = new Date(m.created_at).getTime(); if (t > (sinceById[sid] || 0)) { out.mentions++; if (out.byScope[sid]) out.byScope[sid].mentions++; } });
+        } catch (e) { console.error('[ChatDB] unreadSummary:', e.message || e); }
+        return out;
       },
 
       async createChannel({ name, type, topic }) {
@@ -534,18 +637,33 @@ Continue with TMG Gmail
         return { id: conv.id, type: 'group_dm', title: title || null, memberIds: members };
       },
 
-      // Realtime: subscribe to one open scope's message stream (RLS-filtered by the client JWT).
-      subscribeScope(scope, { onInsert, onUpdate }) {
+      // Realtime: one open scope's message + reaction streams (RLS-filtered by the client JWT).
+      subscribeScope(scope, { onInsert, onUpdate, onReaction }) {
         const c = this.client(); if (!c || !scope) return null;
-        const col = scope.kind === 'channel' ? 'channel_id' : 'conversation_id';
+        const col = this._scopeCol(scope);
         const ch = c.channel('chat:' + scope.kind + ':' + scope.id)
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages', filter: col + '=eq.' + scope.id }, (p) => onInsert && onInsert(p.new))
           .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_messages', filter: col + '=eq.' + scope.id }, (p) => onUpdate && onUpdate(p.new))
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_message_reactions' }, (p) => onReaction && onReaction(p))
           .subscribe();
         return ch;
       },
       unsubscribe(ch) { const c = this.client(); if (ch && c) c.removeChannel(ch); },
     };
+
+    // Parse @Name / @channel / @here / #channel out of composed text → mention rows for chat_mentions.
+    function parseChatMentions(text, scope, roster, channels) {
+      const out = []; const seen = {};
+      let m; const MEN = /(^|[\s.,!?])@([A-Za-z0-9._-]+)/g;
+      while ((m = MEN.exec(text))) {
+        const h = m[2].toLowerCase();
+        if (h === 'here') { if (!seen.here) { out.push({ type: 'here' }); seen.here = 1; } continue; }
+        if (h === 'channel') { if (!seen.channel && scope.kind === 'channel') { out.push({ type: 'channel', channelId: scope.id }); seen.channel = 1; } continue; }
+        const p = (roster || []).find(u => (u.first_name || '').toLowerCase() === h || (((u.first_name || '') + (u.last_name || '')).toLowerCase()) === h);
+        if (p && !seen['u' + p.id]) { out.push({ type: 'user', userId: p.id }); seen['u' + p.id] = 1; }
+      }
+      return out;
+    }
 
     // XSS-safe message renderer → React nodes (text auto-escaped; <a> only for http/https;
     // @mention and #channel become styled chips). NEVER uses dangerouslySetInnerHTML.
@@ -570,7 +688,7 @@ Continue with TMG Gmail
       const link = ctx.linkColor || (ctx.dark ? '#7FB2FF' : '#2F6FE0');
       for (let i = 0; i < matches.length; i++) {
         const t = matches[i];
-        if (t.start < lastEnd) continue;            // drop overlaps
+        if (t.start < lastEnd) continue;
         if (t.start > idx) out.push(s.slice(idx, t.start));
         if (t.type === 'url') {
           const href = chatSafeHref(t.text);
@@ -3593,6 +3711,8 @@ Rules:
     };
 
     // ─── Team Chat ("Chat") — real, realtime, backed by ChatDB ───────
+    const CHAT_EMOJIS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥', '👀', '✅'];
+
     function NewChannelModal({ dark, isAdmin, onClose, onCreated }) {
       const J = "'Jost', sans-serif";
       const panelBg = dark ? '#0A1730' : '#FFFFFF', txt = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.55)' : '#6B6B6B', bord = dark ? '#152545' : '#E4DFD4', inpBg = dark ? '#06101F' : '#F3EBDA';
@@ -3676,48 +3796,197 @@ Rules:
       );
     }
 
-    function ChatConversation({ dark, scope, me, rosterById, nameOf, photoOf, awayOf, onBack }) {
+    function ChatConversation({ dark, scope, me, roster, channels, rosterById, nameOf, photoOf, awayOf, onBack, onRead }) {
       const J = "'Jost', sans-serif";
       const barBg = dark ? '#070F1E' : '#FFFFFF', barBord = dark ? '#0D1E3A' : '#F0EBE3', msgBg = dark ? '#070F1E' : '#FCFBF8';
       const backCol = dark ? 'rgba(255,255,255,0.4)' : 'rgba(0,26,74,0.4)', titleCol = dark ? '#fff' : '#001A4A', subCol = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
       const theirBg = dark ? '#0A1E44' : '#FFFFFF', theirCol = dark ? '#fff' : '#001A4A', theirBord = dark ? 'none' : '1px solid #E4DFD4';
       const mineBg = dark ? '#AD832F' : '#001A4A', timeCol = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9', senderGold = dark ? '#C9A45A' : '#AD832F';
-      const inBarBg = dark ? '#070F1E' : '#F5F0E8', inBarBord = dark ? '#0D1E3A' : '#E0D8CC', inFieldBg = dark ? '#0A1730' : '#FFFFFF', inFieldBord = dark ? '#152545' : '#E0D8CC', inPlace = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9', sendBg = dark ? '#AD832F' : '#001A4A';
+      const inBarBg = dark ? '#070F1E' : '#F5F0E8', inBarBord = dark ? '#0D1E3A' : '#E0D8CC', inFieldBg = dark ? '#0A1730' : '#FFFFFF', inFieldBord = dark ? '#152545' : '#E0D8CC', sendBg = dark ? '#AD832F' : '#001A4A';
+      const reactBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', reactBord = dark ? '#152545' : '#E4DFD4', reactMineBd = dark ? '#C9A45A' : '#AD832F';
       const isGroup = scope.kind === 'channel' || (scope.conv && scope.conv.type === 'group_dm');
 
       const [messages, setMessages] = useState([]); const [loading, setLoading] = useState(true);
-      const [text, setText] = useState(''); const [sending, setSending] = useState(false);
-      const listRef = useRef(null);
+      const [text, setText] = useState(''); const [sending, setSending] = useState(false); const [menu, setMenu] = useState(null);
+      const [actionFor, setActionFor] = useState(null); const [editId, setEditId] = useState(null); const [editText, setEditText] = useState('');
+      const [thread, setThread] = useState(null); const [threadMsgs, setThreadMsgs] = useState([]); const [threadText, setThreadText] = useState(''); const [tSending, setTSending] = useState(false);
+      const listRef = useRef(null); const composerRef = useRef(null); const threadRef = useRef(null);
+      threadRef.current = thread;
       const scrollDown = () => { const el = listRef.current; if (el) el.scrollTop = el.scrollHeight; };
+      const fmtTime = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
+      const byIdNames = {}; Object.keys(rosterById).forEach(id => { byIdNames[id] = nameOf(id); });
+      const ctxFor = (mine) => mine ? { dark, byId: byIdNames, chipColor: '#fff', linkColor: '#fff' } : { dark, byId: byIdNames };
+
+      const dedupeAdd = (prev, row) => prev.some(x => (row.client_id && x.client_id === row.client_id) || x.id === row.id)
+        ? prev.map(x => ((row.client_id && x.client_id === row.client_id) || x.id === row.id) ? { ...x, ...row } : x) : [...prev, row];
+      const applyReaction = (list, p) => {
+        const r = (p.new && p.new.message_id) ? p.new : p.old; if (!r || !r.message_id) return list;
+        return list.map(mm => {
+          if (mm.id !== r.message_id) return mm;
+          let rx = mm.reactions || [];
+          if (p.eventType === 'DELETE') rx = rx.filter(x => !(x.emoji === r.emoji && x.user_id === r.user_id));
+          else if (!rx.some(x => x.emoji === r.emoji && x.user_id === r.user_id)) rx = [...rx, { emoji: r.emoji, user_id: r.user_id }];
+          return { ...mm, reactions: rx };
+        });
+      };
 
       useEffect(() => {
         let active = true; setLoading(true);
-        ChatDB.loadMessages(scope).then(ms => { if (active) { setMessages(ms); setLoading(false); setTimeout(scrollDown, 40); } });
+        ChatDB.loadMessages(scope).then(ms => { if (active) { setMessages(ms); setLoading(false); setTimeout(scrollDown, 40); ChatDB.markRead(scope, ms.length ? ms[ms.length - 1].id : null).then(() => onRead && onRead()); } });
         const ch = ChatDB.subscribeScope(scope, {
-          onInsert: (row) => setMessages(prev => {
-            if (prev.some(x => (row.client_id && x.client_id === row.client_id) || x.id === row.id))
-              return prev.map(x => ((row.client_id && x.client_id === row.client_id) || x.id === row.id) ? row : x);
-            return [...prev, row];
-          }),
-          onUpdate: (row) => setMessages(prev => prev.map(x => x.id === row.id ? row : x)),
+          onInsert: (row) => {
+            if (row.thread_parent_id) {
+              setMessages(prev => prev.map(x => x.id === row.thread_parent_id ? { ...x, reply_count: (x.reply_count || 0) + 1 } : x));
+              if (threadRef.current && threadRef.current.id === row.thread_parent_id) setThreadMsgs(prev => dedupeAdd(prev, row));
+            } else {
+              setMessages(prev => dedupeAdd(prev, row));
+              ChatDB.markRead(scope, row.id).then(() => onRead && onRead());
+            }
+          },
+          onUpdate: (row) => { setMessages(prev => prev.map(x => x.id === row.id ? { ...x, ...row } : x)); setThreadMsgs(prev => prev.map(x => x.id === row.id ? { ...x, ...row } : x)); },
+          onReaction: (p) => { setMessages(prev => applyReaction(prev, p)); setThreadMsgs(prev => applyReaction(prev, p)); },
         });
         return () => { active = false; ChatDB.unsubscribe(ch); };
       }, [scope.id]);
       useEffect(() => { scrollDown(); }, [messages.length]);
 
-      const send = async () => {
-        const body = text.trim(); if (!body || sending) return;
+      const doSend = async (body, threadParentId, clear, setBusy) => {
+        if (!body.trim()) return;
         const clientId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('c' + Date.now() + Math.round(performance.now()));
-        const optimistic = { id: 'tmp-' + clientId, author_id: me, content: body, client_id: clientId, created_at: new Date().toISOString(), _pending: true };
-        setMessages(prev => [...prev, optimistic]); setText(''); setSending(true);
-        try { const row = await ChatDB.sendMessage(scope, { content: body, clientId }); setMessages(prev => prev.map(x => x.client_id === clientId ? row : x)); }
-        catch (e) { setMessages(prev => prev.map(x => x.client_id === clientId ? { ...x, _pending: false, _failed: true } : x)); }
-        finally { setSending(false); setTimeout(scrollDown, 40); }
+        const optimistic = { id: 'tmp-' + clientId, author_id: me, content: body, client_id: clientId, created_at: new Date().toISOString(), reactions: [], reply_count: 0, _pending: true, thread_parent_id: threadParentId || null };
+        if (threadParentId) setThreadMsgs(prev => [...prev, optimistic]); else setMessages(prev => [...prev, optimistic]);
+        clear(); setBusy(true);
+        try {
+          const row = await ChatDB.sendMessage(scope, { content: body, clientId, threadParentId });
+          const mentions = parseChatMentions(body, scope, roster, channels);
+          if (mentions.length && row.id) ChatDB.insertMentions(row.id, mentions);
+          if (threadParentId) { setThreadMsgs(prev => prev.map(x => x.client_id === clientId ? { ...row, reactions: [] } : x)); setMessages(prev => prev.map(x => x.id === threadParentId ? { ...x, reply_count: (x.reply_count || 0) + 1 } : x)); }
+          else setMessages(prev => prev.map(x => x.client_id === clientId ? { ...row, reactions: [] } : x));
+        } catch (e) {
+          const mark = (l) => l.map(x => x.client_id === clientId ? { ...x, _pending: false, _failed: true } : x);
+          if (threadParentId) setThreadMsgs(mark); else setMessages(mark);
+        } finally { setBusy(false); setTimeout(scrollDown, 40); }
       };
-      const onKey = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
-      const fmtTime = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
-      const ctx = { dark, byId: Object.keys(rosterById).reduce((o, id) => { o[id] = nameOf(id); return o; }, {}) };
+      const send = () => doSend(text, null, () => setText(''), setSending);
+      const sendThread = () => doSend(threadText, thread && thread.id, () => setThreadText(''), setTSending);
+      const onKey = (fn) => (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); fn(); } };
 
+      const onComposerChange = (e) => {
+        const val = e.target.value; setText(val);
+        const pos = e.target.selectionStart || val.length;
+        const mm = val.slice(0, pos).match(/(^|\s)([@#])([A-Za-z0-9._-]*)$/);
+        if (!mm) { setMenu(null); return; }
+        const sym = mm[2], qy = mm[3].toLowerCase(), tokenStart = pos - (mm[3].length + 1);
+        let items = [];
+        if (sym === '@') {
+          if (scope.kind === 'channel' && 'channel'.startsWith(qy)) items.push({ label: '@channel', sub: 'Notify the channel', insert: '@channel' });
+          if ('here'.startsWith(qy)) items.push({ label: '@here', sub: 'Notify those active', insert: '@here' });
+          (roster || []).filter(p => p.id !== me).forEach(p => { const nm = nameOf(p.id); if (!qy || nm.toLowerCase().includes(qy)) items.push({ label: nm, photo: p.avatar_url, insert: '@' + ((p.first_name || nm).replace(/\s+/g, '')) }); });
+        } else {
+          (channels || []).forEach(c => { if (!qy || c.name.toLowerCase().includes(qy)) items.push({ label: '#' + c.name, insert: '#' + c.name }); });
+        }
+        setMenu(items.length ? { items: items.slice(0, 6), tokenStart, pos } : null);
+      };
+      const pickMention = (item) => {
+        const ta = composerRef.current; const pos = ta ? (ta.selectionStart || text.length) : text.length;
+        const nt = text.slice(0, menu.tokenStart) + item.insert + ' ' + text.slice(pos);
+        setText(nt); setMenu(null);
+        setTimeout(() => { if (ta) { ta.focus(); const c = menu.tokenStart + item.insert.length + 1; try { ta.setSelectionRange(c, c); } catch (e) {} } }, 10);
+      };
+
+      const toggleReaction = (mm, emoji) => {
+        const mine = (mm.reactions || []).some(r => r.emoji === emoji && r.user_id === me);
+        const upd = (l) => l.map(x => x.id !== mm.id ? x : { ...x, reactions: mine ? (x.reactions || []).filter(r => !(r.emoji === emoji && r.user_id === me)) : [...(x.reactions || []), { emoji, user_id: me }] });
+        setMessages(upd); setThreadMsgs(upd);
+        if (mine) ChatDB.unreact(mm.id, emoji); else ChatDB.react(mm.id, emoji);
+        setActionFor(null);
+      };
+      const startEdit = (mm) => { setEditId(mm.id); setEditText(mm.content); setActionFor(null); };
+      const saveEdit = async () => {
+        const body = editText.trim(); const id = editId;
+        if (!body) { setEditId(null); return; }
+        const upd = (l) => l.map(x => x.id === id ? { ...x, content: body, edited_at: new Date().toISOString() } : x);
+        setMessages(upd); setThreadMsgs(upd); setEditId(null);
+        try { await ChatDB.editMessage(id, body); } catch (e) { alert('Could not save edit.'); }
+      };
+      const openThread = (mm) => { setActionFor(null); setThread(mm); setThreadMsgs([]); ChatDB.threadReplies(scope, mm.id).then(setThreadMsgs); };
+
+      const groupRx = (rx) => { const g = {}; (rx || []).forEach(r => { (g[r.emoji] = g[r.emoji] || { count: 0, mine: false }); g[r.emoji].count++; if (r.user_id === me) g[r.emoji].mine = true; }); return g; };
+
+      const renderRow = (mm, i, list, inThread) => {
+        const mine = mm.author_id === me;
+        const prev = list[i - 1];
+        const showSender = (isGroup || inThread) && !mine && (!prev || prev.author_id !== mm.author_id);
+        const rg = groupRx(mm.reactions);
+        const editing = editId === mm.id;
+        return (
+          <div key={mm.id} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {showSender && <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.06em', fontWeight: 600, marginLeft: 28, color: senderGold }}>{nameOf(mm.author_id)}</div>}
+            <div style={{ display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'flex-end', gap: 6 }}>
+              {!mine ? <Avatar photo={photoOf(mm.author_id)} name={nameOf(mm.author_id)} size={22} /> : <div style={{ width: 1 }} />}
+              {editing ? (
+                <div style={{ maxWidth: '82%', flex: 1 }}>
+                  <textarea autoFocus value={editText} onChange={e => setEditText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(); } if (e.key === 'Escape') setEditId(null); }} rows={2} style={{ width: '100%', resize: 'vertical', borderRadius: 10, padding: '7px 9px', fontFamily: J, fontSize: 11, color: dark ? '#fff' : '#001A4A', background: inFieldBg, border: `1px solid ${inFieldBord}`, outline: 'none', boxSizing: 'border-box' }} />
+                  <div style={{ display: 'flex', gap: 8, marginTop: 4, justifyContent: 'flex-end' }}>
+                    <button onClick={() => setEditId(null)} style={{ fontFamily: J, fontSize: 9, color: subCol, background: 'none', border: 'none', cursor: 'pointer' }}>Cancel</button>
+                    <button onClick={saveEdit} style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: senderGold, background: 'none', border: 'none', cursor: 'pointer' }}>Save</button>
+                  </div>
+                </div>
+              ) : (
+                <div onClick={() => setActionFor(actionFor === mm.id ? null : mm.id)} style={{ maxWidth: '78%', padding: '7px 10px', fontFamily: J, fontSize: 11, lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-word', cursor: 'pointer', borderRadius: mine ? '12px 12px 3px 12px' : '12px 12px 12px 3px', background: mine ? mineBg : theirBg, color: mine ? '#fff' : theirCol, border: mine ? 'none' : theirBord, opacity: mm._pending ? 0.6 : 1 }}>
+                  {renderMessageContent(mm.content, ctxFor(mine))}
+                  {mm.edited_at && <span style={{ fontSize: 8, opacity: 0.6, marginLeft: 5 }}>(edited)</span>}
+                </div>
+              )}
+            </div>
+            {/* reactions strip */}
+            {Object.keys(rg).length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0, justifyContent: mine ? 'flex-end' : 'flex-start', marginTop: 2 }}>
+                {Object.keys(rg).map(em => (
+                  <button key={em} onClick={() => toggleReaction(mm, em)} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px', borderRadius: 10, fontFamily: J, fontSize: 10, cursor: 'pointer', background: rg[em].mine ? reactBg : 'transparent', border: `1px solid ${rg[em].mine ? reactMineBd : reactBord}`, color: dark ? '#fff' : '#001A4A' }}>{em} <span style={{ fontSize: 8 }}>{rg[em].count}</span></button>
+                ))}
+              </div>
+            )}
+            {/* reply count */}
+            {!inThread && mm.reply_count > 0 && (
+              <button onClick={() => openThread(mm)} style={{ alignSelf: mine ? 'flex-end' : 'flex-start', marginLeft: mine ? 0 : 28, marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 9, fontWeight: 600, color: senderGold }}><i className="ti ti-message-circle" style={{ fontSize: 12 }} />{mm.reply_count} {mm.reply_count === 1 ? 'reply' : 'replies'}</button>
+            )}
+            {/* action bar */}
+            {actionFor === mm.id && !editing && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', alignSelf: mine ? 'flex-end' : 'flex-start', marginLeft: mine ? 0 : 28, marginTop: 4, padding: '3px 5px', borderRadius: 12, background: dark ? '#0A1730' : '#fff', border: `1px solid ${reactBord}`, boxShadow: '0 3px 10px rgba(0,0,0,0.12)' }}>
+                {CHAT_EMOJIS.map(em => <button key={em} onClick={() => toggleReaction(mm, em)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 15, padding: '2px 3px', lineHeight: 1 }}>{em}</button>)}
+                {!inThread && <button onClick={() => openThread(mm)} aria-label="Reply in thread" style={{ background: 'none', border: 'none', cursor: 'pointer', color: subCol, padding: '2px 4px', display: 'flex' }}><i className="ti ti-message-circle" style={{ fontSize: 15 }} /></button>}
+                {mine && <button onClick={() => startEdit(mm)} aria-label="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: subCol, padding: '2px 4px', display: 'flex' }}><i className="ti ti-pencil" style={{ fontSize: 15 }} /></button>}
+              </div>
+            )}
+            <div style={{ fontFamily: J, fontSize: 7, color: mm._failed ? '#C0392B' : timeCol, textAlign: mine ? 'right' : 'left', marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0 }}>
+              {mm._failed ? 'Failed to send' : (mm._pending ? 'Sending…' : fmtTime(mm.created_at))}
+            </div>
+          </div>
+        );
+      };
+
+      const composer = (val, onChange, onSend, busy, kRef, placeholder, autoMenu) => (
+        <div style={{ flexShrink: 0, borderTop: `1px solid ${inBarBord}`, background: inBarBg, padding: '8px 12px calc(10px + env(safe-area-inset-bottom))', position: 'relative' }}>
+          {autoMenu && menu && menu.items.length > 0 && (
+            <div style={{ position: 'absolute', left: 12, right: 12, bottom: 'calc(100% - 2px)', background: dark ? '#0A1730' : '#fff', border: `1px solid ${reactBord}`, borderRadius: 12, boxShadow: '0 -4px 16px rgba(0,0,0,0.16)', overflow: 'hidden', maxHeight: 200, overflowY: 'auto', zIndex: 5 }}>
+              {menu.items.map((it, k) => (
+                <button key={k} onClick={() => pickMention(it)} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', borderBottom: k < menu.items.length - 1 ? `1px solid ${dark ? '#152545' : '#F0EBE3'}` : 'none', cursor: 'pointer', textAlign: 'left' }}>
+                  {it.photo !== undefined ? <Avatar photo={it.photo} name={it.label} size={22} /> : <i className="ti ti-at" style={{ fontSize: 16, color: senderGold }} />}
+                  <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: dark ? '#fff' : '#001A4A' }}>{it.label}</span>
+                  {it.sub && <span style={{ fontFamily: J, fontSize: 9, color: subCol, marginLeft: 'auto' }}>{it.sub}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 7 }}>
+            <textarea ref={kRef} value={val} onChange={onChange} onKeyDown={onKey(onSend)} rows={1} placeholder={placeholder} aria-label={placeholder} style={{ flex: 1, resize: 'none', maxHeight: 96, minHeight: 34, borderRadius: 17, padding: '8px 12px', fontFamily: J, fontSize: 11, lineHeight: 1.4, color: dark ? '#fff' : '#001A4A', background: inFieldBg, border: `1px solid ${inFieldBord}`, outline: 'none', boxSizing: 'border-box' }} />
+            <button onClick={onSend} disabled={!val.trim() || busy} aria-label="Send" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: val.trim() ? 'pointer' : 'default', flexShrink: 0, background: val.trim() ? sendBg : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-arrow-up" style={{ fontSize: 15 }} /></button>
+          </div>
+        </div>
+      );
+
+      const parent = thread;
       return (
         <React.Fragment>
           <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 14px', borderBottom: `1px solid ${barBord}`, background: barBg, flexShrink: 0 }}>
@@ -3727,39 +3996,35 @@ Rules:
               {scope.kind === 'channel' && scope.topic ? <div style={{ fontFamily: J, fontSize: 8, color: subCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{scope.topic}</div> : null}
             </div>
           </div>
-          <div ref={listRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '12px 12px', display: 'flex', flexDirection: 'column', gap: 8, background: msgBg }}>
+          <div ref={listRef} onClick={() => { if (actionFor) setActionFor(null); }} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '12px 12px', display: 'flex', flexDirection: 'column', gap: 8, background: msgBg }}>
             {loading && <div style={{ fontFamily: J, fontSize: 10, color: subCol, textAlign: 'center', padding: 16 }}>Loading…</div>}
             {!loading && messages.length === 0 && <div style={{ fontFamily: J, fontSize: 11, color: subCol, textAlign: 'center', padding: 24 }}>No messages yet. Say hello 👋</div>}
-            {messages.map((mm, i) => {
-              const mine = mm.author_id === me;
-              const prev = messages[i - 1];
-              const showSender = isGroup && !mine && (!prev || prev.author_id !== mm.author_id);
-              return (
-                <div key={mm.id} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {showSender && <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.06em', fontWeight: 600, marginLeft: 28, color: senderGold }}>{nameOf(mm.author_id)}</div>}
-                  <div style={{ display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'flex-end', gap: 6 }}>
-                    {!mine ? <Avatar photo={photoOf(mm.author_id)} name={nameOf(mm.author_id)} size={22} /> : <div style={{ width: 1 }} />}
-                    <div style={{ maxWidth: '78%', padding: '7px 10px', fontFamily: J, fontSize: 11, lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-word', borderRadius: mine ? '12px 12px 3px 12px' : '12px 12px 12px 3px', background: mine ? mineBg : theirBg, color: mine ? '#fff' : theirCol, border: mine ? 'none' : theirBord, opacity: mm._pending ? 0.6 : 1 }}>
-                      {renderMessageContent(mm.content, mine ? { dark, byId: ctx.byId, chipColor: '#fff', linkColor: '#fff' } : ctx)}
-                      {mm.edited_at && <span style={{ fontSize: 8, opacity: 0.6, marginLeft: 5 }}>(edited)</span>}
-                    </div>
-                  </div>
-                  <div style={{ fontFamily: J, fontSize: 7, color: mm._failed ? '#C0392B' : timeCol, textAlign: mine ? 'right' : 'left', marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0 }}>
-                    {mm._failed ? 'Failed to send' : (mm._pending ? 'Sending…' : fmtTime(mm.created_at))}
-                  </div>
-                </div>
-              );
-            })}
+            {messages.map((mm, i) => renderRow(mm, i, messages, false))}
           </div>
-          <div style={{ flexShrink: 0, borderTop: `1px solid ${inBarBord}`, background: inBarBg, padding: '8px 12px calc(10px + env(safe-area-inset-bottom))', display: 'flex', alignItems: 'flex-end', gap: 7 }}>
-            <textarea value={text} onChange={e => setText(e.target.value)} onKeyDown={onKey} rows={1} placeholder={'Message ' + scope.title} aria-label={'Message ' + scope.title} style={{ flex: 1, resize: 'none', maxHeight: 96, minHeight: 34, borderRadius: 17, padding: '8px 12px', fontFamily: J, fontSize: 11, lineHeight: 1.4, color: dark ? '#fff' : '#001A4A', background: inFieldBg, border: `1px solid ${inFieldBord}`, outline: 'none', boxSizing: 'border-box' }} />
-            <button onClick={send} disabled={!text.trim() || sending} aria-label="Send" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: text.trim() ? 'pointer' : 'default', flexShrink: 0, background: text.trim() ? sendBg : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-arrow-up" style={{ fontSize: 15 }} /></button>
+          {composer(text, onComposerChange, send, sending, composerRef, 'Message ' + scope.title, true)}
+
+          {/* Thread overlay */}
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: msgBg, transform: parent ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 200ms ease', boxShadow: parent && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none', pointerEvents: parent ? 'auto' : 'none', zIndex: 6 }}>
+            {parent && (
+              <React.Fragment>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 14px', borderBottom: `1px solid ${barBord}`, background: barBg, flexShrink: 0 }}>
+                  <button onClick={() => setThread(null)} aria-label="Close thread" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: backCol, display: 'flex' }}><i className="ti ti-chevron-left" style={{ fontSize: 18 }} /></button>
+                  <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: titleCol }}>Thread</div>
+                </div>
+                <div style={{ flex: 1, overflowY: 'auto', padding: '12px 12px', display: 'flex', flexDirection: 'column', gap: 8, background: msgBg }}>
+                  {renderRow(parent, 0, [parent], true)}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0' }}><div style={{ flex: 1, height: 1, background: barBord }} /><span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.12em', textTransform: 'uppercase', color: subCol }}>{threadMsgs.length} {threadMsgs.length === 1 ? 'reply' : 'replies'}</span><div style={{ flex: 1, height: 1, background: barBord }} /></div>
+                  {threadMsgs.map((tm, i) => renderRow(tm, i, threadMsgs, true))}
+                </div>
+                {composer(threadText, e => setThreadText(e.target.value), sendThread, tSending, null, 'Reply…', false)}
+              </React.Fragment>
+            )}
           </div>
         </React.Fragment>
       );
     }
 
-    function ChatTab({ dark, profile }) {
+    function ChatTab({ dark, profile, chatUnread, onRead }) {
       const J = "'Jost', sans-serif";
       const bg = dark ? '#000D26' : '#FCFBF8', headTitle = dark ? '#FFFFFF' : '#001A4A';
       const composeBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', composeCol = dark ? '#C9A45A' : '#AD832F';
@@ -3768,6 +4033,7 @@ Rules:
       const nameCol = dark ? '#FFFFFF' : '#001A4A', previewCol = dark ? 'rgba(255,255,255,0.35)' : '#888888';
       const me = (window.SupabaseAuth?._state?.session?.user?.id) || 'dev-user-id';
       const isAdmin = hasAdmin(profile && profile.access);
+      const byScope = (chatUnread && chatUnread.byScope) || {};
 
       const [roster, setRoster] = useState([]); const [channels, setChannels] = useState([]); const [convs, setConvs] = useState([]);
       const [loadingList, setLoadingList] = useState(true);
@@ -3791,6 +4057,7 @@ Rules:
       const fcv = convs.filter(c => !ql || convTitle(c).toLowerCase().includes(ql));
       const nothing = !loadingList && !publicCh.length && !privateCh.length && !fcv.length;
 
+      const UnreadDot = ({ id }) => { const u = byScope[id]; if (!u || !u.unread) return null; return <div style={{ minWidth: 16, height: 16, borderRadius: 8, background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px', boxShadow: u.mentions ? '0 0 0 1.5px ' + bg + ', 0 0 0 3px #AD832F' : 'none' }}>{u.unread > 9 ? '9+' : u.unread}</div>; };
       const Section = ({ label }) => <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.18em', fontWeight: 600, color: sectionCol, padding: '12px 14px 5px' }}>{label}</div>;
       const ChannelRow = (c) => (
         <div key={c.id} onClick={() => openChannel(c)} role="button" tabIndex={0} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}` }}>
@@ -3799,11 +4066,11 @@ Rules:
             <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
             {c.topic ? <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 1 }}>{c.topic}</div> : null}
           </div>
+          <UnreadDot id={c.id} />
         </div>
       );
       const ConvRow = (cv) => {
-        const others = cv.memberIds.filter(id => id !== me);
-        const single = others.length <= 1;
+        const others = cv.memberIds.filter(id => id !== me); const single = others.length <= 1;
         return (
           <div key={cv.id} onClick={() => openConv(cv)} role="button" tabIndex={0} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}` }}>
             {single
@@ -3813,6 +4080,7 @@ Rules:
               <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{convTitle(cv)}</div>
               <div style={{ fontFamily: J, fontSize: 9, color: previewCol, marginTop: 1 }}>{cv.type === 'group_dm' ? (cv.memberIds.length + ' members') : 'Direct message'}</div>
             </div>
+            <UnreadDot id={cv.id} />
           </div>
         );
       };
@@ -3851,8 +4119,8 @@ Rules:
               </div>
             </div>
 
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: dark ? '#070F1E' : '#FCFBF8', transform: scope ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 220ms ease', boxShadow: scope && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none', pointerEvents: scope ? 'auto' : 'none' }}>
-              {scope && <ChatConversation key={scope.id} dark={dark} scope={scope} me={me} rosterById={rosterById} nameOf={nameOf} photoOf={photoOf} awayOf={awayOf} onBack={() => setScope(null)} />}
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: dark ? '#070F1E' : '#FCFBF8', transform: scope ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 220ms ease', boxShadow: scope && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none', pointerEvents: scope ? 'auto' : 'none', overflow: 'hidden' }}>
+              {scope && <ChatConversation key={scope.id} dark={dark} scope={scope} me={me} roster={roster} channels={channels} rosterById={rosterById} nameOf={nameOf} photoOf={photoOf} awayOf={awayOf} onBack={() => { setScope(null); onRead && onRead(); }} onRead={onRead} />}
             </div>
           </div>
 
@@ -4214,7 +4482,7 @@ Rules:
     ];
 
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
-    function BottomZone({ active, tabs, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, tabs, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef, unread }) {
       const navTabs = tabs || TABS;
       const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
       const modeLabel = mode === 'work' ? 'Work Mode' : 'AI Mode';
@@ -4361,9 +4629,12 @@ Rules:
                   justifyContent: 'center', gap: 3,
                   padding: '7px 1px', borderRadius: 28, border: 'none', cursor: 'pointer',
                   background: isActive ? (dark ? '#AD832F' : '#FFFFFF') : 'transparent',
-                  transition: 'background 0.2s ease',
+                  transition: 'background 0.2s ease', position: 'relative',
                 }}>
                   <i className={`ti ${icon}`} style={{ fontSize: 18, display: 'block', color, lineHeight: 1 }} />
+                  {id === 'teamchat' && unread && unread.total > 0 && (
+                    <span style={{ position: 'absolute', top: 2, right: '24%', minWidth: 14, height: 14, borderRadius: 7, background: '#AD832F', color: '#fff', fontFamily: "'Jost', sans-serif", fontSize: 7, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px', boxShadow: unread.mentions > 0 ? '0 0 0 1.5px #fff' : 'none' }}>{unread.total > 9 ? '9+' : unread.total}</span>
+                  )}
                   <span style={{
                     fontFamily: "'Jost', sans-serif", fontSize: 7, fontWeight: 500,
                     letterSpacing: '0.11em', color,
@@ -5023,6 +5294,15 @@ Rules:
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
       const [taskInstruction, setTaskInstruction] = useState(null); // armed by the Add To-Do pill → next send creates a task
       const [kpiInstruction, setKpiInstruction] = useState(null); // armed by Enter KPI "paste a note" → next sends parse a KPI
+      const [chatUnread, setChatUnread] = useState({ total: 0, mentions: 0, byScope: {} });
+      const refreshChatUnread = () => { ChatDB.unreadSummary().then(setChatUnread).catch(() => {}); };
+      useEffect(() => {
+        refreshChatUnread();
+        const iv = setInterval(refreshChatUnread, 40000);
+        const onFocus = () => refreshChatUnread();
+        window.addEventListener('focus', onFocus);
+        return () => { clearInterval(iv); window.removeEventListener('focus', onFocus); };
+      }, []);
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
       const [moreView, setMoreView] = useState(() => parseRoute(typeof location !== 'undefined' ? location.hash : '').view || 'directory');
@@ -5377,7 +5657,7 @@ Rules:
                 )}
               </div>
             )}
-            {activeTab === 'teamchat' && <ChatTab dark={dark} profile={profile} />}
+            {activeTab === 'teamchat' && <ChatTab dark={dark} profile={profile} chatUnread={chatUnread} onRead={refreshChatUnread} />}
             {activeTab === 'calls' && <CallsTab dark={dark} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'more' && (
@@ -5403,6 +5683,7 @@ Rules:
           />
           <BottomZone
             active={activeTab}
+            unread={chatUnread}
             tabs={visibleTabs}
             onChange={(t) => {
               setDrawerOpen(false);

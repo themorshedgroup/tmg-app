@@ -843,7 +843,7 @@ Rules:
           parent_task_id: fields.parent_task_id || null,
           created_by: user?.id || null,
         };
-        const wd = { weekly_priority: fields.weekly_priority || null, weekly_rank: fields.weekly_rank || null, daily_priority: fields.daily_priority || null, daily_rank: fields.daily_rank || null };
+        const wd = { weekly_priority: fields.weekly_priority || null, weekly_rank: fields.weekly_rank || null, daily_priority: fields.daily_priority || null, daily_rank: fields.daily_rank || null, decision_due_at: fields.decision_due_at || null, decision_due_has_time: fields.decision_due_has_time || null };
         let res = await c.from('tasks').insert({ ...base, ...wd }).select().single();
         if (res.error && /column|schema cache|PGRST204|42703/i.test((res.error.message || '') + (res.error.code || ''))) res = await c.from('tasks').insert(base).select().single();
         const { data, error } = res;
@@ -859,13 +859,13 @@ Rules:
         if (fields.status === 'done' && oldTask.status !== 'done') patch.completed_at = new Date().toISOString();
         let { error } = await c.from('tasks').update(patch).eq('id', id);
         if (error && /column|schema cache|PGRST204|42703/i.test((error.message || '') + (error.code || ''))) {
-          const p2 = { ...patch }; delete p2.weekly_priority; delete p2.weekly_rank; delete p2.daily_priority; delete p2.daily_rank;
+          const p2 = { ...patch }; delete p2.weekly_priority; delete p2.weekly_rank; delete p2.daily_priority; delete p2.daily_rank; delete p2.decision_due_at; delete p2.decision_due_has_time;
           ({ error } = await c.from('tasks').update(p2).eq('id', id));
         }
         if (error) { console.error('[TaskDB] update:', error.message); throw error; }
-        const FL = { title: 'Title', due_at: 'Due date', project_id: 'Project', priority: 'Priority', status: 'Status', description: 'Description', context: 'Context', working_url: 'Working URL', email_link: 'Email link', decision_question: 'Decision question', recurrence: 'Recurrence' };
+        const FL = { title: 'Title', due_at: 'Due date', project_id: 'Project', priority: 'Priority', status: 'Status', description: 'Description', context: 'Context', working_url: 'Working URL', email_link: 'Email link', decision_question: 'Decision question', decision_due_at: 'Decision due date', recurrence: 'Recurrence' };
         for (const k of Object.keys(fields)) {
-          if (k === 'weekly_priority' || k === 'weekly_rank' || k === 'daily_priority' || k === 'daily_rank') continue;
+          if (k === 'weekly_priority' || k === 'weekly_rank' || k === 'daily_priority' || k === 'daily_rank' || k === 'decision_due_has_time') continue;
           if ((oldTask[k] || null) === (fields[k] || null)) continue;
           let msg;
           if (k === 'status') msg = 'Status: ' + statusLabel(oldTask.status) + ' → ' + statusLabel(fields.status);
@@ -2592,6 +2592,9 @@ Rules:
       const _p2 = (n) => String(n).padStart(2, '0');
       const _initDate = _dd ? (_dd.getFullYear() + '-' + _p2(_dd.getMonth() + 1) + '-' + _p2(_dd.getDate())) : '';
       const _initHM = _dd ? (_p2(_dd.getHours()) + ':' + _p2(_dd.getMinutes())) : '';
+      const _decd = t.decision_due_at ? new Date(t.decision_due_at) : null;
+      const _initDecDate = _decd ? (_decd.getFullYear() + '-' + _p2(_decd.getMonth() + 1) + '-' + _p2(_decd.getDate())) : '';
+      const _initDecHM = _decd ? (_p2(_decd.getHours()) + ':' + _p2(_decd.getMinutes())) : '';
       const [title, setTitle] = useState(t.title || '');
       const [dueDate, setDueDate] = useState(_initDate);
       const [dueTime, setDueTime] = useState(_initHM && _initHM !== '00:00' ? _initHM : '09:00');
@@ -2611,6 +2614,9 @@ Rules:
       const [context, setContext] = useState(t.context || '');
       const [decisionMakers, setDecisionMakers] = useState(t._decisionMakers || []);
       const [decisionQuestion, setDecisionQuestion] = useState(t.decision_question || '');
+      const [decisionDueDate, setDecisionDueDate] = useState(_initDecDate);
+      const [decisionHasTime, setDecisionHasTime] = useState(t.decision_due_has_time != null ? !!t.decision_due_has_time : !!(_initDecHM && _initDecHM !== '00:00'));
+      const [decisionDueTime, setDecisionDueTime] = useState(_initDecHM && _initDecHM !== '00:00' ? _initDecHM : '09:00');
       const [decisionOptions, setDecisionOptions] = useState([]);
       const [saving, setSaving] = useState(false);
       // W/D planning — stored per-user, per-task in localStorage for now (wired to the calendar later)
@@ -2662,11 +2668,12 @@ Rules:
         setSaving(true);
         try {
           const due = dueDate ? (dueDate + 'T' + (hasTime && dueTime ? dueTime : '00:00')) : '';
+          const decisionDue = decisionDueDate ? (decisionDueDate + 'T' + (decisionHasTime && decisionDueTime ? decisionDueTime : '00:00')) : '';
           await onSave({
             title: title.trim(), due, recurrence: repeats ? recurrence : 'none', project, priority, status,
             assignees, assigners, working_url: workingUrl.trim(), email_link: emailLink.trim(),
             description, context, labels: myLabels,
-            decisionMakers, decisionQuestion: decisionQuestion.trim(),
+            decisionMakers, decisionQuestion: decisionQuestion.trim(), decisionDue, decisionHasTime,
             decisionOptions: decisionOptions.filter(o => (o.body || '').trim()),
             planning: { wp: weeklyPriority, wr: weeklyRank, dp: dailyPriority, dr: dailyRank },
           });
@@ -2742,6 +2749,15 @@ Rules:
             {sectionHeader(decisionOpen, setDecisionOpen, 'ti-gavel', 'Decision')}
             {decisionOpen && <div style={{ marginTop: 10 }}>
               {field('Decision maker(s)', chips(decisionMakers, setDecisionMakers))}
+              <div style={{ marginBottom: 13 }}>
+                <div style={lbl}>Decision due date</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                  <input type="date" value={decisionDueDate} onChange={e => setDecisionDueDate(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={{ ...inp, flex: '1 1 150px' }} />
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={decisionHasTime} onChange={e => setDecisionHasTime(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Time</label>
+                </div>
+                {decisionHasTime && <input type="time" value={decisionDueTime} onChange={e => setDecisionDueTime(e.target.value)} style={{ ...inp, marginTop: 8 }} />}
+                <div style={{ fontSize: '0.66rem', color: sub, lineHeight: 1.5, marginTop: 5, fontFamily: C.fontSans }}>If set, this shows on the decision-maker's in-app calendar (not Google Calendar).</div>
+              </div>
               {field('Question', <input value={decisionQuestion} onChange={e => setDecisionQuestion(e.target.value)} placeholder="What needs to be decided?" style={inp} />)}
               {field('Options', (
                 <div>
@@ -2789,7 +2805,7 @@ Rules:
       const row = (k, v) => <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '7px 0', borderBottom: `1px solid ${bord}` }}><span style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, flexShrink: 0 }}>{k}</span><span style={{ fontSize: '0.82rem', color: ink, fontWeight: 500, textAlign: 'right', fontFamily: C.fontSans }}>{v}</span></div>;
       const kindTag = { system: { t: 'CHANGE', c: '#6B6B6B' }, update: { t: 'UPDATE', c: '#2A6FD4' }, ai: { t: 'AI', c: '#AD832F' } };
       const secHead = (icon, txt) => <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><i className={`ti ${icon}`} style={{ fontSize: 14, color: gold }} /><span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>{txt}</span></div>;
-      const hasDecision = decisionOpts.length > 0 || !!task.decision_question || ppl('decision_maker') !== '—';
+      const hasDecision = decisionOpts.length > 0 || !!task.decision_question || ppl('decision_maker') !== '—' || !!task.decision_due_at;
       async function addNote() { if (!note.trim() || busy) return; setBusy(true); try { await TaskDB.addActivity(task.id, 'update', note.trim(), user); setNote(''); setActivity(await TaskDB.loadActivity(task.id)); } finally { setBusy(false); } }
       async function addSub() { if (!subTitle.trim() || addingSub) return; setAddingSub(true); try { await TaskDB.createSubtask(task.id, subTitle.trim(), user); setSubTitle(''); setSubs(await TaskDB.loadSubtasks(task.id)); } finally { setAddingSub(false); } }
       return (
@@ -2824,6 +2840,7 @@ Rules:
             <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
               {secHead('ti-gavel', 'Decision')}
               {ppl('decision_maker') !== '—' ? row('Maker(s)', ppl('decision_maker')) : null}
+              {task.decision_due_at ? row('Decision due', task.decision_due_has_time ? fmt(task.decision_due_at) : new Date(task.decision_due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })) : null}
               {task.decision_question ? <div style={{ fontSize: '0.86rem', color: ink, fontWeight: 600, margin: '10px 0 8px', fontFamily: C.fontSans, lineHeight: 1.4 }}>{task.decision_question}</div> : null}
               {decisionOpts.map(o => (
                 <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderBottom: `1px solid ${bord}` }}>
@@ -2969,9 +2986,10 @@ Rules:
       useEffect(() => { if (view === 'list') { try { const p = JSON.parse(localStorage.getItem(labelKey(user && user.id)) || '[]') || []; const m = {}; p.forEach(x => { m[x.name] = x.color; }); setLabelColors(m); } catch (e) {} } }, [view]);
       async function handleSave(form) {
         const due_at = form.due ? new Date(form.due).toISOString() : null;
+        const decision_due_at = form.decisionDue ? new Date(form.decisionDue).toISOString() : null;
         const project_id = form.project ? await TaskDB.findOrCreateProject(form.project, user) : null;
         const pl = form.planning || {};
-        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null, decision_question: form.decisionQuestion || null, recurrence: form.recurrence || 'none', weekly_priority: pl.wp || null, weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null, daily_priority: pl.dp || null, daily_rank: pl.dr ? parseInt(pl.dr, 10) : null };
+        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null, decision_question: form.decisionQuestion || null, decision_due_at, decision_due_has_time: !!(form.decisionDue && form.decisionHasTime), recurrence: form.recurrence || 'none', weekly_priority: pl.wp || null, weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null, daily_priority: pl.dp || null, daily_rank: pl.dr ? parseInt(pl.dr, 10) : null };
         const people = { assignee: form.assignees, assigner: form.assigners, decision_maker: form.decisionMakers || [] };
         let taskId;
         if (current && current.id) { await TaskDB.update(current.id, current, fields, user); await TaskDB.setPeople(current.id, people); taskId = current.id; }

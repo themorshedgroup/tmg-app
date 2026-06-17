@@ -71,6 +71,20 @@
     #auth-overlay .btn-back { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:14px; border-radius:11px; cursor:pointer; font-family:'Jost',sans-serif; font-size:10px; letter-spacing:.14em; font-weight:500; background:transparent; border:1px solid rgba(255,255,255,.16); color:rgba(255,255,255,.6); transition:background .12s ease; }
     #auth-overlay .btn-back:hover { background:rgba(255,255,255,.04); }
     #auth-overlay .btn-back i { font-size:13px; }
+    /* ── Pending / "account being set up" screen ── */
+    #auth-overlay .icon-wrap { width:80px; height:80px; border-radius:50%; background:rgba(201,164,90,.12); border:1.5px solid rgba(201,164,90,.35); display:flex; align-items:center; justify-content:center; margin-bottom:28px; position:relative; }
+    #auth-overlay .icon-wrap::before { content:''; position:absolute; inset:-8px; border-radius:50%; border:1px solid rgba(201,164,90,.12); }
+    #auth-overlay .icon-wrap::after { content:''; position:absolute; inset:-16px; border-radius:50%; border:1px solid rgba(201,164,90,.06); }
+    #auth-overlay .icon-wrap svg { width:38px; height:38px; }
+    #auth-overlay .pulse-dot { position:absolute; top:4px; right:4px; width:16px; height:16px; border-radius:50%; background:#3DAF7E; border:2.5px solid #001A4A; z-index:2; }
+    #auth-overlay .pulse-dot::after { content:''; position:absolute; inset:-4px; border-radius:50%; background:rgba(61,175,126,.3); animation:tmg-pulse-ring 2s ease infinite; }
+    @keyframes tmg-pulse-ring { 0% { transform:scale(1); opacity:1; } 100% { transform:scale(1.7); opacity:0; } }
+    #auth-overlay .status-badge { display:inline-flex; align-items:center; gap:7px; background:rgba(61,175,126,.12); border:1px solid rgba(61,175,126,.3); border-radius:20px; padding:5px 14px; margin-bottom:20px; }
+    #auth-overlay .badge-dot { width:6px; height:6px; border-radius:50%; background:#3DAF7E; }
+    #auth-overlay .badge-txt { font-size:9px; letter-spacing:.18em; font-weight:600; text-transform:uppercase; color:#3DAF7E; }
+    #auth-overlay #pending-screen .title { font-family:'Cormorant Garamond', Georgia, serif; font-style:italic; font-size:32px; font-weight:400; color:#fff; line-height:1.2; margin-bottom:14px; }
+    #auth-overlay #pending-screen .msg { font-size:13px; line-height:1.75; color:rgba(255,255,255,.6); max-width:300px; }
+    #auth-overlay #pending-screen .msg b { color:rgba(255,255,255,.9); font-weight:500; }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
@@ -140,6 +154,28 @@ Continue with TMG Gmail
 <a class="contact-email" href="mailto:manager@themorshedgroup.com">manager@themorshedgroup.com</a>
 </div>
 <button class="btn-back" id="back-to-signin" onclick="SupabaseAuth.signOut()"><i class="ti ti-arrow-left" aria-hidden="true"></i>Back to sign in</button>
+</div>
+</div>
+<div class="screen" id="pending-screen" hidden>
+<div class="ring r1"></div>
+<div class="ring r2"></div>
+<div class="ring r3"></div>
+<div class="glow-gold"></div>
+<div class="main">
+<div class="icon-wrap">
+<div class="pulse-dot"></div>
+<svg viewBox="0 0 24 24" fill="none" stroke="#C9A45A" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z"/><path d="M12 6v6l4 2"/></svg>
+</div>
+<div class="status-badge"><span class="badge-dot"></span><span class="badge-txt">Account Pending Activation</span></div>
+<div class="title">Welcome to the TMG App!</div>
+<div class="msg">We've received your request. Your account will be ready within <b>24 hours</b> — keep an eye on your inbox for a confirmation email.</div>
+</div>
+<div class="foot">
+<div class="contact-card">
+<div class="contact-lbl">Questions?</div>
+<a class="contact-email" href="mailto:manager@themorshedgroup.com">manager@themorshedgroup.com</a>
+</div>
+<button class="btn-back" onclick="SupabaseAuth.signOut()"><i class="ti ti-arrow-left" aria-hidden="true"></i>Back to sign in</button>
 </div>
 </div>
   </div>
@@ -1015,6 +1051,24 @@ Rules:
       return value;
     }
 
+    // Builds a Gmail "compose" link with a ready-to-send welcome email (TMG runs on Google Workspace).
+    // Used for one-click approval notifications from the Admin console.
+    function gmailComposeUrl(u) {
+      const first = (u.first_name || '').trim();
+      const APP_URL = 'https://themorshedgroup.github.io/tmg-app/';
+      const subject = "You're in — your TMG App account is ready";
+      const body = [
+        (first ? 'Hi ' + first + ',' : 'Hi,'), '',
+        'Good news — your TMG App account is now active.', '',
+        'Open the app and sign in here:',
+        APP_URL, '',
+        'Tap "Continue with TMG Google" and use your @themorshedgroup.com account.', '',
+        '— The Morshed Group'
+      ].join('\n');
+      return 'https://mail.google.com/mail/?view=cm&fs=1&to=' + encodeURIComponent(u.email || '') +
+        '&su=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+    }
+
     // Admin-only user-management console (under the More tab). Replaces editing in Supabase.
     function AdminUsers() {
       const [users, setUsers] = useState([]);
@@ -1038,8 +1092,16 @@ Rules:
         const [saving, setSaving] = useState(false);
         async function save() {
           setSaving(true);
-          try { await ProfileDB.adminUpdate(u.id, { employee_id: emp, hire_date: hireDate || null, title, reports_to: reports || null, assigned_tc: assignedTc || null, access: roles, status }); await refresh(); setOpenId(null); }
-          catch (e) { alert('Could not save: ' + (e.message || e)); }
+          // Newly approved (any non-active → active) with an email → pop a ready-to-send welcome email.
+          const justApproved = status === 'active' && u.status !== 'active' && !!u.email;
+          // Open the tab synchronously (inside the click) so it isn't popup-blocked; fill it after the save succeeds.
+          const mailTab = justApproved ? window.open('', '_blank') : null;
+          try {
+            await ProfileDB.adminUpdate(u.id, { employee_id: emp, hire_date: hireDate || null, title, reports_to: reports || null, assigned_tc: assignedTc || null, access: roles, status });
+            await refresh(); setOpenId(null);
+            if (mailTab) mailTab.location.href = gmailComposeUrl(u);
+          }
+          catch (e) { if (mailTab) mailTab.close(); alert('Could not save: ' + (e.message || e)); }
           finally { setSaving(false); }
         }
         return (
@@ -4999,8 +5061,13 @@ Rules:
       const root = ReactDOM.createRoot(document.getElementById('root'));
 
       const AUTHORIZED_DOMAIN = 'themorshedgroup.com';
-      function showSignin()   { document.getElementById('login-screen').hidden = false; document.getElementById('denied-screen').hidden = true;  document.getElementById('auth-overlay').style.display = 'block'; }
-      function showRejected() { document.getElementById('login-screen').hidden = true;  document.getElementById('denied-screen').hidden = false; document.getElementById('auth-overlay').style.display = 'block'; }
+      function _showScreen(id) {
+        ['login-screen', 'denied-screen', 'pending-screen'].forEach(function (s) { var el = document.getElementById(s); if (el) el.hidden = (s !== id); });
+        document.getElementById('auth-overlay').style.display = 'block';
+      }
+      function showSignin()   { _showScreen('login-screen'); }
+      function showRejected() { _showScreen('denied-screen'); }
+      function showPending()  { _showScreen('pending-screen'); }
       function hideOverlay()  { document.getElementById('auth-overlay').style.display = 'none'; }
 
       if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
@@ -5016,6 +5083,7 @@ Rules:
         if (!email.endsWith('@' + AUTHORIZED_DOMAIN)) { showRejected(); return; }
         const profile = await ProfileDB.ensureProfile(session.user);
         // Gate: a profile that exists but isn't active is blocked. No profile (error/not-yet-set-up) → fail open.
+        if (profile && profile.status === 'pending') { showPending(); return; }
         if (profile && profile.status && profile.status !== 'active') { showRejected(); return; }
         // One-time: persist the Google refresh token captured at sign-in so the calendar can sync.
         const grt = window.SupabaseAuth._googleRefresh;

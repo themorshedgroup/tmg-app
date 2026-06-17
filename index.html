@@ -188,6 +188,7 @@ Continue with TMG Gmail
     window.SupabaseAuth = {
       _state: { session: { user: { id: 'dev-user-id', email: 'symon@morshedgroup.com', user_metadata: { full_name: 'Symon', avatar_url: '' } }, access_token: 'dev-token' } },
       signInWithGoogle: function() {},
+      connectCalendar: function() { alert('Calendar connect runs on the live site, not localhost.'); },
       signOut: function() { location.reload(); },
       getSession: function() { return Promise.resolve(window.SupabaseAuth._state.session); },
       onAuthStateChange: function(cb) { setTimeout(function() { cb({ session: window.SupabaseAuth._state.session }); }, 50); }
@@ -4369,7 +4370,18 @@ Rules:
               {calState === 'loading' ? (
                 <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>Loading…</div>
               ) : calState === 'needs_connect' ? (
-                <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, lineHeight: 1.7, padding: '12px 8px', color: dark ? 'rgba(255,255,255,0.35)' : '#9A8F7E' }}>Sign out and back in to<br />connect your Google Calendar.{calDetail && <span style={{ display: 'block', marginTop: 6, fontSize: 8, color: dark ? 'rgba(255,255,255,0.25)' : '#C4B9A6' }}>{calDetail}</span>}</div>
+                <div style={{ textAlign: 'center', padding: '14px 10px 12px' }}>
+                  <div style={{ fontFamily: J, fontSize: 9, lineHeight: 1.7, color: dark ? 'rgba(255,255,255,0.4)' : '#9A8F7E', marginBottom: 10 }}>Connect your Google Calendar<br />to see your events here.</div>
+                  <button onClick={() => { try { window.SupabaseAuth.connectCalendar(); } catch (e) {} }} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                    fontFamily: J, fontSize: 10, fontWeight: 600, letterSpacing: '0.02em',
+                    padding: '7px 14px', borderRadius: 8, border: 'none',
+                    color: '#fff', background: dark ? '#C9A45A' : '#AD832F',
+                  }}>
+                    <i className="ti ti-brand-google" style={{ fontSize: 12 }} />Connect Google Calendar
+                  </button>
+                  {calDetail && <div style={{ marginTop: 8, fontFamily: J, fontSize: 8, color: dark ? 'rgba(255,255,255,0.25)' : '#C4B9A6' }}>{calDetail}</div>}
+                </div>
               ) : calState === 'error' ? (
                 <div style={{ textAlign: 'center', fontFamily: J, fontSize: 9, padding: '12px 0', color: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9' }}>Couldn't load calendar.{calDetail && <span style={{ display: 'block', marginTop: 6, fontSize: 8 }}>{calDetail}</span>}</div>
               ) : events.length === 0 ? (

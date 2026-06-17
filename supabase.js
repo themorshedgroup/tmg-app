@@ -43,6 +43,34 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     }
   }
 
+  // Connect Google Calendar (read + write events) — deliberately SEPARATE from login.
+  // Re-runs Google OAuth requesting ONLY the calendar.events scope with offline
+  // access, so Google issues a refresh token; init() below captures it and the app
+  // stores it once (see connectGoogleCalendar in index.html). calendar.events covers
+  // BOTH reading events (current popover) and creating/editing/deleting them (future
+  // "Add Event" feature). Normal sign-in (signInWithGoogle, above) is left untouched.
+  async function connectCalendar() {
+    try {
+      const { data, error } = await client.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          scopes: 'https://www.googleapis.com/auth/calendar.events',
+          queryParams: { access_type: 'offline', prompt: 'consent' },
+          redirectTo: _cleanUrl,
+        },
+      });
+      if (error) {
+        console.error('[SA] connectCalendar error:', error.message);
+        alert('Calendar connect error: ' + error.message);
+        return;
+      }
+      if (data && data.url) window.location.href = data.url;
+    } catch (e) {
+      console.error('[SA] connectCalendar exception:', e);
+      alert('Calendar connect exception: ' + (e && e.message ? e.message : e));
+    }
+  }
+
   async function signOut() {
     await client.auth.signOut();
     _state.session = null;
@@ -92,5 +120,5 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     _notify({ session: _state.session });
   })();
 
-  window.SupabaseAuth = { signInWithGoogle, signOut, getSession, onAuthStateChange, _state, _client: client, _googleRefresh: null };
+  window.SupabaseAuth = { signInWithGoogle, connectCalendar, signOut, getSession, onAuthStateChange, _state, _client: client, _googleRefresh: null };
 })();

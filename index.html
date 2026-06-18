@@ -85,6 +85,17 @@
     #auth-overlay #pending-screen .title { font-family:'Cormorant Garamond', Georgia, serif; font-style:italic; font-size:32px; font-weight:400; color:#fff; line-height:1.2; margin-bottom:14px; }
     #auth-overlay #pending-screen .msg { font-size:13px; line-height:1.75; color:rgba(255,255,255,.6); max-width:300px; }
     #auth-overlay #pending-screen .msg b { color:rgba(255,255,255,.9); font-weight:500; }
+    /* Deals tab layout switching */
+    .deals-mobile-view  { display: flex; flex-direction: column; }
+    .deals-kanban-view  { display: none; flex-direction: row; }
+    .deals-mobile-only  { display: flex !important; }
+    .deals-desktop-only { display: none !important; }
+    @media (min-width: 769px) {
+      .deals-mobile-view  { display: none !important; }
+      .deals-kanban-view  { display: flex !important; }
+      .deals-mobile-only  { display: none !important; }
+      .deals-desktop-only { display: flex !important; }
+    }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
@@ -4557,6 +4568,214 @@ Rules:
       );
     }
 
+    // ─── Deals Tab ───────────────────────────────────────────────────
+    function DealsTab() {
+      const J = "'Jost', sans-serif";
+      const [openStages, setOpenStages] = useState({});
+      const toggleStage = (id) => setOpenStages(s => ({ ...s, [id]: !s[id] }));
+
+      const STAGES = [
+        { id: 'new',      label: 'New Referrals',        dot: '#16A34A', bg: '#DCFCE7', text: '#166534', border: '#86EFAC' },
+        { id: 'standby',  label: 'Standby (90-120d)',     dot: '#2563EB', bg: '#DBEAFE', text: '#1D4ED8', border: '#93C5FD' },
+        { id: 'prehot',   label: 'Pre-Hot Zone (30-90d)', dot: '#D97706', bg: '#FEF3C7', text: '#B45309', border: '#FCD34D' },
+        { id: 'hot',      label: 'Hot Zone (<30d)',        dot: '#DC2626', bg: '#FEE2E2', text: '#B91C1C', border: '#FCA5A5' },
+        { id: 'contract', label: 'Under Contract',        dot: '#9333EA', bg: '#F3E8FF', text: '#7E22CE', border: '#D8B4FE' },
+        { id: 'closed',   label: 'Closed Contract',       dot: '#0D9488', bg: '#CCFBF1', text: '#0F766E', border: '#99F6E4' },
+      ];
+
+      const TYPE_COLORS = {
+        'Commercial Buyer':   { bg: '#DBEAFE', text: '#1D4ED8' },
+        'Residential Buyer':  { bg: '#DCFCE7', text: '#166534' },
+        'Residential Seller': { bg: '#FEF3C7', text: '#B45309' },
+        'Commercial Seller':  { bg: '#F3E8FF', text: '#7E22CE' },
+      };
+
+      const fmtPrice = (n) => '$' + n.toLocaleString();
+
+      const DEALS = {
+        new: [
+          { name: 'Daniel Brown',      type: 'Commercial Buyer',   price: 1750000, agents: ['Brett Silverman'] },
+          { name: 'Mason Miller',       type: 'Commercial Buyer',   price: 1200000, agents: ['Brett Silverman'] },
+        ],
+        standby: [
+          { name: 'Kristen Cutshall',  type: 'Commercial Buyer',   price: 1200000, agents: ['Brett Silverman'] },
+          { name: 'Matt Sladek',        type: 'Commercial Buyer',   price: 725000,  agents: ['Brett Silverman'] },
+          { name: 'Neal Gilbreath',     type: 'Residential Buyer',  price: 500000,  agents: ['Kyle Baird', 'Alexandra Machado'] },
+        ],
+        prehot: [
+          { name: 'Shivam Gautam & Supriya Singh', type: 'Commercial Buyer',   price: 2000000, agents: ['Brett Silverman'] },
+          { name: 'Frank Barbella',                type: null,                  price: 2000000, agents: ['Tarek Morshed'] },
+          { name: 'Fatima & Kamaal Ahmed',         type: 'Residential Seller', price: 600000,  agents: ['Kyle Baird', 'Alexandra Machado'] },
+          { name: 'Stuart Frazier',                type: 'Residential Buyer',  price: 850000,  agents: ['Kyle Baird', 'Alexandra Machado'] },
+        ],
+        hot: [
+          { name: 'Randy Mire',                          type: 'Commercial Buyer',   price: 10000000, agents: ['Brett Silverman'] },
+          { name: 'Omar Ghani & Lina Pervez',            type: 'Residential Seller', price: 620000,   agents: ['Brad Baker', 'Alexandra Machado'] },
+          { name: 'Maricruz Acuna — 13400 Immanuel Rd', type: 'Commercial Seller',  price: 3150000,  agents: ['Brett Silverman', 'Alexandra Machado'] },
+        ],
+        contract: [
+          { name: 'Shahid & Sharon Ullah',          type: 'Residential Seller', price: 575000,   agents: ['Brad Baker', 'Alexandra Machado'],    date: '2026-03-31', dateStatus: 'overdue' },
+          { name: 'Ernie Rogers — 21511 W State Hwy 7', type: 'Commercial Buyer', price: 1050000, agents: ['Brett Silverman'] },
+          { name: 'Darrell Suriff & Maricruz Acuna', type: 'Commercial Seller', price: 2433300,  agents: ['Brett Silverman'] },
+        ],
+        closed: [
+          { name: 'James Roberts — 360 Nueces #2807',      type: 'Residential Seller', price: 470000,  agents: ['Cassandra Clemons', 'Alexandra Machado'], date: 'Jun 17, 2026', dateStatus: 'closed' },
+          { name: 'Paola & Anthony Knight — 271 Egret Ln', type: 'Residential Buyer',  price: 1100000, agents: ['Cassandra Clemons', 'Alexandra Machado'], date: 'Jun 9, 2026',  dateStatus: 'closed' },
+          { name: 'Steven & Jennifer Smith — 5305 Fairmount', type: 'Residential Seller', price: 690000, agents: ['Kyle Baird', 'Alexandra Machado'],        date: 'Jun 8, 2026',  dateStatus: 'closed' },
+        ],
+      };
+
+      const TOTALS = { new: 2950000, standby: 2425000, prehot: 5450000, hot: 13770000, contract: 4058300, closed: 2260000 };
+
+      const Badge = ({ type }) => {
+        if (!type) return null;
+        const tc = TYPE_COLORS[type] || {};
+        return (
+          <span style={{ display: 'inline-flex', alignItems: 'center', borderRadius: 20, padding: '3px 9px', background: tc.bg, color: tc.text, fontFamily: J, fontSize: 9, fontWeight: 600 }}>{type}</span>
+        );
+      };
+
+      const BadgeSm = ({ type }) => {
+        if (!type) return null;
+        const tc = TYPE_COLORS[type] || {};
+        return (
+          <span style={{ display: 'inline-flex', alignItems: 'center', borderRadius: 14, padding: '2px 7px', background: tc.bg, color: tc.text, fontFamily: J, fontSize: 8, fontWeight: 600 }}>{type}</span>
+        );
+      };
+
+      const DateLine = ({ date, dateStatus, mobile }) => {
+        if (!date) return null;
+        const fs = mobile ? 10 : 9;
+        if (dateStatus === 'overdue') return (
+          <div style={{ fontFamily: J, fontSize: fs, fontWeight: 500, color: '#DC2626', marginTop: 4 }}>⏰ {date}</div>
+        );
+        if (dateStatus === 'closed') return (
+          <div style={{ fontFamily: J, fontSize: fs, fontWeight: 500, color: '#0F766E', marginTop: 4 }}>✓ {date}</div>
+        );
+        return null;
+      };
+
+      /* ── Mobile card ── */
+      const MobileCard = ({ deal }) => (
+        <div style={{ background: '#fff', border: '1px solid #EDE7DC', borderRadius: 10, padding: '12px 14px', cursor: 'pointer' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 5 }}>
+            <span style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: '#001A4A', flex: 1, marginRight: 8, lineHeight: 1.3 }}>{deal.name}</span>
+            <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: '#001A4A', flexShrink: 0, whiteSpace: 'nowrap' }}>{fmtPrice(deal.price)}</span>
+          </div>
+          {deal.type && <div style={{ marginBottom: 6 }}><Badge type={deal.type} /></div>}
+          {deal.agents.map((a, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: J, fontSize: 10, color: '#6B6B6B', lineHeight: 1.5 }}>
+              <i className="ti ti-user" style={{ fontSize: 11, color: '#AD832F', flexShrink: 0 }} />{a}
+            </div>
+          ))}
+          <DateLine date={deal.date} dateStatus={deal.dateStatus} mobile={true} />
+        </div>
+      );
+
+      /* ── Kanban card ── */
+      const KanbanCard = ({ deal }) => (
+        <div
+          style={{ background: '#fff', border: '1px solid #EDE7DC', borderRadius: 9, padding: '10px 12px', cursor: 'pointer', transition: 'all 0.15s' }}
+          onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 2px 10px rgba(0,26,74,0.1)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+          onMouseLeave={e => { e.currentTarget.style.boxShadow = ''; e.currentTarget.style.transform = ''; }}
+        >
+          <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: '#001A4A', lineHeight: 1.3, marginBottom: 5 }}>{deal.name}</div>
+          {deal.type && <div style={{ marginBottom: 6 }}><BadgeSm type={deal.type} /></div>}
+          <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: '#001A4A', marginBottom: 5 }}>{fmtPrice(deal.price)}</div>
+          {deal.agents.map((a, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, fontFamily: J, fontSize: 9, color: '#6B6B6B', lineHeight: 1.4 }}>
+              <i className="ti ti-user" style={{ fontSize: 10, color: '#AD832F', flexShrink: 0 }} />{a}
+            </div>
+          ))}
+          <DateLine date={deal.date} dateStatus={deal.dateStatus} mobile={false} />
+        </div>
+      );
+
+      return (
+        <div style={{ height: '100%', overflowY: 'auto', background: '#FCFBF8', display: 'flex', flexDirection: 'column' }}>
+          {/* Coming Soon banner */}
+          <div style={{ background: '#9B1C1C', padding: '9px 16px', textAlign: 'center', flexShrink: 0 }}>
+            <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#fff' }}>Coming Soon · Q4 2026</span>
+          </div>
+
+          {/* Page header */}
+          <div style={{ padding: '14px 16px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+            <div>
+              <div style={{ fontFamily: J, fontSize: 18, fontWeight: 600, color: '#001A4A' }}>Deals</div>
+              <div style={{ fontFamily: J, fontSize: 10, color: '#B4B2A9', marginTop: 2 }}>18 active · $30,913,300 pipeline</div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+              {/* Filter — always visible */}
+              <button style={{ display: 'flex', alignItems: 'center', gap: 5, border: '1px solid #E4DFD4', background: '#fff', borderRadius: 8, padding: '7px 12px', fontFamily: J, fontSize: 10, fontWeight: 500, color: '#6B6B6B', cursor: 'pointer' }}>
+                <i className="ti ti-adjustments-horizontal" style={{ fontSize: 13, color: '#AD832F' }} />Filter
+              </button>
+              {/* Search — tablet/desktop only */}
+              <button className="deals-desktop-only" style={{ display: 'flex', alignItems: 'center', gap: 5, border: '1px solid #E4DFD4', background: '#fff', borderRadius: 8, padding: '7px 12px', fontFamily: J, fontSize: 10, fontWeight: 500, color: '#6B6B6B', cursor: 'pointer' }}>
+                <i className="ti ti-search" style={{ fontSize: 13, color: '#AD832F' }} />Search
+              </button>
+              {/* New Deal — tablet/desktop only */}
+              <button className="deals-desktop-only" style={{ display: 'flex', alignItems: 'center', gap: 5, border: '1px solid #001A4A', background: '#001A4A', borderRadius: 8, padding: '7px 12px', fontFamily: J, fontSize: 10, fontWeight: 500, color: '#fff', cursor: 'pointer' }}>
+                <i className="ti ti-plus" style={{ fontSize: 13, color: '#C9A45A' }} />New Deal
+              </button>
+              {/* Mobile + chip */}
+              <button className="deals-mobile-only" style={{ width: 30, height: 30, borderRadius: 8, background: '#F3EBDA', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+                <i className="ti ti-plus" style={{ fontSize: 15, color: '#AD832F' }} />
+              </button>
+            </div>
+          </div>
+
+          {/* ── MOBILE: stacked expandable stage blocks ── */}
+          <div className="deals-mobile-view" style={{ padding: '0 14px 20px', flexDirection: 'column', gap: 8 }}>
+            {STAGES.map(st => {
+              const deals = DEALS[st.id] || [];
+              const isOpen = !!openStages[st.id];
+              return (
+                <div key={st.id}>
+                  <div
+                    onClick={() => toggleStage(st.id)}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 13px', borderRadius: 11, border: `1px solid ${st.border}`, background: st.bg, cursor: 'pointer' }}
+                  >
+                    <div style={{ width: 9, height: 9, borderRadius: '50%', background: st.dot, flexShrink: 0 }} />
+                    <span style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: st.text, flex: 1 }}>{st.label}</span>
+                    <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 8, background: 'rgba(255,255,255,0.6)', color: st.text }}>{deals.length}</span>
+                    <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: st.text }}>{fmtPrice(TOTALS[st.id])}</span>
+                    <i className="ti ti-chevron-down" style={{ fontSize: 15, color: 'rgba(0,0,0,0.3)', transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
+                  </div>
+                  {isOpen && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+                      {deals.map((d, i) => <MobileCard key={i} deal={d} />)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* ── TABLET/DESKTOP: Kanban ── */}
+          <div className="deals-kanban-view" style={{ gap: 12, overflowX: 'auto', padding: '14px 16px 20px', minHeight: 560, alignItems: 'flex-start' }}>
+            {STAGES.map(st => {
+              const deals = DEALS[st.id] || [];
+              return (
+                <div key={st.id} style={{ flex: '0 0 200px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {/* Column header */}
+                  <div style={{ borderRadius: 10, padding: '9px 12px', border: `1px solid ${st.border}`, background: st.bg }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: st.dot, flexShrink: 0 }} />
+                      <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: st.text, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{st.label}</span>
+                      <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, padding: '1px 7px', borderRadius: 7, background: 'rgba(255,255,255,0.6)', color: st.text, flexShrink: 0 }}>{deals.length}</span>
+                    </div>
+                    <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: '#001A4A' }}>{fmtPrice(TOTALS[st.id])}</div>
+                  </div>
+                  {/* Cards */}
+                  {deals.map((d, i) => <KanbanCard key={i} deal={d} />)}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
     // ─── Calendar Popover ────────────────────────────────────────────
     // Calendar popout v2 — TOP-anchored (top:0 of the conversation area; grows DOWNWARD,
     // NOT a bottom slide-up). Nav bar (Today / ‹› / date / 3 PRIOs / chips / Day-Week-Month),
@@ -5736,6 +5955,7 @@ Rules:
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'calls' && <CallsTab dark={dark} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
+            {activeTab === 'deals' && <DealsTab />}
             {activeTab === 'more' && (
               moreView === 'admin' && isAdmin ? <AdminTab onOpenBuilder={() => setBuilderOpen(true)} />
               : moreView === 'app-masterplan' && isAdmin ? <AppRoadmap dark={dark} onBack={() => setMoreMenuOpen(true)} />
@@ -5745,7 +5965,7 @@ Rules:
               : moreView === 'expsurvey' ? <ExpSurvey dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}
-            {!['chat', 'teamchat', 'calls', 'kpis', 'more'].includes(activeTab) && (
+            {!['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>

@@ -3955,6 +3955,40 @@ Rules:
       const J = "'Jost', sans-serif";
       const CG = "'Cormorant Garamond', Georgia, serif";
       const [sub, setSub] = useState('kpis');
+      const [kpiView, setKpiView] = useState('weekly');
+      const [kpiAnchor, setKpiAnchor] = useState(() => new Date());
+      const [dropOpen, setDropOpen] = useState(false);
+      const [kpiVisible, setKpiVisible] = useState([true,true,true,true,true,true]);
+
+      const KPI_DEFS = [
+        { label: 'Calls',           color: '#2563EB' },
+        { label: 'Notes',           color: '#16A34A' },
+        { label: 'Hotzone Actions', color: '#D97706' },
+        { label: 'Pop-bys',         color: '#9333EA' },
+        { label: 'Lunch',           color: '#DC2626' },
+        { label: 'Agent Training',  color: '#0D9488' },
+      ];
+      const CHART_WEEKS = ['5/4', '5/11', '5/18', '5/25'];
+      const CHART_DATA = [
+        [160, 160, 165,  140],
+        [142, 100, 100, null],
+        [127, 127, 147, null],
+        [120, 160, 160, null],
+        [  0, 100, 100, null],
+        [200, 300, 300, null],
+      ];
+      const getKpiLabel = (anchor, view) => {
+        if (view === 'yearly') return String(anchor.getFullYear());
+        if (view === 'monthly') { const q = Math.floor(anchor.getMonth() / 3) + 1; return 'Q' + q + ' ' + anchor.getFullYear(); }
+        return anchor.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      };
+      const navKpiPeriod = (dir) => {
+        const d = new Date(kpiAnchor);
+        if (kpiView === 'yearly') d.setFullYear(d.getFullYear() + dir);
+        else if (kpiView === 'monthly') d.setMonth(d.getMonth() + dir);
+        else d.setDate(d.getDate() + dir * 7);
+        setKpiAnchor(d);
+      };
 
       const green = dark ? '#5DCAA5' : '#0F6E56';
       const red   = dark ? '#F87171' : '#9B1C1C';
@@ -4042,12 +4076,139 @@ Rules:
           </div>
 
           {sub === 'kpis' ? (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-              <div style={{ width: 44, height: 44, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA' }}>
-                <i className="ti ti-chart-bar" style={{ fontSize: 22, color: gold }} />
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+
+              {/* ── Chart section ── */}
+              <div style={{ flexShrink: 0 }}>
+
+                {/* Nav bar */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderBottom: '0.5px solid #F0EBE3' }}>
+                  <button onClick={() => setKpiAnchor(new Date())} style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: '#185FA5', background: '#EEF3FB', border: '0.5px solid #C5D8F0', borderRadius: 6, padding: '3px 8px', cursor: 'pointer' }}>This Period</button>
+                  <div style={{ display: 'flex' }}>
+                    <button onClick={() => navKpiPeriod(-1)} style={{ width: 20, height: 20, border: '0.5px solid #E4DFD4', background: '#FCFBF8', color: '#6B6B6B', borderRadius: '4px 0 0 4px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontFamily: 'serif', fontSize: 13 }}>‹</button>
+                    <button onClick={() => navKpiPeriod(1)} style={{ width: 20, height: 20, border: '0.5px solid #E4DFD4', borderLeft: 'none', background: '#FCFBF8', color: '#6B6B6B', borderRadius: '0 4px 4px 0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontFamily: 'serif', fontSize: 13 }}>›</button>
+                  </div>
+                  <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: '#001A4A', flex: 1 }}>{getKpiLabel(kpiAnchor, kpiView)}</span>
+                  <div style={{ display: 'flex', background: '#F0EBE3', borderRadius: 6, padding: 2, gap: 1 }}>
+                    {[['weekly','Weekly'],['monthly','Monthly'],['yearly','Yearly']].map(([id,lbl]) => (
+                      <button key={id} onClick={() => id !== 'yearly' && setKpiView(id)} style={{ fontFamily: J, fontSize: 8, fontWeight: 600, padding: '3px 7px', borderRadius: 4, border: 'none', cursor: id === 'yearly' ? 'default' : 'pointer', background: kpiView === id ? '#001A4A' : 'transparent', color: kpiView === id ? '#fff' : (id === 'yearly' ? '#C4B9A8' : '#888') }}>{lbl}</button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Metric dropdown */}
+                <div style={{ padding: '8px 12px', borderBottom: '0.5px solid #F0EBE3', position: 'relative' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div onClick={() => setDropOpen(o => !o)} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: '#F3EBDA', border: '0.5px solid #E8D9BC', borderRadius: 7, padding: '5px 10px', cursor: 'pointer' }}>
+                      <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: '#AD832F' }}>{kpiVisible.every(Boolean) ? 'All 6 KPIs' : kpiVisible.filter(Boolean).length + ' KPIs selected'}</span>
+                      <i className="ti ti-chevron-down" style={{ fontSize: 10, color: '#AD832F', transform: dropOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
+                    </div>
+                    <span style={{ fontFamily: J, fontSize: 9, color: '#B4B2A9' }}>Tap to show/hide metrics</span>
+                  </div>
+                  {dropOpen && (
+                    <React.Fragment>
+                      <div onClick={() => setDropOpen(false)} style={{ position: 'fixed', top: 0, right: 0, bottom: 0, left: 0, zIndex: 49 }} />
+                      <div style={{ position: 'absolute', top: 'calc(100% + 2px)', left: 12, zIndex: 50, background: '#fff', border: '1px solid #EDE7DC', borderRadius: 10, padding: '6px 0', boxShadow: '0 4px 16px rgba(0,26,74,.12)', minWidth: 200 }}>
+                        {KPI_DEFS.map((kpi, ki) => (
+                          <div key={ki} onClick={() => { const v=[...kpiVisible]; v[ki]=!v[ki]; setKpiVisible(v); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer' }} onMouseEnter={e=>e.currentTarget.style.background='#F9F6F0'} onMouseLeave={e=>e.currentTarget.style.background=''}>
+                            <div style={{ width: 15, height: 15, borderRadius: 4, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', border: kpiVisible[ki] ? `1.5px solid ${kpi.color}` : '1.5px solid #C4B9A8', background: kpiVisible[ki] ? kpi.color : 'transparent' }}>
+                              {kpiVisible[ki] && <i className="ti ti-check" style={{ fontSize: 9, color: '#fff' }} />}
+                            </div>
+                            <div style={{ width: 8, height: 8, borderRadius: '50%', background: kpi.color, flexShrink: 0 }} />
+                            <span style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: '#001A4A' }}>{kpi.label}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </React.Fragment>
+                  )}
+                </div>
+
+                {/* Line chart */}
+                <div style={{ padding: '10px 12px 6px', borderBottom: '0.5px solid #F0EBE3' }}>
+                  {(() => {
+                    /* ── Dynamic Y-axis ── */
+                    const visVals = CHART_DATA.flatMap((d, ki) => kpiVisible[ki] ? d.filter(v => v !== null) : []);
+                    const dataMin = visVals.length ? Math.min(...visVals) : 50;
+                    const dataMax = visVals.length ? Math.max(...visVals) : 100;
+                    const yMin = Math.max(0,   Math.floor((dataMin - 15) / 25) * 25);
+                    const yMax = Math.min(300,  Math.ceil((dataMax + 15) / 25) * 25);
+                    const yRange = yMax === yMin ? 25 : yMax - yMin;
+                    const ticks = [];
+                    for (let t = yMin; t <= yMax; t += 25) ticks.push(t);
+
+                    /* ── SVG coordinate helpers ── */
+                    const PL = 30, PR = 272, PT = 8, PB = 106;
+                    const PW = PR - PL, PH = PB - PT;
+                    const cx = (i) => PL + (i / (CHART_WEEKS.length - 1)) * PW;
+                    const cy = (v) => PB - ((v - yMin) / yRange) * PH;
+                    const y100 = cy(100);
+
+                    return (
+                      <svg width="100%" viewBox="0 0 340 120" style={{ display: 'block' }}>
+                        {/* Background zones — drawn first (behind everything) */}
+                        {y100 > PT && (
+                          <rect x={PL} y={PT} width={PW} height={Math.min(y100, PB) - PT} fill="rgba(220,252,231,0.30)" />
+                        )}
+                        {y100 < PB && (
+                          <rect x={PL} y={Math.max(y100, PT)} width={PW} height={PB - Math.max(y100, PT)} fill="rgba(254,226,226,0.25)" />
+                        )}
+                        {/* Grid lines */}
+                        {ticks.map((t, i) => (
+                          <line key={i} x1={PL} y1={cy(t)} x2={PR} y2={cy(t)} stroke="#F0EBE3" strokeWidth="0.5" strokeDasharray="3 2" />
+                        ))}
+                        {/* Y-axis labels */}
+                        {ticks.map((t, i) => (
+                          <text key={i} x={PL - 3} y={cy(t) + 2.5} style={{ fontSize: 6, fill: '#B4B2A9', fontFamily: "'Jost',sans-serif" }} textAnchor="end">{t}%</text>
+                        ))}
+                        {/* Gold 100% goal line */}
+                        <line x1={PL} y1={y100} x2={PR} y2={y100} stroke="#AD832F" strokeWidth="1.5" strokeDasharray="6 3" />
+                        <text x={PR + 4} y={y100 + 3} style={{ fontSize: 7, fill: '#AD832F', fontFamily: "'Jost',sans-serif", fontWeight: 600 }}>Goal 100%</text>
+                        {/* Data lines */}
+                        {KPI_DEFS.map((kpi, ki) => {
+                          if (!kpiVisible[ki]) return null;
+                          const pts = CHART_DATA[ki].reduce((acc, v, i) => v !== null ? acc+(acc?' ':'')+cx(i)+','+cy(v) : acc, '');
+                          if (!pts) return null;
+                          return <polyline key={ki} points={pts} fill="none" stroke={kpi.color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />;
+                        })}
+                        {/* X-axis labels */}
+                        {CHART_WEEKS.map((w, i) => (
+                          <text key={i} x={cx(i)} y="116" style={{ fontSize: 6, fill: '#B4B2A9', fontFamily: "'Jost',sans-serif" }} textAnchor="middle">{w}</text>
+                        ))}
+                      </svg>
+                    );
+                  })()}
+                  {/* Legend */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', marginTop: 4 }}>
+                    {KPI_DEFS.map((kpi, ki) => !kpiVisible[ki] ? null : (
+                      <div key={ki} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <div style={{ width: 12, height: 2, borderRadius: 1, background: kpi.color }} />
+                        <span style={{ fontFamily: J, fontSize: 7.5, color: '#6B6B6B' }}>{kpi.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
-              <div style={{ fontFamily: CG, fontStyle: 'italic', fontSize: 18, color: ink }}>KPIs</div>
-              <div style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: faint }}>Coming soon</div>
+
+              {/* ── Data table section ── */}
+              <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '8px 12px 12px' }}>
+                <div style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.14em', fontWeight: 500, textTransform: 'uppercase', color: '#B4B2A9', marginBottom: 8 }}>% Achievement · {getKpiLabel(kpiAnchor, kpiView)}</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '90px repeat(' + CHART_WEEKS.length + ', 1fr)', gap: '3px 4px', marginBottom: 6, paddingBottom: 5, borderBottom: '1px solid #F0EBE3' }}>
+                  <span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.1em', color: '#B4B2A9', textTransform: 'uppercase' }}>Metric</span>
+                  {CHART_WEEKS.map(w => <span key={w} style={{ fontFamily: J, fontSize: 7, color: '#B4B2A9', textAlign: 'right' }}>{w}</span>)}
+                </div>
+                {KPI_DEFS.map((kpi, ki) => !kpiVisible[ki] ? null : (
+                  <div key={ki} style={{ display: 'grid', gridTemplateColumns: '90px repeat(' + CHART_WEEKS.length + ', 1fr)', gap: '3px 4px', padding: '5px 0', borderBottom: '1px solid #F5F2EE', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: kpi.color, flexShrink: 0 }} />
+                      <span style={{ fontFamily: J, fontSize: 8, color: '#001A4A', fontWeight: 500 }}>{kpi.label}</span>
+                    </div>
+                    {CHART_DATA[ki].map((v, i) => (
+                      <span key={i} style={{ fontFamily: J, fontSize: 8, textAlign: 'right', fontWeight: 600, color: v === null ? '#C4B9A8' : v >= 100 ? '#0F6E56' : v >= 75 ? '#B45309' : '#9B1C1C' }}>{v === null ? '—' : v + '%'}</span>
+                    ))}
+                  </div>
+                ))}
+              </div>
+
             </div>
           ) : (
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '10px 14px 6px' }}>
@@ -4695,7 +4856,7 @@ Rules:
         <div style={{ height: '100%', overflowY: 'auto', background: '#FCFBF8', display: 'flex', flexDirection: 'column' }}>
           {/* Coming Soon banner */}
           <div style={{ background: '#9B1C1C', padding: '9px 16px', textAlign: 'center', flexShrink: 0 }}>
-            <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#fff' }}>Coming Soon · Q4 2026</span>
+            <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#fff' }}>Coming Soon · Q3 2026</span>
           </div>
 
           {/* Page header */}

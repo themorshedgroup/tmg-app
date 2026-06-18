@@ -915,12 +915,29 @@ Rules:
       { id: 'daily',   label: 'Daily' },
       { id: 'weekly',  label: 'Weekly' },
       { id: 'monthly', label: 'Monthly' },
+      { id: 'custom',  label: 'Custom…' },
     ];
+    // Which fields carry over when a recurring task spawns its next instance.
+    const RECUR_COPY_FIELDS = [
+      { id: 'description', label: 'Description' },
+      { id: 'context',     label: 'Context' },
+      { id: 'priority',    label: 'Priority' },
+      { id: 'project',     label: 'Project' },
+      { id: 'people',      label: 'Assignees & assigners' },
+      { id: 'decision',    label: 'Decision (question + options)' },
+      { id: 'links',       label: 'Working URL & email' },
+    ];
+    const RECUR_COPY_DEFAULT = RECUR_COPY_FIELDS.map(f => f.id);
     const statusLabel   = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).label || s;
     const statusColor   = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).color || '#6B6B6B';
     const priorityLabel = (p) => (TASK_PRIORITY.find(x => x.id === p) || {}).label || p;
     const priorityColor = (p) => (TASK_PRIORITY.find(x => x.id === p) || {}).color || '#9B9380';
     const recurLabel    = (r) => (TASK_RECUR.find(x => x.id === r)    || {}).label || 'Does not repeat';
+    const recurDesc     = (t) => {
+      if (!t || !t.recurrence || t.recurrence === 'none') return 'Does not repeat';
+      if (t.recurrence === 'custom') { const n = t.recur_interval || 1; const u = t.recur_unit || 'week'; return 'Every ' + n + ' ' + u + (n > 1 ? 's' : ''); }
+      return recurLabel(t.recurrence);
+    };
 
     const TaskDB = {
       client() { return window.SupabaseAuth?._client || null; },
@@ -962,7 +979,7 @@ Rules:
           parent_task_id: fields.parent_task_id || null,
           created_by: user?.id || null,
         };
-        const wd = { weekly_priority: fields.weekly_priority || null, weekly_rank: fields.weekly_rank || null, daily_priority: fields.daily_priority || null, daily_rank: fields.daily_rank || null, decision_due_at: fields.decision_due_at || null, decision_due_has_time: fields.decision_due_has_time || null };
+        const wd = { weekly_priority: fields.weekly_priority || null, weekly_rank: fields.weekly_rank || null, daily_priority: fields.daily_priority || null, daily_rank: fields.daily_rank || null, decision_due_at: fields.decision_due_at || null, decision_due_has_time: fields.decision_due_has_time || null, recur_interval: fields.recur_interval || null, recur_unit: fields.recur_unit || null, recur_copy_fields: fields.recur_copy_fields || null };
         let res = await c.from('tasks').insert({ ...base, ...wd }).select().single();
         if (res.error && /column|schema cache|PGRST204|42703/i.test((res.error.message || '') + (res.error.code || ''))) res = await c.from('tasks').insert(base).select().single();
         const { data, error } = res;
@@ -978,13 +995,13 @@ Rules:
         if (fields.status === 'done' && oldTask.status !== 'done') patch.completed_at = new Date().toISOString();
         let { error } = await c.from('tasks').update(patch).eq('id', id);
         if (error && /column|schema cache|PGRST204|42703/i.test((error.message || '') + (error.code || ''))) {
-          const p2 = { ...patch }; delete p2.weekly_priority; delete p2.weekly_rank; delete p2.daily_priority; delete p2.daily_rank; delete p2.decision_due_at; delete p2.decision_due_has_time;
+          const p2 = { ...patch }; delete p2.weekly_priority; delete p2.weekly_rank; delete p2.daily_priority; delete p2.daily_rank; delete p2.decision_due_at; delete p2.decision_due_has_time; delete p2.recur_interval; delete p2.recur_unit; delete p2.recur_copy_fields;
           ({ error } = await c.from('tasks').update(p2).eq('id', id));
         }
         if (error) { console.error('[TaskDB] update:', error.message); throw error; }
         const FL = { title: 'Title', due_at: 'Due date', project_id: 'Project', priority: 'Priority', status: 'Status', description: 'Description', context: 'Context', working_url: 'Working URL', email_link: 'Email link', decision_question: 'Decision question', decision_due_at: 'Decision due date', recurrence: 'Recurrence' };
         for (const k of Object.keys(fields)) {
-          if (k === 'weekly_priority' || k === 'weekly_rank' || k === 'daily_priority' || k === 'daily_rank' || k === 'decision_due_has_time') continue;
+          if (k === 'weekly_priority' || k === 'weekly_rank' || k === 'daily_priority' || k === 'daily_rank' || k === 'decision_due_has_time' || k === 'recur_interval' || k === 'recur_unit' || k === 'recur_copy_fields') continue;
           if ((oldTask[k] || null) === (fields[k] || null)) continue;
           let msg;
           if (k === 'status') msg = 'Status: ' + statusLabel(oldTask.status) + ' → ' + statusLabel(fields.status);
@@ -1007,19 +1024,30 @@ Rules:
           if (task.recurrence === 'daily') d.setDate(d.getDate() + 1);
           else if (task.recurrence === 'weekly') d.setDate(d.getDate() + 7);
           else if (task.recurrence === 'monthly') d.setMonth(d.getMonth() + 1);
+          else if (task.recurrence === 'custom') { const n = task.recur_interval || 1; const u = task.recur_unit || 'week'; if (u === 'day') d.setDate(d.getDate() + n); else if (u === 'week') d.setDate(d.getDate() + n * 7); else d.setMonth(d.getMonth() + n); }
           nextDue = d.toISOString();
         } }
-        const { data, error } = await c.from('tasks').insert({
-          title: task.title, due_at: nextDue, project_id: task.project_id || null,
-          priority: task.priority || 'medium', status: 'todo',
-          description: task.description || null, context: task.context || null,
-          working_url: task.working_url || null, email_link: task.email_link || null,
-          decision_question: task.decision_question || null, recurrence: task.recurrence,
+        // Which fields carry over (null = legacy default: copy everything).
+        const copy = Array.isArray(task.recur_copy_fields) && task.recur_copy_fields.length ? task.recur_copy_fields : RECUR_COPY_DEFAULT;
+        const has = (k) => copy.indexOf(k) !== -1;
+        const base = {
+          title: task.title, due_at: nextDue, status: 'todo', recurrence: task.recurrence,
+          recur_interval: task.recur_interval || null, recur_unit: task.recur_unit || null, recur_copy_fields: task.recur_copy_fields || null,
+          project_id: has('project') ? (task.project_id || null) : null,
+          priority: has('priority') ? (task.priority || 'medium') : 'medium',
+          description: has('description') ? (task.description || null) : null,
+          context: has('context') ? (task.context || null) : null,
+          working_url: has('links') ? (task.working_url || null) : null,
+          email_link: has('links') ? (task.email_link || null) : null,
+          decision_question: has('decision') ? (task.decision_question || null) : null,
           created_by: user?.id || null,
-        }).select().single();
+        };
+        let res = await c.from('tasks').insert(base).select().single();
+        if (res.error && /column|schema cache|PGRST204|42703/i.test((res.error.message || '') + (res.error.code || ''))) { const b2 = { ...base }; delete b2.recur_interval; delete b2.recur_unit; delete b2.recur_copy_fields; res = await c.from('tasks').insert(b2).select().single(); }
+        const { data, error } = res;
         if (error) { console.error('[TaskDB] spawnRecurrence:', error.message); return; }
-        const { data: ppl } = await c.from('task_people').select('user_id,role').eq('task_id', task.id);
-        if (ppl && ppl.length) await c.from('task_people').insert(ppl.map(p => ({ task_id: data.id, user_id: p.user_id, role: p.role })));
+        if (has('people')) { const { data: ppl } = await c.from('task_people').select('user_id,role').eq('task_id', task.id); if (ppl && ppl.length) await c.from('task_people').insert(ppl.map(p => ({ task_id: data.id, user_id: p.user_id, role: p.role }))); }
+        if (has('decision')) { const { data: opts } = await c.from('task_decision_options').select('body,is_chosen,sort').eq('task_id', task.id); if (opts && opts.length) await c.from('task_decision_options').insert(opts.map(o => ({ task_id: data.id, body: o.body, is_chosen: false, sort: o.sort }))); }
         await this.addActivity(task.id, 'system', 'Recurring task completed — next instance created', user);
         await this.addActivity(data.id, 'system', 'Created from a recurring task', user);
         return data;
@@ -1071,6 +1099,27 @@ Rules:
         return this.create({ title: title.trim(), status: 'todo', priority: 'medium', parent_task_id: parentId }, {}, user);
       },
 
+      // Predecessor / Successor links. predecessor_id must come before successor_id.
+      async loadLinks(taskId) {
+        const c = this.client(); if (!c) return { predecessors: [], successors: [] };
+        const { data, error } = await c.from('task_links').select('id,predecessor_id,successor_id').or('predecessor_id.eq.' + taskId + ',successor_id.eq.' + taskId);
+        if (error) { console.error('[TaskDB] loadLinks:', error.message); return { predecessors: [], successors: [] }; }
+        const rows = data || [];
+        return {
+          predecessors: rows.filter(r => r.successor_id === taskId),   // tasks that must come before this one
+          successors:   rows.filter(r => r.predecessor_id === taskId), // tasks that come after this one
+        };
+      },
+      async addLink(predecessorId, successorId) {
+        const c = this.client(); if (!c) return;
+        const { error } = await c.from('task_links').insert({ predecessor_id: predecessorId, successor_id: successorId });
+        if (error && !/duplicate|unique/i.test(error.message || '')) console.error('[TaskDB] addLink:', error.message);
+      },
+      async removeLink(id) {
+        const c = this.client(); if (!c) return;
+        await c.from('task_links').delete().eq('id', id);
+      },
+
       // Label management — a user's distinct label names across all their tasks.
       async myLabelNames(userId) {
         const c = this.client(); if (!c) return [];
@@ -1103,12 +1152,51 @@ Rules:
       },
 
       async addActivity(taskId, kind, content, user, field) {
-        const c = this.client(); if (!c) return;
-        const { error } = await c.from('task_activity').insert({
+        const c = this.client(); if (!c) return null;
+        const { data, error } = await c.from('task_activity').insert({
           task_id: taskId, kind, content, field: field || null,
           author_id: user?.id || null, author_name: user?.user_metadata?.full_name || user?.email || null,
-        });
-        if (error) console.error('[TaskDB] addActivity:', error.message);
+        }).select().single();
+        if (error) { console.error('[TaskDB] addActivity:', error.message); return null; }
+        return data;
+      },
+
+      // Task Thread — private-but-synced AI Assist (owner-only). Log updates stay in task_activity.
+      async loadAssist(taskId, user) {
+        const c = this.client(); if (!c || !user) return [];
+        const { data, error } = await c.from('task_assist').select('*').eq('task_id', taskId).eq('user_id', user.id).order('created_at', { ascending: true });
+        if (error) { console.error('[TaskDB] loadAssist:', error.message); return []; }
+        return data || [];
+      },
+      async addAssist(taskId, role, content, user) {
+        const c = this.client(); if (!c || !user) return null;
+        const { data, error } = await c.from('task_assist').insert({ task_id: taskId, user_id: user.id, role, content }).select().single();
+        if (error) { console.error('[TaskDB] addAssist:', error.message); return null; }
+        return data;
+      },
+      async updateAssistContent(id, content) {
+        const c = this.client(); if (!c) return;
+        await c.from('task_assist').update({ content }).eq('id', id);
+      },
+      async publishAssist(rowItem, taskId, user) {
+        const c = this.client(); if (!c) return;
+        const act = await this.addActivity(taskId, 'ai', rowItem.content, user);
+        await c.from('task_assist').update({ published: true, published_activity_id: act?.id || null }).eq('id', rowItem.id);
+        return act;
+      },
+      async unpublishAssist(rowItem) {
+        const c = this.client(); if (!c) return;
+        if (rowItem.published_activity_id) await c.from('task_activity').delete().eq('id', rowItem.published_activity_id);
+        await c.from('task_assist').update({ published: false, published_activity_id: null }).eq('id', rowItem.id);
+      },
+      // Write the AI thread summary into context WITHOUT logging an activity (avoids feed noise).
+      async setThreadSummary(taskId, text) {
+        const c = this.client(); if (!c) return;
+        await c.from('tasks').update({ context: text, updated_at: new Date().toISOString() }).eq('id', taskId);
+      },
+      async updateActivityContent(id, content) {
+        const c = this.client(); if (!c) return;
+        await c.from('task_activity').update({ content }).eq('id', id);
       },
     };
 
@@ -2908,7 +2996,12 @@ Rules:
       const [hasTime, setHasTime] = useState(!!(_initHM && _initHM !== '00:00'));
       const [repeats, setRepeats] = useState(!!(t.recurrence && t.recurrence !== 'none'));
       const [recurrence, setRecurrence] = useState(t.recurrence && t.recurrence !== 'none' ? t.recurrence : 'weekly');
+      const [recurInterval, setRecurInterval] = useState(t.recur_interval != null ? String(t.recur_interval) : '2');
+      const [recurUnit, setRecurUnit] = useState(t.recur_unit || 'week');
+      const [recurCopy, setRecurCopy] = useState(Array.isArray(t.recur_copy_fields) && t.recur_copy_fields.length ? t.recur_copy_fields : RECUR_COPY_DEFAULT);
       const [project, setProject] = useState(t._projectName || '');
+      const [projects, setProjects] = useState([]);
+      const [newProjMode, setNewProjMode] = useState(false);
       const [priority, setPriority] = useState(t.priority || 'medium');
       const [status, setStatus] = useState(t.status || 'todo');
       const [myLabels, setMyLabels] = useState([]);
@@ -2934,6 +3027,7 @@ Rules:
       const [planOpen, setPlanOpen] = useState(!!(t.weekly_priority || t.weekly_rank != null || t.daily_priority || t.daily_rank != null));
       const [decisionOpen, setDecisionOpen] = useState(false);
 
+      useEffect(() => { TaskDB.loadProjects().then(rows => setProjects(rows || [])); }, []);
       useEffect(() => {
         if (!t.id) return;
         TaskDB.loadLabels(t.id).then(rows => setMyLabels((rows || []).filter(r => r.user_id === uid).map(r => r.label)));
@@ -2977,7 +3071,11 @@ Rules:
           const due = dueDate ? (dueDate + 'T' + (hasTime && dueTime ? dueTime : '00:00')) : '';
           const decisionDue = decisionDueDate ? (decisionDueDate + 'T' + (decisionHasTime && decisionDueTime ? decisionDueTime : '00:00')) : '';
           await onSave({
-            title: title.trim(), due, recurrence: repeats ? recurrence : 'none', project, priority, status,
+            title: title.trim(), due, recurrence: repeats ? recurrence : 'none',
+            recurInterval: repeats && recurrence === 'custom' ? (parseInt(recurInterval, 10) || 1) : null,
+            recurUnit: repeats && recurrence === 'custom' ? recurUnit : null,
+            recurCopy: repeats ? recurCopy : null,
+            project, priority, status,
             assignees, assigners, working_url: workingUrl.trim(), email_link: emailLink.trim(),
             description, context, labels: myLabels,
             decisionMakers, decisionQuestion: decisionQuestion.trim(), decisionDue, decisionHasTime,
@@ -3022,7 +3120,27 @@ Rules:
               <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={repeats} onChange={e => setRepeats(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Repeat</label>
             </div>
             {hasTime && <input type="time" value={dueTime} onChange={e => setDueTime(e.target.value)} style={{ ...inp, marginTop: 8 }} />}
-            {repeats && <div style={{ marginTop: 8 }}>{sel(recurrence, setRecurrence, REPEAT_OPTS)}<div style={{ fontSize: '0.66rem', color: sub, lineHeight: 1.5, marginTop: 5, fontFamily: C.fontSans }}>When marked Completed, the next one is created automatically with the due date moved forward.</div></div>}
+            {repeats && <div style={{ marginTop: 8 }}>
+              {sel(recurrence, setRecurrence, REPEAT_OPTS)}
+              {recurrence === 'custom' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                  <span style={{ fontSize: '0.78rem', color: sub, fontFamily: C.fontSans }}>Every</span>
+                  <input type="number" min="1" value={recurInterval} onChange={e => setRecurInterval(e.target.value)} style={{ ...inp, width: 64, padding: '8px 9px' }} />
+                  <select value={recurUnit} onChange={e => setRecurUnit(e.target.value)} style={{ ...inp, flex: 1 }}>
+                    <option value="day">day(s)</option>
+                    <option value="week">week(s)</option>
+                    <option value="month">month(s)</option>
+                  </select>
+                </div>
+              )}
+              <div style={{ marginTop: 10 }}>
+                <div style={{ ...lbl, marginBottom: 6 }}>Copy to next instance</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {RECUR_COPY_FIELDS.map(f => { const on = recurCopy.includes(f.id); return <button key={f.id} type="button" onClick={() => setRecurCopy(c => c.includes(f.id) ? c.filter(x => x !== f.id) : [...c, f.id])} style={{ padding: '5px 9px', borderRadius: 14, border: `1px solid ${on ? C.navy : bord}`, background: on ? C.navy : (dark ? '#06101F' : '#fff'), color: on ? '#fff' : sub, fontSize: '0.72rem', cursor: 'pointer', fontFamily: C.fontSans }}>{on ? '✓ ' : ''}{f.label}</button>; })}
+                </div>
+              </div>
+              <div style={{ fontSize: '0.66rem', color: sub, lineHeight: 1.5, marginTop: 8, fontFamily: C.fontSans }}>When marked Completed, the next one is created automatically — due date moved forward, only the checked fields carried over.</div>
+            </div>}
           </div>
           {/* People */}
           {field('Assignees', chips(assignees, setAssignees))}
@@ -3033,7 +3151,17 @@ Rules:
             <div style={{ flex: 1 }}>{field('Priority', sel(priority, setPriority, TASK_PRIORITY))}</div>
           </div>
           {/* Project */}
-          {field('Project', <input value={project} onChange={e => setProject(e.target.value)} placeholder="Type a project name" style={inp} />)}
+          {field('Project', (
+            <div>
+              <select value={newProjMode ? '__new__' : (project || '')} onChange={e => { const v = e.target.value; if (v === '__new__') { setNewProjMode(true); setProject(''); } else { setNewProjMode(false); setProject(v); } }} style={inp}>
+                <option value="">(No project)</option>
+                {projects.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                {project && !newProjMode && !projects.some(p => p.name === project) && <option value={project}>{project}</option>}
+                <option value="__new__">＋ New project…</option>
+              </select>
+              {newProjMode && <input autoFocus value={project} onChange={e => setProject(e.target.value)} placeholder="New project name" style={{ ...inp, marginTop: 8 }} />}
+            </div>
+          ))}
           {/* Labels */}
           {field('Your labels', (
             <div>
@@ -3089,7 +3217,8 @@ Rules:
       );
     }
 
-    function TaskDetail({ dark, task, people, team, user, onEdit, onStatus, onOpenSubtask }) {
+    function TaskDetail({ dark, task, people, team, user, allTasks, onEdit, onStatus, onOpenSubtask }) {
+      const [detTab, setDetTab] = useState('details');   // 'details' | 'thread'
       const [activity, setActivity] = useState([]);
       const [note, setNote] = useState('');
       const [busy, setBusy] = useState(false);
@@ -3098,11 +3227,28 @@ Rules:
       const [subs, setSubs] = useState([]);
       const [subTitle, setSubTitle] = useState('');
       const [addingSub, setAddingSub] = useState(false);
+      // Dependencies (predecessor/successor)
+      const [links, setLinks] = useState({ predecessors: [], successors: [] });
+      const [linkPick, setLinkPick] = useState('');
+      const [linkDir, setLinkDir] = useState('pred');   // 'pred' = picked comes before this; 'succ' = after
+      // Thread
+      const [summary, setSummary] = useState(task.context || '');
+      const [mode, setMode] = useState('log');           // 'log' | 'assist'
+      const [aiBusy, setAiBusy] = useState(false);
+      const [sumBusy, setSumBusy] = useState(false);
+      const [assist, setAssist] = useState([]);
+      const [editId, setEditId] = useState(null);
+      const [editText, setEditText] = useState('');
+      const [decDraft, setDecDraft] = useState(null);    // { question, options:[{text,checked}] }
+      const [decBusy, setDecBusy] = useState(false);
       useEffect(() => {
         TaskDB.loadActivity(task.id).then(setActivity);
         TaskDB.loadDecisionOptions(task.id).then(setDecisionOpts);
         TaskDB.loadLabels(task.id).then(setLabelRows);
         TaskDB.loadSubtasks(task.id).then(setSubs);
+        TaskDB.loadLinks(task.id).then(setLinks);
+        TaskDB.loadAssist(task.id, user).then(setAssist);
+        setSummary(task.context || '');
       }, [task.id]);
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
       const gold = dark ? '#C9A45A' : '#AD832F';
@@ -3112,9 +3258,65 @@ Rules:
       const row = (k, v) => <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '7px 0', borderBottom: `1px solid ${bord}` }}><span style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, flexShrink: 0 }}>{k}</span><span style={{ fontSize: '0.82rem', color: ink, fontWeight: 500, textAlign: 'right', fontFamily: C.fontSans }}>{v}</span></div>;
       const kindTag = { system: { t: 'CHANGE', c: '#6B6B6B' }, update: { t: 'UPDATE', c: '#2A6FD4' }, ai: { t: 'AI', c: '#AD832F' } };
       const secHead = (icon, txt) => <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><i className={`ti ${icon}`} style={{ fontSize: 14, color: gold }} /><span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>{txt}</span></div>;
+      const tinp = { padding: '8px 10px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const cap = { fontSize: '0.6rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans };
       const hasDecision = decisionOpts.length > 0 || !!task.decision_question || ppl('decision_maker') !== '—' || !!task.decision_due_at;
-      async function addNote() { if (!note.trim() || busy) return; setBusy(true); try { await TaskDB.addActivity(task.id, 'update', note.trim(), user); setNote(''); setActivity(await TaskDB.loadActivity(task.id)); } finally { setBusy(false); } }
       async function addSub() { if (!subTitle.trim() || addingSub) return; setAddingSub(true); try { await TaskDB.createSubtask(task.id, subTitle.trim(), user); setSubTitle(''); setSubs(await TaskDB.loadSubtasks(task.id)); } finally { setAddingSub(false); } }
+      // ── Dependencies
+      const titleOf = (id) => ((allTasks || []).find(t => t.id === id) || {}).title || '(task)';
+      async function addDep() { if (!linkPick) return; if (linkDir === 'pred') await TaskDB.addLink(linkPick, task.id); else await TaskDB.addLink(task.id, linkPick); setLinkPick(''); setLinks(await TaskDB.loadLinks(task.id)); }
+      async function removeDep(id) { await TaskDB.removeLink(id); setLinks(await TaskDB.loadLinks(task.id)); }
+      // ── Thread: summary (built from the shared activity feed, not the private AI Assist)
+      async function refreshSummary(actList) {
+        const list = actList || activity; if (!list.length || sumBusy) return;
+        setSumBusy(true);
+        try {
+          const log = list.map(a => '[' + (a.kind || 'log').toUpperCase() + '] ' + a.content).join('\n');
+          const text = await callAI([{ role: 'user', content: 'Task: "' + task.title + '" (status: ' + statusLabel(task.status) + ')\n\nThread:\n' + log + '\n\nWrite a concise 2–3 sentence summary of where this stands and what is next. Plain text only.' }], 'You summarise a task thread in 2–3 plain sentences. Current status, key updates, next step. No bullets, no headers.');
+          setSummary(text); await TaskDB.setThreadSummary(task.id, text);
+        } catch (e) { /* silent — summary is best-effort */ } finally { setSumBusy(false); }
+      }
+      // ── Thread: Log update (shared) — auto-refreshes the summary
+      async function addNote() { if (!note.trim() || busy) return; setBusy(true); try { await TaskDB.addActivity(task.id, 'update', note.trim(), user); setNote(''); const a = await TaskDB.loadActivity(task.id); setActivity(a); refreshSummary(a); } finally { setBusy(false); } }
+      // ── Thread: AI Assist (private but synced) — Q&A NOT added to the shared feed
+      async function sendAssist() {
+        if (!note.trim() || aiBusy) return; const txt = note.trim();
+        setAiBusy(true); setNote('');
+        const uMsg = await TaskDB.addAssist(task.id, 'user', txt, user); setAssist(a => uMsg ? [...a, uMsg] : a);
+        try {
+          const sys = 'You are assisting with ONE task. Be concise and practical. If asked to draft something (email, message), produce it ready to use.\nTask: "' + task.title + '" | Status: ' + statusLabel(task.status) + '\nContext: ' + (summary || 'none') + '\nDecision: ' + (task.decision_question || 'none');
+          const hist = [...assist, uMsg].filter(Boolean).slice(-10).map(m => ({ role: m.role === 'ai' ? 'assistant' : 'user', content: m.content }));
+          const reply = await callAI(hist, sys);
+          const aMsg = await TaskDB.addAssist(task.id, 'ai', reply, user); setAssist(a => aMsg ? [...a, aMsg] : a);
+        } catch (e) { const aMsg = await TaskDB.addAssist(task.id, 'ai', 'Error: ' + e.message, user); setAssist(a => aMsg ? [...a, aMsg] : a); }
+        finally { setAiBusy(false); }
+      }
+      async function saveAssistEdit(id) { const item = assist.find(x => x.id === id); await TaskDB.updateAssistContent(id, editText); if (item && item.published && item.published_activity_id) { await TaskDB.updateActivityContent(item.published_activity_id, editText); setActivity(await TaskDB.loadActivity(task.id)); } setEditId(null); setEditText(''); setAssist(await TaskDB.loadAssist(task.id, user)); }
+      async function togglePublish(item) { if (item.published) await TaskDB.unpublishAssist(item); else await TaskDB.publishAssist(item, task.id, user); setAssist(await TaskDB.loadAssist(task.id, user)); setActivity(await TaskDB.loadActivity(task.id)); }
+      // ── Thread: improve the decision from the thread
+      async function improveDecision() {
+        if (decBusy) return; setDecBusy(true);
+        try {
+          const log = activity.map(a => a.content).join('\n');
+          const reply = await callAI([{ role: 'user', content: 'Task: "' + task.title + '"\nContext: ' + (summary || 'none') + '\nCurrent decision question: ' + (task.decision_question || 'none') + '\nThread:\n' + log + '\n\nSuggest a concise decision question and 2–3 clear options reflecting the current state. Reply ONLY valid JSON: {"question":"...","options":["...","..."]}' }], 'You propose a decision question and options from a task thread. Reply only valid JSON, no preamble.');
+          let parsed = null; try { parsed = JSON.parse((reply.match(/\{[\s\S]*\}/) || [reply])[0]); } catch (e) {}
+          if (parsed && parsed.question) setDecDraft({ question: parsed.question, options: (parsed.options || []).map(o => ({ text: String(o), checked: true })) });
+        } catch (e) { /* silent */ } finally { setDecBusy(false); }
+      }
+      async function acceptDecision() {
+        if (!decDraft) return;
+        await TaskDB.update(task.id, task, { decision_question: decDraft.question }, user);
+        await TaskDB.setDecisionOptions(task.id, decDraft.options.filter(o => o.checked).map(o => ({ body: o.text, is_chosen: false })));
+        setDecDraft(null);
+        setDecisionOpts(await TaskDB.loadDecisionOptions(task.id));
+        setActivity(await TaskDB.loadActivity(task.id));
+      }
+      const depRow = (linkId, otherId) => (
+        <div key={linkId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, marginBottom: 6 }}>
+          <span style={{ flex: 1, minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleOf(otherId)}</span>
+          <i className="ti ti-x" onClick={() => removeDep(linkId)} style={{ fontSize: 14, color: sub, cursor: 'pointer', flexShrink: 0 }} />
+        </div>
+      );
       return (
         <div style={{ padding: '14px 16px 40px' }}>
           <div style={{ fontSize: '1.1rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, marginBottom: 6 }}>{task.title}</div>
@@ -3123,6 +3325,15 @@ Rules:
             <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: priorityColor(task.priority) + '22', color: priorityColor(task.priority), fontFamily: C.fontSans }}>{priorityLabel(task.priority)}</span>
             <button onClick={onEdit} style={{ marginLeft: 'auto', fontSize: '0.74rem', fontWeight: 600, color: dark ? '#fff' : C.navy, background: 'none', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 12px', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>
           </div>
+          {/* Details | Thread tabs */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+            {[['details', 'Details'], ['thread', 'Thread']].map(([id, label]) => (
+              <button key={id} onClick={() => setDetTab(id)} style={{ flex: 1, padding: '7px 8px', borderRadius: 8, border: `1px solid ${detTab === id ? C.navy : bord}`, background: detTab === id ? C.navy : (dark ? '#0A1730' : '#fff'), color: detTab === id ? '#fff' : sub, fontSize: '0.74rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{label}{id === 'thread' && activity.length ? ' · ' + activity.length : ''}</button>
+            ))}
+          </div>
+
+          {detTab === 'details' ? (
+          <React.Fragment>
           {labelRows.length > 0 && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
               {labelRows.map(r => { const mine = r.user_id === (user && user.id); return (
@@ -3134,14 +3345,31 @@ Rules:
             {TASK_STATUS.map(s => <button key={s.id} onClick={async () => { await onStatus(s.id); setActivity(await TaskDB.loadActivity(task.id)); }} style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${task.status === s.id ? s.color : bord}`, background: task.status === s.id ? s.color : (dark ? '#06101F' : '#fff'), color: task.status === s.id ? '#fff' : sub, fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{s.label}</button>)}
           </div>
           {row('Due', fmt(task.due_at))}
-          {task.recurrence && task.recurrence !== 'none' ? row('Repeat', recurLabel(task.recurrence)) : null}
+          {task.recurrence && task.recurrence !== 'none' ? row('Repeat', recurDesc(task)) : null}
           {row('Project', task._projectName || '—')}
           {row('Assignees', ppl('assignee'))}
           {row('Assigned by', ppl('assigner'))}
           {task.working_url ? row('Working URL', <a href={task.working_url} target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Open ↗</a>) : null}
           {task.email_link ? row('Email link', <a href={task.email_link} target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Open ↗</a>) : null}
-          {task.description ? <div style={{ marginTop: 12 }}><div style={{ fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans }}>Description</div><div style={{ fontSize: '0.84rem', color: ink, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{task.description}</div></div> : null}
-          {task.context ? <div style={{ marginTop: 12 }}><div style={{ fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans }}>Context</div><div style={{ fontSize: '0.84rem', color: ink, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{task.context}</div></div> : null}
+          {task.description ? <div style={{ marginTop: 12 }}><div style={cap}>Description</div><div style={{ fontSize: '0.84rem', color: ink, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{task.description}</div></div> : null}
+          {/* Dependencies */}
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
+            {secHead('ti-arrows-split-2', 'Dependencies')}
+            {links.predecessors.length > 0 && <div style={{ marginBottom: 8 }}><div style={cap}>Must come before this</div>{links.predecessors.map(l => depRow(l.id, l.predecessor_id))}</div>}
+            {links.successors.length > 0 && <div style={{ marginBottom: 8 }}><div style={cap}>Comes after this</div>{links.successors.map(l => depRow(l.id, l.successor_id))}</div>}
+            {!links.predecessors.length && !links.successors.length && <div style={{ fontSize: '0.78rem', color: sub, fontFamily: C.fontSans, marginBottom: 8 }}>No dependencies.</div>}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <select value={linkDir} onChange={e => setLinkDir(e.target.value)} style={{ ...tinp, flex: '1 1 130px' }}>
+                <option value="pred">Predecessor (before)</option>
+                <option value="succ">Successor (after)</option>
+              </select>
+              <select value={linkPick} onChange={e => setLinkPick(e.target.value)} style={{ ...tinp, flex: '2 1 150px' }}>
+                <option value="">Pick a task…</option>
+                {(allTasks || []).filter(t => t.id !== task.id).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}
+              </select>
+              <button onClick={addDep} disabled={!linkPick} style={{ padding: '8px 13px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !linkPick ? 0.5 : 1 }}>Link</button>
+            </div>
+          </div>
           {/* Decision */}
           {hasDecision && (
             <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
@@ -3169,25 +3397,98 @@ Rules:
               </div>
             ))}
             <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-              <input value={subTitle} onChange={e => setSubTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addSub(); }} placeholder="Add a subtask…" style={{ flex: 1, padding: '8px 10px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans }} />
+              <input value={subTitle} onChange={e => setSubTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addSub(); }} placeholder="Add a subtask…" style={{ ...tinp, flex: 1 }} />
               <button onClick={addSub} disabled={!subTitle.trim() || addingSub} style={{ padding: '8px 13px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !subTitle.trim() ? 0.5 : 1 }}>Add</button>
             </div>
           </div>
-          <div style={{ marginTop: 18, marginBottom: 8, fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, fontFamily: C.fontSans }}>Activity</div>
+          </React.Fragment>
+          ) : (
+          <React.Fragment>
+          {/* Current Summary */}
+          <div style={{ background: dark ? '#0A1E44' : '#F3EBDA', border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <span style={{ fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>Current Summary</span>
+              <button onClick={() => refreshSummary()} disabled={sumBusy} style={{ fontSize: '0.68rem', fontWeight: 600, color: gold, background: 'none', border: `1px solid ${bord}`, borderRadius: 7, padding: '3px 9px', cursor: 'pointer', fontFamily: C.fontSans }}>{sumBusy ? '…' : '↻ Refresh'}</button>
+            </div>
+            <div style={{ fontSize: '0.82rem', color: summary ? ink : sub, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans, fontStyle: summary ? 'normal' : 'italic' }}>{summary || 'No summary yet — add an update and it’ll generate.'}</div>
+          </div>
+          {/* Improve decision from thread */}
+          <button onClick={improveDecision} disabled={decBusy} style={{ width: '100%', padding: '9px', background: dark ? '#06101F' : '#fff', border: `1px dashed ${gold}`, borderRadius: 9, color: gold, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, marginBottom: 12 }}>{decBusy ? 'Thinking…' : '✨ Improve decision from thread'}</button>
+          {decDraft && (
+            <div style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', marginBottom: 14, background: dark ? '#06101F' : '#fff' }}>
+              <div style={cap}>Suggested decision — edit, then save</div>
+              <input value={decDraft.question} onChange={e => setDecDraft(d => ({ ...d, question: e.target.value }))} style={{ ...tinp, width: '100%', fontWeight: 600 }} />
+              {decDraft.options.map((o, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                  <input type="checkbox" checked={o.checked} onChange={() => setDecDraft(d => ({ ...d, options: d.options.map((x, j) => j === i ? { ...x, checked: !x.checked } : x) }))} style={{ accentColor: C.navy, width: 15, height: 15, flexShrink: 0 }} />
+                  <input value={o.text} onChange={e => setDecDraft(d => ({ ...d, options: d.options.map((x, j) => j === i ? { ...x, text: e.target.value } : x) }))} style={{ ...tinp, flex: 1 }} />
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button onClick={acceptDecision} style={{ padding: '7px 13px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>Save to decision</button>
+                <button onClick={() => setDecDraft(null)} style={{ padding: '7px 13px', background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 9, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+              </div>
+            </div>
+          )}
+          {/* Shared thread feed */}
+          {secHead('ti-message-2', 'Thread')}
           {activity.length === 0 && <div style={{ fontSize: '0.78rem', color: sub, fontFamily: C.fontSans }}>No activity yet.</div>}
           {activity.map(a => { const tag = kindTag[a.kind] || kindTag.update; return (
             <div key={a.id} style={{ display: 'flex', gap: 8, padding: '8px 0', borderBottom: `1px solid ${bord}` }}>
               <span style={{ flexShrink: 0, fontSize: '0.52rem', fontWeight: 700, letterSpacing: '0.06em', color: tag.c, background: tag.c + '1A', borderRadius: 6, padding: '2px 6px', height: 'fit-content', fontFamily: C.fontSans }}>{tag.t}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, lineHeight: 1.4 }}>{a.content}</div>
+                <div style={{ fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>{a.content}</div>
                 <div style={{ fontSize: '0.64rem', color: sub, marginTop: 2, fontFamily: C.fontSans }}>{a.author_name || 'System'} · {fmt(a.created_at)}</div>
               </div>
             </div>
           ); })}
-          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addNote(); }} placeholder="Add an update…" style={{ flex: 1, padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.84rem', outline: 'none', fontFamily: C.fontSans }} />
-            <button onClick={addNote} disabled={!note.trim() || busy} style={{ padding: '9px 14px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !note.trim() ? 0.5 : 1 }}>Post</button>
+          {/* Composer: Log (shared) / AI Assist (private) */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+              {[['log', '📝 Log'], ['assist', '✨ AI Assist']].map(([id, label]) => (
+                <button key={id} onClick={() => setMode(id)} style={{ flex: 1, padding: '6px 8px', borderRadius: 8, border: `1px solid ${mode === id ? C.navy : bord}`, background: mode === id ? C.navy : (dark ? '#06101F' : '#fff'), color: mode === id ? '#fff' : sub, fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{label}</button>
+              ))}
+            </div>
+            {mode === 'assist' && (
+              <div style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: '8px 10px', marginBottom: 8, background: dark ? '#06101F' : '#FCFBF8' }}>
+                <div style={{ ...cap, marginBottom: 6 }}>AI Assist · private to you</div>
+                {assist.length === 0 && <div style={{ fontSize: '0.76rem', color: sub, fontFamily: C.fontSans }}>Ask anything about this task — drafts, next steps, summaries. Only you see this.</div>}
+                {assist.map(m => (
+                  <div key={m.id} style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: '0.58rem', fontWeight: 700, letterSpacing: '0.06em', color: m.role === 'ai' ? gold : sub, fontFamily: C.fontSans, marginBottom: 2 }}>{m.role === 'ai' ? 'AI' : 'YOU'}</div>
+                    {editId === m.id ? (
+                      <div>
+                        <textarea value={editText} onChange={e => setEditText(e.target.value)} rows={3} style={{ ...tinp, width: '100%', resize: 'vertical' }} />
+                        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                          <button onClick={() => saveAssistEdit(m.id)} style={{ fontSize: '0.7rem', fontWeight: 600, color: '#fff', background: C.navy, border: 'none', borderRadius: 7, padding: '4px 10px', cursor: 'pointer', fontFamily: C.fontSans }}>Save</button>
+                          <button onClick={() => { setEditId(null); setEditText(''); }} style={{ fontSize: '0.7rem', fontWeight: 600, color: sub, background: 'none', border: `1px solid ${bord}`, borderRadius: 7, padding: '4px 10px', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div style={{ fontSize: '0.8rem', color: ink, lineHeight: 1.45, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{m.content}</div>
+                        {m.role === 'ai' && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
+                            <span onClick={() => { setEditId(m.id); setEditText(m.content); }} style={{ fontSize: '0.68rem', color: gold, cursor: 'pointer', fontFamily: C.fontSans }}>Edit</span>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '0.68rem', color: sub, cursor: 'pointer', fontFamily: C.fontSans }}>
+                              <input type="checkbox" checked={!!m.published} onChange={() => togglePublish(m)} style={{ accentColor: C.navy, width: 13, height: 13 }} />Publish to thread
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {aiBusy && <div style={{ fontSize: '0.76rem', color: sub, fontStyle: 'italic', fontFamily: C.fontSans }}>AI is thinking…</div>}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { mode === 'assist' ? sendAssist() : addNote(); } }} placeholder={mode === 'assist' ? 'Ask AI about this task…' : 'Add an update…'} style={{ ...tinp, flex: 1, padding: '9px 11px', fontSize: '0.84rem' }} />
+              <button onClick={() => mode === 'assist' ? sendAssist() : addNote()} disabled={!note.trim() || busy || aiBusy} style={{ padding: '9px 14px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !note.trim() ? 0.5 : 1 }}>{mode === 'assist' ? 'Ask' : 'Post'}</button>
+            </div>
           </div>
+          </React.Fragment>
+          )}
         </div>
       );
     }
@@ -3296,7 +3597,7 @@ Rules:
         const decision_due_at = form.decisionDue ? new Date(form.decisionDue).toISOString() : null;
         const project_id = form.project ? await TaskDB.findOrCreateProject(form.project, user) : null;
         const pl = form.planning || {};
-        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null, decision_question: form.decisionQuestion || null, decision_due_at, decision_due_has_time: !!(form.decisionDue && form.decisionHasTime), recurrence: form.recurrence || 'none', weekly_priority: pl.wp || null, weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null, daily_priority: pl.dp || null, daily_rank: pl.dr ? parseInt(pl.dr, 10) : null };
+        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null, decision_question: form.decisionQuestion || null, decision_due_at, decision_due_has_time: !!(form.decisionDue && form.decisionHasTime), recurrence: form.recurrence || 'none', recur_interval: form.recurInterval || null, recur_unit: form.recurUnit || null, recur_copy_fields: form.recurCopy || null, weekly_priority: pl.wp || null, weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null, daily_priority: pl.dp || null, daily_rank: pl.dr ? parseInt(pl.dr, 10) : null };
         const people = { assignee: form.assignees, assigner: form.assigners, decision_maker: form.decisionMakers || [] };
         let taskId;
         if (current && current.id) { await TaskDB.update(current.id, current, fields, user); await TaskDB.setPeople(current.id, people); taskId = current.id; }
@@ -3392,7 +3693,7 @@ Rules:
             {/* Body (scrolls) */}
             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
               {view === 'form' ? <TaskForm dark={dark} task={current ? withMeta(current) : null} team={team} user={user} onSave={handleSave} onCancel={() => setView(current ? 'detail' : 'list')} />
-                : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} onEdit={() => setView('form')} onStatus={(s) => changeStatus(current, s)} onOpenSubtask={(child) => { setCurrent(child); setView('detail'); }} />
+                : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} allTasks={data.tasks} onEdit={() => setView('form')} onStatus={(s) => changeStatus(current, s)} onOpenSubtask={(child) => { setCurrent(child); setView('detail'); }} />
                 : view === 'labels' ? <LabelManager dark={dark} user={user} onClose={() => setView('list')} />
                 : (
                   <div style={{ padding: '12px 14px 24px' }}>

@@ -4314,8 +4314,14 @@ Rules:
       const [vis, setVis] = useState(false);
       const [gevents, setGevents] = useState([]);
       const [tasks, setTasks] = useState([]);
+      const [peopleByTask, setPeopleByTask] = useState({});
+      const [roster, setRoster] = useState({});
+      const [decOpen, setDecOpen] = useState(false);
+      const [decData, setDecData] = useState({});        // taskId -> { options, comments, loaded }
+      const [decDraft, setDecDraft] = useState({});      // taskId -> comment draft
       const [gcal, setGcal] = useState('loading');        // loading | ready | needs_connect | error
       const scrollRef = useRef(null);
+      const user = (window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user) || null;
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
 
       const K = dark ? {
@@ -4362,7 +4368,10 @@ Rules:
           .catch(err => { if (!cancelled) setGcal(err && err.code === 'needs_connect' ? 'needs_connect' : 'error'); });
         return () => { cancelled = true; };
       }, [view, anchor]);
-      useEffect(() => { let c = false; TaskDB.loadAll().then(d => { if (!c && d) setTasks(d.tasks || []); }).catch(() => {}); return () => { c = true; }; }, []);
+      useEffect(() => { let c = false;
+        TaskDB.loadAll().then(d => { if (!c && d) { setTasks(d.tasks || []); setPeopleByTask(d.peopleByTask || {}); } }).catch(() => {});
+        ProfileDB.loadAll().then(ps => { if (!c && ps) { const m = {}; ps.forEach(p => { m[p.id] = (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User'; }); setRoster(m); } }).catch(() => {});
+        return () => { c = true; }; }, []);
 
       // ── timezone helpers (TX=Austin/America-Chicago, PH=Manila/Asia-Manila, live) ──
       const tzOffMin = (date, tz) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }); const m = {}; f.formatToParts(date).forEach(p => m[p.type] = p.value); return (Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour, +m.minute, +m.second) - date.getTime()) / 60000; };
@@ -4391,6 +4400,31 @@ Rules:
       const hasEvents = (day) => (gevents || []).some(e => e.start && (e.allDay ? (e.start || '').slice(0, 10) === isoOf(day) : sameDay(new Date(e.start), day)));
       const monthHasEvent = (day) => hasEvents(day);
       const monthHasTask = (day) => (tasks || []).some(t => t.due_at && sameDay(new Date(t.due_at), day));
+
+      // ── decisions (a decision = any task carrying decision data) ──
+      const nameOf = (id) => roster[id] || '—';
+      const roleNames = (tid, role) => (peopleByTask[tid] || []).filter(p => p.role === role).map(p => nameOf(p.user_id)).filter(n => n && n !== '—').join(', ');
+      const decisionTasks = () => (tasks || []).filter(t => t.decision_question || t.decision_due_at || (peopleByTask[t.id] || []).some(p => p.role === 'decision_maker'));
+      const decDueInfo = (t) => { if (!t.decision_due_at) return null; const d = new Date(t.decision_due_at); const t0 = new Date(todayD); t0.setHours(0, 0, 0, 0); const d0 = new Date(d); d0.setHours(0, 0, 0, 0); const f = t.decision_due_has_time ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); if (d0.getTime() === t0.getTime()) return { label: t.decision_due_has_time ? f : 'Today', color: K.dueToday }; if (d0 < t0) return { label: f, color: K.dueOver }; return { label: f, color: K.dueUp }; };
+      useEffect(() => {
+        if (!decOpen) return; let c = false;
+        decisionTasks().forEach(t => {
+          if (decData[t.id] && decData[t.id].loaded) return;
+          Promise.all([TaskDB.loadDecisionOptions(t.id), TaskDB.loadActivity(t.id)]).then(([opts, act]) => { if (!c) setDecData(prev => ({ ...prev, [t.id]: { options: opts || [], comments: (act || []).filter(a => a.kind === 'update'), loaded: true } })); }).catch(() => {});
+        });
+        return () => { c = true; };
+      }, [decOpen, tasks, peopleByTask]);
+      const chooseOption = async (taskId, idx) => {
+        const d = decData[taskId]; if (!d) return;
+        const opts = d.options.map((o, i) => ({ ...o, is_chosen: i === idx ? !o.is_chosen : false }));
+        setDecData(prev => ({ ...prev, [taskId]: { ...prev[taskId], options: opts } }));
+        try { await TaskDB.setDecisionOptions(taskId, opts.map(o => ({ body: o.body, is_chosen: o.is_chosen }))); } catch (e) {}
+      };
+      const addComment = async (taskId) => {
+        const text = (decDraft[taskId] || '').trim(); if (!text || !user) return;
+        setDecDraft(prev => ({ ...prev, [taskId]: '' }));
+        try { await TaskDB.addActivity(taskId, 'update', text, user); const act = await TaskDB.loadActivity(taskId); setDecData(prev => ({ ...prev, [taskId]: { ...(prev[taskId] || {}), comments: (act || []).filter(a => a.kind === 'update') } })); } catch (e) {}
+      };
 
       const goToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); setAnchor(d); };
       const step = (dir) => setAnchor(a => view === 'month' ? new Date(a.getFullYear(), a.getMonth() + dir, 1) : addDays(a, dir * (view === 'week' ? 7 : 1)));
@@ -4487,6 +4521,71 @@ Rules:
       );
 
       // ── Section 3: date strip (Day + Week) ──
+      // ── Decisions strip (Day + Week) — its own prominent feed, beside Tasks ──
+      const decs = decisionTasks();
+      const decIcon = (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 4v6" /><path d="M9 7l3-3 3 3" />
+          <path d="M4 13l-2 2 2 2" /><path d="M2 15h7" />
+          <path d="M20 13l2 2-2 2" /><path d="M22 15h-7" />
+        </svg>
+      );
+      const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, padding: '2px 6px', borderRadius: 10, background: statusColor(st) + '22', color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
+      const decCard = (t) => {
+        const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = [t.description, t.context].filter(Boolean).join(' · ');
+        return (
+          <div key={t.id} style={{ borderBottom: `0.5px solid ${K.rowBd}`, padding: '9px 12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span onClick={() => onOpenTask && onOpenTask(t)} style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 11, fontWeight: 700, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
+              {statusPill(t.status)}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 5 }}>
+              {maker && <span style={{ fontFamily: J, fontSize: 8.5, color: K.reg }}><b style={{ color: K.gold }}>Maker:</b> {maker}</span>}
+              {dd && <span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 600, color: dd.color }}>Decide by {dd.label}</span>}
+              {asg && <span style={{ fontFamily: J, fontSize: 8.5, color: K.reg }}>Assignee: {asg}</span>}
+            </div>
+            {t.decision_question && <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 600, color: K.date, margin: '8px 0 6px', lineHeight: 1.4 }}>{t.decision_question}</div>}
+            {(d.options || []).map((o, i) => (
+              <div key={o.id || i} onClick={() => chooseOption(t.id, i)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px', marginBottom: 4, borderRadius: 7, cursor: 'pointer', background: o.is_chosen ? (dark ? 'rgba(15,110,86,.18)' : '#E6F2EC') : (dark ? '#0C1830' : '#FAF8F3'), border: `1px solid ${o.is_chosen ? (dark ? '#1E6B4E' : '#9FD3BC') : K.cellBd}` }}>
+                <i className={o.is_chosen ? 'ti ti-circle-check-filled' : 'ti ti-circle'} style={{ fontSize: 15, color: o.is_chosen ? (dark ? '#3FB36B' : '#0F6E56') : K.muted, flexShrink: 0 }} />
+                <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 9.5, fontWeight: o.is_chosen ? 600 : 400, color: K.date }}>{o.body}</span>
+                {o.is_chosen && <span style={{ fontFamily: J, fontSize: 6.5, fontWeight: 700, letterSpacing: '.06em', color: dark ? '#3FB36B' : '#0F6E56', flexShrink: 0 }}>CHOSEN</span>}
+              </div>
+            ))}
+            {extra && <div style={{ fontFamily: J, fontSize: 8.5, color: K.reg, lineHeight: 1.5, marginTop: 4, whiteSpace: 'pre-wrap' }}>{extra}</div>}
+            {(d.comments || []).slice(-2).map(cm => (
+              <div key={cm.id} style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: K.gold, flexShrink: 0 }}>{(cm.author_name || 'User').split(' ')[0]}:</span>
+                <span style={{ fontFamily: J, fontSize: 9, color: K.date, minWidth: 0 }}>{cm.content}</span>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 6, marginTop: 7 }}>
+              <input value={decDraft[t.id] || ''} onChange={e => setDecDraft(prev => ({ ...prev, [t.id]: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addComment(t.id); } }} placeholder="Add a comment…" style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 9, padding: '6px 9px', borderRadius: 7, border: `1px solid ${K.cellBd}`, background: dark ? '#040C1C' : '#FCFBF8', color: K.date, outline: 'none' }} />
+              <button onClick={() => addComment(t.id)} style={{ flexShrink: 0, fontFamily: J, fontSize: 9, fontWeight: 600, padding: '0 12px', borderRadius: 7, border: 'none', background: K.gold, color: '#fff', cursor: 'pointer' }}>Send</button>
+            </div>
+          </div>
+        );
+      };
+      const decStrip = (
+        <React.Fragment>
+          <div onClick={() => setDecOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', background: decOpen ? K.navBg : K.taskBg, borderBottom: `0.5px solid ${K.bd2}`, cursor: 'pointer', flexShrink: 0 }}>
+            <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: K.gold, padding: '7px 0' }}>{decIcon}</div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px' }}>
+              <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: K.gold }}>Decisions</span>
+              <span style={{ fontFamily: J, fontSize: 9, color: K.muted }}>{decs.length ? decs.length + ' open' : 'none'}</span>
+            </div>
+            <div style={{ width: 32, flexShrink: 0, borderLeft: `0.5px solid ${K.cellBd}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <i className={'ti ' + (decOpen ? 'ti-chevron-up' : 'ti-chevron-down')} style={{ fontSize: 12, color: decOpen ? K.gold : K.muted }} />
+            </div>
+          </div>
+          {decOpen && (
+            <div style={{ flexShrink: 0, maxHeight: 280, overflowY: 'auto', borderBottom: `0.5px solid ${K.bd2}` }}>
+              {decs.length ? decs.map(decCard) : <div style={{ padding: '12px', fontFamily: J, fontSize: 9, color: K.muted, textAlign: 'center' }}>No decisions yet. Add a decision on any task.</div>}
+            </div>
+          )}
+        </React.Fragment>
+      );
+
       const dateStrip = (
         <div style={{ display: 'flex', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0 }}>
           <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0 6px' }}>
@@ -4598,6 +4697,7 @@ Rules:
           }}>
             {navBar}
             {view !== 'month' && taskStrip}
+            {view !== 'month' && decStrip}
             {view !== 'month' && dateStrip}
             {view === 'day' && dayGrid}
             {view === 'week' && weekGrid}

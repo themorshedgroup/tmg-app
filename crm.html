@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#001A4A" />
+  <title>TMG CRM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
+  <style>
+    :root {
+      --tmg-navy:      #001A4A;
+      --tmg-navy-deep: #000D26;
+      --tmg-navy-mid:  #0A1E44;
+      --tmg-gold:      #AD832F;
+      --tmg-gold-soft: #C9A45A;
+      --tmg-paper:     #FCFBF8;
+      --tmg-border:    #E4DFD4;
+      --tmg-slate:     #6B6B6B;
+    }
+    *, *::before, *::after {
+      box-sizing: border-box; margin: 0; padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    html, body, #root { height: 100%; width: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif;
+      background: #FCFBF8;
+      overscroll-behavior: none;
+      color: #001A4A;
+    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: #E4DFD4; border-radius: 8px; }
+
+    /* ── Auth gate (sign-in + access-denied) — always navy, never inverts ── */
+    #auth-overlay { font-family: 'Jost', sans-serif; }
+    #auth-overlay * { box-sizing: border-box; margin: 0; padding: 0; }
+    #auth-overlay .screen { width:100%; max-width:440px; min-height:100vh; margin:0 auto; display:flex; flex-direction:column; padding:0 32px; position:relative; overflow:hidden; background:radial-gradient(ellipse 80% 50% at 50% 36%, #0A2A6B 0%, #001A4A 62%); }
+    #auth-overlay .screen[hidden] { display:none; }
+    #auth-overlay .ring { position:absolute; left:50%; transform:translateX(-50%); border:1px solid rgba(201,164,90,.07); border-radius:50%; z-index:1; pointer-events:none; }
+    #auth-overlay .r1 { top:-90px; width:360px; height:360px; }
+    #auth-overlay .r2 { top:-36px; width:250px; height:250px; border-color:rgba(201,164,90,.05); }
+    #auth-overlay .r3 { bottom:-110px; width:320px; height:320px; border-color:rgba(201,164,90,.05); }
+    #auth-overlay .main { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; z-index:2; text-align:center; }
+    #auth-overlay .foot { display:flex; flex-direction:column; align-items:center; gap:18px; padding-bottom:34px; position:relative; z-index:2; }
+    #auth-overlay .glow-gold { position:absolute; top:36%; left:50%; transform:translate(-50%,-50%); width:250px; height:250px; border-radius:50%; background:radial-gradient(circle,rgba(201,164,90,.1) 0%,transparent 66%); z-index:1; pointer-events:none; }
+    #auth-overlay .logo { width:160px; object-fit:contain; margin-bottom:22px; }
+    #auth-overlay .wordmark { font-size:42px; font-weight:600; letter-spacing:.14em; color:#fff; line-height:1; }
+    #auth-overlay .sub { font-size:10px; letter-spacing:.34em; font-weight:500; text-transform:uppercase; color:#C9A45A; margin-top:12px; }
+    #auth-overlay .btn-wrap { width:100%; }
+    #auth-overlay .btn-google { display:flex; align-items:center; justify-content:center; gap:10px; width:80%; margin:0 auto; padding:15px; border-radius:11px; cursor:pointer; font-family:'Jost',sans-serif; font-size:11px; letter-spacing:.14em; font-weight:500; background:#fff; color:#001A4A; border:none; transition:transform .12s ease,opacity .12s ease; }
+    #auth-overlay .btn-google:hover { opacity:.92; }
+    #auth-overlay .btn-google:active { transform:scale(.98); }
+    #auth-overlay .terms { font-size:8px; letter-spacing:.1em; color:rgba(255,255,255,.22); text-align:center; margin-top:10px; }
+    #auth-overlay .glow-red { position:absolute; top:34%; left:50%; transform:translate(-50%,-50%); width:250px; height:250px; border-radius:50%; background:radial-gradient(circle,rgba(155,28,28,.14) 0%,transparent 66%); z-index:1; pointer-events:none; }
+    #auth-overlay .lockwrap { width:60px; height:60px; border-radius:50%; border:1px solid rgba(248,113,113,.3); background:rgba(155,28,28,.12); display:flex; align-items:center; justify-content:center; margin-bottom:24px; }
+    #auth-overlay .lockwrap i { font-size:28px; color:#F87171; }
+    #auth-overlay .title { font-size:20px; font-weight:600; letter-spacing:.05em; color:#fff; margin-bottom:12px; }
+    #auth-overlay .msg { font-size:12px; line-height:1.65; color:rgba(255,255,255,.55); max-width:260px; }
+    #auth-overlay .contact-card { width:100%; background:rgba(255,255,255,.04); border:1px solid rgba(201,164,90,.18); border-radius:12px; padding:16px; text-align:center; }
+    #auth-overlay .contact-lbl { font-size:8px; letter-spacing:.2em; text-transform:uppercase; color:rgba(201,164,90,.6); margin-bottom:7px; }
+    #auth-overlay .contact-email { font-size:12px; font-weight:500; letter-spacing:.02em; color:#C9A45A; text-decoration:none; }
+    #auth-overlay .btn-back { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:14px; border-radius:11px; cursor:pointer; font-family:'Jost',sans-serif; font-size:10px; letter-spacing:.14em; font-weight:500; background:transparent; border:1px solid rgba(255,255,255,.16); color:rgba(255,255,255,.6); transition:background .12s ease; }
+    #auth-overlay .btn-back:hover { background:rgba(255,255,255,.04); }
+    #auth-overlay .btn-back i { font-size:13px; }
+    #auth-overlay .icon-wrap { width:80px; height:80px; border-radius:50%; background:rgba(201,164,90,.12); border:1.5px solid rgba(201,164,90,.35); display:flex; align-items:center; justify-content:center; margin-bottom:28px; position:relative; }
+    #auth-overlay .pulse-dot { position:absolute; top:4px; right:4px; width:16px; height:16px; border-radius:50%; background:#3DAF7E; border:2.5px solid #001A4A; z-index:2; }
+    #auth-overlay .pulse-dot::after { content:''; position:absolute; inset:-4px; border-radius:50%; background:rgba(61,175,126,.3); animation:tmg-pulse-ring 2s ease infinite; }
+    @keyframes tmg-pulse-ring { 0% { transform:scale(1); opacity:1; } 100% { transform:scale(1.7); opacity:0; } }
+    #auth-overlay .status-badge { display:inline-flex; align-items:center; gap:7px; background:rgba(61,175,126,.12); border:1px solid rgba(61,175,126,.3); border-radius:20px; padding:5px 14px; margin-bottom:20px; }
+    #auth-overlay .badge-dot { width:6px; height:6px; border-radius:50%; background:#3DAF7E; }
+    #auth-overlay .badge-txt { font-size:9px; letter-spacing:.18em; font-weight:600; text-transform:uppercase; color:#3DAF7E; }
+    #auth-overlay #pending-screen .title { font-family:'Cormorant Garamond', Georgia, serif; font-style:italic; font-size:32px; font-weight:400; color:#fff; line-height:1.2; margin-bottom:14px; }
+    #auth-overlay #pending-screen .msg { font-size:13px; line-height:1.75; color:rgba(255,255,255,.6); max-width:300px; }
+    #auth-overlay #pending-screen .msg b { color:rgba(255,255,255,.9); font-weight:500; }
+    @keyframes tmg-spin { to { transform: rotate(360deg); } }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
+  <script src="supabase.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+<body>
+  <!-- ─── Auth Overlay (same gate as the main TMG App) ─── -->
+  <div id="auth-overlay" style="position:fixed;inset:0;z-index:9999;background:#001A4A;">
+    <!-- ========== LOGIN SCREEN ========== -->
+    <div class="screen" id="login-screen">
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+      <div class="glow-gold"></div>
+      <div class="main">
+        <img class="logo" src="Morshed Group Logo White.png" alt="The Morshed Group" />
+        <div class="wordmark">TMG CRM</div>
+        <div class="sub">Customer Relationships</div>
+      </div>
+      <div class="foot">
+        <div class="btn-wrap">
+          <button class="btn-google" id="google-signin" onclick="SupabaseAuth.signInWithGoogle()">
+            <svg width="17" height="17" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0">
+              <path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"/>
+              <path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z"/>
+              <path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z"/>
+              <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/>
+            </svg>
+            Continue with TMG Gmail
+          </button>
+          <div class="terms">Authorized TMG team members only</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== ACCESS DENIED SCREEN ========== -->
+    <div class="screen" id="denied-screen" hidden>
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+      <div class="glow-red"></div>
+      <div class="main">
+        <div class="lockwrap"><i class="ti ti-lock-x" aria-hidden="true"></i></div>
+        <div class="title">Access Denied</div>
+        <div class="msg">This account isn't authorized for the TMG App. Access is limited to approved Morshed Group team members.</div>
+      </div>
+      <div class="foot">
+        <div class="contact-card">
+          <div class="contact-lbl">Need Access?</div>
+          <a class="contact-email" href="mailto:manager@themorshedgroup.com">manager@themorshedgroup.com</a>
+        </div>
+        <button class="btn-back" onclick="SupabaseAuth.signOut()"><i class="ti ti-arrow-left" aria-hidden="true"></i>Back to sign in</button>
+      </div>
+    </div>
+
+    <!-- ========== PENDING SCREEN ========== -->
+    <div class="screen" id="pending-screen" hidden>
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+      <div class="glow-gold"></div>
+      <div class="main">
+        <div class="icon-wrap">
+          <div class="pulse-dot"></div>
+          <svg viewBox="0 0 24 24" fill="none" stroke="#C9A45A" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z"/><path d="M12 6v6l4 2"/></svg>
+        </div>
+        <div class="status-badge"><span class="badge-dot"></span><span class="badge-txt">Account Pending Activation</span></div>
+        <div class="title">Welcome to the TMG App!</div>
+        <div class="msg">We've received your request. Your account will be ready within <b>24 hours</b> — keep an eye on your inbox for a confirmation email.</div>
+      </div>
+      <div class="foot">
+        <div class="contact-card">
+          <div class="contact-lbl">Questions?</div>
+          <a class="contact-email" href="mailto:manager@themorshedgroup.com">manager@themorshedgroup.com</a>
+        </div>
+        <button class="btn-back" onclick="SupabaseAuth.signOut()"><i class="ti ti-arrow-left" aria-hidden="true"></i>Back to sign in</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="root"></div>
+
+  <!-- ─── Dev localhost mock (mirrors index.html) ─── -->
+  <script>
+  window.TMG_DEV = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:');
+  if (window.TMG_DEV) {
+    window.SupabaseAuth = {
+      _state: { session: { user: { id: 'dev-user-id', email: 'symon@morshedgroup.com', user_metadata: { full_name: 'Symon' } }, access_token: 'dev-token' } },
+      signInWithGoogle: function() {},
+      signOut: function() { location.reload(); },
+      getSession: function() { return Promise.resolve(window.SupabaseAuth._state.session); },
+      onAuthStateChange: function(cb) { setTimeout(function() { cb({ session: window.SupabaseAuth._state.session }); }, 50); }
+    };
+  }
+  </script>
+
+  <!-- ─── CRM App ─── -->
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    // ─── Design tokens (TMG Brand) ───────────────────────────────────
+    const C = {
+      bg: '#FCFBF8', surface: '#FFFFFF', surfaceHover: '#F3EBDA', border: '#E4DFD4',
+      navy: '#001A4A', navyHover: '#0A2552', gold: '#AD832F', goldSoft: '#C9A45A',
+      textPrimary: '#001A4A', textSecondary: '#6B6B6B', textMuted: '#9B9380',
+      red: '#C0392B', green: '#1E6B40', amber: '#B07A00',
+      fontSans: "-apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif",
+      fontDisplay: "'Cormorant Garamond', Georgia, serif",
+      mono: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
+    };
+
+    const ZOHO_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-crm';
+    const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
+    function authToken() { return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON; }
+
+    async function callZoho(payload) {
+      const res = await fetch(ZOHO_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    }
+
+    // ─── Dev sample schema (so the layout is reviewable on localhost ──
+    //      without a live Zoho connection). Live site uses real Zoho.
+    const DEV_MODULES = [
+      { api_name: 'Contacts', plural_label: 'Contacts', singular_label: 'Contact', generated_type: 'default', creatable: true, editable: true, deletable: true, viewable: true },
+      { api_name: 'Leads', plural_label: 'Leads', singular_label: 'Lead', generated_type: 'default', creatable: true, editable: true, deletable: true, viewable: true },
+      { api_name: 'Deals', plural_label: 'Deals', singular_label: 'Deal', generated_type: 'default', creatable: true, editable: true, deletable: true, viewable: true },
+      { api_name: 'Accounts', plural_label: 'Accounts', singular_label: 'Account', generated_type: 'default', creatable: true, editable: true, deletable: true, viewable: true },
+      { api_name: 'Properties', plural_label: 'Properties', singular_label: 'Property', generated_type: 'custom', creatable: true, editable: true, deletable: true, viewable: true },
+    ];
+    const DEV_FIELDS = {
+      Contacts: [
+        { api_name: 'First_Name', field_label: 'First Name', data_type: 'text', length: 40, required: false, read_only: false, custom_field: false, picklist_values: null, lookup_module: null },
+        { api_name: 'Last_Name', field_label: 'Last Name', data_type: 'text', length: 80, required: true, read_only: false, custom_field: false, picklist_values: null, lookup_module: null },
+        { api_name: 'Email', field_label: 'Email', data_type: 'email', length: 100, required: false, read_only: false, custom_field: false, picklist_values: null, lookup_module: null },
+        { api_name: 'Phone', field_label: 'Phone', data_type: 'phone', length: 50, required: false, read_only: false, custom_field: false, picklist_values: null, lookup_module: null },
+        { api_name: 'Lead_Source', field_label: 'Lead Source', data_type: 'picklist', length: null, required: false, read_only: false, custom_field: false, picklist_values: ['Referral', 'Website', 'Open House', 'Cold Call', 'Past Client'], lookup_module: null },
+        { api_name: 'Account_Name', field_label: 'Account Name', data_type: 'lookup', length: null, required: false, read_only: false, custom_field: false, picklist_values: null, lookup_module: 'Accounts' },
+        { api_name: 'Owner', field_label: 'Contact Owner', data_type: 'ownerlookup', length: null, required: true, read_only: true, custom_field: false, picklist_values: null, lookup_module: null },
+      ],
+      Leads: [
+        { api_name: 'Last_Name', field_label: 'Last Name', data_type: 'text', length: 80, required: true, read_only: false, custom_field: false, picklist_values: null, lookup_module: null },
+        { api_name: 'Lead_Status', field_label: 'Lead Status', data_type: 'picklist', length: null, required: false, read_only: false, custom_field: false, picklist_values: ['New', 'Contacted', 'Nurturing', 'Qualified', 'Lost'], lookup_module: null },
+      ],
+      Deals: [], Accounts: [], Properties: [],
+    };
+
+    function isDev() { return !!window.TMG_DEV; }
+
+    // ─── Small UI helpers ────────────────────────────────────────────
+    function Spinner({ size = 20, color = C.gold }) {
+      return <i className="ti ti-loader-2" style={{ fontSize: size, color, display: 'inline-block', animation: 'tmg-spin 0.8s linear infinite' }} />;
+    }
+
+    function TypePill({ type }) {
+      const map = {
+        text: C.textSecondary, textarea: C.textSecondary, email: '#2563EB', phone: '#0891B2',
+        picklist: C.gold, multiselectpicklist: C.gold, lookup: '#7C3AED', ownerlookup: '#7C3AED',
+        date: C.green, datetime: C.green, integer: C.amber, double: C.amber, currency: C.amber,
+        boolean: C.red,
+      };
+      const col = map[type] || C.textMuted;
+      return <span style={{ fontFamily: C.mono, fontSize: '0.66rem', fontWeight: 600, color: col, background: col + '14', border: '1px solid ' + col + '33', padding: '2px 7px', borderRadius: 6, whiteSpace: 'nowrap' }}>{type}</span>;
+    }
+
+    // ─── Field row ───────────────────────────────────────────────────
+    function FieldRow({ f }) {
+      const [copied, setCopied] = useState(false);
+      function copy() {
+        try { navigator.clipboard.writeText(f.api_name); setCopied(true); setTimeout(() => setCopied(false), 1100); } catch (e) {}
+      }
+      return (
+        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.4fr 1fr', gap: 12, alignItems: 'start', padding: '13px 16px', borderBottom: '1px solid ' + C.border }}>
+          <div>
+            <div style={{ fontSize: '0.86rem', fontWeight: 500, color: C.textPrimary, display: 'flex', alignItems: 'center', gap: 7 }}>
+              {f.field_label}
+              {f.required && <span title="Required" style={{ color: C.red, fontSize: '0.9rem', lineHeight: 1 }}>*</span>}
+            </div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+              {f.custom_field && <span style={{ fontSize: '0.6rem', fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: C.gold, background: C.surfaceHover, padding: '1px 6px', borderRadius: 5 }}>Custom</span>}
+              {f.read_only && <span style={{ fontSize: '0.6rem', fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: C.textMuted, background: '#F1EFEA', padding: '1px 6px', borderRadius: 5 }}>Read-only</span>}
+            </div>
+          </div>
+          <div>
+            <button onClick={copy} title="Copy API name" style={{ fontFamily: C.mono, fontSize: '0.76rem', color: C.navy, background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 6 }}>
+              {f.api_name}
+              <i className={copied ? 'ti ti-check' : 'ti ti-copy'} style={{ fontSize: 13, color: copied ? C.green : C.textMuted }} />
+            </button>
+          </div>
+          <div>
+            <TypePill type={f.data_type} />
+            {f.lookup_module && <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 5 }}>→ {f.lookup_module}</div>}
+            {f.length ? <div style={{ fontSize: '0.7rem', color: C.textMuted, marginTop: 5 }}>max {f.length}</div> : null}
+            {Array.isArray(f.picklist_values) && f.picklist_values.length > 0 && (
+              <div style={{ fontSize: '0.7rem', color: C.textSecondary, marginTop: 5, lineHeight: 1.5 }}>
+                {f.picklist_values.slice(0, 6).join(', ')}{f.picklist_values.length > 6 ? ` +${f.picklist_values.length - 6} more` : ''}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Main app ────────────────────────────────────────────────────
+    function App({ user, profile }) {
+      const [modules, setModules] = useState(null);   // null = loading
+      const [modErr, setModErr] = useState('');
+      const [active, setActive] = useState(null);      // active module api_name
+      const [fields, setFields] = useState({});        // cache: api_name -> field[]
+      const [fieldErr, setFieldErr] = useState('');
+      const [loadingFields, setLoadingFields] = useState(false);
+      const [q, setQ] = useState('');
+
+      // Load modules on mount.
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          if (isDev()) { await new Promise(r => setTimeout(r, 300)); if (alive) { setModules(DEV_MODULES); setActive(DEV_MODULES[0].api_name); } return; }
+          const { ok, data } = await callZoho({ action: 'list_modules' });
+          if (!alive) return;
+          if (!ok) { setModErr(data.error || 'Could not reach Zoho.'); setModules([]); return; }
+          const ms = data.modules || [];
+          setModules(ms);
+          if (ms.length) setActive(ms[0].api_name);
+        })();
+        return () => { alive = false; };
+      }, []);
+
+      // Load fields whenever the active module changes (cached).
+      useEffect(() => {
+        if (!active) return;
+        if (fields[active]) return;
+        let alive = true;
+        setLoadingFields(true); setFieldErr('');
+        (async () => {
+          if (isDev()) { await new Promise(r => setTimeout(r, 250)); if (alive) { setFields(p => ({ ...p, [active]: DEV_FIELDS[active] || [] })); setLoadingFields(false); } return; }
+          const { ok, data } = await callZoho({ action: 'get_fields', module: active });
+          if (!alive) return;
+          if (!ok) { setFieldErr(data.error || 'Could not load fields.'); setLoadingFields(false); return; }
+          setFields(p => ({ ...p, [active]: data.fields || [] }));
+          setLoadingFields(false);
+        })();
+        return () => { alive = false; };
+      }, [active]);
+
+      const activeMod = modules && modules.find(m => m.api_name === active);
+      const activeFields = active ? fields[active] : null;
+      const shownFields = useMemo(() => {
+        if (!activeFields) return null;
+        const t = q.trim().toLowerCase();
+        if (!t) return activeFields;
+        return activeFields.filter(f => (f.field_label || '').toLowerCase().includes(t) || (f.api_name || '').toLowerCase().includes(t));
+      }, [activeFields, q]);
+
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: C.bg }}>
+          {/* Top bar */}
+          <header style={{ flexShrink: 0, background: C.navy, color: '#fff', padding: '0 20px', height: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <a href="index.html" title="Back to TMG App" style={{ color: 'rgba(255,255,255,.7)', textDecoration: 'none', display: 'flex', alignItems: 'center' }}><i className="ti ti-arrow-left" style={{ fontSize: 18 }} /></a>
+              <div style={{ fontWeight: 600, letterSpacing: '.18em', fontSize: '0.95rem' }}>TMG CRM</div>
+              <span style={{ fontSize: '0.62rem', fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: C.goldSoft, border: '1px solid rgba(201,164,90,.4)', padding: '2px 8px', borderRadius: 20 }}>Schema</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <span style={{ fontSize: '0.78rem', color: 'rgba(255,255,255,.7)' }}>{profile?.email || user?.email}</span>
+              <button onClick={() => window.SupabaseAuth.signOut()} style={{ background: 'transparent', border: '1px solid rgba(255,255,255,.2)', color: 'rgba(255,255,255,.8)', fontSize: '0.72rem', padding: '6px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: C.fontSans }}>Sign out</button>
+            </div>
+          </header>
+
+          {/* Infra banner */}
+          <div style={{ flexShrink: 0, background: C.surfaceHover, borderBottom: '1px solid ' + C.border, padding: '8px 20px', fontSize: '0.74rem', color: C.textSecondary, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <i className="ti ti-shield-check" style={{ color: C.green, fontSize: 15 }} />
+            Reading your Zoho <b style={{ color: C.textPrimary, fontWeight: 600 }}>&nbsp;structure only</b> — no contacts or records are imported.
+            {isDev() && <span style={{ marginLeft: 'auto', color: C.amber, fontWeight: 600 }}>DEV PREVIEW (sample data)</span>}
+          </div>
+
+          {/* Body: modules | fields */}
+          <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+            {/* Modules rail */}
+            <nav style={{ width: 240, flexShrink: 0, borderRight: '1px solid ' + C.border, background: C.surface, overflowY: 'auto', padding: '12px 0' }}>
+              <div style={{ fontSize: '0.64rem', fontWeight: 600, letterSpacing: '.16em', textTransform: 'uppercase', color: C.textMuted, padding: '4px 18px 10px' }}>Modules</div>
+              {modules === null && <div style={{ padding: '14px 18px' }}><Spinner /></div>}
+              {modules && modules.length === 0 && !modErr && <div style={{ padding: '14px 18px', fontSize: '0.78rem', color: C.textMuted }}>No modules returned.</div>}
+              {modErr && <div style={{ padding: '14px 18px', fontSize: '0.76rem', color: C.red, lineHeight: 1.5 }}>{modErr}</div>}
+              {(modules || []).map(m => {
+                const on = m.api_name === active;
+                return (
+                  <button key={m.api_name} onClick={() => setActive(m.api_name)} style={{ width: '100%', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '10px 18px', background: on ? C.surfaceHover : 'transparent', border: 'none', borderLeft: '3px solid ' + (on ? C.gold : 'transparent'), cursor: 'pointer', fontFamily: C.fontSans }}>
+                    <span style={{ fontSize: '0.86rem', fontWeight: on ? 600 : 400, color: on ? C.navy : C.textSecondary }}>{m.plural_label || m.api_name}</span>
+                    {m.generated_type === 'custom' && <span style={{ fontSize: '0.56rem', fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: C.gold }}>Custom</span>}
+                  </button>
+                );
+              })}
+            </nav>
+
+            {/* Fields panel */}
+            <main style={{ flex: 1, overflowY: 'auto', minWidth: 0 }}>
+              {!active && <div style={{ padding: 40, color: C.textMuted }}>Select a module.</div>}
+              {active && (
+                <div>
+                  <div style={{ padding: '20px 24px 14px', borderBottom: '1px solid ' + C.border, position: 'sticky', top: 0, background: C.bg, zIndex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+                      <div>
+                        <h1 style={{ fontFamily: C.fontDisplay, fontSize: '1.7rem', fontWeight: 600, color: C.navy, lineHeight: 1.1 }}>{activeMod?.plural_label || active}</h1>
+                        <div style={{ fontFamily: C.mono, fontSize: '0.72rem', color: C.textMuted, marginTop: 3 }}>{active}{activeFields ? ` · ${activeFields.length} fields` : ''}</div>
+                      </div>
+                      <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter fields…" style={{ fontFamily: C.fontSans, fontSize: '0.82rem', padding: '8px 12px', border: '1px solid ' + C.border, borderRadius: 9, background: C.surface, color: C.textPrimary, width: 200, outline: 'none' }} />
+                    </div>
+                  </div>
+
+                  {loadingFields && <div style={{ padding: 32, textAlign: 'center' }}><Spinner size={26} /></div>}
+                  {fieldErr && <div style={{ margin: 24, padding: 16, border: '1px solid ' + C.red + '44', background: C.red + '0d', borderRadius: 10, color: C.red, fontSize: '0.82rem', lineHeight: 1.5 }}>{fieldErr}</div>}
+
+                  {!loadingFields && !fieldErr && shownFields && (
+                    shownFields.length === 0 ? (
+                      <div style={{ padding: 32, textAlign: 'center', color: C.textMuted, fontSize: '0.85rem' }}>{q ? 'No fields match your filter.' : 'This module has no readable fields.'}</div>
+                    ) : (
+                      <div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.4fr 1fr', gap: 12, padding: '10px 16px', fontSize: '0.62rem', fontWeight: 600, letterSpacing: '.12em', textTransform: 'uppercase', color: C.textMuted, borderBottom: '1px solid ' + C.border, background: C.surface, position: 'sticky', top: 82, zIndex: 1 }}>
+                          <div>Field</div><div>API Name</div><div>Type</div>
+                        </div>
+                        {shownFields.map(f => <FieldRow key={f.api_name} f={f} />)}
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+            </main>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Mount + auth gate (mirrors index.html) ──────────────────────
+    (function mount() {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      const AUTHORIZED_DOMAIN = 'themorshedgroup.com';
+      function _showScreen(id) {
+        ['login-screen', 'denied-screen', 'pending-screen'].forEach(function (s) { var el = document.getElementById(s); if (el) el.hidden = (s !== id); });
+        document.getElementById('auth-overlay').style.display = 'block';
+      }
+      function showSignin()   { _showScreen('login-screen'); }
+      function showRejected() { _showScreen('denied-screen'); }
+      function showPending()  { _showScreen('pending-screen'); }
+      function hideOverlay()  { document.getElementById('auth-overlay').style.display = 'none'; }
+
+      if (window.TMG_DEV) {
+        root.render(<App user={window.SupabaseAuth._state.session?.user} profile={{ email: 'symon@morshedgroup.com', first_name: 'Symon', access: 'admin', status: 'active' }} />);
+        hideOverlay();
+        return;
+      }
+
+      async function fetchProfile(userId) {
+        try {
+          const c = window.SupabaseAuth._client;
+          const { data } = await c.from('profiles').select('*').eq('id', userId).maybeSingle();
+          return data || null;
+        } catch (e) { return null; }
+      }
+
+      window.SupabaseAuth.onAuthStateChange(async function({ session }) {
+        if (!session) { showSignin(); return; }
+        const email = (session.user.email || '').toLowerCase();
+        if (!email.endsWith('@' + AUTHORIZED_DOMAIN)) { showRejected(); return; }
+        const profile = await fetchProfile(session.user.id);
+        // Same gate semantics as index.html: existing-but-not-active is blocked; missing profile fails open.
+        if (profile && profile.status === 'pending') { showPending(); return; }
+        if (profile && profile.status && profile.status !== 'active') { showRejected(); return; }
+        root.render(<App user={session.user} profile={profile} />);
+        hideOverlay();
+      });
+    })();
+  </script>
+</body>
+</html>

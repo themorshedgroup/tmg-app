@@ -186,12 +186,13 @@
       mono: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
     };
 
-    const ZOHO_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-crm';
+    // CRM has its OWN edge function (tmg-crm), separate from the app's zoho-crm.
+    const CRM_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/tmg-crm';
     const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     function authToken() { return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON; }
 
     async function callZoho(payload) {
-      const res = await fetch(ZOHO_ENDPOINT, {
+      const res = await fetch(CRM_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
         body: JSON.stringify(payload),

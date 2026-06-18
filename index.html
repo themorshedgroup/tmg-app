@@ -3927,7 +3927,7 @@ Rules:
           position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 50,
           borderTop: `1px solid ${dark ? '#0D1E3A' : '#E0D8CC'}`,
           background: dark ? '#000D26' : '#FCFBF8',
-          padding: '12px 14px calc(14px + env(safe-area-inset-bottom))',
+          padding: '6px 14px calc(7px + env(safe-area-inset-bottom))',
           display: 'flex', flexDirection: 'column', gap: 10,
         }}>
           {/* Attachment previews (AI tab only) */}
@@ -4296,9 +4296,9 @@ Rules:
     }
 
     // ─── Calendar Popover ────────────────────────────────────────────
-    // Calendar popout — TOP-anchored (grows DOWNWARD from the top of the conversation
-    // area; NOT a slide-up). Day / Week / Month views. Shows Google events + in-app
-    // items (task due dates, decision due dates for the decision-maker, W/D priorities).
+    // Calendar popout v2 — TOP-anchored (top:0 of the conversation area; grows DOWNWARD,
+    // NOT a bottom slide-up). Nav bar (Today / ‹› / date / 3 PRIOs / chips / Day-Week-Month),
+    // a collapsible Task strip, a TZ-aligned date strip, and Day/Week/Month grids.
     function CalendarPopover({ dark, zoneH, onOpenTask, onClose }) {
       const J = "'Jost', sans-serif";
       const p2 = (n) => String(n).padStart(2, '0');
@@ -4310,33 +4310,47 @@ Rules:
 
       const [view, setView] = useState('day');           // day | week | month
       const [anchor, setAnchor] = useState(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; });
-      const [viewMenu, setViewMenu] = useState(false);
+      const [tasksOpen, setTasksOpen] = useState(false);
       const [vis, setVis] = useState(false);
       const [gevents, setGevents] = useState([]);
       const [tasks, setTasks] = useState([]);
-      const [peopleByTask, setPeopleByTask] = useState({});
       const [gcal, setGcal] = useState('loading');        // loading | ready | needs_connect | error
       const scrollRef = useRef(null);
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
-      const uid = (window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user && window.SupabaseAuth._state.session.user.id) || null;
 
       const K = dark ? {
-        pop: '#070F1E', bd: '#152545', shadow: '0 6px 22px rgba(0,0,0,.5)', date: '#fff', chev: 'rgba(255,255,255,.45)',
-        chipBd: '#22324A', chipBg: '#0C1830', chipIc: '#9FB0C8', goldBd: '#3A2E14', goldBg: '#1E1808', gold: '#C9A45A',
-        strip: '#152545', dl: 'rgba(255,255,255,.4)', wknd: 'rgba(255,255,255,.25)', todBg: '#0A1E44', todDl: '#C9A45A', circBg: '#C9A45A', circTx: '#001A4A', dot: '#C9A45A',
-        tzBg: '#040C1C', tzBd: '#0D1E3A', tx: '#5AA0E6', ph: '#C9A45A', slot: '#0D1E3A', gline: '#0D1E3A',
-        navyBd: '#3F6FA8', navyBg: '#11213A', goBd: '#C9A45A', goBg: '#241B08', adBd: '#8A7233', adBg: '#1E1808', evT: '#fff', evTm: 'rgba(255,255,255,.5)',
-        cell: '#070F1E', cellBd: '#152545', wkndCell: '#0A1322', mDate: '#fff',
+        pop: '#070F1E', bd: '#152545', bd2: '#0D1E3A', shadow: '0 6px 22px rgba(0,0,0,.5)', navBg: '#040C1C',
+        date: '#fff', tBtnTx: '#5AA0E6', tBtnBg: '#0C1830', tBtnBd: '#22324A',
+        npBg: '#0C1830', npBd: '#22324A', npIc: 'rgba(255,255,255,.4)',
+        sep: '#22324A', gold: '#C9A45A', circBd: 'rgba(255,255,255,.3)', doneBg: '#0F6E56', doneName: 'rgba(255,255,255,.35)', prioName: '#9FC0F0', reg: 'rgba(255,255,255,.55)',
+        chipBd: '#22324A', chipBg: '#0C1830', chipIc: 'rgba(255,255,255,.4)', goldBd: '#3A2E14', goldBg: '#1E1808',
+        segBg: '#0C1830', segTx: 'rgba(255,255,255,.4)', segABg: '#152545', segATx: '#fff',
+        taskBg: '#0A1730', cellBd: '#0D1E3A', muted: 'rgba(255,255,255,.25)', rowBd: '#0D1E3A',
+        dueOver: '#E07A7A', dueToday: '#C9A45A', dueUp: 'rgba(255,255,255,.35)',
+        tzBg: '#040C1C', tx: '#5AA0E6', ph: '#C9A45A', dayLetter: 'rgba(255,255,255,.4)', weekend: 'rgba(255,255,255,.25)',
+        dot: '#C9A45A', todBg: '#0A1E44', circBg: '#152545', circTx: '#fff',
+        slot: '#0D1E3A', gline: '#0D1E3A',
+        evNavyBd: '#3F6FA8', evNavyBg: '#1A2A3A', evGoldBd: '#C9A45A', evGoldBg: '#2A1F0A', evTitle: '#fff', evTime: 'rgba(255,255,255,.5)',
+        weekTodayCol: 'rgba(201,164,90,.06)', weekendCell: '#0A1322',
+        cellBg: '#070F1E', monthBd: '#152545', todCellBg: '#0A1E44', todCellBd: '#3A2E14', dotEvent: '#C9A45A', dotTask: '#3F6FA8',
       } : {
-        pop: '#fff', bd: '#EDE7DC', shadow: '0 6px 22px rgba(0,26,74,.1)', date: '#001A4A', chev: '#B4B2A9',
-        chipBd: '#E4DFD4', chipBg: '#FCFBF8', chipIc: '#6B6B6B', goldBd: '#E8D9BC', goldBg: '#F3EBDA', gold: '#AD832F',
-        strip: '#F0EBE3', dl: '#B4B2A9', wknd: '#D4D0CC', todBg: '#F3EBDA', todDl: '#AD832F', circBg: '#001A4A', circTx: '#fff', dot: '#AD832F',
-        tzBg: '#FCFBF8', tzBd: '#EDE7DC', tx: '#185FA5', ph: '#AD832F', slot: '#F0EBE3', gline: '#F5F2EE',
-        navyBd: '#001A4A', navyBg: '#EEF2F8', goBd: '#AD832F', goBg: '#FDF8F0', adBd: '#C9A45A', adBg: '#F8F3E8', evT: '#001A4A', evTm: '#6B6B6B',
-        cell: '#fff', cellBd: '#F0EBE3', wkndCell: '#FAFAF8', mDate: '#001A4A',
+        pop: '#fff', bd: '#EDE7DC', bd2: '#EDE7DC', shadow: '0 6px 22px rgba(0,26,74,.1)', navBg: '#fff',
+        date: '#001A4A', tBtnTx: '#185FA5', tBtnBg: '#EEF3FB', tBtnBd: '#C5D8F0',
+        npBg: '#FCFBF8', npBd: '#E4DFD4', npIc: '#6B6B6B',
+        sep: '#E4DFD4', gold: '#AD832F', circBd: '#C4B9A8', doneBg: '#0F6E56', doneName: '#B4B2A9', prioName: '#001A4A', reg: '#6B7280',
+        chipBd: '#E4DFD4', chipBg: '#FCFBF8', chipIc: '#6B6B6B', goldBd: '#E8D9BC', goldBg: '#F3EBDA',
+        segBg: '#F0EBE3', segTx: '#888', segABg: '#001A4A', segATx: '#fff',
+        taskBg: '#FDFAF5', cellBd: '#F0EBE3', muted: '#B4B2A9', rowBd: '#F5F2EE',
+        dueOver: '#9B1C1C', dueToday: '#AD832F', dueUp: '#B4B2A9',
+        tzBg: '#FCFBF8', tx: '#185FA5', ph: '#AD832F', dayLetter: '#B4B2A9', weekend: '#D4D0CC',
+        dot: '#AD832F', todBg: '#F3EBDA', circBg: '#001A4A', circTx: '#fff',
+        slot: '#F0EBE3', gline: '#F5F2EE',
+        evNavyBd: '#001A4A', evNavyBg: '#EEF2F8', evGoldBd: '#AD832F', evGoldBg: '#FDF8F0', evTitle: '#001A4A', evTime: '#6B6B6B',
+        weekTodayCol: '#FBF8F2', weekendCell: '#FAFAF8',
+        cellBg: '#fff', monthBd: '#F0EBE3', todCellBg: '#F3EBDA', todCellBd: '#E8D9BC', dotEvent: '#AD832F', dotTask: '#001A4A',
       };
 
-      // Google events for the visible range
+      // ── data ──
       useEffect(() => {
         let cancelled = false; setGcal('loading');
         let tMin, tMax;
@@ -4348,39 +4362,37 @@ Rules:
           .catch(err => { if (!cancelled) setGcal(err && err.code === 'needs_connect' ? 'needs_connect' : 'error'); });
         return () => { cancelled = true; };
       }, [view, anchor]);
-      // In-app items (tasks) — load once
-      useEffect(() => { let c = false; TaskDB.loadAll().then(d => { if (!c && d) { setTasks(d.tasks || []); setPeopleByTask(d.peopleByTask || {}); } }).catch(() => {}); return () => { c = true; }; }, []);
+      useEffect(() => { let c = false; TaskDB.loadAll().then(d => { if (!c && d) setTasks(d.tasks || []); }).catch(() => {}); return () => { c = true; }; }, []);
 
-      // Timezone helpers — TX = Austin (America/Chicago), PH = Manila (Asia/Manila), computed live.
+      // ── timezone helpers (TX=Austin/America-Chicago, PH=Manila/Asia-Manila, live) ──
       const tzOffMin = (date, tz) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }); const m = {}; f.formatToParts(date).forEach(p => m[p.type] = p.value); return (Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour, +m.minute, +m.second) - date.getTime()) / 60000; };
       const austinInstant = (d, h) => { const off = tzOffMin(new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h)), 'America/Chicago'); return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h) - off * 60000); };
       const fmtHour = (inst, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: true }).format(inst);
       const fmtClock = (inst, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true }).format(inst);
       const austinFloat = (inst) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: '2-digit', minute: '2-digit', hour12: false }); const m = {}; f.formatToParts(inst).forEach(p => m[p.type] = p.value); return (+m.hour) + (+m.minute) / 60; };
 
-      // Google events = gold, in-app items (task/decision) = navy, all-day = light gold.
-      const catStyle = (cat) => cat === 'gcal' ? { bd: K.goBd, bg: K.goBg } : cat === 'allday' ? { bd: K.adBd, bg: K.adBg } : { bd: K.navyBd, bg: K.navyBg };
-      const dotColor = (cat) => cat === 'gcal' ? K.gold : cat === 'allday' ? K.adBd : K.navyBd;
-      const isDecMaker = (t) => uid && (peopleByTask[t.id] || []).some(p => p.user_id === uid && p.role === 'decision_maker');
+      // ── task + event helpers ──
+      const dueMs = (t) => t.due_at ? new Date(t.due_at).getTime() : Infinity;
+      const topTasks = (n) => (tasks || []).filter(t => t.status !== 'done').sort((a, b) => dueMs(a) - dueMs(b)).slice(0, n);
+      const allTasksSorted = () => (tasks || []).slice().sort((a, b) => (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0) || dueMs(a) - dueMs(b));
+      // Top tasks = the W/D priorities: daily rank in Day view, weekly rank in Week view (1/2/3).
+      const prioTasks = () => {
+        if (view === 'week') { const wk = isoOf(mondayOf(anchor)); return (tasks || []).filter(t => t.weekly_priority && String(t.weekly_priority).slice(0, 10) === wk && t.weekly_rank).sort((a, b) => a.weekly_rank - b.weekly_rank).slice(0, 3); }
+        const dy = isoOf(anchor); return (tasks || []).filter(t => t.daily_priority && String(t.daily_priority).slice(0, 10) === dy && t.daily_rank).sort((a, b) => a.daily_rank - b.daily_rank).slice(0, 3);
+      };
+      const dueInfo = (t) => {
+        if (!t.due_at) return { label: '', color: K.dueUp };
+        const d = new Date(t.due_at); const t0 = new Date(todayD); t0.setHours(0, 0, 0, 0); const d0 = new Date(d); d0.setHours(0, 0, 0, 0);
+        if (d0.getTime() === t0.getTime()) return { label: 'Today', color: K.dueToday };
+        if (d0 < t0) return { label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), color: K.dueOver };
+        return { label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), color: K.dueUp };
+      };
+      const dayEvents = (day) => (gevents || []).filter(e => e.start && !e.allDay && sameDay(new Date(e.start), day)).map(e => ({ title: e.title || '(busy)', start: new Date(e.start), end: e.end ? new Date(e.end) : null, gold: (e.colorId === '5' || e.colorId === '6') }));
+      const hasEvents = (day) => (gevents || []).some(e => e.start && (e.allDay ? (e.start || '').slice(0, 10) === isoOf(day) : sameDay(new Date(e.start), day)));
+      const monthHasEvent = (day) => hasEvents(day);
+      const monthHasTask = (day) => (tasks || []).some(t => t.due_at && sameDay(new Date(t.due_at), day));
 
-      const itemsForDay = (day) => {
-        const timed = [], allday = [];
-        (gevents || []).forEach(e => {
-          if (!e.start) return;
-          if (e.allDay) { if ((e.start || '').slice(0, 10) === isoOf(day)) allday.push({ cat: 'allday', title: e.title || '(busy)' }); return; }
-          const s = new Date(e.start); if (sameDay(s, day)) timed.push({ cat: 'gcal', title: e.title || '(busy)', start: s, end: e.end ? new Date(e.end) : null });
-        });
-        (tasks || []).forEach(t => {
-          if (t.due_at) { const d = new Date(t.due_at); if (sameDay(d, day)) { const timedDue = t.due_at.indexOf('T') > -1 && !/T00:00/.test(t.due_at); if (timedDue) timed.push({ cat: 'task', title: t.title, start: d, end: null, icon: 'ti-checkbox', task: t }); else allday.push({ cat: 'task', title: t.title, icon: 'ti-checkbox', task: t }); } }
-          if (t.decision_due_at && isDecMaker(t)) { const d = new Date(t.decision_due_at); if (sameDay(d, day)) { if (t.decision_due_has_time) timed.push({ cat: 'decision', title: t.title, start: d, end: null, icon: 'ti-gavel', task: t }); else allday.push({ cat: 'decision', title: t.title, icon: 'ti-gavel', task: t }); } }
-        });
-        return { timed, allday };
-      };
-      const dayCats = (day) => { const it = itemsForDay(day); return it.timed.concat(it.allday).map(x => x.cat); };
-      const priorities = () => {
-        if (view === 'week') { const wk = isoOf(mondayOf(anchor)); return (tasks || []).filter(t => t.weekly_priority && String(t.weekly_priority).slice(0, 10) === wk && t.weekly_rank).sort((a, b) => a.weekly_rank - b.weekly_rank).slice(0, 3).map(t => ({ rank: t.weekly_rank, title: t.title, task: t })); }
-        const dy = isoOf(anchor); return (tasks || []).filter(t => t.daily_priority && String(t.daily_priority).slice(0, 10) === dy && t.daily_rank).sort((a, b) => a.daily_rank - b.daily_rank).slice(0, 3).map(t => ({ rank: t.daily_rank, title: t.title, task: t }));
-      };
+      const goToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); setAnchor(d); };
       const step = (dir) => setAnchor(a => view === 'month' ? new Date(a.getFullYear(), a.getMonth() + dir, 1) : addDays(a, dir * (view === 'week' ? 7 : 1)));
       const dateLabel = () => {
         if (view === 'day') return anchor.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
@@ -4391,96 +4403,114 @@ Rules:
       const stripDays = []; { const s = mondayOf(anchor); for (let i = 0; i < 7; i++) stripDays.push(addDays(s, i)); }
       const HOURS = []; for (let h = 0; h < 24; h++) HOURS.push(h);
       const SL = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-      const DL2 = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
-      const prios = priorities();
-      const dayItems = itemsForDay(anchor);
-      useEffect(() => { if (scrollRef.current && view !== 'month') scrollRef.current.scrollTop = 7 * 48; }, [view, anchor]);
+      const DL2 = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+      useEffect(() => { if (scrollRef.current && view !== 'month') scrollRef.current.scrollTop = 7 * (view === 'week' ? 38 : 48); }, [view, anchor]);
 
-      const sqChip = (icon, gold, onClick) => (
-        <button onClick={onClick} style={{ width: 25, height: 25, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 7, border: `1px solid ${gold ? K.goldBd : K.chipBd}`, background: gold ? K.goldBg : K.chipBg, cursor: 'pointer', padding: 0 }}>
-          <i className={'ti ' + icon} style={{ fontSize: 12, color: gold ? K.gold : K.chipIc }} />
-        </button>
+      const circle = (t, sz) => { const done = t.status === 'done'; return (
+        <div style={{ width: sz, height: sz, borderRadius: '50%', flexShrink: 0, border: `1.5px solid ${done ? K.doneBg : K.circBd}`, background: done ? K.doneBg : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{done && <i className="ti ti-check" style={{ fontSize: sz - 5, color: '#fff' }} />}</div>
+      ); };
+      const navChip = (icon, gold, onClick) => (
+        <button onClick={onClick} style={{ width: 22, height: 22, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, border: `0.5px solid ${gold ? K.goldBd : K.chipBd}`, background: gold ? K.goldBg : K.chipBg, cursor: 'pointer', padding: 0 }}><i className={'ti ' + icon} style={{ fontSize: 11, color: gold ? K.gold : K.chipIc }} /></button>
       );
+      const sep = <div style={{ width: 1, height: 15, background: K.sep, flexShrink: 0 }} />;
       const connectBar = (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '6px 12px', borderBottom: `1px solid ${K.strip}`, flexShrink: 0 }}>
-          <span style={{ fontFamily: J, fontSize: 9, color: dark ? 'rgba(255,255,255,.4)' : '#9A8F7E' }}>Google Calendar not connected</span>
-          <button onClick={() => { try { window.SupabaseAuth.connectCalendar(); } catch (e) {} }} style={{ fontFamily: J, fontSize: 9, fontWeight: 600, padding: '4px 10px', borderRadius: 7, border: 'none', background: K.gold, color: '#fff', cursor: 'pointer' }}>Connect</button>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '5px 12px', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0 }}>
+          <span style={{ fontFamily: J, fontSize: 9, color: K.muted }}>Google Calendar not connected</span>
+          <button onClick={() => { try { window.SupabaseAuth.connectCalendar(); } catch (e) {} }} style={{ fontFamily: J, fontSize: 9, fontWeight: 600, padding: '3px 9px', borderRadius: 6, border: 'none', background: K.gold, color: '#fff', cursor: 'pointer' }}>Connect</button>
         </div>
       );
-      const allDayChip = (x, i) => { const st = catStyle(x.cat); return (
-        <button key={i} onClick={() => x.task && onOpenTask && onOpenTask(x.task)} style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, background: st.bg, border: 'none', borderLeft: `3px solid ${st.bd}`, cursor: x.task ? 'pointer' : 'default', maxWidth: '100%' }}>
-          {x.icon && <i className={'ti ' + x.icon} style={{ fontSize: 8, color: st.bd }} />}
-          <span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 600, color: K.evT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{x.title}</span>
-        </button>
-      ); };
 
-      const header = (
-        <div style={{ padding: '9px 12px 0', flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <i className="ti ti-chevron-left" onClick={() => step(-1)} style={{ fontSize: 14, cursor: 'pointer', color: K.chev }} />
-            <span style={{ flex: 1, fontFamily: J, fontSize: 12, fontWeight: 600, color: K.date }}>{dateLabel()}</span>
-            <i className="ti ti-chevron-right" onClick={() => step(1)} style={{ fontSize: 14, cursor: 'pointer', color: K.chev }} />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 4, position: 'relative' }}>
-              {sqChip('ti-search', false, () => {})}
-              {sqChip('ti-settings-2', true, () => {})}
-              <button onClick={() => setViewMenu(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 3, background: K.goldBg, border: `1px solid ${K.goldBd}`, borderRadius: 7, padding: '4px 8px', cursor: 'pointer' }}>
-                <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.gold, textTransform: 'capitalize' }}>{view}</span>
-                <i className="ti ti-chevron-down" style={{ fontSize: 10, color: K.gold }} />
-              </button>
-              {sqChip('ti-plus', true, () => {})}
-              {viewMenu && (
-                <div style={{ position: 'absolute', top: 30, right: 33, background: K.pop, border: `1px solid ${K.bd}`, borderRadius: 8, boxShadow: K.shadow, zIndex: 20, overflow: 'hidden' }}>
-                  {['day', 'week', 'month'].map(v => (
-                    <div key={v} onClick={() => { setView(v); setViewMenu(false); }} style={{ padding: '7px 18px 7px 12px', fontFamily: J, fontSize: 10, fontWeight: v === view ? 700 : 500, color: v === view ? K.gold : K.date, cursor: 'pointer', textTransform: 'capitalize', background: v === view ? K.goldBg : 'transparent' }}>{v}</div>
-                  ))}
-                </div>
-              )}
-            </div>
+      // ── Section 1: nav bar (horizontally scrollable so nothing clips on phone width) ──
+      const navBar = (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 10px', borderBottom: `0.5px solid ${K.bd2}`, background: K.navBg, flexShrink: 0, overflowX: 'auto' }}>
+          <button onClick={goToday} style={{ flexShrink: 0, fontFamily: J, fontSize: 9, fontWeight: 600, color: K.tBtnTx, background: K.tBtnBg, border: `0.5px solid ${K.tBtnBd}`, borderRadius: 6, padding: '3px 8px', cursor: 'pointer' }}>Today</button>
+          <div style={{ display: 'flex', flexShrink: 0 }}>
+            <button onClick={() => step(-1)} style={{ width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', background: K.npBg, border: `0.5px solid ${K.npBd}`, borderRight: 'none', borderRadius: '4px 0 0 4px', cursor: 'pointer', padding: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 11, color: K.npIc }} /></button>
+            <button onClick={() => step(1)} style={{ width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', background: K.npBg, border: `0.5px solid ${K.npBd}`, borderRadius: '0 4px 4px 0', cursor: 'pointer', padding: 0 }}><i className="ti ti-chevron-right" style={{ fontSize: 11, color: K.npIc }} /></button>
+          </div>
+          <span onClick={goToday} style={{ flexShrink: 0, fontFamily: J, fontSize: 11, fontWeight: 600, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap' }}>{dateLabel()}</span>
+          {sep}
+          {navChip('ti-search', false, () => {})}
+          {navChip('ti-settings-2', true, () => {})}
+          {navChip('ti-plus', true, () => {})}
+          <div style={{ display: 'flex', background: K.segBg, borderRadius: 6, padding: 2, gap: 1, flexShrink: 0 }}>
+            {['day', 'week', 'month'].map(v => (
+              <button key={v} onClick={() => setView(v)} style={{ fontFamily: J, fontSize: 7.5, fontWeight: 600, padding: '3px 6px', borderRadius: 4, border: 'none', cursor: 'pointer', textTransform: 'capitalize', background: v === view ? K.segABg : 'transparent', color: v === view ? K.segATx : K.segTx }}>{v}</button>
+            ))}
           </div>
         </div>
       );
 
-      const weekStrip = (
-        <div style={{ display: 'flex', gap: 2, padding: '8px 10px', borderBottom: `1px solid ${K.strip}`, flexShrink: 0 }}>
-          {stripDays.map((d, i) => {
-            const wknd = i >= 5, isTod = sameDay(d, todayD), isSel = sameDay(d, anchor), hasEv = dayCats(d).length > 0;
-            return (
-              <div key={i} onClick={() => { setAnchor(new Date(d)); if (view === 'month') setView('day'); }} style={{ flex: 1, textAlign: 'center', padding: '3px 0 4px', borderRadius: 8, cursor: 'pointer', background: isTod ? K.todBg : (isSel ? (dark ? 'rgba(255,255,255,.05)' : '#F7F4EE') : 'transparent') }}>
-                <div style={{ fontFamily: J, fontSize: 6, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: isTod ? K.todDl : (wknd ? K.wknd : K.dl) }}>{SL[i]}</div>
-                <div style={{ margin: '2px auto 0', width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '50%', fontFamily: J, fontSize: 11, fontWeight: isTod ? 700 : 500, background: isTod ? K.circBg : 'transparent', color: isTod ? K.circTx : (wknd ? K.wknd : K.date) }}>{d.getDate()}</div>
-                <div style={{ width: 3, height: 3, borderRadius: '50%', margin: '2px auto 0', background: hasEv ? K.dot : 'transparent' }} />
+      // ── Section 2: task strip (Day + Week only) ──
+      const prios = prioTasks();
+      const prioIds = {}; prios.forEach(t => { prioIds[t.id] = true; });
+      const expandedTasks = prios.concat(allTasksSorted().filter(t => !prioIds[t.id]));
+      const taskColor = (t) => t.status === 'done' ? K.doneName : (prioIds[t.id] ? K.prioName : K.reg);
+      const taskWeight = (t) => prioIds[t.id] && t.status !== 'done' ? 700 : 500;
+      const taskStrip = (
+        <React.Fragment>
+          <div onClick={() => setTasksOpen(o => !o)} style={{ display: 'flex', background: tasksOpen ? K.navBg : K.taskBg, borderBottom: `0.5px solid ${K.bd2}`, cursor: 'pointer', flexShrink: 0 }}>
+            <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: K.gold }}>tasks</span>
+            </div>
+            {tasksOpen ? (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', padding: '7px 10px' }}>
+                <span style={{ fontFamily: J, fontSize: 9, fontStyle: 'italic', color: K.muted }}>All tasks</span>
               </div>
-            );
-          })}
+            ) : prios.length > 0 ? [0, 1, 2].map(i => { const t = prios[i]; return (
+              <div key={i} onClick={t ? (e) => { e.stopPropagation(); onOpenTask && onOpenTask(t); } : undefined} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px', borderRight: i < 2 ? `0.5px solid ${K.cellBd}` : 'none' }}>
+                {t && circle(t, 13)}
+                {t && <span style={{ fontFamily: J, fontSize: 9, fontWeight: taskWeight(t), color: taskColor(t), whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>}
+              </div>
+            ); }) : (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', padding: '7px 10px' }}>
+                <span style={{ fontFamily: J, fontSize: 9, fontStyle: 'italic', color: K.muted }}>No priorities set — tap for all tasks</span>
+              </div>
+            )}
+            <div style={{ width: 32, flexShrink: 0, borderLeft: `0.5px solid ${K.cellBd}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <i className={'ti ' + (tasksOpen ? 'ti-chevron-up' : 'ti-chevron-down')} style={{ fontSize: 12, color: tasksOpen ? K.gold : K.muted }} />
+            </div>
+          </div>
+          {tasksOpen && (
+            <div style={{ flexShrink: 0, maxHeight: 200, overflowY: 'auto', borderBottom: `0.5px solid ${K.bd2}` }}>
+              {expandedTasks.map((t, i, arr) => { const di = dueInfo(t); const isP = prioIds[t.id]; return (
+                <div key={t.id} onClick={() => onOpenTask && onOpenTask(t)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px 7px 65px', borderLeft: `3px solid ${isP ? K.prioName : 'transparent'}`, borderBottom: i < arr.length - 1 ? `0.5px solid ${K.rowBd}` : 'none', cursor: 'pointer' }}>
+                  {circle(t, 13)}
+                  <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 9.5, fontWeight: taskWeight(t), color: taskColor(t), whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+                  {di.label && <span style={{ flexShrink: 0, fontFamily: J, fontSize: 8, fontWeight: 600, color: di.color }}>{di.label}</span>}
+                </div>
+              ); })}
+              {expandedTasks.length === 0 && <div style={{ padding: '10px 12px 10px 68px', fontFamily: J, fontSize: 9, color: K.muted }}>No tasks yet.</div>}
+            </div>
+          )}
+        </React.Fragment>
+      );
+
+      // ── Section 3: date strip (Day + Week) ──
+      const dateStrip = (
+        <div style={{ display: 'flex', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0 }}>
+          <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0 6px' }}>
+            <span style={{ fontFamily: J, fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', color: K.tx }}>TX</span>
+            <span style={{ fontFamily: J, fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', color: K.ph }}>PH</span>
+          </div>
+          {stripDays.map((d, i) => { const wknd = i >= 5, isTod = sameDay(d, todayD), isSel = sameDay(d, anchor), hasEv = hasEvents(d); return (
+            <div key={i} onClick={() => { setAnchor(new Date(d)); if (view === 'month') setView('day'); }} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, padding: '4px 1px 5px', borderRight: i < 6 ? `0.5px solid ${K.gline}` : 'none', cursor: 'pointer', background: isTod ? K.todBg : (isSel && view === 'day' ? (dark ? 'rgba(255,255,255,.05)' : '#F7F4EE') : 'transparent') }}>
+              <span style={{ fontFamily: J, fontSize: 6, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, color: isTod ? K.gold : (wknd ? K.weekend : K.dayLetter) }}>{SL[i]}</span>
+              <div style={{ width: 21, height: 21, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: J, fontSize: isTod ? 10 : 11, fontWeight: 600, background: isTod ? K.circBg : 'transparent', color: isTod ? K.circTx : (wknd ? K.weekend : K.date) }}>{d.getDate()}</div>
+              <div style={{ width: 3, height: 3, borderRadius: '50%', background: hasEv ? K.dot : 'transparent' }} />
+            </div>
+          ); })}
         </div>
       );
 
-      const banner = prios.length ? (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', borderBottom: `1px solid ${K.strip}`, flexShrink: 0, overflowX: 'auto' }}>
-          <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: K.gold, flexShrink: 0 }}>Priorities</span>
-          {prios.map((p, i) => (
-            <button key={i} onClick={() => onOpenTask && onOpenTask(p.task)} style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, padding: '3px 8px', borderRadius: 20, border: `1px solid ${K.goldBd}`, background: K.goldBg, cursor: 'pointer' }}>
-              <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: K.gold }}>{p.rank}</span>
-              <span style={{ fontFamily: J, fontSize: 9, fontWeight: 500, color: K.date, whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.title}</span>
-            </button>
-          ))}
-        </div>
-      ) : null;
-
-      const dayBody = (
+      // ── Section 4: Day grid ──
+      const dayGrid = (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {gcal === 'needs_connect' && connectBar}
-          {dayItems.allday.length > 0 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '6px 12px', borderBottom: `1px solid ${K.strip}`, flexShrink: 0 }}>{dayItems.allday.map((x, i) => allDayChip(x, i))}</div>
-          )}
           <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             <div style={{ display: 'flex', position: 'relative' }}>
-              <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.tzBd}` }}>
-                <div style={{ borderBottom: `0.5px solid ${K.tzBd}`, padding: '4px 6px' }}>
-                  <div style={{ fontFamily: J, fontSize: 10, fontWeight: 700, color: K.tx, lineHeight: 1.2 }}>TX</div>
-                  <div style={{ fontFamily: J, fontSize: 10, fontWeight: 700, color: K.ph, lineHeight: 1.2 }}>PH</div>
-                </div>
-                {HOURS.map(h => { const inst = austinInstant(anchor, h); const hot = dayItems.timed.some(e => Math.floor(austinFloat(e.start)) === h); return (
+              <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}` }}>
+                {HOURS.map(h => { const inst = austinInstant(anchor, h); const hot = dayEvents(anchor).some(e => Math.floor(austinFloat(e.start)) === h); return (
                   <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.slot}`, padding: '5px 6px 0' }}>
                     <div style={{ fontFamily: J, fontSize: 11, fontWeight: hot ? 700 : 600, color: hot ? K.gold : K.tx }}>{fmtHour(inst, 'America/Chicago')}</div>
                     <div style={{ fontFamily: J, fontSize: 9, fontWeight: hot ? 600 : 400, color: K.ph, opacity: hot ? 1 : 0.85 }}>{fmtHour(inst, 'Asia/Manila')}</div>
@@ -4489,13 +4519,10 @@ Rules:
               </div>
               <div style={{ flex: 1, position: 'relative' }}>
                 {HOURS.map(h => <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.gline}` }} />)}
-                {dayItems.timed.map((e, i) => { const top = austinFloat(e.start) * 48; const dur = e.end ? Math.max((e.end - e.start) / 3600000, 0.5) : 0.75; const st = catStyle(e.cat); return (
-                  <div key={i} onClick={() => e.task && onOpenTask && onOpenTask(e.task)} style={{ position: 'absolute', top: top + 1, left: 4, right: 4, height: Math.max(dur * 48 - 2, 16), background: st.bg, borderLeft: `3px solid ${st.bd}`, borderRadius: 5, padding: '2px 7px', overflow: 'hidden', cursor: e.task ? 'pointer' : 'default' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                      {e.icon && <i className={'ti ' + e.icon} style={{ fontSize: 8, color: st.bd, flexShrink: 0 }} />}
-                      <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.evT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</span>
-                    </div>
-                    <div style={{ fontFamily: J, fontSize: 7.5, color: K.evTm, marginTop: 1 }}>{fmtClock(e.start, 'America/Chicago')}</div>
+                {dayEvents(anchor).map((e, i) => { const top = austinFloat(e.start) * 48; const dur = e.end ? Math.max((e.end - e.start) / 3600000, 0.5) : 0.75; return (
+                  <div key={i} style={{ position: 'absolute', top: top + 1, left: 4, right: 4, height: Math.max(dur * 48 - 2, 16), background: e.gold ? K.evGoldBg : K.evNavyBg, borderLeft: `3px solid ${e.gold ? K.evGoldBd : K.evNavyBd}`, borderRadius: 5, padding: '4px 7px', overflow: 'hidden' }}>
+                    <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
+                    <div style={{ fontFamily: J, fontSize: 7.5, color: K.evTime, marginTop: 1 }}>{fmtClock(e.start, 'America/Chicago')}</div>
                   </div>
                 ); })}
               </div>
@@ -4504,39 +4531,32 @@ Rules:
         </div>
       );
 
-      const weekBody = (
+      // ── Section 5: Week grid ──
+      const weekGrid = (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {gcal === 'needs_connect' && connectBar}
           <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-            <div style={{ display: 'flex', position: 'relative', minWidth: '100%' }}>
-              <div style={{ width: 54, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.tzBd}` }}>
-                <div style={{ height: 22, borderBottom: `0.5px solid ${K.tzBd}` }} />
-                {HOURS.map(h => { const inst = austinInstant(mondayOf(anchor), h); return (
-                  <div key={h} style={{ height: 48, padding: '3px 5px 0' }}>
-                    <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.tx, letterSpacing: '.04em' }}>{fmtHour(inst, 'America/Chicago')}</div>
-                    <div style={{ fontFamily: J, fontSize: 8, fontWeight: 400, color: K.ph, opacity: .85, letterSpacing: '.04em' }}>{fmtHour(inst, 'Asia/Manila')}</div>
+            {HOURS.map(h => { const inst = austinInstant(mondayOf(anchor), h); return (
+              <div key={h} style={{ display: 'flex' }}>
+                <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, padding: '4px 6px 0' }}>
+                  <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.tx }}>{fmtHour(inst, 'America/Chicago')}</div>
+                  <div style={{ fontFamily: J, fontSize: 8, fontWeight: 400, color: K.ph, opacity: 0.85 }}>{fmtHour(inst, 'Asia/Manila')}</div>
+                </div>
+                {stripDays.map((d, di) => { const isTod = sameDay(d, todayD), wknd = di >= 5; const evs = dayEvents(d).filter(e => Math.floor(austinFloat(e.start)) === h); return (
+                  <div key={di} style={{ flex: 1, minWidth: 0, height: 38, borderBottom: `0.5px solid ${K.gline}`, borderRight: `0.5px solid ${K.gline}`, background: isTod ? K.weekTodayCol : (wknd ? K.weekendCell : 'transparent'), padding: '1px 2px', overflow: 'hidden' }}>
+                    {evs.map((e, ei) => (
+                      <div key={ei} style={{ fontFamily: J, fontSize: 6.5, fontWeight: 500, padding: '2px 4px', borderRadius: 3, marginBottom: 1, background: e.gold ? K.evGoldBg : K.evNavyBg, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
+                    ))}
                   </div>
                 ); })}
               </div>
-              {stripDays.map((d, di) => { const it = itemsForDay(d); const isTod = sameDay(d, todayD); return (
-                <div key={di} style={{ flex: 1, minWidth: 0, position: 'relative', borderRight: di < 6 ? `0.5px solid ${K.gline}` : 'none', background: isTod ? (dark ? 'rgba(201,164,90,.06)' : '#FBF8F2') : 'transparent' }}>
-                  <div style={{ height: 22, borderBottom: `0.5px solid ${K.tzBd}`, display: 'flex', alignItems: 'center', justifyContent: 'center', background: isTod ? K.todBg : 'transparent' }}>
-                    <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: isTod ? (dark ? '#fff' : '#001A4A') : K.dl }}>{DL2[di]} {d.getDate()}</span>
-                  </div>
-                  {HOURS.map(h => <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.gline}` }} />)}
-                  {it.timed.map((e, ei) => { const top = austinFloat(e.start) * 48; const st = catStyle(e.cat); return (
-                    <div key={ei} onClick={() => e.task && onOpenTask && onOpenTask(e.task)} style={{ position: 'absolute', top: 22 + top + 1, left: 1, right: 1, minHeight: 13, background: st.bg, borderLeft: `2px solid ${st.bd}`, borderRadius: 3, padding: '1px 3px', overflow: 'hidden', cursor: e.task ? 'pointer' : 'default' }}>
-                      <span style={{ fontFamily: J, fontSize: 6.5, fontWeight: 500, color: K.evT, display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</span>
-                    </div>
-                  ); })}
-                </div>
-              ); })}
-            </div>
+            ); })}
           </div>
         </div>
       );
 
-      const monthBody = (() => {
+      // ── Section 6: Month grid (auto-height) ──
+      const monthGrid = (() => {
         const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
         const gridStart = mondayOf(first);
         const lastDate = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
@@ -4546,16 +4566,17 @@ Rules:
           <div style={{ flex: '0 0 auto', padding: '8px 10px 10px', overflowY: 'auto' }}>
             {gcal === 'needs_connect' && <div style={{ marginBottom: 8 }}>{connectBar}</div>}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 3, marginBottom: 4 }}>
-              {SL.map((l, i) => <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: 7, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: i >= 5 ? K.wknd : K.dl }}>{l}</div>)}
+              {SL.map((l, i) => <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: 7, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: i >= 5 ? K.weekend : K.dayLetter }}>{l}</div>)}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 3 }}>
-              {cells.map((d, i) => { const inM = d.getMonth() === anchor.getMonth(); const wknd = (i % 7) >= 5; const isTod = sameDay(d, todayD); const cats = dayCats(d); return (
-                <div key={i} onClick={() => { setAnchor(new Date(d)); setView('day'); }} style={{ minHeight: 42, padding: 3, border: `1px solid ${isTod ? K.goldBd : K.cellBd}`, borderRadius: 4, background: isTod ? K.todBg : (wknd ? K.wkndCell : K.cell), opacity: inM ? 1 : 0.4, cursor: 'pointer' }}>
+              {cells.map((d, i) => { const inM = d.getMonth() === anchor.getMonth(); const wknd = (i % 7) >= 5; const isTod = sameDay(d, todayD); const ev = monthHasEvent(d), tk = monthHasTask(d); return (
+                <div key={i} onClick={() => { setAnchor(new Date(d)); setView('day'); }} style={{ minHeight: 42, padding: 3, border: `1px solid ${isTod ? K.todCellBd : K.monthBd}`, borderRadius: 4, background: isTod ? K.todCellBg : (wknd ? K.weekendCell : K.cellBg), opacity: inM ? 1 : 0.4, cursor: 'pointer' }}>
                   {isTod
                     ? <div style={{ width: 16, height: 16, borderRadius: '50%', background: K.circBg, color: K.circTx, fontFamily: J, fontSize: 9, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{d.getDate()}</div>
-                    : <div style={{ fontFamily: J, fontSize: 9, fontWeight: 500, color: wknd ? K.wknd : K.mDate }}>{d.getDate()}</div>}
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2, marginTop: 2 }}>
-                    {cats.slice(0, 4).map((c, ci) => <div key={ci} style={{ width: 4, height: 4, borderRadius: '50%', background: dotColor(c) }} />)}
+                    : <div style={{ fontFamily: J, fontSize: 9, fontWeight: 500, color: wknd ? K.weekend : K.date }}>{d.getDate()}</div>}
+                  <div style={{ display: 'flex', gap: 2, marginTop: 2 }}>
+                    {ev && <div style={{ width: 4, height: 4, borderRadius: '50%', background: K.dotEvent }} />}
+                    {tk && <div style={{ width: 4, height: 4, borderRadius: '50%', background: K.dotTask }} />}
                   </div>
                 </div>
               ); })}
@@ -4564,23 +4585,23 @@ Rules:
         );
       })();
 
+      // TOP-anchored: top is the top of the conversation area (just under the app top bar);
+      // grows DOWNWARD. Day/Week fill to the input bar (bottom = input-bar height); Month is auto.
       return (
         <React.Fragment>
-          {/* Backdrop — dims the conversation behind; sits below the top bar */}
           <div onClick={onClose} style={{ position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', left: 0, right: 0, bottom: 0, zIndex: 9, background: dark ? 'rgba(0,0,0,.35)' : 'rgba(0,26,74,.18)' }} />
-          {/* Popout — TOP-anchored, grows DOWNWARD. Day/Week fill to the input bar; Month is auto-height. */}
           <div onClick={(e) => e.stopPropagation()} style={{
             position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', left: 10, right: 10, bottom: view === 'month' ? 'auto' : (zoneH || 0), zIndex: 10,
             background: K.pop, border: `1px solid ${K.bd}`, borderTop: 'none', borderRadius: '0 0 14px 14px', boxShadow: K.shadow,
             opacity: vis ? 1 : 0, transition: 'opacity 150ms ease', display: 'flex', flexDirection: 'column', overflow: 'hidden',
             maxHeight: view === 'month' ? 'calc(100vh - 90px - env(safe-area-inset-top))' : 'none',
           }}>
-            {header}
-            {view !== 'month' && weekStrip}
-            {view !== 'month' && banner}
-            {view === 'day' && dayBody}
-            {view === 'week' && weekBody}
-            {view === 'month' && monthBody}
+            {navBar}
+            {view !== 'month' && taskStrip}
+            {view !== 'month' && dateStrip}
+            {view === 'day' && dayGrid}
+            {view === 'week' && weekGrid}
+            {view === 'month' && monthGrid}
           </div>
         </React.Fragment>
       );

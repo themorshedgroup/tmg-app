@@ -555,11 +555,81 @@ Rules:
 - Resolve relative dates ("Friday", "tomorrow", "next week") to an absolute YYYY-MM-DD using today's date given in the conversation.
 - Keep the conversational part brief and friendly.`;
 
+    // ─── Enter KPI (Work Mode) ───────────────────────────────────────
+    // Phase A: every flow only PREVIEWS what would be sent — no network call.
+    // Flip KPI_LIVE to true once createAgentKpi() points at the live zoho-crm edge function (Phase B).
+    const KPI_LIVE = false;
+    const KPI_OPTIONS = ['Touch Call', 'Follow Up Call', 'Notes', 'Hotzone Action/s', 'Pop-by', 'Lunch'];
+    const OTHER_KPI_OPTIONS = ['—']; // placeholder — real Zoho "Other KPI" picklist TBD (Phase B)
+    const MAX_KPI_PERSONS = 25;
+    const kpiTodayStr = () => { const t = new Date(); return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0'); };
+
+    // Phase B seam: wire this to the zoho-crm edge function (mirrors callCalendar). Stub while KPI_LIVE is false.
+    async function createAgentKpi(payload) { throw new Error('Zoho not wired yet'); }
+
+    // Note-flow instruction: the AI parses a pasted KPI note and ends every reply with one ACTION block
+    // (mirrors TASK_PILL_INSTRUCTION). A person may have MULTIPLE KPIs; names stay free text (Phase A).
+    const KPI_NOTE_INSTRUCTION =
+`You are the TMG KPI assistant. The agent pastes a short note describing one day of real-estate prospecting activity. Turn it into ONE normalized KPI submission. Keep replies short and friendly — never interrogate.
+
+FORMAT the agents are taught to use:
+- The note STARTS with a date.
+- Each person is separated by a double slash "//". Everything between two "//" belongs to ONE person.
+- Inside a person's chunk: the person's name plus one or more activities, in any order.
+  Example: 6/18 // Sam Smith lunch call // John Doe hotzone // Jane Cruz pop-by notes
+  -> date 2026-06-18; Sam Smith = [Lunch, Touch Call]; John Doe = [Hotzone Action/s]; Jane Cruz = [Pop-by, Notes].
+If the note has no slashes, do your best to split people and activities sensibly.
+
+Map each activity to one or more of these six KPI types (a person CAN have several):
+"Touch Call", "Follow Up Call", "Notes", "Hotzone Action/s", "Pop-by", "Lunch".
+Hints: "call"/"called" -> "Touch Call" (use "Follow Up Call" only if they say follow-up); "note"/"left a note" -> "Notes"; "popped by"/"drop by" -> "Pop-by"; "lunch" -> "Lunch"; "hotzone"/"door-knock" -> "Hotzone Action/s".
+
+Also capture: kpi_date ("YYYY-MM-DD"; resolve a relative leading date like "today"/"yesterday"; default to today if none); ctc_hours (a number) only if CTC / call-time hours are mentioned; "others" = activities that fit none of the six, as {kpi, count}. Names are FREE TEXT — record them exactly as written; do NOT match them to any contact list (that happens later). Up to 25 people.
+
+HOTZONE RULE: if a person has "Hotzone Action/s" but no number is given, you MUST ask how many before submitting (one short question), ending with ACTION:{"type":"NONE","payload":{}}.
+
+## How to reply
+End EVERY reply with exactly ONE action block on its own final line, with nothing after it:
+ACTION:{"type":"KPI","payload":{ ...the fields you have... }}
+
+The payload shape MUST be:
+{ "kpi_date":"YYYY-MM-DD", "ctc_hours": <number or null>,
+  "persons":[ { "name":"...", "kpis":["<one or more of the six>"], "hotzone_count": <number, only when "Hotzone Action/s" is in kpis> } ],
+  "others":[ { "kpi":"...", "count": <number> } ] }
+
+Rules:
+- Use "KPI" only once you have kpi_date AND at least one person with a name and >=1 KPI, AND every hotzone person has a count. That readies it for confirmation; then say one short sentence, e.g. Ready - KPIs for 3 people on 2026-06-18.
+- If the first message already has everything, submit in your FIRST reply — no questions.
+- If something is missing or ambiguous (a hotzone count, follow-up vs touch call), ask ONE short question and end with: ACTION:{"type":"NONE","payload":{}}
+- Resolve relative dates using today's date given below. Do NOT use markdown formatting.`;
+
+    // Plain-text KPI summary for the saved chat message (chat renders raw text — no markdown).
+    function formatKpiPreview(p) {
+      const L = [];
+      L.push('KPI ENTRY');
+      L.push('Owner: ' + (p.owner || '—'));
+      L.push('Date: ' + (p.kpi_date || '—'));
+      L.push('CTC Hours: ' + (p.ctc_hours == null || p.ctc_hours === '' ? '—' : p.ctc_hours));
+      L.push('');
+      const persons = p.persons || [];
+      L.push('People (' + persons.length + '):');
+      persons.forEach(function (x, i) {
+        const parts = (x.kpis || []).map(function (k) { return k === 'Hotzone Action/s' ? ('Hotzone Action/s (' + (x.hotzone_count || 0) + ')') : k; });
+        L.push('  ' + (i + 1) + '. ' + (x.name || '—') + ' — ' + (parts.length ? parts.join(', ') : '—'));
+      });
+      if (p.others && p.others.length) {
+        L.push('');
+        L.push('Other KPIs:');
+        p.others.forEach(function (o) { L.push('  • ' + o.kpi + ': ' + o.count); });
+      }
+      return L.join('\n');
+    }
+
     // ─── Work Mode pills ─────────────────────────────────────────────
     // Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
     const FALLBACK_PILLS = [
       { id: 'fb-task',    label: 'Add To Do',            icon: 'ti-checklist',       colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   config: { instruction: TASK_PILL_INSTRUCTION, seed: 'To Do: ' }, enabled: true },
-      { id: 'fb-kpis',    label: 'Enter KPIs',           icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Enter KPIs' },           enabled: true },
+      { id: 'fb-kpis',    label: 'Enter KPI',            icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { kpi: true, prompt: 'Enter KPI' }, enabled: true },
       { id: 'fb-listing', label: 'Listing Presentation', icon: 'ti-presentation',    colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Listing Presentation' }, enabled: true },
       { id: 'fb-showing', label: 'Add Showing',          icon: 'ti-home',            colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Add Showing' },          enabled: true },
       { id: 'fb-comm',    label: 'Commission Log',       icon: 'ti-currency-dollar', colorLight: '#0F6E56', colorDark: '#5DCAA5',               type: 'prompt', config: { prompt: 'Commission Log' },       enabled: true },
@@ -639,15 +709,15 @@ Rules:
     };
 
     // ─── AI Chat Tab ─────────────────────────────────────────────────
-    function AIChatTab({ user, messages, loading, mode, dark, pills, onPill }) {
+    function AIChatTab({ user, messages, loading, mode, dark, pills, onPill, flowCard, flowKey }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
       const scrollRef = useRef(null);
 
       useEffect(() => {
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }, [messages, loading]);
+      }, [messages, loading, flowKey]);
 
-      const empty = messages.length === 0;
+      const empty = messages.length === 0 && !flowCard;
 
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
@@ -704,6 +774,7 @@ Rules:
                 );
               })
             )}
+            {flowCard}
             {loading && (
               <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 12 }}>
                 <div style={{ padding: '10px 14px', borderRadius: 16, borderBottomLeftRadius: 4, background: C.surface, border: `1px solid ${C.border}`, color: C.textMuted, fontSize: '0.9rem', fontStyle: 'italic' }}>
@@ -1602,6 +1673,194 @@ Rules:
               {idx > 0 && <button onClick={back} style={{ flex: 1, padding: 11, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.88rem', cursor: 'pointer', fontFamily: C.fontSans }}>Back</button>}
               <button onClick={next} style={{ flex: 2, padding: 11, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{idx < steps.length - 1 ? 'Next' : 'Send'}</button>
             </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Enter KPI inline cards (render inside the chat thread) ──────
+    // Multi-select KPI chips for one person. selected = array of KPI_OPTIONS strings.
+    function KpiChips({ selected, onToggle, dark }) {
+      const sel = selected || [];
+      return (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {KPI_OPTIONS.map(opt => {
+            const on = sel.includes(opt);
+            return (
+              <button key={opt} type="button" onClick={() => onToggle(opt)} style={{
+                padding: '6px 11px', borderRadius: 16, cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600, fontFamily: C.fontSans,
+                border: on ? '1px solid transparent' : `1px solid ${dark ? '#1C2D4D' : C.border}`,
+                background: on ? (dark ? C.gold : C.navy) : (dark ? '#0A1730' : '#FFFFFF'),
+                color: on ? '#fff' : (dark ? 'rgba(255,255,255,0.72)' : C.textPrimary),
+                display: 'inline-flex', alignItems: 'center', gap: 5, transition: 'all 0.12s ease',
+              }}>
+                {on && <i className="ti ti-check" style={{ fontSize: 13 }} />}{opt}
+              </button>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // The expanding inline form (form path). Starts compact (date, CTC, Person 1); grows via the buttons.
+    function KpiInlineForm({ dark, ownerName, initial, onReview, onCancel }) {
+      const seed = initial || {};
+      const [kpiDate, setKpiDate] = useState(seed.kpi_date || kpiTodayStr());
+      const [ctcHours, setCtcHours] = useState(seed.ctc_hours == null ? '' : String(seed.ctc_hours));
+      const [persons, setPersons] = useState(() => {
+        const ps = (seed.persons || []).map(p => ({ name: p.name || '', kpis: (p.kpis || []).slice(), hotzone: p.hotzone_count == null ? '' : String(p.hotzone_count) }));
+        return ps.length ? ps : [{ name: '', kpis: [], hotzone: '' }];
+      });
+      const [others, setOthers] = useState(() => (seed.others || []).map(o => ({ kpi: o.kpi || OTHER_KPI_OPTIONS[0], count: o.count == null ? '' : String(o.count) })));
+      const [showOthers, setShowOthers] = useState((seed.others || []).length > 0);
+
+      const bord = dark ? '#152545' : C.border;
+      const txt = dark ? '#fff' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : C.surfaceHover, border: `1px solid ${bord}`, borderRadius: 9, color: dark ? '#fff' : C.textPrimary, fontSize: '0.86rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const lbl = { fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', marginBottom: 4, fontFamily: C.fontSans, fontWeight: 700, textTransform: 'uppercase' };
+      const sectionLbl = { fontSize: '0.6rem', color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, margin: '14px 0 7px', fontFamily: C.fontSans };
+      const removeBtn = { background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 15, display: 'flex', padding: 3 };
+      const ghostBtn = { display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: `1px dashed ${bord}`, borderRadius: 9, padding: '8px 12px', color: dark ? C.goldSoft : C.gold, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans };
+
+      const updatePerson = (i, k, v) => setPersons(ps => ps.map((p, j) => j === i ? { ...p, [k]: v } : p));
+      const toggleKpi = (i, opt) => setPersons(ps => ps.map((p, j) => {
+        if (j !== i) return p;
+        const has = p.kpis.includes(opt);
+        const kpis = has ? p.kpis.filter(k => k !== opt) : [...p.kpis, opt];
+        return { ...p, kpis, ...(opt === 'Hotzone Action/s' && has ? { hotzone: '' } : {}) };
+      }));
+      const addPerson = () => setPersons(ps => ps.length < MAX_KPI_PERSONS ? [...ps, { name: '', kpis: [], hotzone: '' }] : ps);
+      const removePerson = i => setPersons(ps => ps.filter((_, j) => j !== i));
+      const updateOther = (i, k, v) => setOthers(os => os.map((o, j) => j === i ? { ...o, [k]: v } : o));
+      const addOther = () => { setShowOthers(true); setOthers(os => os.length < 5 ? [...os, { kpi: OTHER_KPI_OPTIONS[0], count: '' }] : os); };
+      const removeOther = i => setOthers(os => os.filter((_, j) => j !== i));
+
+      function review() {
+        if (!kpiDate) { alert('Please choose a KPI date.'); return; }
+        const clean = persons.filter(p => p.name.trim() && p.kpis.length).map(p => ({
+          name: p.name.trim(), kpis: p.kpis.slice(),
+          ...(p.kpis.includes('Hotzone Action/s') ? { hotzone_count: Number(p.hotzone) || 0 } : {}),
+        }));
+        if (!clean.length) { alert('Add at least one person with a name and a KPI.'); return; }
+        const cleanOthers = others.filter(o => o.kpi && o.kpi !== '—' && o.count !== '').map(o => ({ kpi: o.kpi, count: Number(o.count) || 0 }));
+        onReview({ owner: ownerName, kpi_date: kpiDate, ctc_hours: ctcHours === '' ? null : Number(ctcHours), persons: clean, others: cleanOthers });
+      }
+
+      return (
+        <div>
+          <div style={{ display: 'flex', gap: 9 }}>
+            <div style={{ flex: 1 }}><div style={lbl}>KPI Date</div><input type="date" value={kpiDate} onChange={e => setKpiDate(e.target.value)} style={inp} /></div>
+            <div style={{ flex: 1 }}><div style={lbl}>CTC Hours</div><input type="number" min="0" step="0.5" value={ctcHours} onChange={e => setCtcHours(e.target.value)} style={inp} placeholder="—" /></div>
+          </div>
+
+          {persons.map((p, i) => (
+            <div key={i} style={{ border: `1px solid ${bord}`, borderRadius: 11, padding: 11, marginTop: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ flex: 1, fontSize: '0.68rem', fontWeight: 700, color: sub, letterSpacing: '0.05em', fontFamily: C.fontSans }}>PERSON {i + 1}</div>
+                {persons.length > 1 && <button onClick={() => removePerson(i)} style={removeBtn}><i className="ti ti-trash" /></button>}
+              </div>
+              <input type="text" value={p.name} onChange={e => updatePerson(i, 'name', e.target.value)} style={{ ...inp, marginBottom: 9 }} placeholder="Contact name" />
+              <div style={{ ...lbl, marginBottom: 6 }}>Applicable KPIs</div>
+              <KpiChips selected={p.kpis} onToggle={(opt) => toggleKpi(i, opt)} dark={dark} />
+              {p.kpis.includes('Hotzone Action/s') && (
+                <div style={{ marginTop: 9 }}><div style={lbl}>Number of hotzone actions</div><input type="number" min="0" value={p.hotzone} onChange={e => updatePerson(i, 'hotzone', e.target.value)} style={inp} placeholder="e.g. 3" /></div>
+              )}
+            </div>
+          ))}
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 11 }}>
+            {persons.length < MAX_KPI_PERSONS && <button onClick={addPerson} style={ghostBtn}><i className="ti ti-plus" />Add another KPI</button>}
+            {!showOthers && <button onClick={addOther} style={ghostBtn}><i className="ti ti-plus" />Add other KPIs</button>}
+          </div>
+
+          {showOthers && (
+            <div>
+              <div style={sectionLbl}>Other KPIs</div>
+              {others.map((o, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                  <div style={{ flex: 2 }}><select value={o.kpi} onChange={e => updateOther(i, 'kpi', e.target.value)} style={inp}>{OTHER_KPI_OPTIONS.map(x => <option key={x} value={x}>{x}</option>)}</select></div>
+                  <div style={{ flex: 1 }}><input type="number" min="0" value={o.count} onChange={e => updateOther(i, 'count', e.target.value)} style={inp} placeholder="Count" /></div>
+                  <button onClick={() => removeOther(i)} style={removeBtn}><i className="ti ti-trash" /></button>
+                </div>
+              ))}
+              {others.length < 5 && <button onClick={addOther} style={ghostBtn}><i className="ti ti-plus" />Add other KPI</button>}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 9, marginTop: 16 }}>
+            <button onClick={onCancel} style={{ padding: '11px 14px', background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 10, fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+            <button onClick={review} style={{ flex: 1, padding: 11, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 10, fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>Review &amp; Confirm <i className="ti ti-arrow-right" style={{ fontSize: 16 }} /></button>
+          </div>
+        </div>
+      );
+    }
+
+    // The read-only summary the agent confirms before it's sent. payload = the normalized KPI object.
+    function KpiSummary({ dark, payload, onBack, onConfirm }) {
+      const bord = dark ? '#152545' : C.border;
+      const txt = dark ? '#fff' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const row = { display: 'flex', justifyContent: 'space-between', gap: 12, padding: '6px 0', fontSize: '0.84rem', fontFamily: C.fontSans };
+      const persons = payload.persons || [];
+      return (
+        <div>
+          <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans, marginBottom: 10 }}>Please review — once confirmed it can’t be edited.</div>
+          <div style={{ ...row, borderBottom: `1px solid ${bord}` }}><span style={{ color: sub }}>Owner</span><span style={{ color: txt, fontWeight: 600 }}>{payload.owner || '—'}</span></div>
+          <div style={{ ...row, borderBottom: `1px solid ${bord}` }}><span style={{ color: sub }}>Date</span><span style={{ color: txt, fontWeight: 600 }}>{payload.kpi_date || '—'}</span></div>
+          <div style={{ ...row, borderBottom: `1px solid ${bord}` }}><span style={{ color: sub }}>CTC Hours</span><span style={{ color: txt, fontWeight: 600 }}>{payload.ctc_hours == null ? '—' : payload.ctc_hours}</span></div>
+          <div style={{ fontSize: '0.6rem', color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, margin: '14px 0 7px', fontFamily: C.fontSans }}>People ({persons.length})</div>
+          {persons.map((p, i) => (
+            <div key={i} style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: '9px 11px', marginBottom: 7 }}>
+              <div style={{ fontSize: '0.86rem', fontWeight: 700, color: txt, fontFamily: C.fontSans, marginBottom: 4 }}>{p.name || '—'}</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                {(p.kpis || []).map(k => (
+                  <span key={k} style={{ fontSize: '0.72rem', fontWeight: 600, color: dark ? C.goldSoft : C.gold, background: dark ? 'rgba(173,131,47,0.16)' : '#F3EBDA', borderRadius: 12, padding: '3px 9px', fontFamily: C.fontSans }}>
+                    {k === 'Hotzone Action/s' ? ('Hotzone × ' + (p.hotzone_count || 0)) : k}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+          {(payload.others || []).length > 0 && (
+            <div>
+              <div style={{ fontSize: '0.6rem', color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, margin: '12px 0 6px', fontFamily: C.fontSans }}>Other KPIs</div>
+              {payload.others.map((o, i) => (<div key={i} style={row}><span style={{ color: txt }}>{o.kpi}</span><span style={{ color: txt, fontWeight: 600 }}>{o.count}</span></div>))}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 9, marginTop: 16 }}>
+            <button onClick={onBack} style={{ padding: '11px 14px', background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 10, fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, display: 'inline-flex', alignItems: 'center', gap: 6 }}><i className="ti ti-arrow-left" style={{ fontSize: 16 }} />Back to edit</button>
+            <button onClick={onConfirm} style={{ flex: 1, padding: 11, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 10, fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}><i className="ti ti-check" style={{ fontSize: 16 }} />Confirm{KPI_LIVE ? ' & send' : ''}</button>
+          </div>
+        </div>
+      );
+    }
+
+    // Wrapper card that hosts the Enter KPI flow inline in the chat thread. flow = { step, payload }.
+    function KpiFlowCard({ dark, flow, pill, ownerName, onChoose, onReview, onBack, onConfirm, onCancel }) {
+      const panelBg = dark ? '#0A1730' : '#FFFFFF';
+      const bord = dark ? '#152545' : C.border;
+      const txt = dark ? '#fff' : C.navy;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const icon = (pill && pill.icon) || 'ti-chart-bar';
+      const choiceBtn = { display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '13px 15px', borderRadius: 11, fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, marginTop: 9, textAlign: 'left' };
+      return (
+        <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 12 }}>
+          <div style={{ width: '92%', maxWidth: 440, background: panelBg, border: `1px solid ${bord}`, borderRadius: 16, borderBottomLeftRadius: 4, padding: 15, boxShadow: '0 1px 2px rgba(0,26,74,0.05)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <i className={`ti ${icon}`} style={{ fontSize: 18, color: dark ? C.goldSoft : C.gold }} />
+              <div style={{ flex: 1, fontFamily: C.fontSans, fontSize: '0.95rem', fontWeight: 600, color: txt }}>Enter KPI</div>
+              <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 18, display: 'flex' }}><i className="ti ti-x" /></button>
+            </div>
+            {flow.step === 'choice' && (
+              <div>
+                <div style={{ fontSize: '0.85rem', color: sub, fontFamily: C.fontSans }}>Would you like to fill out a form, or paste your notes?</div>
+                <button onClick={() => onChoose('form')} style={{ ...choiceBtn, background: dark ? C.gold : C.navy, color: '#fff', border: '1px solid transparent' }}><i className="ti ti-forms" style={{ fontSize: 18 }} />Fill out a form</button>
+                <button onClick={() => onChoose('note')} style={{ ...choiceBtn, background: 'none', color: txt, border: `1px solid ${bord}` }}><i className="ti ti-notes" style={{ fontSize: 18 }} />Paste your notes</button>
+              </div>
+            )}
+            {flow.step === 'form' && <KpiInlineForm dark={dark} ownerName={ownerName} initial={flow.payload} onReview={onReview} onCancel={onCancel} />}
+            {flow.step === 'summary' && <KpiSummary dark={dark} payload={flow.payload} onBack={onBack} onConfirm={onConfirm} />}
           </div>
         </div>
       );
@@ -5097,6 +5356,8 @@ Rules:
       const [builderOpen, setBuilderOpen] = useState(false);
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
       const [taskInstruction, setTaskInstruction] = useState(null); // armed by the Add To-Do pill → next send creates a task
+      const [kpiInstruction, setKpiInstruction] = useState(null); // armed by Enter KPI "paste your notes" → next send parses a KPI note
+      const [kpiFlow, setKpiFlow] = useState(null); // inline Enter KPI card: { step:'choice'|'form'|'summary', payload? }
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
       const [moreView, setMoreView] = useState(() => parseRoute(typeof location !== 'undefined' ? location.hash : '').view || 'directory');
@@ -5256,7 +5517,8 @@ Rules:
 
           await ConvDB.insertMessage(convId, 'user', text || '', uploaded);
           const apiMsgs = history.map(m => ({ role: m.role, content: toApiContent(m) }));
-          const sys = taskInstruction ? (taskInstruction + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.') : undefined;
+          const armed = taskInstruction || kpiInstruction;
+          const sys = armed ? (armed + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.') : undefined;
           const reply = await callAI(apiMsgs, sys);
           // Add To-Do mode: the AI ends with an ACTION block — read it, create the task, hide the JSON.
           let display = reply;
@@ -5270,6 +5532,22 @@ Rules:
                   const created = await createTaskFromAI(parsed.payload, user);
                   if (!display) display = created ? ('Done — added “' + (parsed.payload.title || 'task') + '” to your Tasks.') : 'I couldn’t create that — please try again.';
                   if (created) setTaskInstruction(null); // task created → leave to-do mode
+                }
+              } catch (e) { /* keep the stripped conversational text */ }
+            }
+          } else if (kpiInstruction) {
+            // Enter KPI "paste your notes": the AI ends with an ACTION block. KPI → open the summary card for
+            // confirmation (don't submit yet); NONE → it's asking a follow-up (e.g. a hotzone count). Hide the JSON.
+            const mm = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
+            if (mm) {
+              display = reply.slice(0, mm.index).trim();
+              try {
+                const parsed = JSON.parse(mm[1]);
+                if (parsed && String(parsed.type).toUpperCase() === 'KPI' && parsed.payload) {
+                  const payload = { ...parsed.payload, owner: myName }; // owner is app-side, never from the model
+                  setKpiInstruction(null); // got a full payload → leave note mode; confirm via the card
+                  setKpiFlow({ step: 'summary', payload });
+                  if (!display) display = 'Here’s what I got — review and confirm below.';
                 }
               } catch (e) { /* keep the stripped conversational text */ }
             }
@@ -5305,6 +5583,8 @@ Rules:
         setCurrentConvId(null);
         setWorkRequest(null);
         setTaskInstruction(null);
+        setKpiInstruction(null);
+        setKpiFlow(null);
         setInput(localStorage.getItem('tmg-draft-new') || '');
       }
 
@@ -5318,6 +5598,8 @@ Rules:
         setDrawerOpen(false);
         setCurrentConvId(id);
         setTaskInstruction(null);
+        setKpiInstruction(null);
+        setKpiFlow(null);
         setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
         if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
@@ -5326,11 +5608,47 @@ Rules:
         setMessages(msgs);
       }
 
+      // Enter KPI — arm the paste-a-note parser (mirrors the task-pill arm), seeding the input.
+      function startKpiNote() {
+        setKpiFlow(null);
+        setTaskInstruction(null);
+        setKpiInstruction(KPI_NOTE_INSTRUCTION);
+        setInput('KPI: ');
+        setTimeout(() => { const el = document.querySelector('.tmg-ai-input'); if (el) { el.focus(); try { const n = el.value.length; el.setSelectionRange(n, n); } catch (e) {} } }, 30);
+      }
+
+      // Confirm step → finalize. Phase A (KPI_LIVE=false): preview only, no network. Persists the preview message.
+      async function submitKpi(payload) {
+        setKpiFlow(null);
+        const preview = formatKpiPreview(payload);
+        let content;
+        if (KPI_LIVE) {
+          try {
+            const res = await createAgentKpi(payload);
+            content = 'Submitted to Zoho — Agent KPI created' + (res && res.id ? ' (id ' + res.id + ')' : '') + '.\n\n' + preview;
+          } catch (e) {
+            content = 'Could not submit to Zoho: ' + (e.message || e) + '\n\nHere is what would have been sent:\n\n' + preview;
+          }
+        } else {
+          content = 'Here is your KPI summary (preview — not yet sent to Zoho):\n\n' + preview;
+        }
+        setMessages(prev => [...prev, { role: 'assistant', content }]);
+        const cid = currentConvId;
+        if (cid) { try { await ConvDB.insertMessage(cid, 'assistant', content); await ConvDB.touchConversation(cid); } catch (e) {} }
+      }
+
       // Tap a work-mode pill → run its configured behavior.
       function dispatchPill(pill) {
         if (!pill) return;
+        if (pill.id === 'fb-kpis' || (pill.config && pill.config.kpi)) {
+          setTaskInstruction(null); setKpiInstruction(null);
+          setMessages(prev => [...prev, { role: 'assistant', content: 'Let’s get started 👋 — would you like to fill out a form, or paste your notes?' }]);
+          setKpiFlow({ step: 'choice' });
+          return;
+        }
         if (pill.type === 'form') { setActivePill({ pill, kind: 'form' }); return; }
         if (pill.type === 'steps') { setActivePill({ pill, kind: 'steps' }); return; }
+        setKpiFlow(null); setKpiInstruction(null);
         if (pill.type === 'task') {
           setTaskInstruction((pill.config && pill.config.instruction) || TASK_PILL_INSTRUCTION);
           let seed = pill.config && pill.config.seed;
@@ -5384,7 +5702,22 @@ Rules:
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>
                 {/* Chat stays full width behind; history overlaps it at 50% */}
-                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={effectivePills} onPill={dispatchPill} />
+                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={effectivePills} onPill={dispatchPill}
+                  flowKey={kpiFlow ? kpiFlow.step : ''}
+                  flowCard={kpiFlow ? (
+                    <KpiFlowCard
+                      dark={dark}
+                      flow={kpiFlow}
+                      pill={effectivePills.find(p => p.id === 'fb-kpis' || (p.config && p.config.kpi)) || { icon: 'ti-chart-bar' }}
+                      ownerName={myName}
+                      onChoose={(c) => { if (c === 'form') setKpiFlow({ step: 'form', payload: kpiFlow.payload }); else startKpiNote(); }}
+                      onReview={(payload) => setKpiFlow({ step: 'summary', payload })}
+                      onBack={() => setKpiFlow({ step: 'form', payload: kpiFlow.payload })}
+                      onConfirm={() => submitKpi(kpiFlow.payload)}
+                      onCancel={() => setKpiFlow(null)}
+                    />
+                  ) : null}
+                />
                 {drawerOpen && (
                   <div onClick={() => setDrawerOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 29, background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)' }} />
                 )}

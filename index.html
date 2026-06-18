@@ -568,15 +568,52 @@ Rules:
 
     // ─── Enter KPI (Work Mode) ───────────────────────────────────────
     // Phase A: every flow only PREVIEWS what would be sent — no network call.
-    // Flip KPI_LIVE to true once createAgentKpi() points at the live zoho-crm edge function (Phase B).
-    const KPI_LIVE = false;
+    const KPI_LIVE = true;
     const KPI_OPTIONS = ['Touch Call', 'Follow Up Call', 'Notes', 'Hotzone Action/s', 'Pop-by', 'Lunch'];
     const OTHER_KPI_OPTIONS = ['—']; // placeholder — real Zoho "Other KPI" picklist TBD (Phase B)
     const MAX_KPI_PERSONS = 25;
     const kpiTodayStr = () => { const t = new Date(); return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0'); };
 
-    // Phase B seam: wire this to the zoho-crm edge function (mirrors callCalendar). Stub while KPI_LIVE is false.
-    async function createAgentKpi(payload) { throw new Error('Zoho not wired yet'); }
+    const ZOHO_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-crm';
+    async function callZoho(payload) {
+      const res = await fetch(ZOHO_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    }
+    async function searchZohoContacts(query) {
+      const { ok, data } = await callZoho({ action: 'search_contacts', query });
+      if (!ok) throw new Error(data.error || 'Contact search failed');
+      return data.contacts || [];
+    }
+    async function createAgentKpi(payload) {
+      // Build the Zoho record from the app payload.
+      // Field API names are placeholders — Symon confirms the real ones from Zoho.
+      const record = {
+        KPI_Date: payload.date || kpiTodayStr(),
+        CTC_Hours: payload.ctc != null ? Number(payload.ctc) : undefined,
+        Owner: payload.owner || '',
+      };
+      (payload.persons || []).forEach((p, i) => {
+        const n = i + 1;
+        record['Person_' + n + '_Name'] = p.name;
+        record['Person_' + n + '_Applicable_KPI'] = (p.kpis || []).join('; ');
+        if ((p.kpis || []).some(k => /hotzone/i.test(k)) && p.hotzone_count) {
+          record['Person_' + n + '_Hotzone_Actions'] = Number(p.hotzone_count);
+        }
+      });
+      (payload.others || []).forEach((o, i) => {
+        const n = i + 1;
+        record['Other_KPI_' + n] = o.label;
+        if (o.count) record['Other_KPI_' + n + '_Count'] = Number(o.count);
+      });
+      const { ok, data } = await callZoho({ action: 'create_agent_kpi', record });
+      if (!ok) throw new Error(data.error || 'Failed to create Agent KPI');
+      return data;
+    }
 
     // Note-flow instruction: the AI parses a pasted KPI note and ends every reply with one ACTION block
     // (mirrors TASK_PILL_INSTRUCTION). A person may have MULTIPLE KPIs; names stay free text (Phase A).
@@ -891,7 +928,7 @@ Rules:
       async loadAll() {
         const c = this.client(); if (!c) return { tasks: [], peopleByTask: {}, projById: {}, labelsByTask: {} };
         const [tRes, pRes, prRes, lRes] = await Promise.all([
-          c.from('tasks').select('*').is('parent_task_id', null).order('created_at', { ascending: false }),
+          c.from('tasks').select('*').order('created_at', { ascending: false }),
           c.from('task_people').select('task_id,user_id,role'),
           c.from('projects').select('id,name'),
           c.from('task_labels').select('task_id,user_id,label'),
@@ -1024,7 +1061,7 @@ Rules:
         if (rows.length) { const { error } = await c.from('task_decision_options').insert(rows); if (error) console.error('[TaskDB] setDecisionOptions:', error.message); }
       },
 
-      // Subtasks (tasks with a parent — excluded from the top-level list).
+      // Subtasks (tasks with a parent — also shown in the main list, with a "↳ parent" caption).
       async loadSubtasks(parentId) {
         const c = this.client(); if (!c) return [];
         const { data } = await c.from('tasks').select('*').eq('parent_task_id', parentId).order('created_at', { ascending: true });
@@ -3286,6 +3323,7 @@ Rules:
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
               <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
+              {t.parent_task_id && (() => { const par = data.tasks.find(x => x.id === t.parent_task_id); return par ? <div style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: '0.62rem', color: dark ? '#C9A45A' : '#AD832F', marginTop: 3, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}><i className="ti ti-subtask" style={{ fontSize: 11, flexShrink: 0 }} />{par.title}</div> : null; })()}
               {myLabels.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>{myLabels.map(l => { const lc = labelColors[l]; return <span key={l} style={{ padding: '1px 6px', borderRadius: 10, background: lc ? lc + '26' : (dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA'), color: lc || (dark ? '#C9A45A' : '#AD832F'), fontSize: '0.58rem', fontWeight: 600, fontFamily: C.fontSans }}>{l}</span>; })}</div>}
             </div>
             {showStatus && <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusColor(t.status) + '22', color: statusColor(t.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(t.status)}</span>}

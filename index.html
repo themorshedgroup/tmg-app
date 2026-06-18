@@ -4053,7 +4053,7 @@ Rules:
     }
 
     // ─── Top Bar ─────────────────────────────────────────────────────
-    function TopBar({ dark, onToggleDark, onCalendar, calendarOpen, onTasks, tasksOpen, avatar, name, dotColor, onProfile }) {
+    function TopBar({ dark, onToggleDark, onCalendar, calendarOpen, onTasks, tasksOpen, onDecisions, avatar, name, dotColor, onProfile }) {
       // Gold-tinted rounded-square chip; same tint + gold icon in light and dark.
       const iconBtn = (onClick, iconClass, title) => (
         <button
@@ -4081,6 +4081,9 @@ Rules:
           <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             {iconBtn(onTasks, 'ti ti-checklist', 'Tasks')}
+            <button onClick={onDecisions} title="Decisions" aria-label="Decisions" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 9, cursor: 'pointer', padding: 0, background: 'rgba(201,164,90,0.16)', border: 'none', color: '#C9A45A' }}>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 4v6" /><path d="M9 7l3-3 3 3" /><path d="M4 13l-2 2 2 2" /><path d="M2 15h7" /><path d="M20 13l2 2-2 2" /><path d="M22 15h-7" /></svg>
+            </button>
             {iconBtn(onCalendar, 'ti ti-calendar', 'Calendar')}
             <button onClick={onProfile} aria-label="Your profile" style={{ position: 'relative', width: 32, height: 32, borderRadius: 9, border: 'none', padding: 0, cursor: 'pointer', background: 'rgba(201,164,90,0.16)', flexShrink: 0 }}>
               {avatar
@@ -4697,11 +4700,107 @@ Rules:
           }}>
             {navBar}
             {view !== 'month' && taskStrip}
-            {view !== 'month' && decStrip}
             {view !== 'month' && dateStrip}
             {view === 'day' && dayGrid}
             {view === 'week' && weekGrid}
             {view === 'month' && monthGrid}
+          </div>
+        </React.Fragment>
+      );
+    }
+
+    // ─── Decisions popout (standalone, opened from the top bar beside Tasks; sized like the calendar) ──
+    function DecisionsPopover({ dark, zoneH, onOpenTask, onClose }) {
+      const J = "'Jost', sans-serif";
+      const todayD = new Date();
+      const [tasks, setTasks] = useState([]);
+      const [peopleByTask, setPeopleByTask] = useState({});
+      const [roster, setRoster] = useState({});
+      const [decData, setDecData] = useState({});
+      const [decDraft, setDecDraft] = useState({});
+      const [vis, setVis] = useState(false);
+      const user = (window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user) || null;
+      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
+      useEffect(() => { let c = false;
+        TaskDB.loadAll().then(d => { if (!c && d) { setTasks(d.tasks || []); setPeopleByTask(d.peopleByTask || {}); } }).catch(() => {});
+        ProfileDB.loadAll().then(ps => { if (!c && ps) { const m = {}; ps.forEach(p => { m[p.id] = (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User'; }); setRoster(m); } }).catch(() => {});
+        return () => { c = true; }; }, []);
+
+      const K = dark ? {
+        pop: '#070F1E', bd: '#152545', bd2: '#0D1E3A', shadow: '0 6px 22px rgba(0,0,0,.5)',
+        date: '#fff', gold: '#C9A45A', reg: 'rgba(255,255,255,.55)', muted: 'rgba(255,255,255,.3)',
+        cellBd: '#0D1E3A', rowBd: '#0D1E3A', dueToday: '#C9A45A', dueOver: '#E07A7A', dueUp: 'rgba(255,255,255,.4)',
+      } : {
+        pop: '#fff', bd: '#EDE7DC', bd2: '#EDE7DC', shadow: '0 6px 22px rgba(0,26,74,.1)',
+        date: '#001A4A', gold: '#AD832F', reg: '#6B7280', muted: '#B4B2A9',
+        cellBd: '#F0EBE3', rowBd: '#F5F2EE', dueToday: '#AD832F', dueOver: '#9B1C1C', dueUp: '#B4B2A9',
+      };
+
+      const nameOf = (id) => roster[id] || '—';
+      const roleNames = (tid, role) => (peopleByTask[tid] || []).filter(p => p.role === role).map(p => nameOf(p.user_id)).filter(n => n && n !== '—').join(', ');
+      const decisionTasks = () => (tasks || []).filter(t => t.decision_question || t.decision_due_at || (peopleByTask[t.id] || []).some(p => p.role === 'decision_maker'));
+      const decDueInfo = (t) => { if (!t.decision_due_at) return null; const d = new Date(t.decision_due_at); const t0 = new Date(todayD); t0.setHours(0, 0, 0, 0); const d0 = new Date(d); d0.setHours(0, 0, 0, 0); const f = t.decision_due_has_time ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); if (d0.getTime() === t0.getTime()) return { label: t.decision_due_has_time ? f : 'Today', color: K.dueToday }; if (d0 < t0) return { label: f, color: K.dueOver }; return { label: f, color: K.dueUp }; };
+      const decs = decisionTasks();
+      useEffect(() => { let c = false;
+        decs.forEach(t => { if (decData[t.id] && decData[t.id].loaded) return; Promise.all([TaskDB.loadDecisionOptions(t.id), TaskDB.loadActivity(t.id)]).then(([opts, act]) => { if (!c) setDecData(prev => ({ ...prev, [t.id]: { options: opts || [], comments: (act || []).filter(a => a.kind === 'update'), loaded: true } })); }).catch(() => {}); });
+        return () => { c = true; }; }, [tasks, peopleByTask]);
+      const chooseOption = async (taskId, idx) => { const d = decData[taskId]; if (!d) return; const opts = d.options.map((o, i) => ({ ...o, is_chosen: i === idx ? !o.is_chosen : false })); setDecData(prev => ({ ...prev, [taskId]: { ...prev[taskId], options: opts } })); try { await TaskDB.setDecisionOptions(taskId, opts.map(o => ({ body: o.body, is_chosen: o.is_chosen }))); } catch (e) {} };
+      const addComment = async (taskId) => { const text = (decDraft[taskId] || '').trim(); if (!text || !user) return; setDecDraft(prev => ({ ...prev, [taskId]: '' })); try { await TaskDB.addActivity(taskId, 'update', text, user); const act = await TaskDB.loadActivity(taskId); setDecData(prev => ({ ...prev, [taskId]: { ...(prev[taskId] || {}), comments: (act || []).filter(a => a.kind === 'update') } })); } catch (e) {} };
+      const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7.5, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: statusColor(st) + '22', color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
+
+      const decCard = (t) => {
+        const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = [t.description, t.context].filter(Boolean).join(' · ');
+        return (
+          <div key={t.id} style={{ borderBottom: `0.5px solid ${K.rowBd}`, padding: '11px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span onClick={() => onOpenTask && onOpenTask(t)} style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 12, fontWeight: 700, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
+              {statusPill(t.status)}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 5 }}>
+              {maker && <span style={{ fontFamily: J, fontSize: 9, color: K.reg }}><b style={{ color: K.gold }}>Maker:</b> {maker}</span>}
+              {dd && <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: dd.color }}>Decide by {dd.label}</span>}
+              {asg && <span style={{ fontFamily: J, fontSize: 9, color: K.reg }}>Assignee: {asg}</span>}
+            </div>
+            {t.decision_question && <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: K.date, margin: '8px 0 6px', lineHeight: 1.4 }}>{t.decision_question}</div>}
+            {(d.options || []).map((o, i) => (
+              <div key={o.id || i} onClick={() => chooseOption(t.id, i)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '6px 9px', marginBottom: 4, borderRadius: 7, cursor: 'pointer', background: o.is_chosen ? (dark ? 'rgba(15,110,86,.18)' : '#E6F2EC') : (dark ? '#0C1830' : '#FAF8F3'), border: `1px solid ${o.is_chosen ? (dark ? '#1E6B4E' : '#9FD3BC') : K.cellBd}` }}>
+                <i className={o.is_chosen ? 'ti ti-circle-check-filled' : 'ti ti-circle'} style={{ fontSize: 16, color: o.is_chosen ? (dark ? '#3FB36B' : '#0F6E56') : K.muted, flexShrink: 0 }} />
+                <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 10, fontWeight: o.is_chosen ? 600 : 400, color: K.date }}>{o.body}</span>
+                {o.is_chosen && <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, letterSpacing: '.06em', color: dark ? '#3FB36B' : '#0F6E56', flexShrink: 0 }}>CHOSEN</span>}
+              </div>
+            ))}
+            {extra && <div style={{ fontFamily: J, fontSize: 9, color: K.reg, lineHeight: 1.5, marginTop: 4, whiteSpace: 'pre-wrap' }}>{extra}</div>}
+            {(d.comments || []).slice(-3).map(cm => (
+              <div key={cm.id} style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 700, color: K.gold, flexShrink: 0 }}>{(cm.author_name || 'User').split(' ')[0]}:</span>
+                <span style={{ fontFamily: J, fontSize: 9.5, color: K.date, minWidth: 0 }}>{cm.content}</span>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <input value={decDraft[t.id] || ''} onChange={e => setDecDraft(prev => ({ ...prev, [t.id]: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addComment(t.id); } }} placeholder="Add a comment…" style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 9.5, padding: '7px 10px', borderRadius: 7, border: `1px solid ${K.cellBd}`, background: dark ? '#040C1C' : '#FCFBF8', color: K.date, outline: 'none' }} />
+              <button onClick={() => addComment(t.id)} style={{ flexShrink: 0, fontFamily: J, fontSize: 9.5, fontWeight: 600, padding: '0 13px', borderRadius: 7, border: 'none', background: K.gold, color: '#fff', cursor: 'pointer' }}>Send</button>
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', left: 0, right: 0, bottom: 0, zIndex: 9, background: dark ? 'rgba(0,0,0,.35)' : 'rgba(0,26,74,.18)' }} />
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', right: 10, width: 'min(calc(100% - 20px), 560px)', bottom: (zoneH || 0), zIndex: 10,
+            background: K.pop, border: `1px solid ${K.bd}`, borderTop: 'none', borderRadius: '0 0 14px 14px', boxShadow: K.shadow,
+            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease', display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '11px 14px', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0 }}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={K.gold} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M12 4v6" /><path d="M9 7l3-3 3 3" /><path d="M4 13l-2 2 2 2" /><path d="M2 15h7" /><path d="M20 13l2 2-2 2" /><path d="M22 15h-7" /></svg>
+              <span style={{ flex: 1, fontFamily: J, fontSize: 13, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: K.gold }}>Decisions</span>
+              <span style={{ fontFamily: J, fontSize: 10, color: K.muted }}>{decs.length ? decs.length + ' open' : ''}</span>
+              <i className="ti ti-x" onClick={onClose} style={{ fontSize: 17, color: K.muted, cursor: 'pointer', marginLeft: 4 }} />
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              {decs.length ? decs.map(decCard) : <div style={{ padding: '24px 16px', fontFamily: J, fontSize: 11, color: K.muted, textAlign: 'center', lineHeight: 1.6 }}>No decisions yet.<br />Add a decision question, maker, or due date on any task to see it here.</div>}
+            </div>
           </div>
         </React.Fragment>
       );
@@ -4948,6 +5047,7 @@ Rules:
       const [accessCfg, setAccessCfg] = useState(DEFAULT_ACCESS);
       const [showCalendar, setShowCalendar] = useState(false);
       const [showTasks, setShowTasks] = useState(false);
+      const [showDecisions, setShowDecisions] = useState(false);
       const [tasksFocus, setTasksFocus] = useState(null);   // a task to open directly (e.g. from the Projects tab)
       const [showProfile, setShowProfile] = useState(false);
       const [showStatus, setShowStatus] = useState(false);
@@ -5274,9 +5374,10 @@ Rules:
 
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
-          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); setTasksFocus(null); }} tasksOpen={showTasks} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
+          <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); setShowDecisions(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); setShowDecisions(false); setTasksFocus(null); }} tasksOpen={showTasks} onDecisions={() => { setShowDecisions(s => !s); setShowCalendar(false); setShowTasks(false); }} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
           {showCalendar && <CalendarPopover dark={dark} zoneH={zoneH} onOpenTask={(t) => { setShowCalendar(false); setShowTasks(true); setTasksFocus(t); }} onClose={() => setShowCalendar(false)} />}
           {showTasks && <TasksScreen dark={dark} user={user} initialTask={tasksFocus} onClose={() => { setShowTasks(false); setTasksFocus(null); }} />}
+          {showDecisions && <DecisionsPopover dark={dark} zoneH={zoneH} onOpenTask={(t) => { setShowDecisions(false); setShowTasks(true); setTasksFocus(t); }} onClose={() => setShowDecisions(false)} />}
           {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>

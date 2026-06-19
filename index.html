@@ -84,12 +84,20 @@
     #auth-overlay .pulse-dot { position:absolute; top:4px; right:4px; width:16px; height:16px; border-radius:50%; background:#3DAF7E; border:2.5px solid #001A4A; z-index:2; }
     #auth-overlay .pulse-dot::after { content:''; position:absolute; inset:-4px; border-radius:50%; background:rgba(61,175,126,.3); animation:tmg-pulse-ring 2s ease infinite; }
     @keyframes tmg-pulse-ring { 0% { transform:scale(1); opacity:1; } 100% { transform:scale(1.7); opacity:0; } }
+    @keyframes tmg-spin { to { transform: rotate(360deg); } }
     #auth-overlay .status-badge { display:inline-flex; align-items:center; gap:7px; background:rgba(61,175,126,.12); border:1px solid rgba(61,175,126,.3); border-radius:20px; padding:5px 14px; margin-bottom:20px; }
     #auth-overlay .badge-dot { width:6px; height:6px; border-radius:50%; background:#3DAF7E; }
     #auth-overlay .badge-txt { font-size:9px; letter-spacing:.18em; font-weight:600; text-transform:uppercase; color:#3DAF7E; }
     #auth-overlay #pending-screen .title { font-family:'Cormorant Garamond', Georgia, serif; font-style:italic; font-size:32px; font-weight:400; color:#fff; line-height:1.2; margin-bottom:14px; }
     #auth-overlay #pending-screen .msg { font-size:13px; line-height:1.75; color:rgba(255,255,255,.6); max-width:300px; }
     #auth-overlay #pending-screen .msg b { color:rgba(255,255,255,.9); font-weight:500; }
+    /* Task status color system (single source of truth; mirrors TASK_STATUS in JS) */
+    :root {
+      --todo-text:#AD832F; --todo-bg:#F3EBDA; --todo-border:#E8D9BC;
+      --prog-text:#185FA5; --prog-bg:#EEF3FB; --prog-border:#B8D4F0;
+      --stuck-text:#9B1C1C; --stuck-bg:#FEE2E2; --stuck-border:#FBBCBC;
+      --done-text:#0F6E56; --done-bg:#E6F2EC; --done-border:#A0D9C4;
+    }
     /* Deals tab layout switching */
     .deals-mobile-view  { display: flex; flex-direction: column; }
     .deals-kanban-view  { display: none; flex-direction: row; }
@@ -594,6 +602,18 @@ Rules:
       if (!ok) throw new Error(data.error || 'Contact search failed');
       return data.contacts || [];
     }
+    // Fuzzy-match a typed name against Zoho Contacts → ranked candidates [{id, full_name, email, score}].
+    async function matchZohoContacts(name) {
+      const { ok, data } = await callZoho({ action: 'match_contacts', name });
+      if (!ok) throw new Error(data.error || 'Contact match failed');
+      return data.matches || [];
+    }
+    // Create a new Zoho Contact → { id, full_name }.
+    async function createZohoContact(firstName, lastName) {
+      const { ok, data } = await callZoho({ action: 'create_contact', first_name: firstName, last_name: lastName });
+      if (!ok) throw new Error(data.error || 'Could not create contact');
+      return data;
+    }
     // Valid picklist options for the "Other KPI" fields — Zoho rejects any other value.
     const ALLOWED_OTHER_KPIS = [
       'Agent Recruiting for Tarek', 'Agent Training for Tarek', 'EO Work for Brad',
@@ -615,12 +635,8 @@ Rules:
         if ((p.kpis || []).some(k => /hotzone/i.test(k)) && p.hotzone_count) {
           record['Number_of_Hotzone_Actions_' + n] = Number(p.hotzone_count);
         }
-        // Person_N_Name is a Contacts LOOKUP. Link by record id only on a single, unambiguous
-        // match (avoids attaching a KPI to the wrong contact). Unmatched names stay blank.
-        try {
-          const matches = await searchZohoContacts(p.name);
-          if (matches.length === 1) record['Person_' + n + '_Name'] = { id: matches[0].id };
-        } catch (e) { /* leave unlinked if the search fails */ }
+        // Person_N_Name is a Contacts LOOKUP — use the contact resolved in the summary step.
+        if (p.contact_id) record['Person_' + n + '_Name'] = { id: p.contact_id };
       }
 
       // Other KPIs: 3 slots, and the value must be one of the allowed picklist options.
@@ -921,10 +937,10 @@ Rules:
 
     // ─── Tasks ───────────────────────────────────────────────────────
     const TASK_STATUS = [
-      { id: 'todo',        label: 'To Do',       color: '#AD832F', bg: '#F3EBDA' },  // gold
-      { id: 'in_progress', label: 'In Progress', color: '#185FA5', bg: '#EEF3FB' },  // blue
-      { id: 'stuck',       label: 'Stuck',       color: '#9B1C1C', bg: '#FEE2E2' },  // red
-      { id: 'done',        label: 'Completed',   color: '#0F6E56', bg: '#E6F2EC' },  // green
+      { id: 'todo',        label: 'To Do',       color: '#AD832F', bg: '#F3EBDA', border: '#E8D9BC' },  // gold
+      { id: 'in_progress', label: 'In Progress', color: '#185FA5', bg: '#EEF3FB', border: '#B8D4F0' },  // blue
+      { id: 'stuck',       label: 'Stuck',       color: '#9B1C1C', bg: '#FEE2E2', border: '#FBBCBC' },  // red
+      { id: 'done',        label: 'Completed',   color: '#0F6E56', bg: '#E6F2EC', border: '#A0D9C4' },  // green
     ];
     const TASK_PRIORITY = [
       { id: 'low',    label: 'Low',    color: '#CA9A04' },  // yellow
@@ -952,6 +968,7 @@ Rules:
     const statusLabel   = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).label || s;
     const statusColor   = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).color || '#6B6B6B';
     const statusBg      = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).bg    || '#EEEEEE';
+    const statusBorder  = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).border || '#E4DFD4';
     const priorityLabel = (p) => (TASK_PRIORITY.find(x => x.id === p) || {}).label || p;
     const priorityColor = (p) => (TASK_PRIORITY.find(x => x.id === p) || {}).color || '#9B9380';
     const recurLabel    = (r) => (TASK_RECUR.find(x => x.id === r)    || {}).label || 'Does not repeat';
@@ -1959,41 +1976,119 @@ Rules:
       );
     }
 
-    // The read-only summary the agent confirms before it's sent. payload = the normalized KPI object.
+    // The review step. Each person is matched against Zoho Contacts here; submit is blocked
+    // until every person is linked to a contact (picked from suggestions) or a new one is created.
     function KpiSummary({ dark, payload, onBack, onConfirm }) {
       const bord = dark ? '#152545' : C.border;
       const txt = dark ? '#fff' : C.navy;
       const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const green = dark ? '#5FCF99' : C.green;
       const row = { display: 'flex', justifyContent: 'space-between', gap: 12, padding: '6px 0', fontSize: '0.84rem', fontFamily: C.fontSans };
       const persons = payload.persons || [];
+      const [res, setRes] = useState(() => persons.map(() => ({ status: 'loading', matches: [], chosenId: null, chosenLabel: '', mode: null, creating: false, error: '' })));
+      const [submitting, setSubmitting] = useState(false);
+      const setOne = (i, patch) => setRes(r => r.map((x, j) => j === i ? { ...x, ...patch } : x));
+
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          for (let i = 0; i < persons.length; i++) {
+            try {
+              const matches = await matchZohoContacts(persons[i].name);
+              if (!alive) return;
+              const top = matches[0];
+              // Auto-link a clearly dominant match, but keep it visible/changeable.
+              const strong = top && top.score >= 90 && (matches.length === 1 || !matches[1] || (top.score - matches[1].score) >= 15);
+              setOne(i, { status: 'ready', matches, chosenId: strong ? top.id : null, chosenLabel: strong ? top.full_name : '', mode: strong ? 'match' : null });
+            } catch (e) {
+              if (!alive) return;
+              setOne(i, { status: 'ready', error: 'CRM lookup failed' });
+            }
+          }
+        })();
+        return () => { alive = false; };
+      }, []);
+
+      const pick = (i, m) => setOne(i, { chosenId: m.id, chosenLabel: m.full_name, mode: 'match', error: '' });
+      const clearPick = (i) => setOne(i, { chosenId: null, chosenLabel: '', mode: null });
+      async function createFor(i) {
+        const nm = (persons[i].name || '').trim();
+        const parts = nm.split(/\s+/).filter(Boolean);
+        const first = parts.length > 1 ? parts[0] : '';
+        const last = parts.length > 1 ? parts.slice(1).join(' ') : (parts[0] || nm);
+        setOne(i, { creating: true, error: '' });
+        try {
+          const c = await createZohoContact(first, last);
+          setOne(i, { creating: false, chosenId: c.id, chosenLabel: c.full_name || nm, mode: 'created' });
+        } catch (e) { setOne(i, { creating: false, error: (e.message || 'Could not create contact') }); }
+      }
+
+      const anyBusy = res.some(x => x.status === 'loading' || x.creating);
+      const allResolved = res.length > 0 && res.every(x => x.chosenId);
+      async function confirm() {
+        if (!allResolved || submitting) return;
+        setSubmitting(true);
+        const resolved = persons.map((p, i) => ({ ...p, contact_id: res[i].chosenId, name: res[i].chosenLabel || p.name }));
+        try { await onConfirm(resolved); } catch (e) { setSubmitting(false); }
+      }
+
+      const spin = { animation: 'tmg-spin 0.8s linear infinite', display: 'inline-block' };
+
       return (
         <div>
-          <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans, marginBottom: 10 }}>Please review — once confirmed it can’t be edited.</div>
+          <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans, marginBottom: 10 }}>Match each person to a contact, then confirm — once sent it can’t be edited.</div>
           <div style={{ ...row, borderBottom: `1px solid ${bord}` }}><span style={{ color: sub }}>Owner</span><span style={{ color: txt, fontWeight: 600 }}>{payload.owner || '—'}</span></div>
           <div style={{ ...row, borderBottom: `1px solid ${bord}` }}><span style={{ color: sub }}>Date</span><span style={{ color: txt, fontWeight: 600 }}>{payload.kpi_date || '—'}</span></div>
           <div style={{ ...row, borderBottom: `1px solid ${bord}` }}><span style={{ color: sub }}>CTC Hours</span><span style={{ color: txt, fontWeight: 600 }}>{payload.ctc_hours == null ? '—' : payload.ctc_hours}</span></div>
           <div style={{ fontSize: '0.6rem', color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, margin: '14px 0 7px', fontFamily: C.fontSans }}>People ({persons.length})</div>
-          {persons.map((p, i) => (
-            <div key={i} style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: '9px 11px', marginBottom: 7 }}>
-              <div style={{ fontSize: '0.86rem', fontWeight: 700, color: txt, fontFamily: C.fontSans, marginBottom: 4 }}>{p.name || '—'}</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                {(p.kpis || []).map(k => (
-                  <span key={k} style={{ fontSize: '0.72rem', fontWeight: 600, color: dark ? C.goldSoft : C.gold, background: dark ? 'rgba(173,131,47,0.16)' : '#F3EBDA', borderRadius: 12, padding: '3px 9px', fontFamily: C.fontSans }}>
-                    {k === 'Hotzone Action/s' ? ('Hotzone × ' + (p.hotzone_count || 0)) : k}
-                  </span>
-                ))}
+          {persons.map((p, i) => {
+            const st = res[i] || {};
+            return (
+              <div key={i} style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: '9px 11px', marginBottom: 7 }}>
+                <div style={{ fontSize: '0.86rem', fontWeight: 700, color: txt, fontFamily: C.fontSans, marginBottom: 4 }}>{p.name || '—'}</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 7 }}>
+                  {(p.kpis || []).map(k => (
+                    <span key={k} style={{ fontSize: '0.72rem', fontWeight: 600, color: dark ? C.goldSoft : C.gold, background: dark ? 'rgba(173,131,47,0.16)' : '#F3EBDA', borderRadius: 12, padding: '3px 9px', fontFamily: C.fontSans }}>
+                      {k === 'Hotzone Action/s' ? ('Hotzone × ' + (p.hotzone_count || 0)) : k}
+                    </span>
+                  ))}
+                </div>
+                {st.status === 'loading' && <div style={{ fontSize: '0.76rem', color: sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-loader-2" style={spin} />Checking CRM…</div>}
+                {st.status === 'ready' && st.chosenId && (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: '0.78rem', fontFamily: C.fontSans }}>
+                    <span style={{ color: green, fontWeight: 600 }}><i className="ti ti-circle-check-filled" style={{ marginRight: 5 }} />{st.mode === 'created' ? 'New contact: ' : 'Linked: '}{st.chosenLabel}</span>
+                    <button onClick={() => clearPick(i)} style={{ background: 'none', border: 'none', color: sub, fontSize: '0.74rem', cursor: 'pointer', textDecoration: 'underline', fontFamily: C.fontSans }}>change</button>
+                  </div>
+                )}
+                {st.status === 'ready' && !st.chosenId && (
+                  <div>
+                    {st.matches && st.matches.length > 0 && <div style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, fontWeight: 600 }}>Did you mean…</div>}
+                    {(st.matches || []).map(m => (
+                      <button key={m.id} onClick={() => pick(i, m)} style={{ textAlign: 'left', width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 10px', marginTop: 5, borderRadius: 8, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.8rem', border: `1px solid ${bord}`, background: 'transparent', color: txt }}>
+                        <span style={{ fontWeight: 600 }}>{m.full_name}{m.email ? <span style={{ color: sub, fontWeight: 400 }}> · {m.email}</span> : null}</span>
+                        <span style={{ color: sub, fontSize: '0.68rem' }}>{m.score}%</span>
+                      </button>
+                    ))}
+                    <div style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, margin: '8px 0 0' }}>{st.matches && st.matches.length ? 'None of these?' : 'No matching contact found.'}</div>
+                    <button onClick={() => createFor(i)} disabled={st.creating} style={{ marginTop: 5, display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: `1px dashed ${dark ? C.goldSoft : C.gold}`, borderRadius: 8, padding: '7px 11px', color: dark ? C.goldSoft : C.gold, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>
+                      {st.creating ? <i className="ti ti-loader-2" style={spin} /> : <i className="ti ti-user-plus" />}Create contact “{p.name}”
+                    </button>
+                    {st.error && <div style={{ fontSize: '0.74rem', color: C.red, marginTop: 5, fontFamily: C.fontSans }}>{st.error}</div>}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
           {(payload.others || []).length > 0 && (
             <div>
               <div style={{ fontSize: '0.6rem', color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, margin: '12px 0 6px', fontFamily: C.fontSans }}>Other KPIs</div>
               {payload.others.map((o, i) => (<div key={i} style={row}><span style={{ color: txt }}>{o.kpi}</span><span style={{ color: txt, fontWeight: 600 }}>{o.count}</span></div>))}
             </div>
           )}
+          {!allResolved && !anyBusy && <div style={{ fontSize: '0.74rem', color: sub, fontFamily: C.fontSans, marginTop: 12 }}>Match or create a contact for each person to enable submit.</div>}
           <div style={{ display: 'flex', gap: 9, marginTop: 16 }}>
             <button onClick={onBack} style={{ padding: '11px 14px', background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 10, fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, display: 'inline-flex', alignItems: 'center', gap: 6 }}><i className="ti ti-arrow-left" style={{ fontSize: 16 }} />Back to edit</button>
-            <button onClick={onConfirm} style={{ flex: 1, padding: 11, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 10, fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}><i className="ti ti-check" style={{ fontSize: 16 }} />Confirm{KPI_LIVE ? ' & send' : ''}</button>
+            <button onClick={confirm} disabled={!allResolved || submitting} style={{ flex: 1, padding: 11, background: (!allResolved || submitting) ? (dark ? '#23344f' : '#C9C3B4') : (dark ? C.gold : C.navy), color: '#fff', border: 'none', borderRadius: 10, fontSize: '0.88rem', fontWeight: 600, cursor: (!allResolved || submitting) ? 'not-allowed' : 'pointer', fontFamily: C.fontSans, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}><i className="ti ti-check" style={{ fontSize: 16 }} />{submitting ? 'Sending…' : ('Confirm' + (KPI_LIVE ? ' & send' : ''))}</button>
           </div>
         </div>
       );
@@ -3646,7 +3741,7 @@ Rules:
         const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
         const myLabels = myLabelsFor(t.id);
         return (
-          <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer' }}>
+          <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderLeft: `2.5px solid ${statusColor(t.status)}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer', opacity: t.status === 'done' ? 0.75 : 1 }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} title={priorityLabel(t.priority)} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
@@ -6464,7 +6559,7 @@ Rules:
                       onChoose={(c) => { if (c === 'form') setKpiFlow({ step: 'form', payload: kpiFlow.payload }); else startKpiNote(); }}
                       onReview={(payload) => setKpiFlow({ step: 'summary', payload })}
                       onBack={() => setKpiFlow({ step: 'form', payload: kpiFlow.payload })}
-                      onConfirm={() => submitKpi(kpiFlow.payload)}
+                      onConfirm={(resolvedPersons) => submitKpi({ ...kpiFlow.payload, persons: resolvedPersons || kpiFlow.payload.persons })}
                       onCancel={() => setKpiFlow(null)}
                     />
                   ) : null}

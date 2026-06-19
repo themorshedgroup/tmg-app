@@ -1014,8 +1014,10 @@
       const isTouch = typeof window !== 'undefined' && 'ontouchstart' in window;
       const [thread, setThread] = useState(null); const [threadMsgs, setThreadMsgs] = useState([]); const [threadText, setThreadText] = useState(''); const [tSending, setTSending] = useState(false);
       const listRef = useRef(null); const composerRef = useRef(null); const threadComposerRef = useRef(null); const threadRef = useRef(null);
+      const prevMsgCount = useRef(0);
       threadRef.current = thread;
       const scrollDown = () => { const el = listRef.current; if (el) el.scrollTop = el.scrollHeight; };
+      const nearBottom = () => { const el = listRef.current; if (!el) return true; return (el.scrollHeight - el.scrollTop - el.clientHeight) < 80; };
       const fmtTime = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
       const byIdNames = {}; Object.keys(rosterById).forEach(id => { byIdNames[id] = nameOf(id); });
       const ctxFor = (mine) => mine ? { dark, byId: byIdNames, chipColor: '#fff', linkColor: '#fff' } : { dark, byId: byIdNames };
@@ -1060,7 +1062,13 @@
         });
         return () => { active = false; ChatDB.unsubscribe(ch); ChatDB.unsubscribe(readCh); };
       }, [scope.id]);
-      useEffect(() => { scrollDown(); }, [messages.length]);
+      // Auto-scroll only when MAIN messages grow AND the user is already near the bottom.
+      // Skips yanking the view when an inline thread expands mid-list or a reply arrives in an open thread.
+      useEffect(() => {
+        const grew = messages.length > prevMsgCount.current;
+        prevMsgCount.current = messages.length;
+        if (grew && nearBottom()) scrollDown();
+      }, [messages.length]);
 
       const doSend = async (body, threadParentId, clear, setBusy) => {
         if (!body.trim()) return;
@@ -1083,8 +1091,9 @@
       const sendThread = () => doSend(threadText, thread && thread.id, () => setThreadText(''), setTSending);
       const onKey = (fn) => (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); fn(); } };
 
-      const onComposerChange = (e) => {
-        const val = e.target.value; setText(val);
+      // Shared @-mention / #-channel autocomplete. target ('main' | 'thread') tells pickMention which composer to write into.
+      const onComposerChangeFor = (target, setVal) => (e) => {
+        const val = e.target.value; setVal(val);
         const pos = e.target.selectionStart || val.length;
         const mm = val.slice(0, pos).match(/(^|\s)([@#])([A-Za-z0-9._-]*)$/);
         if (!mm) { setMenu(null); return; }
@@ -1098,12 +1107,18 @@
           (channels || []).forEach(c => { if (!qy || c.name.toLowerCase().includes(qy)) items.push({ label: '#' + c.name, insert: '#' + c.name }); });
         }
         if (items.length) setEmojiPicker(null);
-        setMenu(items.length ? { items: items.slice(0, 6), tokenStart, pos } : null);
+        setMenu(items.length ? { items: items.slice(0, 6), tokenStart, pos, target } : null);
       };
+      const onComposerChange = onComposerChangeFor('main', setText);
+      const onThreadComposerChange = onComposerChangeFor('thread', setThreadText);
       const pickMention = (item) => {
-        const ta = composerRef.current; const pos = ta ? (ta.selectionStart || text.length) : text.length;
-        const nt = text.slice(0, menu.tokenStart) + item.insert + ' ' + text.slice(pos);
-        setText(nt); setMenu(null);
+        const inThr = menu && menu.target === 'thread';
+        const ref = inThr ? threadComposerRef : composerRef;
+        const cur = inThr ? threadText : text;
+        const setVal = inThr ? setThreadText : setText;
+        const ta = ref.current; const pos = ta ? (ta.selectionStart || cur.length) : cur.length;
+        const nt = cur.slice(0, menu.tokenStart) + item.insert + ' ' + cur.slice(pos);
+        setVal(nt); setMenu(null);
         setTimeout(() => { if (ta) { ta.focus(); const c = menu.tokenStart + item.insert.length + 1; try { ta.setSelectionRange(c, c); } catch (e) {} } }, 10);
       };
       // Insert an emoji at the caret of the given textarea; keep the picker open (Slack-like).
@@ -1143,7 +1158,19 @@
         setMessages(upd); setThreadMsgs(upd); setEditId(null);
         try { await ChatDB.editMessage(id, body); } catch (e) { alert('Could not save edit.'); }
       };
-      const openThread = (mm) => { setActionFor(null); setThread(mm); setThreadMsgs([]); ChatDB.threadReplies(scope, mm.id).then(setThreadMsgs); };
+      // Toggle the inline thread dock: collapse if this parent is already open, else open it and load replies.
+      const openThread = (mm) => {
+        setActionFor(null);
+        if (threadRef.current && threadRef.current.id === mm.id) { setThread(null); return; }
+        setThread(mm); setThreadMsgs([]);
+        ChatDB.threadReplies(scope, mm.id).then(setThreadMsgs);
+        // Bring the parent row into view and focus the thread composer, replacing the old overlay slide.
+        setTimeout(() => {
+          const el = document.getElementById('chat-row-' + mm.id);
+          if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+          if (threadComposerRef.current) threadComposerRef.current.focus();
+        }, 60);
+      };
 
       const groupRx = (rx) => { const g = {}; (rx || []).forEach(r => { (g[r.emoji] = g[r.emoji] || { count: 0, mine: false }); g[r.emoji].count++; if (r.user_id === me) g[r.emoji].mine = true; }); return g; };
 
@@ -1165,8 +1192,9 @@
         const canReact = !mm._pending && !mm._failed && !editing;
         const triggerOpacity = isTouch ? 0.4 : (hoverId === mm.id ? 1 : 0);
         const trigCol = dark ? 'rgba(255,255,255,0.55)' : '#8A8676';
+        const threadOpen = !inThread && thread && thread.id === mm.id;
         return (
-          <div key={mm.id} onMouseEnter={() => setHoverId(mm.id)} onMouseLeave={() => setHoverId(h => h === mm.id ? null : h)} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div key={mm.id} id={inThread ? undefined : ('chat-row-' + mm.id)} onMouseEnter={() => setHoverId(mm.id)} onMouseLeave={() => setHoverId(h => h === mm.id ? null : h)} style={{ display: 'flex', flexDirection: 'column', gap: 2, borderRadius: threadOpen ? 10 : 0, background: threadOpen ? (dark ? 'rgba(173,131,47,0.07)' : 'rgba(173,131,47,0.06)') : 'transparent', padding: threadOpen ? '4px 4px 2px' : 0, margin: threadOpen ? '0 -4px' : 0 }}>
             {showSender && <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.06em', fontWeight: 600, marginLeft: 28, color: senderGold }}>{nameOf(mm.author_id)}</div>}
             <div style={{ display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'flex-end', gap: 6 }}>
               {!mine ? <Avatar photo={photoOf(mm.author_id)} name={nameOf(mm.author_id)} size={22} /> : <div style={{ width: 1 }} />}
@@ -1222,6 +1250,20 @@
         );
       };
 
+      // Inline thread dock — rendered nested under its parent row in the main list (replaces the old slide-in overlay).
+      const renderThreadDock = () => (
+        <div style={{ marginLeft: 28, marginTop: 4, marginBottom: 2, background: dark ? 'rgba(173,131,47,0.05)' : 'rgba(173,131,47,0.04)', border: `1px solid ${reactBord}`, borderLeft: `2px solid ${reactMineBd}`, borderRadius: 10, padding: '6px 8px 6px 10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <button onClick={() => setThread(null)} aria-label="Collapse thread" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: subCol, display: 'flex', alignItems: 'center' }}><i className="ti ti-chevron-down" style={{ fontSize: 14 }} /></button>
+            <span style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 600, color: senderGold }}>{threadMsgs.length} {threadMsgs.length === 1 ? 'reply' : 'replies'}</span>
+          </div>
+          <div style={{ maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {threadMsgs.length === 0 && <div style={{ fontFamily: J, fontSize: 10, color: subCol, padding: '2px 0' }}>No replies yet — start the thread below.</div>}
+            {threadMsgs.map((tm, i) => renderRow(tm, i, threadMsgs, true))}
+          </div>
+        </div>
+      );
+
       const composer = (val, onChange, onSend, busy, kRef, placeholder, autoMenu, pickerKey) => {
         const iconCol = dark ? 'rgba(255,255,255,0.55)' : '#8A8676';
         const fmtBtn = (icon, before, after, ph) => (
@@ -1267,7 +1309,6 @@
         );
       };
 
-      const parent = thread;
       return (
         <React.Fragment>
           {(() => {
@@ -1301,27 +1342,24 @@
           <div ref={listRef} onClick={() => { if (actionFor) setActionFor(null); }} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '12px 12px', display: 'flex', flexDirection: 'column', gap: 8, background: msgBg }}>
             {loading && <div style={{ fontFamily: J, fontSize: 10, color: subCol, textAlign: 'center', padding: 16 }}>Loading…</div>}
             {!loading && messages.length === 0 && <div style={{ fontFamily: J, fontSize: 11, color: subCol, textAlign: 'center', padding: 24 }}>No messages yet. Say hello 👋</div>}
-            {messages.map((mm, i) => renderRow(mm, i, messages, false))}
-          </div>
-          {composer(text, onComposerChange, send, sending, composerRef, 'Message ' + scope.title, true, 'main')}
-
-          {/* Thread overlay */}
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: msgBg, transform: parent ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 200ms ease', boxShadow: parent && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none', pointerEvents: parent ? 'auto' : 'none', zIndex: 6 }}>
-            {parent && (
-              <React.Fragment>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 14px', borderBottom: `1px solid ${barBord}`, background: barBg, flexShrink: 0 }}>
-                  <button onClick={() => setThread(null)} aria-label="Close thread" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: backCol, display: 'flex' }}><i className="ti ti-chevron-left" style={{ fontSize: 18 }} /></button>
-                  <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: titleCol }}>Thread</div>
-                </div>
-                <div style={{ flex: 1, overflowY: 'auto', padding: '12px 12px', display: 'flex', flexDirection: 'column', gap: 8, background: msgBg }}>
-                  {renderRow(parent, 0, [parent], true)}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0' }}><div style={{ flex: 1, height: 1, background: barBord }} /><span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.12em', textTransform: 'uppercase', color: subCol }}>{threadMsgs.length} {threadMsgs.length === 1 ? 'reply' : 'replies'}</span><div style={{ flex: 1, height: 1, background: barBord }} /></div>
-                  {threadMsgs.map((tm, i) => renderRow(tm, i, threadMsgs, true))}
-                </div>
-                {composer(threadText, e => setThreadText(e.target.value), sendThread, tSending, threadComposerRef, 'Reply…', false, 'thread')}
+            {messages.map((mm, i) => (
+              <React.Fragment key={mm.id}>
+                {renderRow(mm, i, messages, false)}
+                {thread && thread.id === mm.id && renderThreadDock()}
               </React.Fragment>
-            )}
+            ))}
           </div>
+          {/* Single context-aware composer: thread mode when a thread is open, otherwise the normal main composer. */}
+          {thread && (
+            <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', background: dark ? 'rgba(173,131,47,0.08)' : '#F3EBDA', borderTop: `1px solid ${inBarBord}` }}>
+              <i className="ti ti-message-circle" style={{ fontSize: 13, color: senderGold }} />
+              <span style={{ flex: 1, fontFamily: J, fontSize: 9, fontWeight: 600, color: senderGold }}>Replying in thread</span>
+              <button onClick={() => { setThread(null); setTimeout(() => composerRef.current && composerRef.current.focus(), 30); }} aria-label="Exit thread" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: subCol, display: 'flex', alignItems: 'center' }}><i className="ti ti-x" style={{ fontSize: 14 }} /></button>
+            </div>
+          )}
+          {thread
+            ? composer(threadText, onThreadComposerChange, sendThread, tSending, threadComposerRef, 'Reply in thread…', true, 'thread')
+            : composer(text, onComposerChange, send, sending, composerRef, 'Message ' + scope.title, true, 'main')}
         </React.Fragment>
       );
     }

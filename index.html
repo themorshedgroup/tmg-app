@@ -4849,7 +4849,7 @@ Rules:
       const src = 'tasks.html?embed=1' + hash;
       const top = 'calc(60px + env(safe-area-inset-top))';
       const panel = wide
-        ? { right: 0, width: 460, borderLeft: '1px solid #EDE7DC', boxShadow: '-8px 0 32px rgba(0,26,74,0.14)' }
+        ? { right: 0, width: 'min(94vw, 760px)', borderLeft: '1px solid #EDE7DC', boxShadow: '-8px 0 32px rgba(0,26,74,0.14)' }
         : { left: 8, right: 8, borderRadius: '0 0 14px 14px' };
       return (
         <React.Fragment>
@@ -4886,7 +4886,7 @@ Rules:
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
         .concat([{ id: 'tasks', label: 'Tasks', icon: 'ti-checklist', href: 'tasks.html' }])
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
-        .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', icon: 'ti-messages' }] : [])
+        .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', img: 'sffu-icon.png' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
         .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
       // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
@@ -5352,7 +5352,7 @@ Rules:
                   const on = activeTab === 'more' && moreView === it.id;
                   return (
                     <button key={it.id} onClick={() => { if (it.href) { window.location.href = it.href; return; } setMoreView(it.id); setActiveTab('more'); setMoreMenuOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 11, width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: 'none', background: on ? (dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA') : 'none', cursor: 'pointer', color: dark ? '#fff' : C.navy, fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 500 }}>
-                      <i className={`ti ${it.icon}`} style={{ fontSize: 18, color: dark ? C.goldSoft : C.gold }} />{it.label}
+                      {it.img ? <img src={it.img} style={{ width: 18, height: 18, objectFit: 'contain' }} /> : <i className={`ti ${it.icon}`} style={{ fontSize: 18, color: dark ? C.goldSoft : C.gold }} />}{it.label}
                     </button>
                   );
                 })}

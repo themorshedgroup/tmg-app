@@ -4299,7 +4299,7 @@ Rules:
     // One cohesive TMG-branded card: accent bar · merged identity header
     // (no role badge) · status controls · Details · Edit. Appearance /
     // Chat History / Sign out stay BELOW the card (Settings-embedded).
-    function ProfilePanel({ dark, user, profile, name, avatar, away, statusText, statusEmoji, onToggleAway, onOpenStatus, onClose, historySide, setHistorySide, setDark, fontScale, setFontScale }) {
+    function ProfilePanel({ dark, user, profile, name, avatar, away, statusText, statusEmoji, onToggleAway, onOpenStatus, onClose, historySide, setHistorySide, setDark, fontScale, setFontScale, navItems, moreMenuItems, onReorderNav, onReorderMore }) {
       const J = "'Jost', sans-serif";
       const [me, setMe] = useState(profile || null);
       const [allUsers, setAllUsers] = useState([]);
@@ -4449,7 +4449,7 @@ Rules:
 
             {/* ─── below the panel (untouched): Appearance · Chat History · Sign out ─── */}
             <div style={{ paddingTop: 14 }}>
-              <SettingsTab embedded historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={visibleTabs} moreMenuItems={moreItems} onReorderNav={handleReorderNav} onReorderMore={handleReorderMore} />
+              <SettingsTab embedded historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={navItems} moreMenuItems={moreMenuItems} onReorderNav={onReorderNav} onReorderMore={onReorderMore} />
             </div>
           </div>
         </React.Fragment>
@@ -5372,7 +5372,7 @@ Rules:
           {showCalendar && <TaskFramePopover which="calendar" zoneH={zoneH} onClose={() => setShowCalendar(false)} />}
           {showTasks && <TaskFramePopover which="tasks" zoneH={zoneH} onClose={() => { setShowTasks(false); setTasksFocus(null); }} />}
           {showDecisions && <TaskFramePopover which="decisions" zoneH={zoneH} onClose={() => setShowDecisions(false)} />}
-          {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
+          {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={visibleTabs} moreMenuItems={moreItems} onReorderNav={handleReorderNav} onReorderMore={handleReorderMore} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (

@@ -307,6 +307,8 @@
       '<text x="110" y="132" font-family="Jost,sans-serif" font-size="13" fill="#001A4A" text-anchor="middle">Sample Floor Plan</text>' +
       '</svg>'
     );
+    // Dev fixture voice note: a tiny silent WAV so the <audio> player + "AI transcript" caption are testable on localhost.
+    _devAttachUrls['dev/sample-voice.wav'] = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
     // Strip path separators / unsafe chars so the storage key stays well-formed.
     function sanitizeFileName(name) {
       return String(name || 'file').replace(/[\/\\]+/g, '_').replace(/[^A-Za-z0-9._-]/g, '_').replace(/_{2,}/g, '_').slice(0, 120) || 'file';
@@ -318,6 +320,7 @@
       return (b / (1024 * 1024)).toFixed(b < 10 * 1024 * 1024 ? 1 : 0) + ' MB';
     }
     function isImageMime(m) { return /^image\//.test(String(m || '')); }
+    function isAudioMime(m) { return /^audio\//.test(String(m || '')); }
     // Decode an image File to grab natural width/height (best-effort; resolves nulls on failure).
     function imageDims(file) {
       return new Promise((resolve) => {
@@ -358,6 +361,8 @@
               { id: 'm1', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'Welcome to the new Chat! 🎉 Notes at https://themorshedgroup.com', created_at: ago(3600000), reactions: [{ emoji: '🎉', user_id: 'dev-user-id' }, { emoji: '🎉', user_id: 'dev-alex' }], reply_count: 2, attachments: [{ id: 'devatt1', message_id: 'm1', storage_path: 'dev/sample-floorplan.svg', file_name: 'floorplan.svg', mime_type: 'image/svg+xml', file_size: 4200, width: 220, height: 150 }] },
               { id: 'm2', channel_id: 'devc1', author_id: 'dev-user-id',  content: 'Looks great. @Tarek can you review the #deals pipeline?', created_at: ago(1800000), reactions: [], reply_count: 0 },
               { id: 'm3', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'XSS test: <img src=x onerror=alert(1)> <script>alert(1)<\/script> javascript:alert(1)', created_at: ago(600000), edited_at: ago(300000), reactions: [], reply_count: 0 },
+              { id: 'm4', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'Hey team, quick voice note — the buyer wants to push closing to Friday, let me know if that works.', created_at: ago(240000), reactions: [], reply_count: 0, attachments: [{ id: 'devatt2', message_id: 'm4', storage_path: 'dev/sample-voice.wav', file_name: 'voice-note.wav', mime_type: 'audio/wav', file_size: 18000 }] },
+              { id: 'm5', channel_id: 'devc1', author_id: 'dev-user-id',  content: '', created_at: ago(120000), reactions: [], reply_count: 0, attachments: [{ id: 'devatt3', message_id: 'm5', storage_path: 'dev/sample-voice.wav', file_name: 'voice-note.wav', mime_type: 'audio/wav', file_size: 12000 }] },
             ],
             devd1: [
               { id: 'd1', conversation_id: 'devd1', author_id: 'dev-tarek', content: 'Hey — got a sec to sync on Forest Hill?', created_at: ago(900000), reactions: [], reply_count: 0 },
@@ -531,6 +536,25 @@
         if (error) { console.error('[ChatDB] loadAttachments:', error.message); return out; }
         (data || []).forEach(r => { (out[r.message_id] = out[r.message_id] || []).push(r); });
         return out;
+      },
+
+      // Voice-note transcription via the deployed chat-transcribe edge function.
+      // POST { storage_path, cleanup:true } with the user's access token; returns the transcript ('' on any failure).
+      async transcribe(storagePath) {
+        if (!storagePath) return '';
+        if (!this.client()) return ''; // dev/preview: no real transcription
+        try {
+          const token = window.SupabaseAuth?._state?.session?.access_token;
+          const res = await fetch('https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/chat-transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (token || SUPABASE_ANON), 'apikey': SUPABASE_ANON },
+            body: JSON.stringify({ storage_path: storagePath, cleanup: true }),
+          });
+          if (!res.ok) { console.error('[ChatDB] transcribe HTTP', res.status); return ''; }
+          const data = await res.json().catch(() => ({}));
+          if (data && data.error) { console.error('[ChatDB] transcribe:', data.error); return ''; }
+          return (data && data.transcript) || '';
+        } catch (e) { console.error('[ChatDB] transcribe:', e && e.message); return ''; }
       },
 
       async editMessage(id, content) {
@@ -908,6 +932,28 @@
       );
     }
 
+    // Compact inline audio player for voice-note attachments. Resolves a signed (or dev object) URL on mount.
+    function AttachmentAudio({ att, dark }) {
+      const [url, setUrl] = useState(att.previewUrl || '');
+      useEffect(() => {
+        let active = true;
+        if (!att.previewUrl) ChatDB.signedUrl(att.storage_path).then(u => { if (active && u) setUrl(u); }).catch(() => {});
+        return () => { active = false; };
+      }, [att.storage_path]);
+      const bord = dark ? '#152545' : '#E4DFD4', bg = dark ? '#0A1730' : '#fff', col = dark ? 'rgba(255,255,255,0.5)' : '#8A8676';
+      if (!url) {
+        return (
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, width: 240, maxWidth: '100%', padding: '8px 10px', borderRadius: 12, background: bg, border: `1px solid ${bord}`, color: col, fontFamily: "'Jost', sans-serif", fontSize: 10 }}>
+            <i className="ti ti-microphone" style={{ fontSize: 15 }} />Voice message
+          </div>
+        );
+      }
+      return (
+        <audio controls preload="metadata" src={url} aria-label="Voice message"
+          style={{ width: 240, maxWidth: '100%', height: 36, borderRadius: 12, display: 'block' }} />
+      );
+    }
+
     // Merge live Supabase profiles OVER the curated TEAM seed (see note above).
     function buildRoster(profiles) {
       profiles = profiles || [];
@@ -1146,6 +1192,17 @@
       const [thread, setThread] = useState(null); const [threadMsgs, setThreadMsgs] = useState([]); const [threadText, setThreadText] = useState(''); const [tSending, setTSending] = useState(false);
       const [pending, setPending] = useState([]); // staged attachments: { id, file, meta, status, previewUrl }
       const fileRef = useRef(null);
+      // ── Voice-message recording ──
+      const canRecord = typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function' && typeof MediaRecorder !== 'undefined';
+      const [rec, setRec] = useState(null);          // null | 'recording' | 'processing'
+      const [recSecs, setRecSecs] = useState(0);
+      const [recError, setRecError] = useState('');  // soft inline message (e.g. permission denied)
+      const mediaRef = useRef(null);                 // active MediaRecorder
+      const streamRef = useRef(null);                // active MediaStream (to stop tracks)
+      const chunksRef = useRef([]);                  // recorded Blob chunks
+      const recTimerRef = useRef(null);              // 1s tick interval
+      const recMimeRef = useRef('');                 // chosen recorder mimeType
+      const voiceUrlsRef = useRef([]);               // object URLs to revoke on unmount
       const listRef = useRef(null); const composerRef = useRef(null); const threadComposerRef = useRef(null); const threadRef = useRef(null);
       const prevMsgCount = useRef(0);
       threadRef.current = thread;
@@ -1269,6 +1326,98 @@
       };
       const removePending = (id) => setPending(prev => prev.filter(p => p.id !== id));
 
+      // ── Voice messages ──────────────────────────────────────────────
+      // Pick a MediaRecorder mime the browser actually supports (iOS Safari → mp4 only).
+      const pickRecMime = () => {
+        const cands = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+        if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
+          for (const c of cands) { if (MediaRecorder.isTypeSupported(c)) return c; }
+        }
+        return ''; // let the browser choose its default
+      };
+      const extForMime = (m) => /mp4|m4a|aac/i.test(m) ? 'm4a' : (/ogg/i.test(m) ? 'ogg' : 'webm');
+      const clearRecTimer = () => { if (recTimerRef.current) { clearInterval(recTimerRef.current); recTimerRef.current = null; } };
+      const stopTracks = () => { if (streamRef.current) { try { streamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {} streamRef.current = null; } };
+      const resetRec = () => { clearRecTimer(); setRecSecs(0); setRec(null); mediaRef.current = null; chunksRef.current = []; };
+
+      const startRecording = async () => {
+        if (!canRecord || rec) return;
+        setRecError('');
+        let stream;
+        try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+        catch (e) { setRecError('Microphone access was blocked. Enable it in your browser settings to send a voice message.'); return; }
+        try {
+          streamRef.current = stream;
+          const mime = pickRecMime(); recMimeRef.current = mime;
+          const mr = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+          chunksRef.current = [];
+          mr.ondataavailable = (ev) => { if (ev.data && ev.data.size > 0) chunksRef.current.push(ev.data); };
+          mediaRef.current = mr;
+          mr.start();
+          setRecSecs(0); setRec('recording');
+          clearRecTimer();
+          recTimerRef.current = setInterval(() => setRecSecs(s => s + 1), 1000);
+        } catch (e) {
+          stopTracks(); resetRec();
+          setRecError('Could not start recording on this device.');
+        }
+      };
+
+      const cancelRecording = () => {
+        clearRecTimer();
+        const mr = mediaRef.current;
+        if (mr && mr.state !== 'inactive') { try { mr.onstop = null; mr.stop(); } catch (e) {} }
+        stopTracks();
+        resetRec();
+      };
+
+      // Stop the recorder, build a Blob, upload via the attachment substrate, transcribe, then send.
+      const stopAndSend = () => {
+        const mr = mediaRef.current;
+        if (!mr) { resetRec(); return; }
+        clearRecTimer();
+        setRec('processing');
+        const mime = recMimeRef.current || mr.mimeType || 'audio/webm';
+        mr.onstop = async () => {
+          stopTracks();
+          const blob = new Blob(chunksRef.current, { type: mime });
+          chunksRef.current = [];
+          if (!blob.size) { resetRec(); return; }
+          const ext = extForMime(mime);
+          const file = new File([blob], 'voice-' + Date.now() + '.' + ext, { type: mime });
+          // Local object URL so the optimistic bubble can play instantly (revoked on unmount).
+          let previewUrl = '';
+          if (typeof URL !== 'undefined' && URL.createObjectURL) { previewUrl = URL.createObjectURL(blob); voiceUrlsRef.current.push(previewUrl); }
+          const aid = (crypto.randomUUID ? crypto.randomUUID() : ('v' + Date.now() + Math.random()));
+          try {
+            const meta = await ChatDB.uploadAttachment(scope, file);
+            meta.previewUrl = previewUrl || meta.previewUrl || '';   // ensure instant playback for my optimistic row
+            const transcript = await ChatDB.transcribe(meta.storage_path); // '' → audio-only message
+            const staged = [{ id: aid, file, meta, status: 'ready', previewUrl: meta.previewUrl }];
+            const inThread = !!(threadRef.current && threadRef.current.id);
+            if (inThread) await doSend(transcript, threadRef.current.id, () => {}, () => {}, staged);
+            else await doSend(transcript, null, () => {}, () => {}, staged);
+          } catch (e) {
+            setRecError('Could not send the voice message. Please try again.');
+          } finally {
+            resetRec();
+          }
+        };
+        try { if (mr.state !== 'inactive') mr.stop(); else mr.onstop(); }
+        catch (e) { stopTracks(); resetRec(); }
+      };
+
+      // Revoke voice object URLs + tear down any live recording on unmount.
+      useEffect(() => () => {
+        clearRecTimer();
+        if (mediaRef.current && mediaRef.current.state !== 'inactive') { try { mediaRef.current.onstop = null; mediaRef.current.stop(); } catch (e) {} }
+        stopTracks();
+        voiceUrlsRef.current.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
+        voiceUrlsRef.current = [];
+      }, []);
+
+      const fmtRecTime = (s) => { const m = Math.floor(s / 60), ss = s % 60; return m + ':' + String(ss).padStart(2, '0'); };
+
       // Shared @-mention / #-channel autocomplete. target ('main' | 'thread') tells pickMention which composer to write into.
       const onComposerChangeFor = (target, setVal) => (e) => {
         const val = e.target.value; setVal(val);
@@ -1371,6 +1520,7 @@
         const triggerOpacity = isTouch ? 0.4 : (hoverId === mm.id ? 1 : 0);
         const trigCol = dark ? 'rgba(255,255,255,0.55)' : '#8A8676';
         const threadOpen = !inThread && thread && thread.id === mm.id;
+        const hasAudioAtt = (mm.attachments || []).some(att => isAudioMime(att.mime_type));
         return (
           <div key={mm.id} id={inThread ? undefined : ('chat-row-' + mm.id)} onMouseEnter={() => setHoverId(mm.id)} onMouseLeave={() => setHoverId(h => h === mm.id ? null : h)} style={{ display: 'flex', flexDirection: 'column', gap: 2, borderRadius: threadOpen ? 10 : 0, background: threadOpen ? (dark ? 'rgba(173,131,47,0.07)' : 'rgba(173,131,47,0.06)') : 'transparent', padding: threadOpen ? '4px 4px 2px' : 0, margin: threadOpen ? '0 -4px' : 0 }}>
             {showSender && <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.06em', fontWeight: 600, marginLeft: 28, color: senderGold }}>{nameOf(mm.author_id)}</div>}
@@ -1384,8 +1534,16 @@
                     <button onClick={saveEdit} style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: senderGold, background: 'none', border: 'none', cursor: 'pointer' }}>Save</button>
                   </div>
                 </div>
+              ) : (hasAudioAtt && !(mm.content || '').trim()) ? (
+                /* Audio-only voice note: skip the empty text bubble (the player renders below). */
+                <div style={{ maxWidth: '78%' }} />
               ) : (
                 <div onClick={() => setActionFor(actionFor === mm.id ? null : mm.id)} style={{ maxWidth: '78%', padding: '7px 10px', fontFamily: J, fontSize: 11, lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-word', cursor: 'pointer', borderRadius: mine ? '12px 12px 3px 12px' : '12px 12px 12px 3px', background: mine ? mineBg : theirBg, color: mine ? '#fff' : theirCol, border: mine ? 'none' : theirBord, opacity: mm._pending ? 0.6 : 1 }}>
+                  {hasAudioAtt && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3, fontFamily: J, fontSize: 8, letterSpacing: '0.04em', fontWeight: 600, textTransform: 'uppercase', opacity: 0.6 }}>
+                      <i className="ti ti-sparkles" style={{ fontSize: 10 }} />AI transcript
+                    </div>
+                  )}
                   {renderMessageContent(mm.content, ctxFor(mine))}
                   {mm.edited_at && <span style={{ fontSize: 8, opacity: 0.6, marginLeft: 5 }}>(edited)</span>}
                 </div>
@@ -1398,7 +1556,9 @@
             {/* attachments (images render inline; other files as a chip) — works in threads too */}
             {(mm.attachments || []).length > 0 && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4, marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0, justifyContent: mine ? 'flex-end' : 'flex-start', maxWidth: '82%', alignSelf: mine ? 'flex-end' : 'flex-start' }}>
-                {(mm.attachments || []).map(att => isImageMime(att.mime_type)
+                {(mm.attachments || []).map(att => isAudioMime(att.mime_type)
+                  ? <AttachmentAudio key={att.id || att.storage_path} att={att} dark={dark} />
+                  : isImageMime(att.mime_type)
                   ? <AttachmentImage key={att.id || att.storage_path} att={att} dark={dark} />
                   : (
                     <button key={att.id || att.storage_path} type="button" onClick={async () => { const u = att.previewUrl || await ChatDB.signedUrl(att.storage_path); if (u) window.open(u, '_blank', 'noopener,noreferrer'); }}
@@ -1516,6 +1676,32 @@
               })}
             </div>
           )}
+          {/* Soft mic-permission / recording error (never throws) */}
+          {recError && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, padding: '6px 9px', borderRadius: 9, background: dark ? 'rgba(192,57,43,0.14)' : '#FBEAE7', border: `1px solid ${dark ? 'rgba(192,57,43,0.4)' : '#E8C4BE'}`, color: dark ? '#F0A99F' : '#A2342A', fontFamily: J, fontSize: 9.5 }}>
+              <i className="ti ti-microphone-off" style={{ fontSize: 13, flexShrink: 0 }} />
+              <span style={{ flex: 1 }}>{recError}</span>
+              <button type="button" onClick={() => setRecError('')} aria-label="Dismiss" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0, display: 'flex' }}><i className="ti ti-x" style={{ fontSize: 12 }} /></button>
+            </div>
+          )}
+          {rec ? (
+            /* Recording / processing bar — replaces the input row while a voice note is being captured. */
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 34, padding: '4px 6px 4px 12px', borderRadius: 17, background: inFieldBg, border: `1px solid ${inFieldBord}` }}>
+              {rec === 'processing' ? (
+                <React.Fragment>
+                  <i className="ti ti-loader-2" style={{ fontSize: 16, color: senderGold, animation: 'tmg-spin 0.8s linear infinite' }} />
+                  <span style={{ flex: 1, fontFamily: J, fontSize: 11, fontWeight: 500, color: subCol }}>Transcribing…</span>
+                </React.Fragment>
+              ) : (
+                <React.Fragment>
+                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#C0392B', flexShrink: 0, animation: 'tmg-pulse-ring 1.4s ease infinite' }} />
+                  <span style={{ flex: 1, fontFamily: J, fontSize: 12, fontWeight: 600, color: dark ? '#fff' : '#001A4A', fontVariantNumeric: 'tabular-nums' }}>{fmtRecTime(recSecs)}</span>
+                  <button type="button" onClick={cancelRecording} aria-label="Cancel recording" title="Cancel" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, background: 'transparent', color: dark ? 'rgba(255,255,255,0.55)' : '#8A8676', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-trash" style={{ fontSize: 17 }} /></button>
+                  <button type="button" onClick={stopAndSend} aria-label="Stop and send" title="Send voice message" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, background: sendBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-check" style={{ fontSize: 16 }} /></button>
+                </React.Fragment>
+              )}
+            </div>
+          ) : (
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 7 }}>
             {autoMenu && (
               <button type="button" disabled aria-label="Screen recording (coming soon)" title="Screen recording — coming soon" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'transparent', flexShrink: 0, cursor: 'not-allowed', color: dark ? 'rgba(255,255,255,0.30)' : '#B4B2A9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-device-desktop" style={{ fontSize: 16 }} /></button>
@@ -1523,10 +1709,16 @@
             <button type="button" onClick={openFilePicker} aria-label="Attach file" title="Attach a file or image" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'transparent', flexShrink: 0, cursor: 'pointer', color: iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-paperclip" style={{ fontSize: 17 }} /></button>
             <textarea ref={kRef} value={val} onChange={onChange} onKeyDown={onKey(onSend)} rows={1} placeholder={placeholder} aria-label={placeholder} style={{ flex: 1, resize: 'none', maxHeight: 96, minHeight: 34, borderRadius: 17, padding: '8px 12px', fontFamily: J, fontSize: 11, lineHeight: 1.4, color: dark ? '#fff' : '#001A4A', background: inFieldBg, border: `1px solid ${inFieldBord}`, outline: 'none', boxSizing: 'border-box' }} />
             <button type="button" onClick={() => { setMenu(null); setEmojiPicker(p => p === pickerKey ? null : pickerKey); }} aria-label="Emoji" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'transparent', flexShrink: 0, cursor: 'pointer', color: emojiPicker === pickerKey ? senderGold : iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-mood-smile" style={{ fontSize: 18 }} /></button>
-            {(() => { const canSend = (val.trim().length > 0 || pendingReady) && !busy; return (
+            {(() => { const canSend = (val.trim().length > 0 || pendingReady) && !busy;
+              // WhatsApp-style: mic when there's nothing to send, Send button otherwise.
+              if (!canSend && canRecord) return (
+                <button type="button" onClick={startRecording} aria-label="Record voice message" title="Record a voice message" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, background: sendBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-microphone" style={{ fontSize: 17 }} /></button>
+              );
+              return (
             <button onClick={onSend} disabled={!canSend} aria-label="Send" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: canSend ? 'pointer' : 'default', flexShrink: 0, background: canSend ? sendBg : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-arrow-up" style={{ fontSize: 15 }} /></button>
             ); })()}
           </div>
+          )}
         </div>
         );
       };

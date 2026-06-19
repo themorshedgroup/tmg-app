@@ -190,8 +190,9 @@
       mono: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
     };
 
-    // CRM has its OWN edge function (tmg-crm), separate from the app's zoho-crm.
-    const CRM_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/tmg-crm';
+    // CRM shares the org's single Zoho proxy function (zoho-crm) — it adds the
+    // read-only list_modules / get_fields actions used by the schema explorer.
+    const CRM_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-crm';
     const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     function authToken() { return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON; }
 

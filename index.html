@@ -2228,7 +2228,81 @@ Rules:
       );
     }
 
-    function SettingsTab({ historySide, setHistorySide, dark, setDark, fontScale, setFontScale, embedded }) {
+    function DragReorderList({ items, onReorder, dark, renderLabel }) {
+      const [dragIdx, setDragIdx] = useState(null);
+      const [overIdx, setOverIdx] = useState(null);
+      const listRef = useRef(null);
+      const rowHeight = 44;
+
+      const getIdxFromY = (clientY) => {
+        if (!listRef.current) return null;
+        const rect = listRef.current.getBoundingClientRect();
+        const y = clientY - rect.top;
+        return Math.max(0, Math.min(items.length - 1, Math.floor(y / rowHeight)));
+      };
+
+      const onPointerDown = (e, idx) => {
+        e.preventDefault();
+        setDragIdx(idx);
+        setOverIdx(idx);
+        const el = e.currentTarget.closest('[data-drag-list]');
+        const onMove = (ev) => {
+          const cy = ev.touches ? ev.touches[0].clientY : ev.clientY;
+          setOverIdx(getIdxFromY(cy));
+        };
+        const onUp = () => {
+          setDragIdx(d => {
+            setOverIdx(o => {
+              if (d !== null && o !== null && d !== o) {
+                const arr = [...items];
+                const [moved] = arr.splice(d, 1);
+                arr.splice(o, 0, moved);
+                onReorder(arr);
+              }
+              return null;
+            });
+            return null;
+          });
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          window.removeEventListener('pointercancel', onUp);
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+      };
+
+      const borderCol = dark ? '#1E3360' : C.border;
+      const dragBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+
+      return (
+        <div ref={listRef} data-drag-list style={{ borderRadius: 10, border: `1px solid ${borderCol}`, overflow: 'hidden' }}>
+          {items.map((item, i) => {
+            const isDragging = dragIdx === i;
+            const isOver = overIdx === i && dragIdx !== null && dragIdx !== i;
+            return (
+              <div key={item.id} style={{
+                display: 'flex', alignItems: 'center', gap: 10, height: rowHeight,
+                padding: '0 12px', background: isDragging ? dragBg : 'transparent',
+                borderBottom: i < items.length - 1 ? `1px solid ${borderCol}` : 'none',
+                borderTop: isOver && dragIdx > i ? `2px solid ${C.gold}` : 'none',
+                borderBottomColor: isOver && dragIdx < i ? C.gold : (i < items.length - 1 ? borderCol : 'transparent'),
+                borderBottomWidth: isOver && dragIdx < i ? 2 : 1,
+                opacity: isDragging ? 0.7 : 1,
+                touchAction: 'none', userSelect: 'none', WebkitUserSelect: 'none',
+              }}>
+                <i className="ti ti-grip-vertical" onPointerDown={e => onPointerDown(e, i)} style={{
+                  fontSize: 16, color: C.textMuted, cursor: 'grab', touchAction: 'none', padding: '4px 0',
+                }} />
+                {renderLabel(item)}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function SettingsTab({ historySide, setHistorySide, dark, setDark, fontScale, setFontScale, embedded, navItems, moreMenuItems, onReorderNav, onReorderMore }) {
       const sideBtn = (val, label, icon) => {
         const on = historySide === val;
         return (
@@ -2269,6 +2343,33 @@ Rules:
               <span style={{ fontSize: 22, color: C.textMuted, fontFamily: C.fontSans, fontWeight: 700, flexShrink: 0 }}>A</span>
             </div>
             <div style={{ fontSize: '0.72rem', color: C.textMuted, marginTop: 9, lineHeight: 1.5, fontFamily: C.fontSans }}>Adjusts the size of everything in the app.{(fontScale || 1) !== 1 && <React.Fragment> · <button onClick={() => setFontScale(1)} style={{ background: 'none', border: 'none', padding: 0, color: C.gold, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.72rem', fontWeight: 600 }}>Reset to 100%</button></React.Fragment>}</div>
+
+            {navItems && navItems.length > 0 && (
+              <React.Fragment>
+                <div style={{ height: 1, background: dark ? '#1E3360' : C.border, margin: '18px 0' }} />
+                <div style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans, marginBottom: 4 }}>Navigation order</div>
+                <div style={{ fontSize: '0.72rem', color: C.textMuted, fontFamily: C.fontSans, marginBottom: 10, lineHeight: 1.5 }}>Drag to rearrange the bottom tabs.</div>
+                <DragReorderList items={navItems} onReorder={onReorderNav} dark={dark} renderLabel={(item) => (
+                  <React.Fragment>
+                    <i className={`ti ${item.icon}`} style={{ fontSize: 16, color: dark ? C.goldSoft : C.gold }} />
+                    <span style={{ fontSize: '0.82rem', color: C.textPrimary, fontFamily: C.fontSans, fontWeight: 500 }}>{item.label}</span>
+                  </React.Fragment>
+                )} />
+              </React.Fragment>
+            )}
+
+            {moreMenuItems && moreMenuItems.length > 0 && (
+              <React.Fragment>
+                <div style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans, marginTop: 16, marginBottom: 4 }}>More menu order</div>
+                <div style={{ fontSize: '0.72rem', color: C.textMuted, fontFamily: C.fontSans, marginBottom: 10, lineHeight: 1.5 }}>Drag to rearrange items in the More menu.</div>
+                <DragReorderList items={moreMenuItems} onReorder={onReorderMore} dark={dark} renderLabel={(item) => (
+                  <React.Fragment>
+                    {item.img ? <img src={item.img} style={{ width: 16, height: 16, objectFit: 'contain' }} /> : <i className={`ti ${item.icon}`} style={{ fontSize: 16, color: dark ? C.goldSoft : C.gold }} />}
+                    <span style={{ fontSize: '0.82rem', color: C.textPrimary, fontFamily: C.fontSans, fontWeight: 500 }}>{item.label}</span>
+                  </React.Fragment>
+                )} />
+              </React.Fragment>
+            )}
           </div>
 
           {/* Chat history */}
@@ -4348,7 +4449,7 @@ Rules:
 
             {/* ─── below the panel (untouched): Appearance · Chat History · Sign out ─── */}
             <div style={{ paddingTop: 14 }}>
-              <SettingsTab embedded historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />
+              <SettingsTab embedded historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={visibleTabs} moreMenuItems={moreItems} onReorderNav={handleReorderNav} onReorderMore={handleReorderMore} />
             </div>
           </div>
         </React.Fragment>
@@ -4878,10 +4979,20 @@ Rules:
 
       // Admin-configurable access: filter the nav + More apps to what this user may see.
       const appSet = profile ? allowedAppSet(profile.access, accessCfg) : null; // null = everything
-      const visibleTabs = appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS;
+      const [tabOrder, setTabOrder] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-tab-order')) || null; } catch { return null; } });
+      const [moreOrder, setMoreOrder] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-more-order')) || null; } catch { return null; } });
+      const applyOrder = (list, order) => {
+        if (!order || !order.length) return list;
+        const map = Object.fromEntries(list.map(it => [it.id, it]));
+        const ordered = order.filter(id => map[id]).map(id => map[id]);
+        list.forEach(it => { if (!order.includes(it.id)) ordered.push(it); });
+        return ordered;
+      };
+      const baseTabs = appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS;
+      const visibleTabs = applyOrder(baseTabs, tabOrder);
       const isAdmin = hasAdmin(profile && profile.access);
       // "More" menu — Settings always; Shared Drives / Company Directory gated; Admin role-gated.
-      const moreItems = []
+      const baseMI = []
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
         .concat([{ id: 'tasks', label: 'Tasks', icon: 'ti-checklist', href: 'tasks.html' }])
@@ -4889,6 +5000,9 @@ Rules:
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', img: 'sffu-icon.png' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
         .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
+      const moreItems = applyOrder(baseMI, moreOrder);
+      const handleReorderNav = (arr) => { const ids = arr.map(t => t.id); setTabOrder(ids); localStorage.setItem('tmg-tab-order', JSON.stringify(ids)); };
+      const handleReorderMore = (arr) => { const ids = arr.map(t => t.id); setMoreOrder(ids); localStorage.setItem('tmg-more-order', JSON.stringify(ids)); };
       // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
       const myAvatar = (profile && profile.avatar_url) || (user && user.user_metadata && user.user_metadata.avatar_url) || '';
       const myName = ((((profile && profile.first_name) || '') + ' ' + ((profile && profile.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || (user && user.email) || 'Me';

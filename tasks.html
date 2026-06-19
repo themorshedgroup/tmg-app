@@ -224,6 +224,13 @@ Continue with TMG Gmail
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
+    // Standalone Tasks app (served at /tasks). Boots straight into the Tasks screen.
+    const TASKS_STANDALONE = true;
+    const TASKS_EMBED = (() => { try { return window.self !== window.top; } catch (e) { return false; } })();
+    // Embedded (inside the main app's iframe popout) → no top bar, so popouts fill from the top.
+    const POPOUT_TOP = TASKS_EMBED ? '0px' : POPOUT_TOP;
+    const TASKS_HASH = (typeof location !== 'undefined' ? location.hash : '').replace('#', '').toLowerCase();
+
     // ─── Design tokens (TMG Brand) ───────────────────────────────────
     const C = {
       bg:           '#FCFBF8',
@@ -3101,6 +3108,805 @@ Rules:
       );
     }
 
+    // ─── Tasks module (full screen, opened from the top-bar Tasks chip) ──
+    function TaskForm({ dark, task, team, user, onSave, onCancel }) {
+      const t = task || {};
+      const uid = user && user.id;
+      const _dd = t.due_at ? new Date(t.due_at) : null;
+      const _p2 = (n) => String(n).padStart(2, '0');
+      const _initDate = _dd ? (_dd.getFullYear() + '-' + _p2(_dd.getMonth() + 1) + '-' + _p2(_dd.getDate())) : '';
+      const _initHM = _dd ? (_p2(_dd.getHours()) + ':' + _p2(_dd.getMinutes())) : '';
+      const _decd = t.decision_due_at ? new Date(t.decision_due_at) : null;
+      const _initDecDate = _decd ? (_decd.getFullYear() + '-' + _p2(_decd.getMonth() + 1) + '-' + _p2(_decd.getDate())) : '';
+      const _initDecHM = _decd ? (_p2(_decd.getHours()) + ':' + _p2(_decd.getMinutes())) : '';
+      const [title, setTitle] = useState(t.title || '');
+      const [dueDate, setDueDate] = useState(_initDate);
+      const [dueTime, setDueTime] = useState(_initHM && _initHM !== '00:00' ? _initHM : '09:00');
+      const [hasTime, setHasTime] = useState(!!(_initHM && _initHM !== '00:00'));
+      const [repeats, setRepeats] = useState(!!(t.recurrence && t.recurrence !== 'none'));
+      const [recurrence, setRecurrence] = useState(t.recurrence && t.recurrence !== 'none' ? t.recurrence : 'weekly');
+      const [recurInterval, setRecurInterval] = useState(t.recur_interval != null ? String(t.recur_interval) : '2');
+      const [recurUnit, setRecurUnit] = useState(t.recur_unit || 'week');
+      const [recurCopy, setRecurCopy] = useState(Array.isArray(t.recur_copy_fields) && t.recur_copy_fields.length ? t.recur_copy_fields : RECUR_COPY_DEFAULT);
+      const [project, setProject] = useState(t._projectName || '');
+      const [projects, setProjects] = useState([]);
+      const [newProjMode, setNewProjMode] = useState(false);
+      const [priority, setPriority] = useState(t.priority || 'medium');
+      const [status, setStatus] = useState(t.status || 'todo');
+      const [myLabels, setMyLabels] = useState([]);
+      const [labelInput, setLabelInput] = useState('');
+      const [assignees, setAssignees] = useState(t._assignees || []);
+      const [assigners, setAssigners] = useState(t._assigners || []);
+      const [workingUrl, setWorkingUrl] = useState(t.working_url || '');
+      const [emailLink, setEmailLink] = useState(t.email_link || '');
+      const [description, setDescription] = useState(t.description || '');
+      const [context, setContext] = useState(t.context || '');
+      const [decisionMakers, setDecisionMakers] = useState(t._decisionMakers || []);
+      const [decisionQuestion, setDecisionQuestion] = useState(t.decision_question || '');
+      const [decisionDueDate, setDecisionDueDate] = useState(_initDecDate);
+      const [decisionHasTime, setDecisionHasTime] = useState(t.decision_due_has_time != null ? !!t.decision_due_has_time : !!(_initDecHM && _initDecHM !== '00:00'));
+      const [decisionDueTime, setDecisionDueTime] = useState(_initDecHM && _initDecHM !== '00:00' ? _initDecHM : '09:00');
+      const [decisionOptions, setDecisionOptions] = useState([]);
+      const [saving, setSaving] = useState(false);
+      // W/D planning — stored per-user, per-task in localStorage for now (wired to the calendar later)
+      const [weeklyPriority, setWeeklyPriority] = useState(t.weekly_priority || '');
+      const [weeklyRank, setWeeklyRank] = useState(t.weekly_rank != null ? String(t.weekly_rank) : '');
+      const [dailyPriority, setDailyPriority] = useState(t.daily_priority || '');
+      const [dailyRank, setDailyRank] = useState(t.daily_rank != null ? String(t.daily_rank) : '');
+      const [planOpen, setPlanOpen] = useState(!!(t.weekly_priority || t.weekly_rank != null || t.daily_priority || t.daily_rank != null));
+      const [decisionOpen, setDecisionOpen] = useState(false);
+
+      useEffect(() => { TaskDB.loadProjects().then(rows => setProjects(rows || [])); }, []);
+      useEffect(() => {
+        if (!t.id) return;
+        TaskDB.loadLabels(t.id).then(rows => setMyLabels((rows || []).filter(r => r.user_id === uid).map(r => r.label)));
+        TaskDB.loadDecisionOptions(t.id).then(rows => setDecisionOptions((rows || []).map(r => ({ body: r.body, is_chosen: r.is_chosen }))));
+        if (t.decision_question) setDecisionOpen(true);
+      }, [t.id]);
+
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const gold = dark ? '#C9A45A' : '#AD832F';
+      const lbl = { fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, margin: '0 0 5px', fontFamily: C.fontSans };
+      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const toggle = (arr, set, id) => set(arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]);
+      const chips = (arr, set) => (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {team.map(m => { const on = arr.includes(m.id); return <button key={m.id} type="button" onClick={() => toggle(arr, set, m.id)} style={{ padding: '6px 10px', borderRadius: 16, border: `1px solid ${on ? C.navy : bord}`, background: on ? C.navy : (dark ? '#06101F' : '#fff'), color: on ? '#fff' : sub, fontSize: '0.76rem', cursor: 'pointer', fontFamily: C.fontSans }}>{m.name}</button>; })}
+          {!team.length && <span style={{ fontSize: '0.74rem', color: sub }}>No teammates loaded.</span>}
+        </div>
+      );
+      const sel = (val, set, opts) => { const cur = opts.find(o => o.id === val) || {}; return <select value={val} onChange={e => set(e.target.value)} style={{ ...inp, ...(cur.bg ? { background: cur.bg, color: cur.color, fontWeight: 600 } : {}) }}>{opts.map(o => <option key={o.id} value={o.id} style={o.bg ? { background: o.bg, color: o.color, fontWeight: 600 } : undefined}>{o.label}</option>)}</select>; };
+      const field = (label, node) => <div style={{ marginBottom: 13 }}><div style={lbl}>{label}</div>{node}</div>;
+      const addLabel = () => { const v = labelInput.trim(); if (!v) return; setMyLabels(l => l.includes(v) ? l : [...l, v]); setLabelInput(''); };
+      const removeLabel = (v) => setMyLabels(l => l.filter(x => x !== v));
+      const addOpt = () => setDecisionOptions(o => [...o, { body: '', is_chosen: false }]);
+      const updateOpt = (i, v) => setDecisionOptions(o => o.map((x, j) => j === i ? { ...x, body: v } : x));
+      const removeOpt = (i) => setDecisionOptions(o => o.filter((_, j) => j !== i));
+      const setChosen = (i) => setDecisionOptions(o => o.map((x, j) => ({ ...x, is_chosen: j === i ? !x.is_chosen : false })));
+
+      const mondayOpts = (() => {
+        const opts = [{ id: '', label: '— Pick a week —' }];
+        const d = new Date(); const o = (d.getDay() + 6) % 7; d.setDate(d.getDate() - o); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - 7);
+        for (let i = 0; i < 18; i++) { const iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); opts.push({ id: iso, label: 'Wk of ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) }); d.setDate(d.getDate() + 7); }
+        return opts;
+      })();
+      const RANKS = [{ id: '', label: '—' }, { id: '1', label: 'Rank 1' }, { id: '2', label: 'Rank 2' }, { id: '3', label: 'Rank 3' }];
+      const REPEAT_OPTS = TASK_RECUR.filter(r => r.id !== 'none');
+
+      async function save() {
+        if (!title.trim()) return;
+        setSaving(true);
+        try {
+          const due = dueDate ? (dueDate + 'T' + (hasTime && dueTime ? dueTime : '00:00')) : '';
+          const decisionDue = decisionDueDate ? (decisionDueDate + 'T' + (decisionHasTime && decisionDueTime ? decisionDueTime : '00:00')) : '';
+          await onSave({
+            title: title.trim(), due, recurrence: repeats ? recurrence : 'none',
+            recurInterval: repeats && recurrence === 'custom' ? (parseInt(recurInterval, 10) || 1) : null,
+            recurUnit: repeats && recurrence === 'custom' ? recurUnit : null,
+            recurCopy: repeats ? recurCopy : null,
+            project, priority, status,
+            assignees, assigners, working_url: workingUrl.trim(), email_link: emailLink.trim(),
+            description, context, labels: myLabels,
+            decisionMakers, decisionQuestion: decisionQuestion.trim(), decisionDue, decisionHasTime,
+            decisionOptions: decisionOptions.filter(o => (o.body || '').trim()),
+            planning: { wp: weeklyPriority, wr: weeklyRank, dp: dailyPriority, dr: dailyRank },
+          });
+        } finally { setSaving(false); }
+      }
+
+      const sectionHeader = (open, setOpen, icon, label) => (
+        <button type="button" onClick={() => setOpen(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}>
+          <i className={`ti ${icon}`} style={{ fontSize: 15, color: gold }} />
+          <span style={{ flex: 1, fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>{label}</span>
+          <i className={`ti ti-chevron-${open ? 'up' : 'down'}`} style={{ fontSize: 15, color: sub }} />
+        </button>
+      );
+
+      return (
+        <div style={{ padding: '14px 16px 40px' }}>
+          {/* W/D Planning (collapsible) */}
+          <div style={{ marginBottom: 13 }}>
+            {sectionHeader(planOpen, setPlanOpen, 'ti-target', 'W/D Planning')}
+            {planOpen && <div style={{ marginTop: 10 }}>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1.5 }}>{field('Weekly priority', sel(weeklyPriority, setWeeklyPriority, mondayOpts))}</div>
+                <div style={{ flex: 1 }}>{field('Weekly rank', sel(weeklyRank, setWeeklyRank, RANKS))}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1.5 }}>{field('Daily priority', <input type="date" value={dailyPriority} onChange={e => setDailyPriority(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={inp} />)}</div>
+                <div style={{ flex: 1 }}>{field('Daily rank', sel(dailyRank, setDailyRank, RANKS))}</div>
+              </div>
+            </div>}
+          </div>
+          {/* Title */}
+          {field('Title', <input value={title} onChange={e => setTitle(e.target.value)} placeholder="What needs doing?" style={inp} />)}
+          {/* Due date (date only) + Time / Repeat toggles */}
+          <div style={{ marginBottom: 13 }}>
+            <div style={lbl}>Due date</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={{ ...inp, flex: '1 1 150px' }} />
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={hasTime} onChange={e => setHasTime(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Time</label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={repeats} onChange={e => setRepeats(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Repeat</label>
+            </div>
+            {hasTime && <input type="time" value={dueTime} onChange={e => setDueTime(e.target.value)} style={{ ...inp, marginTop: 8 }} />}
+            {repeats && <div style={{ marginTop: 8 }}>
+              {sel(recurrence, setRecurrence, REPEAT_OPTS)}
+              {recurrence === 'custom' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                  <span style={{ fontSize: '0.78rem', color: sub, fontFamily: C.fontSans }}>Every</span>
+                  <input type="number" min="1" value={recurInterval} onChange={e => setRecurInterval(e.target.value)} style={{ ...inp, width: 64, padding: '8px 9px' }} />
+                  <select value={recurUnit} onChange={e => setRecurUnit(e.target.value)} style={{ ...inp, flex: 1 }}>
+                    <option value="day">day(s)</option>
+                    <option value="week">week(s)</option>
+                    <option value="month">month(s)</option>
+                  </select>
+                </div>
+              )}
+              <div style={{ marginTop: 10 }}>
+                <div style={{ ...lbl, marginBottom: 6 }}>Copy to next instance</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {RECUR_COPY_FIELDS.map(f => { const on = recurCopy.includes(f.id); return <button key={f.id} type="button" onClick={() => setRecurCopy(c => c.includes(f.id) ? c.filter(x => x !== f.id) : [...c, f.id])} style={{ padding: '5px 9px', borderRadius: 14, border: `1px solid ${on ? C.navy : bord}`, background: on ? C.navy : (dark ? '#06101F' : '#fff'), color: on ? '#fff' : sub, fontSize: '0.72rem', cursor: 'pointer', fontFamily: C.fontSans }}>{on ? '✓ ' : ''}{f.label}</button>; })}
+                </div>
+              </div>
+              <div style={{ fontSize: '0.66rem', color: sub, lineHeight: 1.5, marginTop: 8, fontFamily: C.fontSans }}>When marked Completed, the next one is created automatically — due date moved forward, only the checked fields carried over.</div>
+            </div>}
+          </div>
+          {/* People */}
+          {field('Assignees', chips(assignees, setAssignees))}
+          {field('Assigned by', chips(assigners, setAssigners))}
+          {/* Status + Priority side by side */}
+          <div style={{ display: 'flex', gap: 10 }}>
+            <div style={{ flex: 1 }}>{field('Status', sel(status, setStatus, TASK_STATUS))}</div>
+            <div style={{ flex: 1 }}>{field('Priority', sel(priority, setPriority, TASK_PRIORITY))}</div>
+          </div>
+          {/* Project */}
+          {field('Project', (
+            <div>
+              <select value={newProjMode ? '__new__' : (project || '')} onChange={e => { const v = e.target.value; if (v === '__new__') { setNewProjMode(true); setProject(''); } else { setNewProjMode(false); setProject(v); } }} style={inp}>
+                <option value="">(No project)</option>
+                {projects.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                {project && !newProjMode && !projects.some(p => p.name === project) && <option value={project}>{project}</option>}
+                <option value="__new__">＋ New project…</option>
+              </select>
+              {newProjMode && <input autoFocus value={project} onChange={e => setProject(e.target.value)} placeholder="New project name" style={{ ...inp, marginTop: 8 }} />}
+            </div>
+          ))}
+          {/* Labels */}
+          {field('Your labels', (
+            <div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input value={labelInput} onChange={e => setLabelInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addLabel(); } }} placeholder="Add a label…" style={inp} />
+                <button type="button" onClick={addLabel} style={{ padding: '0 14px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.8rem', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}>Add</button>
+              </div>
+              {myLabels.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                {myLabels.map(l => <span key={l} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 7px 4px 10px', borderRadius: 16, background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA', color: gold, fontSize: '0.74rem', fontWeight: 500, fontFamily: C.fontSans }}>{l}<i className="ti ti-x" onClick={() => removeLabel(l)} style={{ fontSize: 12, cursor: 'pointer' }} /></span>)}
+              </div>}
+            </div>
+          ))}
+          {/* Details */}
+          {field('Description', <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder="Initial description (auto-filled when generated from AI mode later)" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
+          {field('Context', <textarea value={context} onChange={e => setContext(e.target.value)} rows={2} placeholder="Ongoing updates / notes" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
+          {field('Working URL', <input value={workingUrl} onChange={e => setWorkingUrl(e.target.value)} placeholder="https://…" style={inp} />)}
+          {field('Email link', <input value={emailLink} onChange={e => setEmailLink(e.target.value)} placeholder="https://… (link to the email)" style={inp} />)}
+          {/* Decision (collapsible) */}
+          <div style={{ marginTop: 4, marginBottom: 4 }}>
+            {sectionHeader(decisionOpen, setDecisionOpen, 'ti-gavel', 'Decision')}
+            {decisionOpen && <div style={{ marginTop: 10 }}>
+              {field('Decision maker(s)', chips(decisionMakers, setDecisionMakers))}
+              <div style={{ marginBottom: 13 }}>
+                <div style={lbl}>Decision due date</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                  <input type="date" value={decisionDueDate} onChange={e => setDecisionDueDate(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={{ ...inp, flex: '1 1 150px' }} />
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={decisionHasTime} onChange={e => setDecisionHasTime(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Time</label>
+                </div>
+                {decisionHasTime && <input type="time" value={decisionDueTime} onChange={e => setDecisionDueTime(e.target.value)} style={{ ...inp, marginTop: 8 }} />}
+                <div style={{ fontSize: '0.66rem', color: sub, lineHeight: 1.5, marginTop: 5, fontFamily: C.fontSans }}>If set, this shows on the decision-maker's in-app calendar (not Google Calendar).</div>
+              </div>
+              {field('Question', <input value={decisionQuestion} onChange={e => setDecisionQuestion(e.target.value)} placeholder="What needs to be decided?" style={inp} />)}
+              {field('Options', (
+                <div>
+                  {decisionOptions.map((o, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                      <i className={o.is_chosen ? 'ti ti-circle-check-filled' : 'ti ti-circle'} onClick={() => setChosen(i)} title="Mark as chosen" style={{ fontSize: 19, cursor: 'pointer', color: o.is_chosen ? (dark ? '#3FB36B' : '#1E6B40') : sub, flexShrink: 0 }} />
+                      <input value={o.body} onChange={e => updateOpt(i, e.target.value)} placeholder={'Option ' + String.fromCharCode(65 + i)} style={inp} />
+                      <i className="ti ti-trash" onClick={() => removeOpt(i)} style={{ fontSize: 15, cursor: 'pointer', color: sub, flexShrink: 0 }} />
+                    </div>
+                  ))}
+                  <button type="button" onClick={addOpt} style={{ marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 5, padding: '7px 12px', background: 'none', border: `1px dashed ${bord}`, borderRadius: 9, color: sub, fontSize: '0.78rem', cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-plus" style={{ fontSize: 13 }} />Add option</button>
+                </div>
+              ))}
+            </div>}
+          </div>
+          {/* Save / Cancel */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+            <button onClick={save} disabled={saving || !title.trim()} style={{ flex: 1, padding: 12, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !title.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (task ? 'Save changes' : 'Create task')}</button>
+            <button onClick={onCancel} style={{ flex: 1, padding: 12, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
+    function TaskDetail({ dark, task, people, team, user, allTasks, onEdit, onStatus, onOpenSubtask }) {
+      const [detTab, setDetTab] = useState('details');   // 'details' | 'thread'
+      const [activity, setActivity] = useState([]);
+      const [note, setNote] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [decisionOpts, setDecisionOpts] = useState([]);
+      const [labelRows, setLabelRows] = useState([]);
+      const [subs, setSubs] = useState([]);
+      const [subTitle, setSubTitle] = useState('');
+      const [addingSub, setAddingSub] = useState(false);
+      // Dependencies (predecessor/successor)
+      const [links, setLinks] = useState({ predecessors: [], successors: [] });
+      const [linkPick, setLinkPick] = useState('');
+      const [linkDir, setLinkDir] = useState('pred');   // 'pred' = picked comes before this; 'succ' = after
+      // Thread
+      const [summary, setSummary] = useState(task.context || '');
+      const [mode, setMode] = useState('log');           // 'log' | 'assist'
+      const [aiBusy, setAiBusy] = useState(false);
+      const [sumBusy, setSumBusy] = useState(false);
+      const [assist, setAssist] = useState([]);
+      const [editId, setEditId] = useState(null);
+      const [editText, setEditText] = useState('');
+      const [decDraft, setDecDraft] = useState(null);    // { question, options:[{text,checked}] }
+      const [decBusy, setDecBusy] = useState(false);
+      useEffect(() => {
+        TaskDB.loadActivity(task.id).then(setActivity);
+        TaskDB.loadDecisionOptions(task.id).then(setDecisionOpts);
+        TaskDB.loadLabels(task.id).then(setLabelRows);
+        TaskDB.loadSubtasks(task.id).then(setSubs);
+        TaskDB.loadLinks(task.id).then(setLinks);
+        TaskDB.loadAssist(task.id, user).then(setAssist);
+        setSummary(task.context || '');
+      }, [task.id]);
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const gold = dark ? '#C9A45A' : '#AD832F';
+      const nameOf = id => (team.find(m => m.id === id) || {}).name || '—';
+      const ppl = role => (people || []).filter(p => p.role === role).map(p => nameOf(p.user_id)).join(', ') || '—';
+      const fmt = d => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+      const row = (k, v) => <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '7px 0', borderBottom: `1px solid ${bord}` }}><span style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, flexShrink: 0 }}>{k}</span><span style={{ fontSize: '0.82rem', color: ink, fontWeight: 500, textAlign: 'right', fontFamily: C.fontSans }}>{v}</span></div>;
+      const kindTag = { system: { t: 'CHANGE', c: '#6B6B6B' }, update: { t: 'UPDATE', c: '#2A6FD4' }, ai: { t: 'AI', c: '#AD832F' } };
+      const secHead = (icon, txt) => <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><i className={`ti ${icon}`} style={{ fontSize: 14, color: gold }} /><span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>{txt}</span></div>;
+      const tinp = { padding: '8px 10px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const cap = { fontSize: '0.6rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans };
+      const hasDecision = decisionOpts.length > 0 || !!task.decision_question || ppl('decision_maker') !== '—' || !!task.decision_due_at;
+      async function addSub() { if (!subTitle.trim() || addingSub) return; setAddingSub(true); try { await TaskDB.createSubtask(task.id, subTitle.trim(), user); setSubTitle(''); setSubs(await TaskDB.loadSubtasks(task.id)); } finally { setAddingSub(false); } }
+      // ── Dependencies
+      const titleOf = (id) => ((allTasks || []).find(t => t.id === id) || {}).title || '(task)';
+      async function addDep() { if (!linkPick) return; if (linkDir === 'pred') await TaskDB.addLink(linkPick, task.id); else await TaskDB.addLink(task.id, linkPick); setLinkPick(''); setLinks(await TaskDB.loadLinks(task.id)); }
+      async function removeDep(id) { await TaskDB.removeLink(id); setLinks(await TaskDB.loadLinks(task.id)); }
+      // ── Thread: summary (built from the shared activity feed, not the private AI Assist)
+      async function refreshSummary(actList) {
+        const list = actList || activity; if (!list.length || sumBusy) return;
+        setSumBusy(true);
+        try {
+          const log = list.map(a => '[' + (a.kind || 'log').toUpperCase() + '] ' + a.content).join('\n');
+          const text = await callAI([{ role: 'user', content: 'Task: "' + task.title + '" (status: ' + statusLabel(task.status) + ')\n\nThread:\n' + log + '\n\nWrite a concise 2–3 sentence summary of where this stands and what is next. Plain text only.' }], 'You summarise a task thread in 2–3 plain sentences. Current status, key updates, next step. No bullets, no headers.');
+          setSummary(text); await TaskDB.setThreadSummary(task.id, text);
+        } catch (e) { /* silent — summary is best-effort */ } finally { setSumBusy(false); }
+      }
+      // ── Thread: Log update (shared) — auto-refreshes the summary
+      async function addNote() { if (!note.trim() || busy) return; setBusy(true); try { await TaskDB.addActivity(task.id, 'update', note.trim(), user); setNote(''); const a = await TaskDB.loadActivity(task.id); setActivity(a); refreshSummary(a); } finally { setBusy(false); } }
+      // ── Thread: AI Assist (private but synced) — Q&A NOT added to the shared feed
+      async function sendAssist() {
+        if (!note.trim() || aiBusy) return; const txt = note.trim();
+        setAiBusy(true); setNote('');
+        const uMsg = await TaskDB.addAssist(task.id, 'user', txt, user); setAssist(a => uMsg ? [...a, uMsg] : a);
+        try {
+          const sys = 'You are assisting with ONE task. Be concise and practical. If asked to draft something (email, message), produce it ready to use.\nTask: "' + task.title + '" | Status: ' + statusLabel(task.status) + '\nContext: ' + (summary || 'none') + '\nDecision: ' + (task.decision_question || 'none');
+          const hist = [...assist, uMsg].filter(Boolean).slice(-10).map(m => ({ role: m.role === 'ai' ? 'assistant' : 'user', content: m.content }));
+          const reply = await callAI(hist, sys);
+          const aMsg = await TaskDB.addAssist(task.id, 'ai', reply, user); setAssist(a => aMsg ? [...a, aMsg] : a);
+        } catch (e) { const aMsg = await TaskDB.addAssist(task.id, 'ai', 'Error: ' + e.message, user); setAssist(a => aMsg ? [...a, aMsg] : a); }
+        finally { setAiBusy(false); }
+      }
+      async function saveAssistEdit(id) { const item = assist.find(x => x.id === id); await TaskDB.updateAssistContent(id, editText); if (item && item.published && item.published_activity_id) { await TaskDB.updateActivityContent(item.published_activity_id, editText); setActivity(await TaskDB.loadActivity(task.id)); } setEditId(null); setEditText(''); setAssist(await TaskDB.loadAssist(task.id, user)); }
+      async function togglePublish(item) { if (item.published) await TaskDB.unpublishAssist(item); else await TaskDB.publishAssist(item, task.id, user); setAssist(await TaskDB.loadAssist(task.id, user)); setActivity(await TaskDB.loadActivity(task.id)); }
+      // ── Thread: improve the decision from the thread
+      async function improveDecision() {
+        if (decBusy) return; setDecBusy(true);
+        try {
+          const log = activity.map(a => a.content).join('\n');
+          const reply = await callAI([{ role: 'user', content: 'Task: "' + task.title + '"\nContext: ' + (summary || 'none') + '\nCurrent decision question: ' + (task.decision_question || 'none') + '\nThread:\n' + log + '\n\nSuggest a concise decision question and 2–3 clear options reflecting the current state. Reply ONLY valid JSON: {"question":"...","options":["...","..."]}' }], 'You propose a decision question and options from a task thread. Reply only valid JSON, no preamble.');
+          let parsed = null; try { parsed = JSON.parse((reply.match(/\{[\s\S]*\}/) || [reply])[0]); } catch (e) {}
+          if (parsed && parsed.question) setDecDraft({ question: parsed.question, options: (parsed.options || []).map(o => ({ text: String(o), checked: true })) });
+        } catch (e) { /* silent */ } finally { setDecBusy(false); }
+      }
+      async function acceptDecision() {
+        if (!decDraft) return;
+        await TaskDB.update(task.id, task, { decision_question: decDraft.question }, user);
+        await TaskDB.setDecisionOptions(task.id, decDraft.options.filter(o => o.checked).map(o => ({ body: o.text, is_chosen: false })));
+        setDecDraft(null);
+        setDecisionOpts(await TaskDB.loadDecisionOptions(task.id));
+        setActivity(await TaskDB.loadActivity(task.id));
+      }
+      const depRow = (linkId, otherId) => (
+        <div key={linkId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, marginBottom: 6 }}>
+          <span style={{ flex: 1, minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleOf(otherId)}</span>
+          <i className="ti ti-x" onClick={() => removeDep(linkId)} style={{ fontSize: 14, color: sub, cursor: 'pointer', flexShrink: 0 }} />
+        </div>
+      );
+      return (
+        <div style={{ padding: '14px 16px 40px' }}>
+          <div style={{ fontSize: '1.1rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, marginBottom: 6 }}>{task.title}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: statusBg(task.status), color: statusColor(task.status), fontFamily: C.fontSans }}>{statusLabel(task.status)}</span>
+            <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: priorityColor(task.priority) + '22', color: priorityColor(task.priority), fontFamily: C.fontSans }}>{priorityLabel(task.priority)}</span>
+            <button onClick={onEdit} style={{ marginLeft: 'auto', fontSize: '0.74rem', fontWeight: 600, color: dark ? '#fff' : C.navy, background: 'none', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 12px', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>
+          </div>
+          {/* Details | Thread tabs */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+            {[['details', 'Details'], ['thread', 'Thread']].map(([id, label]) => (
+              <button key={id} onClick={() => setDetTab(id)} style={{ flex: 1, padding: '7px 8px', borderRadius: 8, border: `1px solid ${detTab === id ? C.navy : bord}`, background: detTab === id ? C.navy : (dark ? '#0A1730' : '#fff'), color: detTab === id ? '#fff' : sub, fontSize: '0.74rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{label}{id === 'thread' && activity.length ? ' · ' + activity.length : ''}</button>
+            ))}
+          </div>
+
+          {detTab === 'details' ? (
+          <React.Fragment>
+          {labelRows.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+              {labelRows.map(r => { const mine = r.user_id === (user && user.id); return (
+                <span key={r.id} style={{ padding: '3px 9px', borderRadius: 16, fontSize: '0.7rem', fontWeight: 500, fontFamily: C.fontSans, background: mine ? (dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA') : (dark ? 'rgba(255,255,255,0.06)' : '#F0EEEA'), color: mine ? gold : sub }}>{r.label}</span>
+              ); })}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+            {TASK_STATUS.map(s => { const on = task.status === s.id; return <button key={s.id} onClick={async () => { await onStatus(s.id); setActivity(await TaskDB.loadActivity(task.id)); }} style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${on ? s.color : bord}`, background: on ? s.bg : (dark ? '#06101F' : '#fff'), color: on ? s.color : sub, fontSize: '0.72rem', fontWeight: on ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans }}>{s.label}</button>; })}
+          </div>
+          {row('Due', fmt(task.due_at))}
+          {task.recurrence && task.recurrence !== 'none' ? row('Repeat', recurDesc(task)) : null}
+          {row('Project', task._projectName || '—')}
+          {row('Assignees', ppl('assignee'))}
+          {row('Assigned by', ppl('assigner'))}
+          {task.working_url ? row('Working URL', <a href={task.working_url} target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Open ↗</a>) : null}
+          {task.email_link ? row('Email link', <a href={task.email_link} target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Open ↗</a>) : null}
+          {task.description ? <div style={{ marginTop: 12 }}><div style={cap}>Description</div><div style={{ fontSize: '0.84rem', color: ink, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{task.description}</div></div> : null}
+          {/* Dependencies */}
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
+            {secHead('ti-arrows-split-2', 'Dependencies')}
+            {links.predecessors.length > 0 && <div style={{ marginBottom: 8 }}><div style={cap}>Must come before this</div>{links.predecessors.map(l => depRow(l.id, l.predecessor_id))}</div>}
+            {links.successors.length > 0 && <div style={{ marginBottom: 8 }}><div style={cap}>Comes after this</div>{links.successors.map(l => depRow(l.id, l.successor_id))}</div>}
+            {!links.predecessors.length && !links.successors.length && <div style={{ fontSize: '0.78rem', color: sub, fontFamily: C.fontSans, marginBottom: 8 }}>No dependencies.</div>}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <select value={linkDir} onChange={e => setLinkDir(e.target.value)} style={{ ...tinp, flex: '1 1 130px' }}>
+                <option value="pred">Predecessor (before)</option>
+                <option value="succ">Successor (after)</option>
+              </select>
+              <select value={linkPick} onChange={e => setLinkPick(e.target.value)} style={{ ...tinp, flex: '2 1 150px' }}>
+                <option value="">Pick a task…</option>
+                {(allTasks || []).filter(t => t.id !== task.id).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}
+              </select>
+              <button onClick={addDep} disabled={!linkPick} style={{ padding: '8px 13px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !linkPick ? 0.5 : 1 }}>Link</button>
+            </div>
+          </div>
+          {/* Decision */}
+          {hasDecision && (
+            <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
+              {secHead('ti-gavel', 'Decision')}
+              {ppl('decision_maker') !== '—' ? row('Maker(s)', ppl('decision_maker')) : null}
+              {task.decision_due_at ? row('Decision due', task.decision_due_has_time ? fmt(task.decision_due_at) : new Date(task.decision_due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })) : null}
+              {task.decision_question ? <div style={{ fontSize: '0.86rem', color: ink, fontWeight: 600, margin: '10px 0 8px', fontFamily: C.fontSans, lineHeight: 1.4 }}>{task.decision_question}</div> : null}
+              {decisionOpts.map(o => (
+                <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderBottom: `1px solid ${bord}` }}>
+                  <i className={o.is_chosen ? 'ti ti-circle-check-filled' : 'ti ti-circle'} style={{ fontSize: 17, color: o.is_chosen ? (dark ? '#3FB36B' : '#1E6B40') : sub, flexShrink: 0 }} />
+                  <span style={{ flex: 1, minWidth: 0, fontSize: '0.84rem', color: o.is_chosen ? ink : sub, fontWeight: o.is_chosen ? 600 : 400, fontFamily: C.fontSans }}>{o.body}</span>
+                  {o.is_chosen && <span style={{ fontSize: '0.56rem', fontWeight: 700, letterSpacing: '0.08em', color: dark ? '#3FB36B' : '#1E6B40', fontFamily: C.fontSans, flexShrink: 0 }}>CHOSEN</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {/* Subtasks */}
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
+            {secHead('ti-subtask', subs.length ? 'Subtasks · ' + subs.length : 'Subtasks')}
+            {subs.map(s => (
+              <div key={s.id} onClick={() => onOpenSubtask && onOpenSubtask(s)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 10px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 10, marginBottom: 6, cursor: 'pointer' }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(s.priority) }} />
+                <span style={{ flex: 1, minWidth: 0, fontSize: '0.82rem', color: ink, fontWeight: 500, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: s.status === 'done' ? 'line-through' : 'none' }}>{s.title}</span>
+                <span style={{ fontSize: '0.58rem', fontWeight: 600, padding: '2px 7px', borderRadius: 12, background: statusBg(s.status), color: statusColor(s.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(s.status)}</span>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+              <input value={subTitle} onChange={e => setSubTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addSub(); }} placeholder="Add a subtask…" style={{ ...tinp, flex: 1 }} />
+              <button onClick={addSub} disabled={!subTitle.trim() || addingSub} style={{ padding: '8px 13px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !subTitle.trim() ? 0.5 : 1 }}>Add</button>
+            </div>
+          </div>
+          </React.Fragment>
+          ) : (
+          <React.Fragment>
+          {/* Current Summary */}
+          <div style={{ background: dark ? '#0A1E44' : '#F3EBDA', border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <span style={{ fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>Current Summary</span>
+              <button onClick={() => refreshSummary()} disabled={sumBusy} style={{ fontSize: '0.68rem', fontWeight: 600, color: gold, background: 'none', border: `1px solid ${bord}`, borderRadius: 7, padding: '3px 9px', cursor: 'pointer', fontFamily: C.fontSans }}>{sumBusy ? '…' : '↻ Refresh'}</button>
+            </div>
+            <div style={{ fontSize: '0.82rem', color: summary ? ink : sub, lineHeight: 1.5, whiteSpace: 'pre-wrap', fontFamily: C.fontSans, fontStyle: summary ? 'normal' : 'italic' }}>{summary || 'No summary yet — add an update and it’ll generate.'}</div>
+          </div>
+          {/* Improve decision from thread */}
+          <button onClick={improveDecision} disabled={decBusy} style={{ width: '100%', padding: '9px', background: dark ? '#06101F' : '#fff', border: `1px dashed ${gold}`, borderRadius: 9, color: gold, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, marginBottom: 12 }}>{decBusy ? 'Thinking…' : '✨ Improve decision from thread'}</button>
+          {decDraft && (
+            <div style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', marginBottom: 14, background: dark ? '#06101F' : '#fff' }}>
+              <div style={cap}>Suggested decision — edit, then save</div>
+              <input value={decDraft.question} onChange={e => setDecDraft(d => ({ ...d, question: e.target.value }))} style={{ ...tinp, width: '100%', fontWeight: 600 }} />
+              {decDraft.options.map((o, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                  <input type="checkbox" checked={o.checked} onChange={() => setDecDraft(d => ({ ...d, options: d.options.map((x, j) => j === i ? { ...x, checked: !x.checked } : x) }))} style={{ accentColor: C.navy, width: 15, height: 15, flexShrink: 0 }} />
+                  <input value={o.text} onChange={e => setDecDraft(d => ({ ...d, options: d.options.map((x, j) => j === i ? { ...x, text: e.target.value } : x) }))} style={{ ...tinp, flex: 1 }} />
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button onClick={acceptDecision} style={{ padding: '7px 13px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>Save to decision</button>
+                <button onClick={() => setDecDraft(null)} style={{ padding: '7px 13px', background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 9, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+              </div>
+            </div>
+          )}
+          {/* Shared thread feed */}
+          {secHead('ti-message-2', 'Thread')}
+          {activity.length === 0 && <div style={{ fontSize: '0.78rem', color: sub, fontFamily: C.fontSans }}>No activity yet.</div>}
+          {activity.map(a => { const tag = kindTag[a.kind] || kindTag.update; return (
+            <div key={a.id} style={{ display: 'flex', gap: 8, padding: '8px 0', borderBottom: `1px solid ${bord}` }}>
+              <span style={{ flexShrink: 0, fontSize: '0.52rem', fontWeight: 700, letterSpacing: '0.06em', color: tag.c, background: tag.c + '1A', borderRadius: 6, padding: '2px 6px', height: 'fit-content', fontFamily: C.fontSans }}>{tag.t}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, lineHeight: 1.4, whiteSpace: 'pre-wrap' }}>{a.content}</div>
+                <div style={{ fontSize: '0.64rem', color: sub, marginTop: 2, fontFamily: C.fontSans }}>{a.author_name || 'System'} · {fmt(a.created_at)}</div>
+              </div>
+            </div>
+          ); })}
+          {/* Composer: Log (shared) / AI Assist (private) */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+              {[['log', '📝 Log'], ['assist', '✨ AI Assist']].map(([id, label]) => (
+                <button key={id} onClick={() => setMode(id)} style={{ flex: 1, padding: '6px 8px', borderRadius: 8, border: `1px solid ${mode === id ? C.navy : bord}`, background: mode === id ? C.navy : (dark ? '#06101F' : '#fff'), color: mode === id ? '#fff' : sub, fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{label}</button>
+              ))}
+            </div>
+            {mode === 'assist' && (
+              <div style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: '8px 10px', marginBottom: 8, background: dark ? '#06101F' : '#FCFBF8' }}>
+                <div style={{ ...cap, marginBottom: 6 }}>AI Assist · private to you</div>
+                {assist.length === 0 && <div style={{ fontSize: '0.76rem', color: sub, fontFamily: C.fontSans }}>Ask anything about this task — drafts, next steps, summaries. Only you see this.</div>}
+                {assist.map(m => (
+                  <div key={m.id} style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: '0.58rem', fontWeight: 700, letterSpacing: '0.06em', color: m.role === 'ai' ? gold : sub, fontFamily: C.fontSans, marginBottom: 2 }}>{m.role === 'ai' ? 'AI' : 'YOU'}</div>
+                    {editId === m.id ? (
+                      <div>
+                        <textarea value={editText} onChange={e => setEditText(e.target.value)} rows={3} style={{ ...tinp, width: '100%', resize: 'vertical' }} />
+                        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                          <button onClick={() => saveAssistEdit(m.id)} style={{ fontSize: '0.7rem', fontWeight: 600, color: '#fff', background: C.navy, border: 'none', borderRadius: 7, padding: '4px 10px', cursor: 'pointer', fontFamily: C.fontSans }}>Save</button>
+                          <button onClick={() => { setEditId(null); setEditText(''); }} style={{ fontSize: '0.7rem', fontWeight: 600, color: sub, background: 'none', border: `1px solid ${bord}`, borderRadius: 7, padding: '4px 10px', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div style={{ fontSize: '0.8rem', color: ink, lineHeight: 1.45, whiteSpace: 'pre-wrap', fontFamily: C.fontSans }}>{m.content}</div>
+                        {m.role === 'ai' && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
+                            <span onClick={() => { setEditId(m.id); setEditText(m.content); }} style={{ fontSize: '0.68rem', color: gold, cursor: 'pointer', fontFamily: C.fontSans }}>Edit</span>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '0.68rem', color: sub, cursor: 'pointer', fontFamily: C.fontSans }}>
+                              <input type="checkbox" checked={!!m.published} onChange={() => togglePublish(m)} style={{ accentColor: C.navy, width: 13, height: 13 }} />Publish to thread
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {aiBusy && <div style={{ fontSize: '0.76rem', color: sub, fontStyle: 'italic', fontFamily: C.fontSans }}>AI is thinking…</div>}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { mode === 'assist' ? sendAssist() : addNote(); } }} placeholder={mode === 'assist' ? 'Ask AI about this task…' : 'Add an update…'} style={{ ...tinp, flex: 1, padding: '9px 11px', fontSize: '0.84rem' }} />
+              <button onClick={() => mode === 'assist' ? sendAssist() : addNote()} disabled={!note.trim() || busy || aiBusy} style={{ padding: '9px 14px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !note.trim() ? 0.5 : 1 }}>{mode === 'assist' ? 'Ask' : 'Post'}</button>
+            </div>
+          </div>
+          </React.Fragment>
+          )}
+        </div>
+      );
+    }
+
+    // Manage your own labels (rename / delete across all your tasks).
+    // User-level label palette (names sync to tasks via task_labels; colors are
+    // a personal display preference kept in localStorage). Tasks can be shared,
+    // so each teammate manages their own labels/colors.
+    const LABEL_COLORS = ['#E24B4A', '#E0A93B', '#378ADD', '#7F77DD', '#1D9E75', '#E07B00', '#D4537E', '#6B7280', '#2BA8A0', '#9B5DE5', '#3BB0C9', '#7FB800'];
+    const labelKey = (uid) => 'tmg-labels-' + (uid || 'anon');
+
+    function LabelManager({ dark, user, onClose }) {
+      const J = C.fontSans;
+      const uid = user && user.id;
+      const [items, setItems] = useState(null);   // [{ name, color, _orig }]
+      const [origNames, setOrigNames] = useState([]);
+      const [saving, setSaving] = useState(false);
+      const ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', bord = dark ? '#152545' : '#E4DFD4';
+      const fieldBg = dark ? '#06101F' : '#FFFFFF', rowBg = dark ? '#0A1730' : '#F7F4EE';
+
+      useEffect(() => {
+        (async () => {
+          let saved = [];
+          try { saved = JSON.parse(localStorage.getItem(labelKey(uid)) || '[]') || []; } catch (e) {}
+          const names = await TaskDB.myLabelNames(uid);
+          const have = {}; saved.forEach(s => { have[s.name] = true; });
+          const merged = saved.map(s => ({ name: s.name, color: s.color || LABEL_COLORS[1], _orig: s.name }));
+          names.forEach(n => { if (!have[n]) merged.push({ name: n, color: LABEL_COLORS[1], _orig: n }); });
+          setItems(merged); setOrigNames(names);
+        })();
+      }, []);
+
+      const update = (i, patch) => setItems(its => its.map((x, j) => j === i ? { ...x, ...patch } : x));
+      const add = () => setItems(its => [...(its || []), { name: '', color: LABEL_COLORS[0], _orig: null }]);
+      const remove = (i) => setItems(its => its.filter((_, j) => j !== i));
+
+      async function save() {
+        setSaving(true);
+        const clean = (items || []).map(x => ({ name: (x.name || '').trim(), color: x.color, _orig: x._orig })).filter(x => x.name);
+        const seen = {}, final = [];
+        clean.forEach(x => { const k = x.name.toLowerCase(); if (!seen[k]) { seen[k] = 1; final.push(x); } });
+        try {
+          for (const x of final) { if (x._orig && x._orig !== x.name && origNames.indexOf(x._orig) !== -1) await TaskDB.renameLabel(uid, x._orig, x.name); }
+          const keep = new Set(final.map(x => x.name)), keepOrig = new Set(final.map(x => x._orig).filter(Boolean));
+          for (const n of origNames) { if (!keep.has(n) && !keepOrig.has(n)) await TaskDB.deleteLabel(uid, n); }
+        } catch (e) { console.error('[LabelManager] sync:', e); }
+        try { localStorage.setItem(labelKey(uid), JSON.stringify(final.map(x => ({ name: x.name, color: x.color })))); } catch (e) {}
+        setSaving(false); onClose();
+      }
+
+      return (
+        <div style={{ padding: '12px 14px 24px', fontFamily: J }}>
+          <div style={{ fontSize: '0.72rem', color: sub, lineHeight: 1.5, marginBottom: 12 }}>Your personal labels — names sync across your tasks, colors are just yours. Each teammate manages their own.</div>
+          {items === null ? <div style={{ color: sub, fontSize: '0.82rem', padding: 8 }}>Loading…</div>
+            : (<React.Fragment>
+              {items.length === 0 && <div style={{ color: sub, fontSize: '0.8rem', padding: '6px 2px 12px' }}>No labels yet — tap “Add label” to create one.</div>}
+              {items.map((it, i) => (
+                <div key={i} style={{ background: rowBg, border: `1px solid ${bord}`, borderRadius: 12, padding: 10, marginBottom: 9 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                    <span style={{ width: 26, height: 26, borderRadius: 8, flexShrink: 0, background: it.color }} />
+                    <input value={it.name} onChange={e => update(i, { name: e.target.value })} placeholder="Label name" style={{ flex: 1, minWidth: 0, padding: '8px 11px', background: fieldBg, border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: J }} />
+                    <i className="ti ti-x" onClick={() => remove(i)} title="Remove" style={{ fontSize: 16, cursor: 'pointer', color: sub, flexShrink: 0 }} />
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 9 }}>
+                    {LABEL_COLORS.map(c => { const on = it.color === c; return <button key={c} onClick={() => update(i, { color: c })} aria-label="Pick color" style={{ width: 26, height: 26, borderRadius: 8, cursor: 'pointer', background: c, border: on ? `2px solid ${ink}` : '2px solid transparent', padding: 0 }} />; })}
+                  </div>
+                </div>
+              ))}
+              <button onClick={add} style={{ width: '100%', padding: 10, borderRadius: 10, border: `1px dashed ${bord}`, background: 'none', color: sub, cursor: 'pointer', fontFamily: J, fontSize: '0.8rem', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 14 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add label</button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={onClose} style={{ flex: 1, padding: 11, borderRadius: 11, border: `1px solid ${bord}`, background: 'none', color: sub, cursor: 'pointer', fontFamily: J, fontSize: '0.85rem', fontWeight: 600 }}>Cancel</button>
+                <button onClick={save} disabled={saving} style={{ flex: 1, padding: 11, borderRadius: 11, border: 'none', background: C.navy, color: '#fff', cursor: saving ? 'default' : 'pointer', fontFamily: J, fontSize: '0.85rem', fontWeight: 600 }}>{saving ? 'Saving…' : 'Save changes'}</button>
+              </div>
+            </React.Fragment>)}
+        </div>
+      );
+    }
+
+    function TasksScreen({ dark, user, onClose, initialTask }) {
+      const [data, setData] = useState({ tasks: [], peopleByTask: {}, projById: {}, labelsByTask: {} });
+      const [team, setTeam] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [view, setView] = useState('list');   // list | detail | form | labels
+      const [current, setCurrent] = useState(null);
+      const [sortBy, setSortBy] = useState('status');   // status | due | label
+      const [labelColors, setLabelColors] = useState({});
+      const [vis, setVis] = useState(false);
+      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
+      useEffect(() => { if (initialTask) { setCurrent(initialTask); setView('detail'); } }, [initialTask]);
+      const bg = dark ? '#000D26' : '#FCFBF8', bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const enrich = (t, projById) => ({ ...t, _projectName: t.project_id ? (projById[t.project_id] || '') : '' });
+      const withMetaFrom = (t, d) => { const ppl = d.peopleByTask[t.id] || []; return { ...enrich(t, d.projById), _assignees: ppl.filter(p => p.role === 'assignee').map(p => p.user_id), _assigners: ppl.filter(p => p.role === 'assigner').map(p => p.user_id), _decisionMakers: ppl.filter(p => p.role === 'decision_maker').map(p => p.user_id) }; };
+      const withMeta = (t) => withMetaFrom(t, data);
+      async function reload() {
+        setLoading(true);
+        const [d, tm] = await Promise.all([TaskDB.loadAll(), ProfileDB.loadAll()]);
+        setData(d);
+        setTeam((tm || []).map(p => ({ id: p.id, name: ((((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User') })));
+        setLoading(false);
+        return d;
+      }
+      useEffect(() => { reload(); }, []);
+      useEffect(() => { if (view === 'list') { try { const p = JSON.parse(localStorage.getItem(labelKey(user && user.id)) || '[]') || []; const m = {}; p.forEach(x => { m[x.name] = x.color; }); setLabelColors(m); } catch (e) {} } }, [view]);
+      async function handleSave(form) {
+        const due_at = form.due ? new Date(form.due).toISOString() : null;
+        const decision_due_at = form.decisionDue ? new Date(form.decisionDue).toISOString() : null;
+        const project_id = form.project ? await TaskDB.findOrCreateProject(form.project, user) : null;
+        const pl = form.planning || {};
+        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null, decision_question: form.decisionQuestion || null, decision_due_at, decision_due_has_time: !!(form.decisionDue && form.decisionHasTime), recurrence: form.recurrence || 'none', recur_interval: form.recurInterval || null, recur_unit: form.recurUnit || null, recur_copy_fields: form.recurCopy || null, weekly_priority: pl.wp || null, weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null, daily_priority: pl.dp || null, daily_rank: pl.dr ? parseInt(pl.dr, 10) : null };
+        const people = { assignee: form.assignees, assigner: form.assigners, decision_maker: form.decisionMakers || [] };
+        let taskId;
+        if (current && current.id) { await TaskDB.update(current.id, current, fields, user); await TaskDB.setPeople(current.id, people); taskId = current.id; }
+        else { const created = await TaskDB.create(fields, people, user); taskId = created && created.id; }
+        if (taskId) { await TaskDB.setLabels(taskId, user && user.id, form.labels || []); await TaskDB.setDecisionOptions(taskId, form.decisionOptions || []); }
+        await reload(); setView('list'); setCurrent(null);
+      }
+      async function changeStatus(task, status) {
+        await TaskDB.update(task.id, task, { status }, user);
+        const d = await reload();
+        const fresh = (d.tasks || []).find(x => x.id === task.id);
+        setCurrent(fresh || { ...task, status });   // subtasks aren't in the top-level list — fall back to optimistic
+      }
+      const back = () => { if (view === 'form') setView(current ? 'detail' : 'list'); else { setView('list'); setCurrent(null); } };
+      const titleText = view === 'form' ? (current ? 'Edit task' : 'New task') : view === 'detail' ? 'Task' : view === 'labels' ? 'Manage labels' : 'Tasks';
+      const myLabelsFor = (id) => (data.labelsByTask[id] || []).filter(l => l.user_id === (user && user.id)).map(l => l.label);
+      const groupHead = (color, text) => <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: color }} /><span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{text}</span></div>;
+      const taskRow = (t, showStatus) => {
+        const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
+        const myLabels = myLabelsFor(t.id);
+        return (
+          <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderLeft: `2.5px solid ${statusColor(t.status)}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer', opacity: t.status === 'done' ? 0.75 : 1 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} title={priorityLabel(t.priority)} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+              <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
+              {t.parent_task_id && (() => { const par = data.tasks.find(x => x.id === t.parent_task_id); return par ? <div style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: '0.62rem', color: dark ? '#C9A45A' : '#AD832F', marginTop: 3, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}><i className="ti ti-subtask" style={{ fontSize: 11, flexShrink: 0 }} />{par.title}</div> : null; })()}
+              {myLabels.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>{myLabels.map(l => { const lc = labelColors[l]; return <span key={l} style={{ padding: '1px 6px', borderRadius: 10, background: lc ? lc + '26' : (dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA'), color: lc || (dark ? '#C9A45A' : '#AD832F'), fontSize: '0.58rem', fontWeight: 600, fontFamily: C.fontSans }}>{l}</span>; })}</div>}
+            </div>
+            {showStatus && <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusBg(t.status), color: statusColor(t.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(t.status)}</span>}
+            <i className="ti ti-chevron-right" style={{ fontSize: 16, color: sub, flexShrink: 0 }} />
+          </div>
+        );
+      };
+      const sortTabs = (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          {[['status', 'Status'], ['due', 'Due date'], ['label', 'Label']].map(([id, label]) => (
+            <button key={id} onClick={() => setSortBy(id)} style={{ flex: 1, padding: '6px 8px', borderRadius: 8, border: `1px solid ${sortBy === id ? C.navy : bord}`, background: sortBy === id ? C.navy : (dark ? '#0A1730' : '#fff'), color: sortBy === id ? '#fff' : sub, fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{label}</button>
+          ))}
+        </div>
+      );
+      const renderList = () => {
+        if (sortBy === 'due') {
+          const sorted = [...data.tasks].sort((a, b) => { if (!a.due_at && !b.due_at) return 0; if (!a.due_at) return 1; if (!b.due_at) return -1; return new Date(a.due_at) - new Date(b.due_at); });
+          return <div>{groupHead(dark ? '#C9A45A' : '#AD832F', 'By due date · ' + sorted.length)}{sorted.map(t => taskRow(t, true))}</div>;
+        }
+        if (sortBy === 'label') {
+          const groups = {}; const unlabeled = [];
+          data.tasks.forEach(t => { const ls = myLabelsFor(t.id); if (!ls.length) unlabeled.push(t); else ls.forEach(l => { (groups[l] = groups[l] || []).push(t); }); });
+          const names = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+          return (
+            <React.Fragment>
+              {names.map(n => <div key={n} style={{ marginBottom: 16 }}>{groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length)}{groups[n].map(t => taskRow(t, true))}</div>)}
+              {unlabeled.length > 0 && <div style={{ marginBottom: 16 }}>{groupHead(sub, 'Unlabeled · ' + unlabeled.length)}{unlabeled.map(t => taskRow(t, true))}</div>}
+            </React.Fragment>
+          );
+        }
+        return TASK_STATUS.map(col => {
+          const items = data.tasks.filter(t => t.status === col.id);
+          if (!items.length) return null;
+          return <div key={col.id} style={{ marginBottom: 16 }}>{groupHead(col.color, col.label + ' · ' + items.length)}{items.map(t => taskRow(t, false))}</div>;
+        });
+      };
+      return (
+        <React.Fragment>
+          {/* Overlay — dims content only, sits below the top bar (mirrors the calendar pop-out) */}
+          <div onClick={onClose} style={{ position: 'fixed', top: POPOUT_TOP, left: 0, right: 0, bottom: 0, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />
+          {/* Popout */}
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'fixed', top: POPOUT_TOP, right: 10, width: 'min(calc(100% - 20px), 560px)', zIndex: 60,
+            maxHeight: 'calc(100vh - 80px - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
+            display: 'flex', flexDirection: 'column',
+            borderRadius: 14, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+            background: bg, border: `1px solid ${bord}`,
+            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease',
+          }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                {view === 'list'
+                  ? <i className="ti ti-checklist" style={{ fontSize: 15, color: dark ? '#C9A45A' : '#AD832F' }} />
+                  : <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />}
+                <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleText}</span>
+              </div>
+              {view === 'list'
+                ? <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0 }}>
+                    <select value={sortBy} onChange={e => setSortBy(e.target.value)} title="Sort tasks by" style={{ fontFamily: C.fontSans, fontSize: '0.66rem', fontWeight: 600, color: dark ? '#C9A45A' : '#AD832F', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 4px 4px 7px', cursor: 'pointer', outline: 'none' }}><option value="status">Status</option><option value="due">Due date</option><option value="label">Label</option></select>
+                    <i className="ti ti-tag" onClick={() => setView('labels')} title="Manage labels" style={{ fontSize: 16, cursor: 'pointer', color: dark ? '#C9A45A' : '#AD832F' }} />
+                    <button onClick={() => { setCurrent(null); setView('form'); }} aria-label="New task" style={{ display: 'flex', alignItems: 'center', gap: 4, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '4px 10px', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>
+                  </div>
+                : <i className="ti ti-x" onClick={onClose} aria-label="Close" style={{ fontSize: 15, cursor: 'pointer', color: dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9', flexShrink: 0 }} />}
+            </div>
+            {/* Body (scrolls) */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+              {view === 'form' ? <TaskForm dark={dark} task={current ? withMeta(current) : null} team={team} user={user} onSave={handleSave} onCancel={() => setView(current ? 'detail' : 'list')} />
+                : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} allTasks={data.tasks} onEdit={() => setView('form')} onStatus={(s) => changeStatus(current, s)} onOpenSubtask={(child) => { setCurrent(child); setView('detail'); }} />
+                : view === 'labels' ? <LabelManager dark={dark} user={user} onClose={() => setView('list')} />
+                : (
+                  <div style={{ padding: '12px 14px 24px' }}>
+                    {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 12 }}>Loading…</div>
+                      : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center' }}>No tasks yet. Tap <b>New</b> to add one.</div>
+                      : <React.Fragment>{renderList()}</React.Fragment>}
+                  </div>
+                )}
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
+    // ─── Projects (opened from the More menu) ────────────────────────
+    function ProjectsTab({ dark, user, onBack, onOpenTask }) {
+      const [data, setData] = useState(null);   // null = loading
+      const [adding, setAdding] = useState(false);
+      const [newName, setNewName] = useState('');
+      const J = "'Jost', sans-serif";
+      const headingC = dark ? '#fff' : '#001A4A';
+      const subC = dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9';
+      const cardBg = dark ? '#0A1730' : '#fff';
+      const bord = dark ? '#152545' : '#EDE7DC';
+      const ink = dark ? '#fff' : '#001A4A';
+      const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const gold = dark ? '#C9A45A' : '#AD832F';
+      async function load() { setData(await TaskDB.loadAll()); }
+      useEffect(() => { load(); }, []);
+      async function createProject() { const n = newName.trim(); if (!n) return; await TaskDB.createProject(n, user); setNewName(''); setAdding(false); await load(); }
+      let groups = [];
+      if (data) {
+        const byId = {};
+        Object.keys(data.projById || {}).forEach(id => { byId[id] = { id, name: data.projById[id], tasks: [] }; });
+        const noProj = { id: null, name: 'No project', tasks: [] };
+        (data.tasks || []).forEach(t => { if (t.project_id && byId[t.project_id]) byId[t.project_id].tasks.push(t); else noProj.tasks.push(t); });
+        groups = Object.values(byId).sort((a, b) => a.name.localeCompare(b.name));
+        if (noProj.tasks.length) groups.push(noProj);
+      }
+      const statusChips = (tasks) => {
+        const counts = {}; tasks.forEach(t => { counts[t.status] = (counts[t.status] || 0) + 1; });
+        return TASK_STATUS.filter(s => counts[s.id]).map(s => (
+          <span key={s.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '0.6rem', fontWeight: 600, color: s.color, fontFamily: J }}><span style={{ width: 6, height: 6, borderRadius: '50%', background: s.color }} />{counts[s.id]} {s.label}</span>
+        ));
+      };
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '12px 16px 8px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: headingC }}><i className="ti ti-chevron-left" style={{ fontSize: 22 }} /></button>
+            <span style={{ flex: 1, fontFamily: J, fontSize: 17, fontWeight: 600, letterSpacing: '0.02em', color: headingC }}>Projects</span>
+            <button onClick={() => setAdding(a => !a)} style={{ display: 'flex', alignItems: 'center', gap: 4, background: gold, color: '#fff', border: 'none', borderRadius: 20, padding: '5px 11px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', fontFamily: J }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>
+          </div>
+          {adding && (
+            <div style={{ margin: '4px 16px 8px', display: 'flex', gap: 8 }}>
+              <input autoFocus value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') createProject(); }} placeholder="Project name…" style={{ flex: 1, padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: J }} />
+              <button onClick={createProject} style={{ padding: '0 14px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.82rem', fontWeight: 600, cursor: 'pointer', fontFamily: J }}>Add</button>
+            </div>
+          )}
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 16px 20px' }}>
+            {data === null ? <div style={{ color: sub, fontSize: '0.84rem', padding: 12 }}>Loading…</div>
+              : groups.length === 0 ? <div style={{ color: sub, fontSize: '0.84rem', padding: 24, textAlign: 'center' }}>No projects yet. Tap <b>New</b>, or add a project when creating a task.</div>
+              : groups.map(g => (
+                <div key={g.id || 'none'} style={{ background: cardBg, border: `1px solid ${bord}`, borderRadius: 14, padding: '12px 14px', marginBottom: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: g.tasks.length ? 8 : 2 }}>
+                    <i className="ti ti-folder" style={{ fontSize: 16, color: gold }} />
+                    <span style={{ flex: 1, fontFamily: J, fontSize: 14, fontWeight: 600, color: ink }}>{g.name}</span>
+                    <span style={{ fontFamily: J, fontSize: 11, color: sub }}>{g.tasks.length} {g.tasks.length === 1 ? 'task' : 'tasks'}</span>
+                  </div>
+                  {g.tasks.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 8 }}>{statusChips(g.tasks)}</div>}
+                  {g.tasks.map(t => (
+                    <div key={t.id} onClick={() => onOpenTask && onOpenTask(t)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 0', borderTop: `1px solid ${bord}`, cursor: 'pointer' }}>
+                      <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} />
+                      <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 12.5, color: ink, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+                      <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusBg(t.status), color: statusColor(t.status), fontFamily: J, flexShrink: 0 }}>{statusLabel(t.status)}</span>
+                    </div>
+                  ))}
+                  {g.tasks.length === 0 && <div style={{ fontFamily: J, fontSize: 11, color: subC, paddingTop: 2 }}>No tasks yet.</div>}
+                </div>
+              ))}
+          </div>
+        </div>
+      );
+    }
+
     function SharedDrivesTab({ dark, onBack }) {
       const J = "'Jost', sans-serif";
       const [query, setQuery] = useState('');
@@ -4603,6 +5409,515 @@ Rules:
     }
 
     // ─── Calendar Popover ────────────────────────────────────────────
+    // Calendar popout v2 — TOP-anchored (top:0 of the conversation area; grows DOWNWARD,
+    // NOT a bottom slide-up). Nav bar (Today / ‹› / date / 3 PRIOs / chips / Day-Week-Month),
+    // a collapsible Task strip, a TZ-aligned date strip, and Day/Week/Month grids.
+    function CalendarPopover({ dark, zoneH, onOpenTask, onClose }) {
+      const J = "'Jost', sans-serif";
+      const p2 = (n) => String(n).padStart(2, '0');
+      const isoOf = (d) => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+      const mondayOf = (d) => { const x = new Date(d); const off = (x.getDay() + 6) % 7; x.setDate(x.getDate() - off); x.setHours(0, 0, 0, 0); return x; };
+      const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+      const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+      const todayD = new Date();
+
+      const [view, setView] = useState('day');           // day | week | month
+      const [anchor, setAnchor] = useState(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; });
+      const [tasksOpen, setTasksOpen] = useState(false);
+      const [vis, setVis] = useState(false);
+      const [gevents, setGevents] = useState([]);
+      const [tasks, setTasks] = useState([]);
+      const [peopleByTask, setPeopleByTask] = useState({});
+      const [roster, setRoster] = useState({});
+      const [decOpen, setDecOpen] = useState(false);
+      const [decData, setDecData] = useState({});        // taskId -> { options, comments, loaded }
+      const [decDraft, setDecDraft] = useState({});      // taskId -> comment draft
+      const [gcal, setGcal] = useState('loading');        // loading | ready | needs_connect | error
+      const scrollRef = useRef(null);
+      const user = (window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user) || null;
+      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
+
+      const K = dark ? {
+        pop: '#070F1E', bd: '#152545', bd2: '#0D1E3A', shadow: '0 6px 22px rgba(0,0,0,.5)', navBg: '#040C1C',
+        date: '#fff', tBtnTx: '#5AA0E6', tBtnBg: '#0C1830', tBtnBd: '#22324A',
+        npBg: '#0C1830', npBd: '#22324A', npIc: 'rgba(255,255,255,.4)',
+        sep: '#22324A', gold: '#C9A45A', circBd: 'rgba(255,255,255,.3)', doneBg: '#0F6E56', doneName: 'rgba(255,255,255,.35)', prioName: '#9FC0F0', reg: 'rgba(255,255,255,.55)',
+        chipBd: '#22324A', chipBg: '#0C1830', chipIc: 'rgba(255,255,255,.4)', goldBd: '#3A2E14', goldBg: '#1E1808',
+        segBg: '#0C1830', segTx: 'rgba(255,255,255,.4)', segABg: '#152545', segATx: '#fff',
+        taskBg: '#0A1730', cellBd: '#0D1E3A', muted: 'rgba(255,255,255,.25)', rowBd: '#0D1E3A',
+        dueOver: '#E07A7A', dueToday: '#C9A45A', dueUp: 'rgba(255,255,255,.35)',
+        tzBg: '#040C1C', tx: '#5AA0E6', ph: '#C9A45A', dayLetter: 'rgba(255,255,255,.4)', weekend: 'rgba(255,255,255,.25)',
+        dot: '#C9A45A', todBg: '#0A1E44', circBg: '#152545', circTx: '#fff',
+        slot: '#0D1E3A', gline: '#0D1E3A',
+        evNavyBd: '#3F6FA8', evNavyBg: '#1A2A3A', evGoldBd: '#C9A45A', evGoldBg: '#2A1F0A', evTitle: '#fff', evTime: 'rgba(255,255,255,.5)',
+        weekTodayCol: 'rgba(201,164,90,.06)', weekendCell: '#0A1322',
+        cellBg: '#070F1E', monthBd: '#152545', todCellBg: '#0A1E44', todCellBd: '#3A2E14', dotEvent: '#C9A45A', dotTask: '#3F6FA8',
+      } : {
+        pop: '#fff', bd: '#EDE7DC', bd2: '#EDE7DC', shadow: '0 6px 22px rgba(0,26,74,.1)', navBg: '#fff',
+        date: '#001A4A', tBtnTx: '#185FA5', tBtnBg: '#EEF3FB', tBtnBd: '#C5D8F0',
+        npBg: '#FCFBF8', npBd: '#E4DFD4', npIc: '#6B6B6B',
+        sep: '#E4DFD4', gold: '#AD832F', circBd: '#C4B9A8', doneBg: '#0F6E56', doneName: '#B4B2A9', prioName: '#001A4A', reg: '#6B7280',
+        chipBd: '#E4DFD4', chipBg: '#FCFBF8', chipIc: '#6B6B6B', goldBd: '#E8D9BC', goldBg: '#F3EBDA',
+        segBg: '#F0EBE3', segTx: '#888', segABg: '#001A4A', segATx: '#fff',
+        taskBg: '#FDFAF5', cellBd: '#F0EBE3', muted: '#B4B2A9', rowBd: '#F5F2EE',
+        dueOver: '#9B1C1C', dueToday: '#AD832F', dueUp: '#B4B2A9',
+        tzBg: '#FCFBF8', tx: '#185FA5', ph: '#AD832F', dayLetter: '#B4B2A9', weekend: '#D4D0CC',
+        dot: '#AD832F', todBg: '#F3EBDA', circBg: '#001A4A', circTx: '#fff',
+        slot: '#F0EBE3', gline: '#F5F2EE',
+        evNavyBd: '#001A4A', evNavyBg: '#EEF2F8', evGoldBd: '#AD832F', evGoldBg: '#FDF8F0', evTitle: '#001A4A', evTime: '#6B6B6B',
+        weekTodayCol: '#FBF8F2', weekendCell: '#FAFAF8',
+        cellBg: '#fff', monthBd: '#F0EBE3', todCellBg: '#F3EBDA', todCellBd: '#E8D9BC', dotEvent: '#AD832F', dotTask: '#001A4A',
+      };
+
+      // ── data ──
+      useEffect(() => {
+        let cancelled = false; setGcal('loading');
+        let tMin, tMax;
+        if (view === 'month') { tMin = mondayOf(new Date(anchor.getFullYear(), anchor.getMonth(), 1)); tMax = addDays(tMin, 42); }
+        else if (view === 'week') { tMin = mondayOf(anchor); tMax = addDays(tMin, 7); }
+        else { tMin = new Date(anchor); tMin.setHours(0, 0, 0, 0); tMax = addDays(tMin, 1); }
+        fetchGoogleEvents(tMin.toISOString(), tMax.toISOString())
+          .then(list => { if (!cancelled) { setGevents(list || []); setGcal('ready'); } })
+          .catch(err => { if (!cancelled) setGcal(err && err.code === 'needs_connect' ? 'needs_connect' : 'error'); });
+        return () => { cancelled = true; };
+      }, [view, anchor]);
+      useEffect(() => { let c = false;
+        TaskDB.loadAll().then(d => { if (!c && d) { setTasks(d.tasks || []); setPeopleByTask(d.peopleByTask || {}); } }).catch(() => {});
+        ProfileDB.loadAll().then(ps => { if (!c && ps) { const m = {}; ps.forEach(p => { m[p.id] = (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User'; }); setRoster(m); } }).catch(() => {});
+        return () => { c = true; }; }, []);
+
+      // ── timezone helpers (TX=Austin/America-Chicago, PH=Manila/Asia-Manila, live) ──
+      const tzOffMin = (date, tz) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }); const m = {}; f.formatToParts(date).forEach(p => m[p.type] = p.value); return (Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour, +m.minute, +m.second) - date.getTime()) / 60000; };
+      const austinInstant = (d, h) => { const off = tzOffMin(new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h)), 'America/Chicago'); return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h) - off * 60000); };
+      const fmtHour = (inst, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: true }).format(inst);
+      const fmtClock = (inst, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true }).format(inst);
+      const austinFloat = (inst) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: '2-digit', minute: '2-digit', hour12: false }); const m = {}; f.formatToParts(inst).forEach(p => m[p.type] = p.value); return (+m.hour) + (+m.minute) / 60; };
+
+      // ── task + event helpers ──
+      const dueMs = (t) => t.due_at ? new Date(t.due_at).getTime() : Infinity;
+      const topTasks = (n) => (tasks || []).filter(t => t.status !== 'done').sort((a, b) => dueMs(a) - dueMs(b)).slice(0, n);
+      const allTasksSorted = () => (tasks || []).slice().sort((a, b) => (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0) || dueMs(a) - dueMs(b));
+      // Top tasks = the W/D priorities: daily rank in Day view, weekly rank in Week view (1/2/3).
+      const prioTasks = () => {
+        if (view === 'week') { const wk = isoOf(mondayOf(anchor)); return (tasks || []).filter(t => t.weekly_priority && String(t.weekly_priority).slice(0, 10) === wk && t.weekly_rank).sort((a, b) => a.weekly_rank - b.weekly_rank).slice(0, 3); }
+        const dy = isoOf(anchor); return (tasks || []).filter(t => t.daily_priority && String(t.daily_priority).slice(0, 10) === dy && t.daily_rank).sort((a, b) => a.daily_rank - b.daily_rank).slice(0, 3);
+      };
+      const dueInfo = (t) => {
+        if (!t.due_at) return { label: '', color: K.dueUp };
+        const d = new Date(t.due_at); const t0 = new Date(todayD); t0.setHours(0, 0, 0, 0); const d0 = new Date(d); d0.setHours(0, 0, 0, 0);
+        if (d0.getTime() === t0.getTime()) return { label: 'Today', color: K.dueToday };
+        if (d0 < t0) return { label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), color: K.dueOver };
+        return { label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), color: K.dueUp };
+      };
+      const dayEvents = (day) => (gevents || []).filter(e => e.start && !e.allDay && sameDay(new Date(e.start), day)).map(e => ({ title: e.title || '(busy)', start: new Date(e.start), end: e.end ? new Date(e.end) : null, gold: (e.colorId === '5' || e.colorId === '6') }));
+      const hasEvents = (day) => (gevents || []).some(e => e.start && (e.allDay ? (e.start || '').slice(0, 10) === isoOf(day) : sameDay(new Date(e.start), day)));
+      const monthHasEvent = (day) => hasEvents(day);
+      const monthHasTask = (day) => (tasks || []).some(t => t.due_at && sameDay(new Date(t.due_at), day));
+
+      // ── decisions (a decision = any task carrying decision data) ──
+      const nameOf = (id) => roster[id] || '—';
+      const roleNames = (tid, role) => (peopleByTask[tid] || []).filter(p => p.role === role).map(p => nameOf(p.user_id)).filter(n => n && n !== '—').join(', ');
+      const decisionTasks = () => (tasks || []).filter(t => t.decision_question || t.decision_due_at || (peopleByTask[t.id] || []).some(p => p.role === 'decision_maker'));
+      const decDueInfo = (t) => { if (!t.decision_due_at) return null; const d = new Date(t.decision_due_at); const t0 = new Date(todayD); t0.setHours(0, 0, 0, 0); const d0 = new Date(d); d0.setHours(0, 0, 0, 0); const f = t.decision_due_has_time ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); if (d0.getTime() === t0.getTime()) return { label: t.decision_due_has_time ? f : 'Today', color: K.dueToday }; if (d0 < t0) return { label: f, color: K.dueOver }; return { label: f, color: K.dueUp }; };
+      useEffect(() => {
+        if (!decOpen) return; let c = false;
+        decisionTasks().forEach(t => {
+          if (decData[t.id] && decData[t.id].loaded) return;
+          Promise.all([TaskDB.loadDecisionOptions(t.id), TaskDB.loadActivity(t.id)]).then(([opts, act]) => { if (!c) setDecData(prev => ({ ...prev, [t.id]: { options: opts || [], comments: (act || []).filter(a => a.kind === 'update'), loaded: true } })); }).catch(() => {});
+        });
+        return () => { c = true; };
+      }, [decOpen, tasks, peopleByTask]);
+      const chooseOption = async (taskId, idx) => {
+        const d = decData[taskId]; if (!d) return;
+        const opts = d.options.map((o, i) => ({ ...o, is_chosen: i === idx ? !o.is_chosen : false }));
+        setDecData(prev => ({ ...prev, [taskId]: { ...prev[taskId], options: opts } }));
+        try { await TaskDB.setDecisionOptions(taskId, opts.map(o => ({ body: o.body, is_chosen: o.is_chosen }))); } catch (e) {}
+      };
+      const addComment = async (taskId) => {
+        const text = (decDraft[taskId] || '').trim(); if (!text || !user) return;
+        setDecDraft(prev => ({ ...prev, [taskId]: '' }));
+        try { await TaskDB.addActivity(taskId, 'update', text, user); const act = await TaskDB.loadActivity(taskId); setDecData(prev => ({ ...prev, [taskId]: { ...(prev[taskId] || {}), comments: (act || []).filter(a => a.kind === 'update') } })); } catch (e) {}
+      };
+
+      const goToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); setAnchor(d); };
+      const step = (dir) => setAnchor(a => view === 'month' ? new Date(a.getFullYear(), a.getMonth() + dir, 1) : addDays(a, dir * (view === 'week' ? 7 : 1)));
+      const dateLabel = () => {
+        if (view === 'day') return anchor.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+        if (view === 'week') { const s = mondayOf(anchor), e = addDays(s, 6); return s.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' – ' + e.toLocaleDateString('en-US', { day: 'numeric' }) + ', ' + e.getFullYear(); }
+        return anchor.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      };
+
+      const stripDays = []; { const s = mondayOf(anchor); for (let i = 0; i < 7; i++) stripDays.push(addDays(s, i)); }
+      const HOURS = []; for (let h = 0; h < 24; h++) HOURS.push(h);
+      const SL = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+      const DL2 = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+      useEffect(() => { if (scrollRef.current && view !== 'month') scrollRef.current.scrollTop = 7 * (view === 'week' ? 38 : 48); }, [view, anchor]);
+
+      const circle = (t, sz) => { const done = t.status === 'done'; return (
+        <div style={{ width: sz, height: sz, borderRadius: '50%', flexShrink: 0, border: `1.5px solid ${done ? K.doneBg : K.circBd}`, background: done ? K.doneBg : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{done && <i className="ti ti-check" style={{ fontSize: sz - 5, color: '#fff' }} />}</div>
+      ); };
+      const navChip = (icon, gold, onClick) => (
+        <button onClick={onClick} style={{ width: 22, height: 22, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, border: `0.5px solid ${gold ? K.goldBd : K.chipBd}`, background: gold ? K.goldBg : K.chipBg, cursor: 'pointer', padding: 0 }}><i className={'ti ' + icon} style={{ fontSize: 11, color: gold ? K.gold : K.chipIc }} /></button>
+      );
+      const sep = <div style={{ width: 1, height: 15, background: K.sep, flexShrink: 0 }} />;
+      const connectBar = (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '5px 12px', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0 }}>
+          <span style={{ fontFamily: J, fontSize: 9, color: K.muted }}>Google Calendar not connected</span>
+          <button onClick={() => { try { window.SupabaseAuth.connectCalendar(); } catch (e) {} }} style={{ fontFamily: J, fontSize: 9, fontWeight: 600, padding: '3px 9px', borderRadius: 6, border: 'none', background: K.gold, color: '#fff', cursor: 'pointer' }}>Connect</button>
+        </div>
+      );
+
+      // ── Section 1: nav bar (horizontally scrollable so nothing clips on phone width) ──
+      const navBar = (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 10px', borderBottom: `0.5px solid ${K.bd2}`, background: K.navBg, flexShrink: 0, overflowX: 'auto' }}>
+          <button onClick={goToday} style={{ flexShrink: 0, fontFamily: J, fontSize: 9, fontWeight: 600, color: K.tBtnTx, background: K.tBtnBg, border: `0.5px solid ${K.tBtnBd}`, borderRadius: 6, padding: '3px 8px', cursor: 'pointer' }}>Today</button>
+          <div style={{ display: 'flex', flexShrink: 0 }}>
+            <button onClick={() => step(-1)} style={{ width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', background: K.npBg, border: `0.5px solid ${K.npBd}`, borderRight: 'none', borderRadius: '4px 0 0 4px', cursor: 'pointer', padding: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 11, color: K.npIc }} /></button>
+            <button onClick={() => step(1)} style={{ width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', background: K.npBg, border: `0.5px solid ${K.npBd}`, borderRadius: '0 4px 4px 0', cursor: 'pointer', padding: 0 }}><i className="ti ti-chevron-right" style={{ fontSize: 11, color: K.npIc }} /></button>
+          </div>
+          <span onClick={goToday} style={{ flexShrink: 0, fontFamily: J, fontSize: 11, fontWeight: 600, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap' }}>{dateLabel()}</span>
+          {sep}
+          {navChip('ti-search', false, () => {})}
+          {navChip('ti-settings-2', true, () => {})}
+          {navChip('ti-plus', true, () => {})}
+          <div style={{ display: 'flex', background: K.segBg, borderRadius: 6, padding: 2, gap: 1, flexShrink: 0 }}>
+            {['day', 'week', 'month'].map(v => (
+              <button key={v} onClick={() => setView(v)} style={{ fontFamily: J, fontSize: 7.5, fontWeight: 600, padding: '3px 6px', borderRadius: 4, border: 'none', cursor: 'pointer', textTransform: 'capitalize', background: v === view ? K.segABg : 'transparent', color: v === view ? K.segATx : K.segTx }}>{v}</button>
+            ))}
+          </div>
+        </div>
+      );
+
+      // ── Section 2: task strip (Day + Week only) ──
+      const prios = prioTasks();
+      const prioIds = {}; prios.forEach(t => { prioIds[t.id] = true; });
+      const expandedTasks = prios.concat(allTasksSorted().filter(t => !prioIds[t.id]));
+      const taskColor = (t) => t.status === 'done' ? K.doneName : (prioIds[t.id] ? K.prioName : K.reg);
+      const taskWeight = (t) => prioIds[t.id] && t.status !== 'done' ? 700 : 500;
+      const taskStrip = (
+        <React.Fragment>
+          <div onClick={() => setTasksOpen(o => !o)} style={{ display: 'flex', background: tasksOpen ? K.navBg : K.taskBg, borderBottom: `0.5px solid ${K.bd2}`, cursor: 'pointer', flexShrink: 0 }}>
+            <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: K.gold }}>tasks</span>
+            </div>
+            {tasksOpen ? (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', padding: '7px 10px' }}>
+                <span style={{ fontFamily: J, fontSize: 9, fontStyle: 'italic', color: K.muted }}>All tasks</span>
+              </div>
+            ) : prios.length > 0 ? [0, 1, 2].map(i => { const t = prios[i]; return (
+              <div key={i} onClick={t ? (e) => { e.stopPropagation(); onOpenTask && onOpenTask(t); } : undefined} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px', borderRight: i < 2 ? `0.5px solid ${K.cellBd}` : 'none' }}>
+                {t && circle(t, 13)}
+                {t && <span style={{ fontFamily: J, fontSize: 9, fontWeight: taskWeight(t), color: taskColor(t), whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>}
+              </div>
+            ); }) : (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', padding: '7px 10px' }}>
+                <span style={{ fontFamily: J, fontSize: 9, fontStyle: 'italic', color: K.muted }}>No priorities set — tap for all tasks</span>
+              </div>
+            )}
+            <div style={{ width: 32, flexShrink: 0, borderLeft: `0.5px solid ${K.cellBd}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <i className={'ti ' + (tasksOpen ? 'ti-chevron-up' : 'ti-chevron-down')} style={{ fontSize: 12, color: tasksOpen ? K.gold : K.muted }} />
+            </div>
+          </div>
+          {tasksOpen && (
+            <div style={{ flexShrink: 0, maxHeight: 200, overflowY: 'auto', borderBottom: `0.5px solid ${K.bd2}` }}>
+              {expandedTasks.map((t, i, arr) => { const di = dueInfo(t); const isP = prioIds[t.id]; return (
+                <div key={t.id} onClick={() => onOpenTask && onOpenTask(t)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px 7px 65px', borderLeft: `3px solid ${isP ? K.prioName : 'transparent'}`, borderBottom: i < arr.length - 1 ? `0.5px solid ${K.rowBd}` : 'none', cursor: 'pointer' }}>
+                  {circle(t, 13)}
+                  <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 9.5, fontWeight: taskWeight(t), color: taskColor(t), whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+                  {di.label && <span style={{ flexShrink: 0, fontFamily: J, fontSize: 8, fontWeight: 600, color: di.color }}>{di.label}</span>}
+                </div>
+              ); })}
+              {expandedTasks.length === 0 && <div style={{ padding: '10px 12px 10px 68px', fontFamily: J, fontSize: 9, color: K.muted }}>No tasks yet.</div>}
+            </div>
+          )}
+        </React.Fragment>
+      );
+
+      // ── Section 3: date strip (Day + Week) ──
+      // ── Decisions strip (Day + Week) — its own prominent feed, beside Tasks ──
+      const decs = decisionTasks();
+      const decIcon = (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 4v6" /><path d="M9 7l3-3 3 3" />
+          <path d="M4 13l-2 2 2 2" /><path d="M2 15h7" />
+          <path d="M20 13l2 2-2 2" /><path d="M22 15h-7" />
+        </svg>
+      );
+      const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, padding: '2px 6px', borderRadius: 10, background: statusBg(st), color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
+      const decCard = (t) => {
+        const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = t.description || '';
+        return (
+          <div key={t.id} style={{ borderBottom: `0.5px solid ${K.rowBd}`, padding: '9px 12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span onClick={() => onOpenTask && onOpenTask(t)} style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 11, fontWeight: 700, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
+              {statusPill(t.status)}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 5 }}>
+              {maker && <span style={{ fontFamily: J, fontSize: 8.5, color: K.reg }}><b style={{ color: K.gold }}>Maker:</b> {maker}</span>}
+              {dd && <span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 600, color: dd.color }}>Decide by {dd.label}</span>}
+              {asg && <span style={{ fontFamily: J, fontSize: 8.5, color: K.reg }}>Assignee: {asg}</span>}
+            </div>
+            {t.context && <div style={{ fontFamily: J, fontSize: 8.5, color: K.reg, lineHeight: 1.5, marginTop: 4, whiteSpace: 'pre-wrap' }}><b style={{ color: K.gold }}>Context:</b> {t.context}</div>}
+            {t.decision_question && <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 600, color: K.date, margin: '8px 0 6px', lineHeight: 1.4 }}>{t.decision_question}</div>}
+            {(d.options || []).map((o, i) => (
+              <div key={o.id || i} onClick={() => chooseOption(t.id, i)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px', marginBottom: 4, borderRadius: 7, cursor: 'pointer', background: o.is_chosen ? (dark ? 'rgba(15,110,86,.18)' : '#E6F2EC') : (dark ? '#0C1830' : '#FAF8F3'), border: `1px solid ${o.is_chosen ? (dark ? '#1E6B4E' : '#9FD3BC') : K.cellBd}` }}>
+                <i className={o.is_chosen ? 'ti ti-circle-check-filled' : 'ti ti-circle'} style={{ fontSize: 15, color: o.is_chosen ? (dark ? '#3FB36B' : '#0F6E56') : K.muted, flexShrink: 0 }} />
+                <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 9.5, fontWeight: o.is_chosen ? 600 : 400, color: K.date }}>{o.body}</span>
+                {o.is_chosen && <span style={{ fontFamily: J, fontSize: 6.5, fontWeight: 700, letterSpacing: '.06em', color: dark ? '#3FB36B' : '#0F6E56', flexShrink: 0 }}>CHOSEN</span>}
+              </div>
+            ))}
+            {extra && <div style={{ fontFamily: J, fontSize: 8.5, color: K.reg, lineHeight: 1.5, marginTop: 4, whiteSpace: 'pre-wrap' }}>{extra}</div>}
+            {(d.comments || []).slice(-2).map(cm => (
+              <div key={cm.id} style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: K.gold, flexShrink: 0 }}>{(cm.author_name || 'User').split(' ')[0]}:</span>
+                <span style={{ fontFamily: J, fontSize: 9, color: K.date, minWidth: 0 }}>{cm.content}</span>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 6, marginTop: 7 }}>
+              <input value={decDraft[t.id] || ''} onChange={e => setDecDraft(prev => ({ ...prev, [t.id]: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addComment(t.id); } }} placeholder="Add a comment…" style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 9, padding: '6px 9px', borderRadius: 7, border: `1px solid ${K.cellBd}`, background: dark ? '#040C1C' : '#FCFBF8', color: K.date, outline: 'none' }} />
+              <button onClick={() => addComment(t.id)} style={{ flexShrink: 0, fontFamily: J, fontSize: 9, fontWeight: 600, padding: '0 12px', borderRadius: 7, border: 'none', background: K.gold, color: '#fff', cursor: 'pointer' }}>Send</button>
+            </div>
+          </div>
+        );
+      };
+      const decStrip = (
+        <React.Fragment>
+          <div onClick={() => setDecOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', background: decOpen ? K.navBg : K.taskBg, borderBottom: `0.5px solid ${K.bd2}`, cursor: 'pointer', flexShrink: 0 }}>
+            <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: K.gold, padding: '7px 0' }}>{decIcon}</div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px' }}>
+              <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: K.gold }}>Decisions</span>
+              <span style={{ fontFamily: J, fontSize: 9, color: K.muted }}>{decs.length ? decs.length + ' open' : 'none'}</span>
+            </div>
+            <div style={{ width: 32, flexShrink: 0, borderLeft: `0.5px solid ${K.cellBd}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <i className={'ti ' + (decOpen ? 'ti-chevron-up' : 'ti-chevron-down')} style={{ fontSize: 12, color: decOpen ? K.gold : K.muted }} />
+            </div>
+          </div>
+          {decOpen && (
+            <div style={{ flexShrink: 0, maxHeight: 280, overflowY: 'auto', borderBottom: `0.5px solid ${K.bd2}` }}>
+              {decs.length ? decs.map(decCard) : <div style={{ padding: '12px', fontFamily: J, fontSize: 9, color: K.muted, textAlign: 'center' }}>No decisions yet. Add a decision on any task.</div>}
+            </div>
+          )}
+        </React.Fragment>
+      );
+
+      const dateStrip = (
+        <div style={{ display: 'flex', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0 }}>
+          <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0 6px' }}>
+            <span style={{ fontFamily: J, fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', color: K.tx }}>TX</span>
+            <span style={{ fontFamily: J, fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', color: K.ph }}>PH</span>
+          </div>
+          {stripDays.map((d, i) => { const wknd = i >= 5, isTod = sameDay(d, todayD), isSel = sameDay(d, anchor), hasEv = hasEvents(d); return (
+            <div key={i} onClick={() => { setAnchor(new Date(d)); if (view === 'month') setView('day'); }} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, padding: '4px 1px 5px', borderRight: i < 6 ? `0.5px solid ${K.gline}` : 'none', cursor: 'pointer', background: isTod ? K.todBg : (isSel && view === 'day' ? (dark ? 'rgba(255,255,255,.05)' : '#F7F4EE') : 'transparent') }}>
+              <span style={{ fontFamily: J, fontSize: 6, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, color: isTod ? K.gold : (wknd ? K.weekend : K.dayLetter) }}>{SL[i]}</span>
+              <div style={{ width: 21, height: 21, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: J, fontSize: isTod ? 10 : 11, fontWeight: 600, background: isTod ? K.circBg : 'transparent', color: isTod ? K.circTx : (wknd ? K.weekend : K.date) }}>{d.getDate()}</div>
+              <div style={{ width: 3, height: 3, borderRadius: '50%', background: hasEv ? K.dot : 'transparent' }} />
+            </div>
+          ); })}
+        </div>
+      );
+
+      // ── Section 4: Day grid ──
+      const dayGrid = (
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {gcal === 'needs_connect' && connectBar}
+          <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            <div style={{ display: 'flex', position: 'relative' }}>
+              <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}` }}>
+                {HOURS.map(h => { const inst = austinInstant(anchor, h); const hot = dayEvents(anchor).some(e => Math.floor(austinFloat(e.start)) === h); return (
+                  <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.slot}`, padding: '5px 6px 0' }}>
+                    <div style={{ fontFamily: J, fontSize: 11, fontWeight: hot ? 700 : 600, color: hot ? K.gold : K.tx }}>{fmtHour(inst, 'America/Chicago')}</div>
+                    <div style={{ fontFamily: J, fontSize: 9, fontWeight: hot ? 600 : 400, color: K.ph, opacity: hot ? 1 : 0.85 }}>{fmtHour(inst, 'Asia/Manila')}</div>
+                  </div>
+                ); })}
+              </div>
+              <div style={{ flex: 1, position: 'relative' }}>
+                {HOURS.map(h => <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.gline}` }} />)}
+                {dayEvents(anchor).map((e, i) => { const top = austinFloat(e.start) * 48; const dur = e.end ? Math.max((e.end - e.start) / 3600000, 0.5) : 0.75; return (
+                  <div key={i} style={{ position: 'absolute', top: top + 1, left: 4, right: 4, height: Math.max(dur * 48 - 2, 16), background: e.gold ? K.evGoldBg : K.evNavyBg, borderLeft: `3px solid ${e.gold ? K.evGoldBd : K.evNavyBd}`, borderRadius: 5, padding: '4px 7px', overflow: 'hidden' }}>
+                    <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
+                    <div style={{ fontFamily: J, fontSize: 7.5, color: K.evTime, marginTop: 1 }}>{fmtClock(e.start, 'America/Chicago')}</div>
+                  </div>
+                ); })}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+
+      // ── Section 5: Week grid ──
+      const weekGrid = (
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {gcal === 'needs_connect' && connectBar}
+          <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+            {HOURS.map(h => { const inst = austinInstant(mondayOf(anchor), h); return (
+              <div key={h} style={{ display: 'flex' }}>
+                <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, padding: '4px 6px 0' }}>
+                  <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.tx }}>{fmtHour(inst, 'America/Chicago')}</div>
+                  <div style={{ fontFamily: J, fontSize: 8, fontWeight: 400, color: K.ph, opacity: 0.85 }}>{fmtHour(inst, 'Asia/Manila')}</div>
+                </div>
+                {stripDays.map((d, di) => { const isTod = sameDay(d, todayD), wknd = di >= 5; const evs = dayEvents(d).filter(e => Math.floor(austinFloat(e.start)) === h); return (
+                  <div key={di} style={{ flex: 1, minWidth: 0, height: 38, borderBottom: `0.5px solid ${K.gline}`, borderRight: `0.5px solid ${K.gline}`, background: isTod ? K.weekTodayCol : (wknd ? K.weekendCell : 'transparent'), padding: '1px 2px', overflow: 'hidden' }}>
+                    {evs.map((e, ei) => (
+                      <div key={ei} style={{ fontFamily: J, fontSize: 6.5, fontWeight: 500, padding: '2px 4px', borderRadius: 3, marginBottom: 1, background: e.gold ? K.evGoldBg : K.evNavyBg, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
+                    ))}
+                  </div>
+                ); })}
+              </div>
+            ); })}
+          </div>
+        </div>
+      );
+
+      // ── Section 6: Month grid (auto-height) ──
+      const monthGrid = (() => {
+        const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+        const gridStart = mondayOf(first);
+        const lastDate = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
+        const rows = Math.ceil((((first.getDay() + 6) % 7) + lastDate) / 7);
+        const cells = []; for (let i = 0; i < rows * 7; i++) cells.push(addDays(gridStart, i));
+        return (
+          <div style={{ flex: '0 0 auto', padding: '8px 10px 10px', overflowY: 'auto' }}>
+            {gcal === 'needs_connect' && <div style={{ marginBottom: 8 }}>{connectBar}</div>}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 3, marginBottom: 4 }}>
+              {SL.map((l, i) => <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: 7, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: i >= 5 ? K.weekend : K.dayLetter }}>{l}</div>)}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 3 }}>
+              {cells.map((d, i) => { const inM = d.getMonth() === anchor.getMonth(); const wknd = (i % 7) >= 5; const isTod = sameDay(d, todayD); const ev = monthHasEvent(d), tk = monthHasTask(d); return (
+                <div key={i} onClick={() => { setAnchor(new Date(d)); setView('day'); }} style={{ minHeight: 42, padding: 3, border: `1px solid ${isTod ? K.todCellBd : K.monthBd}`, borderRadius: 4, background: isTod ? K.todCellBg : (wknd ? K.weekendCell : K.cellBg), opacity: inM ? 1 : 0.4, cursor: 'pointer' }}>
+                  {isTod
+                    ? <div style={{ width: 16, height: 16, borderRadius: '50%', background: K.circBg, color: K.circTx, fontFamily: J, fontSize: 9, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{d.getDate()}</div>
+                    : <div style={{ fontFamily: J, fontSize: 9, fontWeight: 500, color: wknd ? K.weekend : K.date }}>{d.getDate()}</div>}
+                  <div style={{ display: 'flex', gap: 2, marginTop: 2 }}>
+                    {ev && <div style={{ width: 4, height: 4, borderRadius: '50%', background: K.dotEvent }} />}
+                    {tk && <div style={{ width: 4, height: 4, borderRadius: '50%', background: K.dotTask }} />}
+                  </div>
+                </div>
+              ); })}
+            </div>
+          </div>
+        );
+      })();
+
+      // TOP-anchored: top is the top of the conversation area (just under the app top bar);
+      // grows DOWNWARD. Day/Week fill to the input bar (bottom = input-bar height); Month is auto.
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', top: POPOUT_TOP, left: 0, right: 0, bottom: 0, zIndex: 9, background: dark ? 'rgba(0,0,0,.35)' : 'rgba(0,26,74,.18)' }} />
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'fixed', top: POPOUT_TOP, right: 10, width: 'min(calc(100% - 20px), 560px)', bottom: view === 'month' ? 'auto' : (zoneH || 0), zIndex: 10,
+            background: K.pop, border: `1px solid ${K.bd}`, borderTop: 'none', borderRadius: '0 0 14px 14px', boxShadow: K.shadow,
+            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease', display: 'flex', flexDirection: 'column', overflow: 'hidden',
+            maxHeight: view === 'month' ? 'calc(100vh - 90px - env(safe-area-inset-top))' : 'none',
+          }}>
+            {navBar}
+            {view !== 'month' && taskStrip}
+            {view !== 'month' && dateStrip}
+            {view === 'day' && dayGrid}
+            {view === 'week' && weekGrid}
+            {view === 'month' && monthGrid}
+          </div>
+        </React.Fragment>
+      );
+    }
+
+    // ─── Decisions popout (standalone, opened from the top bar beside Tasks; sized like the calendar) ──
+    function DecisionsPopover({ dark, zoneH, onOpenTask, onClose }) {
+      const J = "'Jost', sans-serif";
+      const todayD = new Date();
+      const [tasks, setTasks] = useState([]);
+      const [peopleByTask, setPeopleByTask] = useState({});
+      const [roster, setRoster] = useState({});
+      const [decData, setDecData] = useState({});
+      const [decDraft, setDecDraft] = useState({});
+      const [vis, setVis] = useState(false);
+      const user = (window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user) || null;
+      useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
+      useEffect(() => { let c = false;
+        TaskDB.loadAll().then(d => { if (!c && d) { setTasks(d.tasks || []); setPeopleByTask(d.peopleByTask || {}); } }).catch(() => {});
+        ProfileDB.loadAll().then(ps => { if (!c && ps) { const m = {}; ps.forEach(p => { m[p.id] = (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User'; }); setRoster(m); } }).catch(() => {});
+        return () => { c = true; }; }, []);
+
+      const K = dark ? {
+        pop: '#070F1E', bd: '#152545', bd2: '#0D1E3A', shadow: '0 6px 22px rgba(0,0,0,.5)',
+        date: '#fff', gold: '#C9A45A', reg: 'rgba(255,255,255,.55)', muted: 'rgba(255,255,255,.3)',
+        cellBd: '#0D1E3A', rowBd: '#0D1E3A', dueToday: '#C9A45A', dueOver: '#E07A7A', dueUp: 'rgba(255,255,255,.4)',
+      } : {
+        pop: '#fff', bd: '#EDE7DC', bd2: '#EDE7DC', shadow: '0 6px 22px rgba(0,26,74,.1)',
+        date: '#001A4A', gold: '#AD832F', reg: '#6B7280', muted: '#B4B2A9',
+        cellBd: '#F0EBE3', rowBd: '#F5F2EE', dueToday: '#AD832F', dueOver: '#9B1C1C', dueUp: '#B4B2A9',
+      };
+
+      const nameOf = (id) => roster[id] || '—';
+      const roleNames = (tid, role) => (peopleByTask[tid] || []).filter(p => p.role === role).map(p => nameOf(p.user_id)).filter(n => n && n !== '—').join(', ');
+      const decisionTasks = () => (tasks || []).filter(t => t.decision_question || t.decision_due_at || (peopleByTask[t.id] || []).some(p => p.role === 'decision_maker'));
+      const decDueInfo = (t) => { if (!t.decision_due_at) return null; const d = new Date(t.decision_due_at); const t0 = new Date(todayD); t0.setHours(0, 0, 0, 0); const d0 = new Date(d); d0.setHours(0, 0, 0, 0); const f = t.decision_due_has_time ? d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); if (d0.getTime() === t0.getTime()) return { label: t.decision_due_has_time ? f : 'Today', color: K.dueToday }; if (d0 < t0) return { label: f, color: K.dueOver }; return { label: f, color: K.dueUp }; };
+      const decs = decisionTasks();
+      useEffect(() => { let c = false;
+        decs.forEach(t => { if (decData[t.id] && decData[t.id].loaded) return; Promise.all([TaskDB.loadDecisionOptions(t.id), TaskDB.loadActivity(t.id)]).then(([opts, act]) => { if (!c) setDecData(prev => ({ ...prev, [t.id]: { options: opts || [], comments: (act || []).filter(a => a.kind === 'update'), loaded: true } })); }).catch(() => {}); });
+        return () => { c = true; }; }, [tasks, peopleByTask]);
+      const chooseOption = async (taskId, idx) => { const d = decData[taskId]; if (!d) return; const opts = d.options.map((o, i) => ({ ...o, is_chosen: i === idx ? !o.is_chosen : false })); setDecData(prev => ({ ...prev, [taskId]: { ...prev[taskId], options: opts } })); try { await TaskDB.setDecisionOptions(taskId, opts.map(o => ({ body: o.body, is_chosen: o.is_chosen }))); } catch (e) {} };
+      const addComment = async (taskId) => { const text = (decDraft[taskId] || '').trim(); if (!text || !user) return; setDecDraft(prev => ({ ...prev, [taskId]: '' })); try { await TaskDB.addActivity(taskId, 'update', text, user); const act = await TaskDB.loadActivity(taskId); setDecData(prev => ({ ...prev, [taskId]: { ...(prev[taskId] || {}), comments: (act || []).filter(a => a.kind === 'update') } })); } catch (e) {} };
+      const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7.5, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: statusBg(st), color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
+
+      const decCard = (t) => {
+        const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = t.description || '';
+        return (
+          <div key={t.id} style={{ borderBottom: `0.5px solid ${K.rowBd}`, padding: '11px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span onClick={() => onOpenTask && onOpenTask(t)} style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 12, fontWeight: 700, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
+              {statusPill(t.status)}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 5 }}>
+              {maker && <span style={{ fontFamily: J, fontSize: 9, color: K.reg }}><b style={{ color: K.gold }}>Maker:</b> {maker}</span>}
+              {dd && <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: dd.color }}>Decide by {dd.label}</span>}
+              {asg && <span style={{ fontFamily: J, fontSize: 9, color: K.reg }}>Assignee: {asg}</span>}
+            </div>
+            {t.context && <div style={{ fontFamily: J, fontSize: 9, color: K.reg, lineHeight: 1.5, marginTop: 4, whiteSpace: 'pre-wrap' }}><b style={{ color: K.gold }}>Context:</b> {t.context}</div>}
+            {t.decision_question && <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: K.date, margin: '8px 0 6px', lineHeight: 1.4 }}>{t.decision_question}</div>}
+            {(d.options || []).map((o, i) => (
+              <div key={o.id || i} onClick={() => chooseOption(t.id, i)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '6px 9px', marginBottom: 4, borderRadius: 7, cursor: 'pointer', background: o.is_chosen ? (dark ? 'rgba(15,110,86,.18)' : '#E6F2EC') : (dark ? '#0C1830' : '#FAF8F3'), border: `1px solid ${o.is_chosen ? (dark ? '#1E6B4E' : '#9FD3BC') : K.cellBd}` }}>
+                <i className={o.is_chosen ? 'ti ti-circle-check-filled' : 'ti ti-circle'} style={{ fontSize: 16, color: o.is_chosen ? (dark ? '#3FB36B' : '#0F6E56') : K.muted, flexShrink: 0 }} />
+                <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 10, fontWeight: o.is_chosen ? 600 : 400, color: K.date }}>{o.body}</span>
+                {o.is_chosen && <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, letterSpacing: '.06em', color: dark ? '#3FB36B' : '#0F6E56', flexShrink: 0 }}>CHOSEN</span>}
+              </div>
+            ))}
+            {extra && <div style={{ fontFamily: J, fontSize: 9, color: K.reg, lineHeight: 1.5, marginTop: 4, whiteSpace: 'pre-wrap' }}>{extra}</div>}
+            {(d.comments || []).slice(-3).map(cm => (
+              <div key={cm.id} style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 700, color: K.gold, flexShrink: 0 }}>{(cm.author_name || 'User').split(' ')[0]}:</span>
+                <span style={{ fontFamily: J, fontSize: 9.5, color: K.date, minWidth: 0 }}>{cm.content}</span>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <input value={decDraft[t.id] || ''} onChange={e => setDecDraft(prev => ({ ...prev, [t.id]: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addComment(t.id); } }} placeholder="Add a comment…" style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 9.5, padding: '7px 10px', borderRadius: 7, border: `1px solid ${K.cellBd}`, background: dark ? '#040C1C' : '#FCFBF8', color: K.date, outline: 'none' }} />
+              <button onClick={() => addComment(t.id)} style={{ flexShrink: 0, fontFamily: J, fontSize: 9.5, fontWeight: 600, padding: '0 13px', borderRadius: 7, border: 'none', background: K.gold, color: '#fff', cursor: 'pointer' }}>Send</button>
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', top: POPOUT_TOP, left: 0, right: 0, bottom: 0, zIndex: 9, background: dark ? 'rgba(0,0,0,.35)' : 'rgba(0,26,74,.18)' }} />
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'fixed', top: POPOUT_TOP, right: 10, width: 'min(calc(100% - 20px), 560px)', bottom: (zoneH || 0), zIndex: 10,
+            background: K.pop, border: `1px solid ${K.bd}`, borderTop: 'none', borderRadius: '0 0 14px 14px', boxShadow: K.shadow,
+            opacity: vis ? 1 : 0, transition: 'opacity 150ms ease', display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '11px 14px', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0 }}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={K.gold} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M12 4v6" /><path d="M9 7l3-3 3 3" /><path d="M4 13l-2 2 2 2" /><path d="M2 15h7" /><path d="M20 13l2 2-2 2" /><path d="M22 15h-7" /></svg>
+              <span style={{ flex: 1, fontFamily: J, fontSize: 13, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: K.gold }}>Decisions</span>
+              <span style={{ fontFamily: J, fontSize: 10, color: K.muted }}>{decs.length ? decs.length + ' open' : ''}</span>
+              <i className="ti ti-x" onClick={onClose} style={{ fontSize: 17, color: K.muted, cursor: 'pointer', marginLeft: 4 }} />
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              {decs.length ? decs.map(decCard) : <div style={{ padding: '24px 16px', fontFamily: J, fontSize: 11, color: K.muted, textAlign: 'center', lineHeight: 1.6 }}>No decisions yet.<br />Add a decision question, maker, or due date on any task to see it here.</div>}
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
     // ─── Chat History Drawer ─────────────────────────────────────────
     // Short timestamp like "11:42p", "Yest", "Mon", "Jun 3".
     function shortTime(iso) {
@@ -4829,7 +6144,7 @@ Rules:
     // (hash only, no server config). Overlays (calendar/tasks/profile) close on
     // Back but aren't deep-linked yet. parseRoute maps a hash → {tab, view}.
     const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
-    const ROUTE_MORE = ['drives', 'directory', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
+    const ROUTE_MORE = ['drives', 'directory', 'projects', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
@@ -4837,36 +6152,14 @@ Rules:
       return { tab: 'chat', view: null };
     }
 
-    // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
-    // /tasks app. The top-bar icons open it in an iframe popout inside the content
-    // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-    function TaskFramePopover({ which, zoneH, onClose }) {
-      const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
-      useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
-      const hash = which === 'decisions' ? '#decisions' : which === 'calendar' ? '#calendar' : '#tasks';
-      const src = 'tasks.html?embed=1' + hash;
-      const top = 'calc(60px + env(safe-area-inset-top))';
-      const panel = wide
-        ? { right: 0, width: 460, borderLeft: '1px solid #EDE7DC', boxShadow: '-8px 0 32px rgba(0,26,74,0.14)' }
-        : { left: 8, right: 8, borderRadius: '0 0 14px 14px' };
-      return (
-        <React.Fragment>
-          <div onClick={onClose} style={{ position: 'fixed', top, bottom: zoneH || 0, left: 0, right: 0, background: 'rgba(0,26,74,0.20)', zIndex: 9 }} />
-          <div style={{ position: 'fixed', top, bottom: zoneH || 0, zIndex: 10, background: '#fff', overflow: 'hidden', ...panel }}>
-            <iframe src={src} title="Tasks" style={{ width: '100%', height: '100%', border: 'none', display: 'block' }} />
-          </div>
-        </React.Fragment>
-      );
-    }
-
     function App({ user, profile }) {
       const [activeTab, setActiveTab] = useState(() => parseRoute(typeof location !== 'undefined' ? location.hash : '').tab);
       const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
       const [fontScale, setFontScale] = useState(() => parseFloat(localStorage.getItem('tmg-fontscale')) || 1);
       const [accessCfg, setAccessCfg] = useState(DEFAULT_ACCESS);
-      const [showCalendar, setShowCalendar] = useState(false);
-      const [showTasks, setShowTasks] = useState(false);
-      const [showDecisions, setShowDecisions] = useState(false);
+      const [showCalendar, setShowCalendar] = useState(TASKS_HASH === 'calendar');
+      const [showTasks, setShowTasks] = useState(TASKS_HASH === 'decisions' || TASKS_HASH === 'calendar' ? false : TASKS_STANDALONE);
+      const [showDecisions, setShowDecisions] = useState(TASKS_HASH === 'decisions');
       const [tasksFocus, setTasksFocus] = useState(null);   // a task to open directly (e.g. from the Projects tab)
       const [showProfile, setShowProfile] = useState(false);
       const [showStatus, setShowStatus] = useState(false);
@@ -4882,7 +6175,7 @@ Rules:
       const moreItems = []
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
-        .concat([{ id: 'tasks', label: 'Tasks', icon: 'ti-checklist', href: 'tasks.html' }])
+        .concat([{ id: 'projects', label: 'Projects', icon: 'ti-list-check' }])
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', icon: 'ti-messages' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
@@ -5250,12 +6543,40 @@ Rules:
         refreshConversations();
       }
 
+      // Embedded in the main app's iframe popout → render ONLY the active task surface,
+      // no top bar / bottom nav / chat behind. POPOUT_TOP is 0 so it fills the iframe.
+      if (TASKS_EMBED) {
+        return (
+          <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, color: C.textPrimary }}>
+            {showCalendar && <CalendarPopover dark={dark} zoneH={0} onOpenTask={(t) => { setShowCalendar(false); setShowTasks(true); setTasksFocus(t); }} onClose={() => {}} />}
+            {showTasks && <TasksScreen dark={dark} user={user} initialTask={tasksFocus} onClose={() => {}} />}
+            {showDecisions && <DecisionsPopover dark={dark} zoneH={0} onOpenTask={(t) => { setShowDecisions(false); setShowTasks(true); setTasksFocus(t); }} onClose={() => {}} />}
+          </div>
+        );
+      }
+
+      // Standalone /tasks page (e.g. opened from More → Tasks): task-focused — keep the
+      // top bar (for switching Tasks/Decisions/Calendar + profile), drop the chat + input bar.
+      if (TASKS_STANDALONE) {
+        return (
+          <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary }}>
+            <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); setShowDecisions(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); setShowDecisions(false); setTasksFocus(null); }} tasksOpen={showTasks} onDecisions={() => { setShowDecisions(s => !s); setShowCalendar(false); setShowTasks(false); }} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
+            {showCalendar && <CalendarPopover dark={dark} zoneH={0} onOpenTask={(t) => { setShowCalendar(false); setShowTasks(true); setTasksFocus(t); }} onClose={() => { setShowCalendar(false); setShowTasks(true); }} />}
+            {showTasks && <TasksScreen dark={dark} user={user} initialTask={tasksFocus} onClose={() => { setTasksFocus(null); }} />}
+            {showDecisions && <DecisionsPopover dark={dark} zoneH={0} onOpenTask={(t) => { setShowDecisions(false); setShowTasks(true); setTasksFocus(t); }} onClose={() => { setShowDecisions(false); setShowTasks(true); }} />}
+            {!showCalendar && !showTasks && !showDecisions && <div style={{ flex: 1 }} />}
+            {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
+            {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
+          </div>
+        );
+      }
+
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
           <TopBar dark={dark} onToggleDark={() => setDark(d => !d)} onCalendar={() => { setShowCalendar(s => !s); setShowTasks(false); setShowDecisions(false); }} calendarOpen={showCalendar} onTasks={() => { setShowTasks(s => !s); setShowCalendar(false); setShowDecisions(false); setTasksFocus(null); }} tasksOpen={showTasks} onDecisions={() => { setShowDecisions(s => !s); setShowCalendar(false); setShowTasks(false); }} avatar={myAvatar} name={myName} dotColor={dotColor} onProfile={() => setShowProfile(true)} />
-          {showCalendar && <TaskFramePopover which="calendar" zoneH={zoneH} onClose={() => setShowCalendar(false)} />}
-          {showTasks && <TaskFramePopover which="tasks" zoneH={zoneH} onClose={() => { setShowTasks(false); setTasksFocus(null); }} />}
-          {showDecisions && <TaskFramePopover which="decisions" zoneH={zoneH} onClose={() => setShowDecisions(false)} />}
+          {showCalendar && <CalendarPopover dark={dark} zoneH={zoneH} onOpenTask={(t) => { setShowCalendar(false); setShowTasks(true); setTasksFocus(t); }} onClose={() => setShowCalendar(false)} />}
+          {showTasks && <TasksScreen dark={dark} user={user} initialTask={tasksFocus} onClose={() => { setShowTasks(false); setTasksFocus(null); }} />}
+          {showDecisions && <DecisionsPopover dark={dark} zoneH={zoneH} onOpenTask={(t) => { setShowDecisions(false); setShowTasks(true); setTasksFocus(t); }} onClose={() => setShowDecisions(false)} />}
           {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
@@ -5302,6 +6623,7 @@ Rules:
               : moreView === 'app-masterplan' && isAdmin ? <AppRoadmap dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
+              : moreView === 'projects' ? <ProjectsTab dark={dark} user={user} onBack={() => setMoreMenuOpen(true)} onOpenTask={(t) => { setTasksFocus(t); setShowTasks(true); }} />
               : moreView === 'expsurvey' ? <ExpSurvey dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}
@@ -5349,7 +6671,7 @@ Rules:
                 {moreItems.map(it => {
                   const on = activeTab === 'more' && moreView === it.id;
                   return (
-                    <button key={it.id} onClick={() => { if (it.href) { window.location.href = it.href; return; } setMoreView(it.id); setActiveTab('more'); setMoreMenuOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 11, width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: 'none', background: on ? (dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA') : 'none', cursor: 'pointer', color: dark ? '#fff' : C.navy, fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 500 }}>
+                    <button key={it.id} onClick={() => { setMoreView(it.id); setActiveTab('more'); setMoreMenuOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 11, width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8, border: 'none', background: on ? (dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA') : 'none', cursor: 'pointer', color: dark ? '#fff' : C.navy, fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 500 }}>
                       <i className={`ti ${it.icon}`} style={{ fontSize: 18, color: dark ? C.goldSoft : C.gold }} />{it.label}
                     </button>
                   );

@@ -4858,7 +4858,10 @@ Rules:
           WebkitBackdropFilter: 'blur(20px) saturate(180%)',
           borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
         }}>
-          <div style={{ fontSize: '0.95rem', fontWeight: 300, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+            <img src="m-monogram.png" alt="" style={{ height: 22, width: 'auto', display: 'block' }} />
+            <div style={{ fontSize: '0.95rem', fontWeight: 600, color: C.goldSoft, letterSpacing: '0.26em', textTransform: 'uppercase', fontFamily: C.fontSans }}>TMG APP</div>
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             {iconBtn(onTasks, 'ti ti-checklist', 'Tasks')}
             <button onClick={onDecisions} title="Decisions" aria-label="Decisions" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: 9, cursor: 'pointer', padding: 0, background: 'rgba(201,164,90,0.16)', border: 'none', color: '#C9A45A' }}>

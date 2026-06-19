@@ -41,13 +41,13 @@
     /* ── Auth gate (sign-in + access-denied) — always navy, never inverts ── */
     #auth-overlay { font-family: 'Jost', sans-serif; }
     #auth-overlay * { box-sizing: border-box; margin: 0; padding: 0; }
-    #auth-overlay .screen { width:100%; max-width:440px; min-height:100vh; margin:0 auto; display:flex; flex-direction:column; padding:0 32px; position:relative; overflow:hidden; background:radial-gradient(ellipse 80% 50% at 50% 36%, #0A2A6B 0%, #001A4A 62%); }
+    #auth-overlay .screen { width:100%; max-width:440px; min-height:100vh; min-height:100dvh; margin:0 auto; display:flex; flex-direction:column; padding:0 32px env(safe-area-inset-bottom) 32px; position:relative; overflow:hidden; background:radial-gradient(ellipse 80% 50% at 50% 36%, #0A2A6B 0%, #001A4A 62%); }
     #auth-overlay .screen[hidden] { display:none; }
     #auth-overlay .ring { position:absolute; left:50%; transform:translateX(-50%); border:1px solid rgba(201,164,90,.07); border-radius:50%; z-index:1; pointer-events:none; }
     #auth-overlay .r1 { top:-90px; width:360px; height:360px; }
     #auth-overlay .r2 { top:-36px; width:250px; height:250px; border-color:rgba(201,164,90,.05); }
     #auth-overlay .r3 { bottom:-110px; width:320px; height:320px; border-color:rgba(201,164,90,.05); }
-    #auth-overlay .main { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; z-index:2; text-align:center; }
+    #auth-overlay .main { flex:0.8; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; z-index:2; text-align:center; }
     #auth-overlay .foot { display:flex; flex-direction:column; align-items:center; gap:18px; padding-bottom:34px; position:relative; z-index:2; }
     #auth-overlay .glow-gold { position:absolute; top:36%; left:50%; transform:translate(-50%,-50%); width:250px; height:250px; border-radius:50%; background:radial-gradient(circle,rgba(201,164,90,.1) 0%,transparent 66%); z-index:1; pointer-events:none; }
     #auth-overlay .logo { width:195px; object-fit:contain; margin-bottom:26px; }

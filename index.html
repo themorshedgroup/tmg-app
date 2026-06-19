@@ -905,10 +905,10 @@ Rules:
 
     // ─── Tasks ───────────────────────────────────────────────────────
     const TASK_STATUS = [
-      { id: 'todo',        label: 'To Do',       color: '#64748B' },  // slate — not started
-      { id: 'in_progress', label: 'In Progress', color: '#2563EB' },  // blue — active
-      { id: 'stuck',       label: 'Stuck',       color: '#DC2626' },  // red — blocked
-      { id: 'done',        label: 'Completed',   color: '#16A34A' },  // green — done
+      { id: 'todo',        label: 'To Do',       color: '#AD832F', bg: '#F3EBDA' },  // gold
+      { id: 'in_progress', label: 'In Progress', color: '#185FA5', bg: '#EEF3FB' },  // blue
+      { id: 'stuck',       label: 'Stuck',       color: '#9B1C1C', bg: '#FEE2E2' },  // red
+      { id: 'done',        label: 'Completed',   color: '#0F6E56', bg: '#E6F2EC' },  // green
     ];
     const TASK_PRIORITY = [
       { id: 'low',    label: 'Low',    color: '#CA9A04' },  // yellow
@@ -935,6 +935,7 @@ Rules:
     const RECUR_COPY_DEFAULT = RECUR_COPY_FIELDS.map(f => f.id);
     const statusLabel   = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).label || s;
     const statusColor   = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).color || '#6B6B6B';
+    const statusBg      = (s) => (TASK_STATUS.find(x => x.id === s)   || {}).bg    || '#EEEEEE';
     const priorityLabel = (p) => (TASK_PRIORITY.find(x => x.id === p) || {}).label || p;
     const priorityColor = (p) => (TASK_PRIORITY.find(x => x.id === p) || {}).color || '#9B9380';
     const recurLabel    = (r) => (TASK_RECUR.find(x => x.id === r)    || {}).label || 'Does not repeat';
@@ -3056,7 +3057,7 @@ Rules:
           {!team.length && <span style={{ fontSize: '0.74rem', color: sub }}>No teammates loaded.</span>}
         </div>
       );
-      const sel = (val, set, opts) => <select value={val} onChange={e => set(e.target.value)} style={inp}>{opts.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}</select>;
+      const sel = (val, set, opts) => { const cur = opts.find(o => o.id === val) || {}; return <select value={val} onChange={e => set(e.target.value)} style={{ ...inp, ...(cur.bg ? { background: cur.bg, color: cur.color, fontWeight: 600 } : {}) }}>{opts.map(o => <option key={o.id} value={o.id} style={o.bg ? { background: o.bg, color: o.color, fontWeight: 600 } : undefined}>{o.label}</option>)}</select>; };
       const field = (label, node) => <div style={{ marginBottom: 13 }}><div style={lbl}>{label}</div>{node}</div>;
       const addLabel = () => { const v = labelInput.trim(); if (!v) return; setMyLabels(l => l.includes(v) ? l : [...l, v]); setLabelInput(''); };
       const removeLabel = (v) => setMyLabels(l => l.filter(x => x !== v));
@@ -3331,7 +3332,7 @@ Rules:
         <div style={{ padding: '14px 16px 40px' }}>
           <div style={{ fontSize: '1.1rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, marginBottom: 6 }}>{task.title}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-            <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: statusColor(task.status) + '22', color: statusColor(task.status), fontFamily: C.fontSans }}>{statusLabel(task.status)}</span>
+            <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: statusBg(task.status), color: statusColor(task.status), fontFamily: C.fontSans }}>{statusLabel(task.status)}</span>
             <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: priorityColor(task.priority) + '22', color: priorityColor(task.priority), fontFamily: C.fontSans }}>{priorityLabel(task.priority)}</span>
             <button onClick={onEdit} style={{ marginLeft: 'auto', fontSize: '0.74rem', fontWeight: 600, color: dark ? '#fff' : C.navy, background: 'none', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 12px', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>
           </div>
@@ -3352,7 +3353,7 @@ Rules:
             </div>
           )}
           <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
-            {TASK_STATUS.map(s => <button key={s.id} onClick={async () => { await onStatus(s.id); setActivity(await TaskDB.loadActivity(task.id)); }} style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${task.status === s.id ? s.color : bord}`, background: task.status === s.id ? s.color : (dark ? '#06101F' : '#fff'), color: task.status === s.id ? '#fff' : sub, fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{s.label}</button>)}
+            {TASK_STATUS.map(s => { const on = task.status === s.id; return <button key={s.id} onClick={async () => { await onStatus(s.id); setActivity(await TaskDB.loadActivity(task.id)); }} style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${on ? s.color : bord}`, background: on ? s.bg : (dark ? '#06101F' : '#fff'), color: on ? s.color : sub, fontSize: '0.72rem', fontWeight: on ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans }}>{s.label}</button>; })}
           </div>
           {row('Due', fmt(task.due_at))}
           {task.recurrence && task.recurrence !== 'none' ? row('Repeat', recurDesc(task)) : null}
@@ -3403,7 +3404,7 @@ Rules:
               <div key={s.id} onClick={() => onOpenSubtask && onOpenSubtask(s)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 10px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 10, marginBottom: 6, cursor: 'pointer' }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(s.priority) }} />
                 <span style={{ flex: 1, minWidth: 0, fontSize: '0.82rem', color: ink, fontWeight: 500, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: s.status === 'done' ? 'line-through' : 'none' }}>{s.title}</span>
-                <span style={{ fontSize: '0.58rem', fontWeight: 600, padding: '2px 7px', borderRadius: 12, background: statusColor(s.status) + '22', color: statusColor(s.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(s.status)}</span>
+                <span style={{ fontSize: '0.58rem', fontWeight: 600, padding: '2px 7px', borderRadius: 12, background: statusBg(s.status), color: statusColor(s.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(s.status)}</span>
               </div>
             ))}
             <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
@@ -3637,7 +3638,7 @@ Rules:
               {t.parent_task_id && (() => { const par = data.tasks.find(x => x.id === t.parent_task_id); return par ? <div style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: '0.62rem', color: dark ? '#C9A45A' : '#AD832F', marginTop: 3, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}><i className="ti ti-subtask" style={{ fontSize: 11, flexShrink: 0 }} />{par.title}</div> : null; })()}
               {myLabels.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>{myLabels.map(l => { const lc = labelColors[l]; return <span key={l} style={{ padding: '1px 6px', borderRadius: 10, background: lc ? lc + '26' : (dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA'), color: lc || (dark ? '#C9A45A' : '#AD832F'), fontSize: '0.58rem', fontWeight: 600, fontFamily: C.fontSans }}>{l}</span>; })}</div>}
             </div>
-            {showStatus && <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusColor(t.status) + '22', color: statusColor(t.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(t.status)}</span>}
+            {showStatus && <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusBg(t.status), color: statusColor(t.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(t.status)}</span>}
             <i className="ti ti-chevron-right" style={{ fontSize: 16, color: sub, flexShrink: 0 }} />
           </div>
         );
@@ -3777,7 +3778,7 @@ Rules:
                     <div key={t.id} onClick={() => onOpenTask && onOpenTask(t)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 0', borderTop: `1px solid ${bord}`, cursor: 'pointer' }}>
                       <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} />
                       <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 12.5, color: ink, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
-                      <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusColor(t.status) + '22', color: statusColor(t.status), fontFamily: J, flexShrink: 0 }}>{statusLabel(t.status)}</span>
+                      <span style={{ fontSize: '0.56rem', fontWeight: 700, padding: '2px 7px', borderRadius: 12, background: statusBg(t.status), color: statusColor(t.status), fontFamily: J, flexShrink: 0 }}>{statusLabel(t.status)}</span>
                     </div>
                   ))}
                   {g.tasks.length === 0 && <div style={{ fontFamily: J, fontSize: 11, color: subC, paddingTop: 2 }}>No tasks yet.</div>}
@@ -5524,7 +5525,7 @@ Rules:
           <path d="M20 13l2 2-2 2" /><path d="M22 15h-7" />
         </svg>
       );
-      const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, padding: '2px 6px', borderRadius: 10, background: statusColor(st) + '22', color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
+      const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, padding: '2px 6px', borderRadius: 10, background: statusBg(st), color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
       const decCard = (t) => {
         const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = t.description || '';
         return (
@@ -5738,7 +5739,7 @@ Rules:
         return () => { c = true; }; }, [tasks, peopleByTask]);
       const chooseOption = async (taskId, idx) => { const d = decData[taskId]; if (!d) return; const opts = d.options.map((o, i) => ({ ...o, is_chosen: i === idx ? !o.is_chosen : false })); setDecData(prev => ({ ...prev, [taskId]: { ...prev[taskId], options: opts } })); try { await TaskDB.setDecisionOptions(taskId, opts.map(o => ({ body: o.body, is_chosen: o.is_chosen }))); } catch (e) {} };
       const addComment = async (taskId) => { const text = (decDraft[taskId] || '').trim(); if (!text || !user) return; setDecDraft(prev => ({ ...prev, [taskId]: '' })); try { await TaskDB.addActivity(taskId, 'update', text, user); const act = await TaskDB.loadActivity(taskId); setDecData(prev => ({ ...prev, [taskId]: { ...(prev[taskId] || {}), comments: (act || []).filter(a => a.kind === 'update') } })); } catch (e) {} };
-      const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7.5, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: statusColor(st) + '22', color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
+      const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7.5, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: statusBg(st), color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
 
       const decCard = (t) => {
         const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = t.description || '';

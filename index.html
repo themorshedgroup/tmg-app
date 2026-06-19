@@ -2228,7 +2228,7 @@ Rules:
       );
     }
 
-    function DragReorderList({ items, onReorder, dark, renderLabel }) {
+    function DragReorderList({ items, onReorder, dark, renderLabel, onMoveItem, moveIcon, moveLabel }) {
       const [dragIdx, setDragIdx] = useState(null);
       const [overIdx, setOverIdx] = useState(null);
       const listRef = useRef(null);
@@ -2242,10 +2242,10 @@ Rules:
       };
 
       const onPointerDown = (e, idx) => {
+        if (items[idx].locked) return;
         e.preventDefault();
         setDragIdx(idx);
         setOverIdx(idx);
-        const el = e.currentTarget.closest('[data-drag-list]');
         const onMove = (ev) => {
           const cy = ev.touches ? ev.touches[0].clientY : ev.clientY;
           setOverIdx(getIdxFromY(cy));
@@ -2291,10 +2291,17 @@ Rules:
                 opacity: isDragging ? 0.7 : 1,
                 touchAction: 'none', userSelect: 'none', WebkitUserSelect: 'none',
               }}>
-                <i className="ti ti-grip-vertical" onPointerDown={e => onPointerDown(e, i)} style={{
-                  fontSize: 16, color: C.textMuted, cursor: 'grab', touchAction: 'none', padding: '4px 0',
+                <i className={`ti ${item.locked ? 'ti-lock' : 'ti-grip-vertical'}`} onPointerDown={e => onPointerDown(e, i)} style={{
+                  fontSize: 14, color: item.locked ? (dark ? 'rgba(255,255,255,0.15)' : '#D5D0C6') : C.textMuted, cursor: item.locked ? 'default' : 'grab', touchAction: 'none', padding: '4px 0',
                 }} />
-                {renderLabel(item)}
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                  {renderLabel(item)}
+                </div>
+                {onMoveItem && !item.locked && (
+                  <button onClick={() => onMoveItem(item)} title={moveLabel} style={{ flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', color: dark ? C.goldSoft : C.gold }}>
+                    <i className={`ti ${moveIcon}`} style={{ fontSize: 15 }} />
+                  </button>
+                )}
               </div>
             );
           })}
@@ -2302,7 +2309,7 @@ Rules:
       );
     }
 
-    function SettingsTab({ historySide, setHistorySide, dark, setDark, fontScale, setFontScale, embedded, navItems, moreMenuItems, onReorderNav, onReorderMore }) {
+    function SettingsTab({ historySide, setHistorySide, dark, setDark, fontScale, setFontScale, embedded, navItems, moreMenuItems, onReorderNav, onReorderMore, onMoveToMore, onMoveToNav }) {
       const sideBtn = (val, label, icon) => {
         const on = historySide === val;
         return (
@@ -2347,11 +2354,11 @@ Rules:
             {navItems && navItems.length > 0 && (
               <React.Fragment>
                 <div style={{ height: 1, background: dark ? '#1E3360' : C.border, margin: '18px 0' }} />
-                <div style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans, marginBottom: 4 }}>Navigation order</div>
-                <div style={{ fontSize: '0.72rem', color: C.textMuted, fontFamily: C.fontSans, marginBottom: 10, lineHeight: 1.5 }}>Drag to rearrange the bottom tabs.</div>
-                <DragReorderList items={navItems} onReorder={onReorderNav} dark={dark} renderLabel={(item) => (
+                <div style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans, marginBottom: 4 }}>Navigation bar</div>
+                <div style={{ fontSize: '0.72rem', color: C.textMuted, fontFamily: C.fontSans, marginBottom: 10, lineHeight: 1.5 }}>Drag to reorder. Tap <i className="ti ti-arrow-bar-down" style={{ fontSize: 11 }} /> to move to More.</div>
+                <DragReorderList items={navItems} onReorder={onReorderNav} dark={dark} onMoveItem={onMoveToMore} moveIcon="ti-arrow-bar-down" moveLabel="Move to More" renderLabel={(item) => (
                   <React.Fragment>
-                    <i className={`ti ${item.icon}`} style={{ fontSize: 16, color: dark ? C.goldSoft : C.gold }} />
+                    {item.img ? <img src={item.img} style={{ width: 16, height: 16, objectFit: 'contain' }} /> : <i className={`ti ${item.icon}`} style={{ fontSize: 16, color: dark ? C.goldSoft : C.gold }} />}
                     <span style={{ fontSize: '0.82rem', color: C.textPrimary, fontFamily: C.fontSans, fontWeight: 500 }}>{item.label}</span>
                   </React.Fragment>
                 )} />
@@ -2360,9 +2367,9 @@ Rules:
 
             {moreMenuItems && moreMenuItems.length > 0 && (
               <React.Fragment>
-                <div style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans, marginTop: 16, marginBottom: 4 }}>More menu order</div>
-                <div style={{ fontSize: '0.72rem', color: C.textMuted, fontFamily: C.fontSans, marginBottom: 10, lineHeight: 1.5 }}>Drag to rearrange items in the More menu.</div>
-                <DragReorderList items={moreMenuItems} onReorder={onReorderMore} dark={dark} renderLabel={(item) => (
+                <div style={{ fontSize: '0.85rem', color: C.textPrimary, fontFamily: C.fontSans, marginTop: 16, marginBottom: 4 }}>More menu</div>
+                <div style={{ fontSize: '0.72rem', color: C.textMuted, fontFamily: C.fontSans, marginBottom: 10, lineHeight: 1.5 }}>Drag to reorder. Tap <i className="ti ti-arrow-bar-up" style={{ fontSize: 11 }} /> to move to navigation.</div>
+                <DragReorderList items={moreMenuItems} onReorder={onReorderMore} dark={dark} onMoveItem={onMoveToNav} moveIcon="ti-arrow-bar-up" moveLabel="Move to Navigation" renderLabel={(item) => (
                   <React.Fragment>
                     {item.img ? <img src={item.img} style={{ width: 16, height: 16, objectFit: 'contain' }} /> : <i className={`ti ${item.icon}`} style={{ fontSize: 16, color: dark ? C.goldSoft : C.gold }} />}
                     <span style={{ fontSize: '0.82rem', color: C.textPrimary, fontFamily: C.fontSans, fontWeight: 500 }}>{item.label}</span>
@@ -4084,7 +4091,7 @@ Rules:
     ];
 
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
-    function BottomZone({ active, tabs, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, activeMoreView, tabs, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
       const navTabs = tabs || TABS;
       const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
       const modeLabel = mode === 'work' ? 'Work Mode' : 'AI Mode';
@@ -4220,8 +4227,9 @@ Rules:
             background: dark ? '#0A1730' : '#001A4A',
             borderRadius: 40, padding: 4, width: '100%',
           }}>
-            {navTabs.map(({ id, label, icon }) => {
-              const isActive = active === id;
+            {navTabs.map(({ id, label, icon, img }) => {
+              const coreNavIds = ['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'];
+              const isActive = active === id || (active === 'more' && !coreNavIds.includes(id) && id !== 'more' && activeMoreView === id);
               const activeColor = dark ? '#FFFFFF' : '#001A4A';
               const inactiveColor = dark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.28)';
               const color = isActive ? activeColor : inactiveColor;
@@ -4233,7 +4241,7 @@ Rules:
                   background: isActive ? (dark ? '#AD832F' : '#FFFFFF') : 'transparent',
                   transition: 'background 0.2s ease',
                 }}>
-                  <i className={`ti ${icon}`} style={{ fontSize: 18, display: 'block', color, lineHeight: 1 }} />
+                  {img ? <img src={img} style={{ width: 18, height: 18, objectFit: 'contain', display: 'block', opacity: isActive ? 1 : 0.35 }} /> : <i className={`ti ${icon}`} style={{ fontSize: 18, display: 'block', color, lineHeight: 1 }} />}
                   <span style={{
                     fontFamily: "'Jost', sans-serif", fontSize: 7, fontWeight: 500,
                     letterSpacing: '0.11em', color,
@@ -4299,7 +4307,7 @@ Rules:
     // One cohesive TMG-branded card: accent bar · merged identity header
     // (no role badge) · status controls · Details · Edit. Appearance /
     // Chat History / Sign out stay BELOW the card (Settings-embedded).
-    function ProfilePanel({ dark, user, profile, name, avatar, away, statusText, statusEmoji, onToggleAway, onOpenStatus, onClose, historySide, setHistorySide, setDark, fontScale, setFontScale, navItems, moreMenuItems, onReorderNav, onReorderMore }) {
+    function ProfilePanel({ dark, user, profile, name, avatar, away, statusText, statusEmoji, onToggleAway, onOpenStatus, onClose, historySide, setHistorySide, setDark, fontScale, setFontScale, navItems, moreMenuItems, onReorderNav, onReorderMore, onMoveToMore, onMoveToNav }) {
       const J = "'Jost', sans-serif";
       const [me, setMe] = useState(profile || null);
       const [allUsers, setAllUsers] = useState([]);
@@ -4449,7 +4457,7 @@ Rules:
 
             {/* ─── below the panel (untouched): Appearance · Chat History · Sign out ─── */}
             <div style={{ paddingTop: 14 }}>
-              <SettingsTab embedded historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={navItems} moreMenuItems={moreMenuItems} onReorderNav={onReorderNav} onReorderMore={onReorderMore} />
+              <SettingsTab embedded historySide={historySide} setHistorySide={setHistorySide} dark={dark} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={navItems} moreMenuItems={moreMenuItems} onReorderNav={onReorderNav} onReorderMore={onReorderMore} onMoveToMore={onMoveToMore} onMoveToNav={onMoveToNav} />
             </div>
           </div>
         </React.Fragment>
@@ -4979,20 +4987,12 @@ Rules:
 
       // Admin-configurable access: filter the nav + More apps to what this user may see.
       const appSet = profile ? allowedAppSet(profile.access, accessCfg) : null; // null = everything
-      const [tabOrder, setTabOrder] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-tab-order')) || null; } catch { return null; } });
-      const [moreOrder, setMoreOrder] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-more-order')) || null; } catch { return null; } });
-      const applyOrder = (list, order) => {
-        if (!order || !order.length) return list;
-        const map = Object.fromEntries(list.map(it => [it.id, it]));
-        const ordered = order.filter(id => map[id]).map(id => map[id]);
-        list.forEach(it => { if (!order.includes(it.id)) ordered.push(it); });
-        return ordered;
-      };
-      const baseTabs = appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS;
-      const visibleTabs = applyOrder(baseTabs, tabOrder);
+      const [navConfig, setNavConfig] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-nav-config')) || null; } catch { return null; } });
+      const saveNavConfig = (cfg) => { setNavConfig(cfg); localStorage.setItem('tmg-nav-config', JSON.stringify(cfg)); };
       const isAdmin = hasAdmin(profile && profile.access);
-      // "More" menu — Settings always; Shared Drives / Company Directory gated; Admin role-gated.
-      const baseMI = []
+      // All possible items the user could see (access-filtered).
+      const defaultNavIds = (appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS).map(t => t.id);
+      const allMoreDefs = []
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
         .concat([{ id: 'tasks', label: 'Tasks', icon: 'ti-checklist', href: 'tasks.html' }])
@@ -5000,9 +5000,30 @@ Rules:
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', img: 'sffu-icon.png' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
         .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
-      const moreItems = applyOrder(baseMI, moreOrder);
-      const handleReorderNav = (arr) => { const ids = arr.map(t => t.id); setTabOrder(ids); localStorage.setItem('tmg-tab-order', JSON.stringify(ids)); };
-      const handleReorderMore = (arr) => { const ids = arr.map(t => t.id); setMoreOrder(ids); localStorage.setItem('tmg-more-order', JSON.stringify(ids)); };
+      const allItemMap = Object.fromEntries(TABS.concat(allMoreDefs).map(it => [it.id, it]));
+      // Build nav + more from config, falling back to defaults.
+      const buildLists = () => {
+        if (!navConfig) return { nav: defaultNavIds, more: allMoreDefs.map(m => m.id) };
+        const allowed = new Set(defaultNavIds.concat(allMoreDefs.map(m => m.id)));
+        const cfgNav = (navConfig.nav || []).filter(id => allowed.has(id));
+        const cfgMore = (navConfig.more || []).filter(id => allowed.has(id));
+        const placed = new Set(cfgNav.concat(cfgMore));
+        // Any new items not in config go to their default list.
+        defaultNavIds.forEach(id => { if (!placed.has(id)) cfgNav.push(id); placed.add(id); });
+        allMoreDefs.forEach(m => { if (!placed.has(m.id)) cfgMore.push(m.id); placed.add(m.id); });
+        // 'more' must always be in nav and last.
+        const navNoMore = cfgNav.filter(id => id !== 'more');
+        return { nav: navNoMore.concat(['more']), more: cfgMore.filter(id => id !== 'more') };
+      };
+      const lists = buildLists();
+      const visibleTabs = lists.nav.map(id => allItemMap[id]).filter(Boolean);
+      const moreItems = lists.more.map(id => allItemMap[id]).filter(Boolean);
+      // Mark 'more' as locked (can't be moved/dragged).
+      const navForSettings = visibleTabs.map(t => t.id === 'more' ? { ...t, locked: true } : t);
+      const handleReorderNav = (arr) => saveNavConfig({ nav: arr.map(t => t.id), more: lists.more });
+      const handleReorderMore = (arr) => saveNavConfig({ nav: lists.nav, more: arr.map(t => t.id) });
+      const handleMoveToMore = (item) => saveNavConfig({ nav: lists.nav.filter(id => id !== item.id), more: lists.more.concat([item.id]) });
+      const handleMoveToNav = (item) => { const navNoMore = lists.nav.filter(id => id !== 'more'); saveNavConfig({ nav: navNoMore.concat([item.id, 'more']), more: lists.more.filter(id => id !== item.id) }); };
       // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
       const myAvatar = (profile && profile.avatar_url) || (user && user.user_metadata && user.user_metadata.avatar_url) || '';
       const myName = ((((profile && profile.first_name) || '') + ' ' + ((profile && profile.last_name) || '')).trim()) || (user && user.user_metadata && user.user_metadata.full_name) || (user && user.email) || 'Me';
@@ -5372,7 +5393,7 @@ Rules:
           {showCalendar && <TaskFramePopover which="calendar" zoneH={zoneH} onClose={() => setShowCalendar(false)} />}
           {showTasks && <TaskFramePopover which="tasks" zoneH={zoneH} onClose={() => { setShowTasks(false); setTasksFocus(null); }} />}
           {showDecisions && <TaskFramePopover which="decisions" zoneH={zoneH} onClose={() => setShowDecisions(false)} />}
-          {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={visibleTabs} moreMenuItems={moreItems} onReorderNav={handleReorderNav} onReorderMore={handleReorderMore} />}
+          {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={navForSettings} moreMenuItems={moreItems} onReorderNav={handleReorderNav} onReorderMore={handleReorderMore} onMoveToMore={handleMoveToMore} onMoveToNav={handleMoveToNav} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (
@@ -5435,6 +5456,7 @@ Rules:
           />
           <BottomZone
             active={activeTab}
+            activeMoreView={moreView}
             tabs={visibleTabs}
             onChange={(t) => {
               setDrawerOpen(false);
@@ -5443,7 +5465,12 @@ Rules:
                 else setMoreMenuOpen(o => !o);
                 return;
               }
-              setMoreMenuOpen(false); setActiveTab(t);
+              setMoreMenuOpen(false);
+              const item = allItemMap[t];
+              if (item && item.href) { window.location.href = item.href; return; }
+              const coreNavIds = ['chat', 'teamchat', 'calls', 'kpis', 'deals'];
+              if (coreNavIds.includes(t)) { setActiveTab(t); }
+              else { setMoreView(t); setActiveTab('more'); }
             }}
             dark={dark}
             mode={mode}

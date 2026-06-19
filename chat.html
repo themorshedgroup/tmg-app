@@ -183,6 +183,8 @@
   <script type="text/babel">
     const { useState, useEffect, useRef, useMemo } = React;
 
+    function useIsWide(){ const [w,setW]=useState(()=> (typeof window!=='undefined' && window.matchMedia('(min-width:769px)').matches)); useEffect(()=>{ const m=window.matchMedia('(min-width:769px)'); const h=e=>setW(e.matches); m.addEventListener ? m.addEventListener('change',h) : m.addListener(h); return ()=> m.removeEventListener ? m.removeEventListener('change',h) : m.removeListener(h); },[]); return w; }
+
     // ─── Design tokens (TMG Brand) ───────────────────────────────────
     const C = {
       bg:           '#FCFBF8',
@@ -332,10 +334,10 @@
 
       async loadRoster() {
         if (!this.client()) return [
-          { id: 'dev-user-id', first_name: 'Symon', last_name: 'Yongco',  avatar_url: '', access: ['admin'],      away: false },
-          { id: 'dev-tarek',   first_name: 'Tarek', last_name: 'Morshed', avatar_url: '', access: ['admin'],      away: false },
-          { id: 'dev-alex',    first_name: 'Alex',  last_name: 'Rivera',  avatar_url: '', access: ['operations'], away: true },
-          { id: 'dev-brett',   first_name: 'Brett', last_name: 'Cole',    avatar_url: '', access: ['agent'],      away: false },
+          { id: 'dev-user-id', first_name: 'Symon', last_name: 'Yongco',  avatar_url: '', access: ['admin'],      away: false, status_emoji: '',   status_text: '',              last_seen_at: new Date().toISOString() },
+          { id: 'dev-tarek',   first_name: 'Tarek', last_name: 'Morshed', avatar_url: '', access: ['admin'],      away: false, status_emoji: '🏝️', status_text: 'On a showing', last_seen_at: new Date().toISOString() },
+          { id: 'dev-alex',    first_name: 'Alex',  last_name: 'Rivera',  avatar_url: '', access: ['operations'], away: true,  status_emoji: '',   status_text: '',              last_seen_at: new Date(Date.now() - 3600000).toISOString() },
+          { id: 'dev-brett',   first_name: 'Brett', last_name: 'Cole',    avatar_url: '', access: ['agent'],      away: false, status_emoji: '☕', status_text: 'Coffee run',   last_seen_at: new Date().toISOString() },
         ];
         try { return await ProfileDB.loadAll(); } catch (e) { return []; }
       },
@@ -963,7 +965,7 @@
       );
     }
 
-    function ChatConversation({ dark, scope, me, roster, channels, rosterById, nameOf, photoOf, awayOf, onBack, onRead }) {
+    function ChatConversation({ dark, scope, me, roster, channels, rosterById, nameOf, photoOf, awayOf, statusOf, showBack, onBack, onRead }) {
       const J = "'Jost', sans-serif";
       const barBg = dark ? '#070F1E' : '#FFFFFF', barBord = dark ? '#0D1E3A' : '#F0EBE3', msgBg = dark ? '#070F1E' : '#FCFBF8';
       const backCol = dark ? 'rgba(255,255,255,0.4)' : 'rgba(0,26,74,0.4)', titleCol = dark ? '#fff' : '#001A4A', subCol = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
@@ -972,6 +974,7 @@
       const inBarBg = dark ? '#070F1E' : '#F5F0E8', inBarBord = dark ? '#0D1E3A' : '#E0D8CC', inFieldBg = dark ? '#0A1730' : '#FFFFFF', inFieldBord = dark ? '#152545' : '#E0D8CC', sendBg = dark ? '#AD832F' : '#001A4A';
       const reactBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', reactBord = dark ? '#152545' : '#E4DFD4', reactMineBd = dark ? '#C9A45A' : '#AD832F';
       const isGroup = scope.kind === 'channel' || (scope.conv && scope.conv.type === 'group_dm');
+      const peerId = (scope.kind === 'conversation' && scope.conv && scope.conv.type === 'dm') ? scope.conv.memberIds.find(id => id !== me) : null;
 
       const [messages, setMessages] = useState([]); const [loading, setLoading] = useState(true);
       const [text, setText] = useState(''); const [sending, setSending] = useState(false); const [menu, setMenu] = useState(null);
@@ -1204,13 +1207,34 @@
       const parent = thread;
       return (
         <React.Fragment>
+          {(() => {
+            const iconCircleBg = dark ? '#0A1730' : '#F5F2EE', iconCircleCol = dark ? '#C9A45A' : '#AD832F';
+            const awayCol = dark ? '#E0A93B' : '#B07A00';
+            const ps = peerId ? (statusOf ? statusOf(peerId) : null) : null;
+            const hasStatus = ps && (ps.status_emoji || ps.status_text);
+            let subLine = null, subTint = subCol;
+            if (peerId) {
+              if (hasStatus) subLine = `${ps.status_emoji || ''} ${ps.status_text || ''}`.trim();
+              else { const away = awayOf(peerId); subLine = away ? 'Away' : 'Active'; if (away) subTint = awayCol; }
+            } else if (scope.kind === 'channel') {
+              subLine = scope.topic || null;
+            } else if (scope.conv && scope.conv.type === 'group_dm') {
+              subLine = (scope.conv.memberIds.length) + ' members';
+            }
+            return (
           <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 14px', borderBottom: `1px solid ${barBord}`, background: barBg, flexShrink: 0 }}>
-            <button onClick={onBack} aria-label="Back" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: backCol, display: 'flex', flexShrink: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 18 }} /></button>
+            {showBack && <button onClick={onBack} aria-label="Back" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: backCol, display: 'flex', flexShrink: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 18 }} /></button>}
+            {peerId
+              ? <div style={{ position: 'relative', flexShrink: 0 }}><Avatar photo={photoOf(peerId)} name={nameOf(peerId)} size={28} /><span style={{ position: 'absolute', bottom: 0, right: 0, width: 9, height: 9, borderRadius: '50%', background: awayOf(peerId) ? '#E0A93B' : '#2FBF6B', border: `2px solid ${barBg}` }} /></div>
+              : <div style={{ width: 28, height: 28, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: iconCircleBg, color: iconCircleCol }}><i className={`ti ${scope.kind === 'channel' ? (scope.channel && scope.channel.type === 'private' ? 'ti-lock' : 'ti-hash') : 'ti-users'}`} style={{ fontSize: 14 }} /></div>}
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{scope.title}</div>
-              {scope.kind === 'channel' && scope.topic ? <div style={{ fontFamily: J, fontSize: 8, color: subCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{scope.topic}</div> : null}
+              {subLine ? <div style={{ fontFamily: J, fontSize: 8, color: subTint, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{subLine}</div> : null}
             </div>
+            <button aria-label="Tasks" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: backCol, display: 'flex', flexShrink: 0 }}><i className="ti ti-checklist" style={{ fontSize: 18 }} /></button>
           </div>
+            );
+          })()}
           <div ref={listRef} onClick={() => { if (actionFor) setActionFor(null); }} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '12px 12px', display: 'flex', flexDirection: 'column', gap: 8, background: msgBg }}>
             {loading && <div style={{ fontFamily: J, fontSize: 10, color: subCol, textAlign: 'center', padding: 16 }}>Loading…</div>}
             {!loading && messages.length === 0 && <div style={{ fontFamily: J, fontSize: 11, color: subCol, textAlign: 'center', padding: 24 }}>No messages yet. Say hello 👋</div>}
@@ -1249,6 +1273,7 @@
       const me = (window.SupabaseAuth?._state?.session?.user?.id) || 'dev-user-id';
       const isAdmin = hasAdmin(profile && profile.access);
       const byScope = (chatUnread && chatUnread.byScope) || {};
+      const wide = useIsWide();
 
       const [roster, setRoster] = useState([]); const [channels, setChannels] = useState([]); const [convs, setConvs] = useState([]);
       const [loadingList, setLoadingList] = useState(true);
@@ -1258,6 +1283,7 @@
       const nameOf = (id) => { const p = rosterById[id]; return p ? (((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || 'Member') : 'Member'; };
       const photoOf = (id) => { const p = rosterById[id]; return (p && p.avatar_url) || ''; };
       const awayOf = (id) => { const p = rosterById[id]; return !!(p && p.away); };
+      const statusOf = (id) => { const p = rosterById[id]; return p ? { status_text: p.status_text || '', status_emoji: p.status_emoji || '' } : { status_text: '', status_emoji: '' }; };
       const convTitle = (cv) => cv.title || (cv.memberIds.filter(id => id !== me).map(nameOf).join(', ')) || 'Direct Message';
 
       const refresh = () => { setLoadingList(true); Promise.all([ChatDB.loadRoster(), ChatDB.listChannels(), ChatDB.listConversations()]).then(([r, ch, cv]) => { setRoster(r || []); setChannels(ch || []); setConvs(cv || []); setLoadingList(false); }); };
@@ -1274,8 +1300,10 @@
 
       const UnreadDot = ({ id }) => { const u = byScope[id]; if (!u || !u.unread) return null; return <div style={{ minWidth: 16, height: 16, borderRadius: 8, background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px', boxShadow: u.mentions ? '0 0 0 1.5px ' + bg + ', 0 0 0 3px #AD832F' : 'none' }}>{u.unread > 9 ? '9+' : u.unread}</div>; };
       const Section = ({ label }) => <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.18em', fontWeight: 600, color: sectionCol, padding: '12px 14px 5px' }}>{label}</div>;
+      const selBg = dark ? 'rgba(173,131,47,0.12)' : '#F3EBDA';
+      const isSel = (id) => wide && scope && scope.id === id;
       const ChannelRow = (c) => (
-        <div key={c.id} onClick={() => openChannel(c)} role="button" tabIndex={0} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}` }}>
+        <div key={c.id} onClick={() => openChannel(c)} role="button" tabIndex={0} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}`, background: isSel(c.id) ? selBg : 'transparent' }}>
           <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', color: composeCol }}><i className={`ti ${c.type === 'private' ? 'ti-lock' : 'ti-hash'}`} style={{ fontSize: 16 }} /></div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
@@ -1287,7 +1315,7 @@
       const ConvRow = (cv) => {
         const others = cv.memberIds.filter(id => id !== me); const single = others.length <= 1;
         return (
-          <div key={cv.id} onClick={() => openConv(cv)} role="button" tabIndex={0} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}` }}>
+          <div key={cv.id} onClick={() => openConv(cv)} role="button" tabIndex={0} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}`, background: isSel(cv.id) ? selBg : 'transparent' }}>
             {single
               ? <div style={{ position: 'relative', flexShrink: 0 }}><Avatar photo={photoOf(others[0])} name={nameOf(others[0])} size={34} />{!awayOf(others[0]) && <span style={{ position: 'absolute', bottom: 0, right: 0, width: 9, height: 9, borderRadius: '50%', background: '#2FBF6B', border: `2px solid ${bg}` }} />}</div>
               : <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', color: composeCol }}><i className="ti ti-users" style={{ fontSize: 16 }} /></div>}
@@ -1300,10 +1328,13 @@
         );
       };
 
+      const placeholderCol = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: bg }}>
+          <div style={{ flex: 1, position: 'relative', overflow: 'hidden', display: wide ? 'flex' : 'block', flexDirection: wide ? 'row' : undefined }}>
+            <div style={wide
+              ? { position: 'relative', width: 340, flexShrink: 0, height: '100%', borderRight: `1px solid ${rowBord}`, display: 'flex', flexDirection: 'column', background: bg }
+              : { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: bg }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px 8px', flexShrink: 0, position: 'relative' }}>
                 <div style={{ fontFamily: J, fontSize: 14, fontWeight: 600, color: headTitle }}>Chat</div>
                 <button onClick={() => setMenu(m => !m)} aria-label="New conversation" style={{ width: 28, height: 28, borderRadius: '50%', border: 'none', cursor: 'pointer', background: composeBg, color: composeCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><i className="ti ti-edit" style={{ fontSize: 15 }} /></button>
@@ -1334,8 +1365,12 @@
               </div>
             </div>
 
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: dark ? '#070F1E' : '#FCFBF8', transform: scope ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 220ms ease', boxShadow: scope && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none', pointerEvents: scope ? 'auto' : 'none', overflow: 'hidden' }}>
-              {scope && <ChatConversation key={scope.id} dark={dark} scope={scope} me={me} roster={roster} channels={channels} rosterById={rosterById} nameOf={nameOf} photoOf={photoOf} awayOf={awayOf} onBack={() => { setScope(null); onRead && onRead(); }} onRead={onRead} />}
+            <div style={wide
+              ? { position: 'relative', flex: 1, display: 'flex', flexDirection: 'column', background: dark ? '#070F1E' : '#FCFBF8', transform: 'none', transition: 'none', boxShadow: 'none', overflow: 'hidden' }
+              : { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: dark ? '#070F1E' : '#FCFBF8', transform: scope ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 220ms ease', boxShadow: scope && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none', pointerEvents: scope ? 'auto' : 'none', overflow: 'hidden' }}>
+              {scope
+                ? <ChatConversation key={scope.id} dark={dark} scope={scope} me={me} roster={roster} channels={channels} rosterById={rosterById} nameOf={nameOf} photoOf={photoOf} awayOf={awayOf} statusOf={statusOf} showBack={!wide} onBack={() => { setScope(null); onRead && onRead(); }} onRead={onRead} />
+                : (wide ? <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, color: placeholderCol }}><i className="ti ti-messages" style={{ fontSize: 40 }} /><div style={{ fontFamily: J, fontSize: 12, fontWeight: 500 }}>Select a conversation</div></div> : null)}
             </div>
           </div>
 

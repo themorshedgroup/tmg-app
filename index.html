@@ -3672,7 +3672,7 @@ Rules:
           <div onClick={onClose} style={{ position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', left: 0, right: 0, bottom: 0, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />
           {/* Popout */}
           <div onClick={(e) => e.stopPropagation()} style={{
-            position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', right: 10, width: '75%', zIndex: 60,
+            position: 'fixed', top: 'calc(60px + env(safe-area-inset-top))', right: 10, width: 'min(calc(100% - 20px), 560px)', zIndex: 60,
             maxHeight: 'calc(100vh - 80px - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
             display: 'flex', flexDirection: 'column',
             borderRadius: 14, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.18)',

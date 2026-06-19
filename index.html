@@ -1278,6 +1278,53 @@ Rules:
     }
 
     // Admin-only user-management console (under the More tab). Replaces editing in Supabase.
+    // Hoisted to a STABLE top-level component so it isn't recreated on every
+    // AdminUsers re-render. (When it lived inside AdminUsers, any parent
+    // re-render gave it a new function identity → React remounted it → all the
+    // field state reset to the saved values, so edits appeared to be "lost".)
+    function UserEditor({ u, users, refresh, setOpenId, nameOf, inp, lbl }) {
+      const [emp, setEmp] = useState(u.employee_id || '');
+      const [hireDate, setHireDate] = useState(u.hire_date || '');
+      const [title, setTitle] = useState(u.title || '');
+      const [reports, setReports] = useState(u.reports_to || '');
+      const [assignedTc, setAssignedTc] = useState(u.assigned_tc || '');
+      const [roles, setRoles] = useState(toRoles(u.access));
+      const [status, setStatus] = useState(u.status || 'pending');
+      const [saving, setSaving] = useState(false);
+      const isAgent = roles.includes('agent'); // Assigned TC only applies to sales agents
+      async function save() {
+        setSaving(true);
+        // Newly approved (any non-active → active) with an email → pop a ready-to-send welcome email.
+        const justApproved = status === 'active' && u.status !== 'active' && !!u.email;
+        // Open the tab synchronously (inside the click) so it isn't popup-blocked; fill it after the save succeeds.
+        const mailTab = justApproved ? window.open('', '_blank') : null;
+        try {
+          await ProfileDB.adminUpdate(u.id, { employee_id: emp, hire_date: hireDate || null, title, reports_to: reports || null, assigned_tc: isAgent ? (assignedTc || null) : null, access: roles, status });
+          await refresh(); setOpenId(null);
+          if (mailTab) mailTab.location.href = gmailComposeUrl(u);
+        }
+        catch (e) { if (mailTab) mailTab.close(); alert('Could not save: ' + (e.message || e)); }
+        finally { setSaving(false); }
+      }
+      return (
+        <div style={{ padding: '10px 12px', background: C.bg, borderRadius: 10, marginTop: 6 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <div><div style={lbl}>Employee ID</div><input value={emp} onChange={e => setEmp(e.target.value)} style={inp} /></div>
+            <div><div style={lbl}>Hire date</div><input type="date" value={hireDate} onChange={e => setHireDate(e.target.value)} style={inp} /></div>
+            <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Title</div><input value={title} onChange={e => setTitle(e.target.value)} style={inp} /></div>
+            <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Access <span style={{ textTransform: 'none', fontWeight: 400 }}>(one or more)</span></div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{['admin', 'operations', 'agent', 'tc'].map(a => { const on = roles.includes(a); return <button key={a} type="button" onClick={() => setRoles(on ? roles.filter(r => r !== a) : [...roles, a])} style={{ padding: '6px 10px', borderRadius: 8, border: `1px solid ${on ? C.navy : C.border}`, background: on ? C.navy : C.surface, color: on ? '#fff' : C.textSecondary, fontSize: '0.74rem', fontWeight: on ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans }}>{ACCESS_LABEL[a]}</button>; })}</div></div>
+            <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Status</div><select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{['active', 'pending', 'disabled'].map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select></div>
+            <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Reports to</div><select value={reports} onChange={e => setReports(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => x.id !== u.id).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
+            {isAgent && <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Assigned TC</div><select value={assignedTc} onChange={e => setAssignedTc(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => toRoles(x.access).includes('tc')).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button onClick={save} disabled={saving} style={{ flex: 1, padding: '8px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save'}</button>
+            <button onClick={() => setOpenId(null)} style={{ flex: 1, padding: '8px', background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: '0.8rem', cursor: 'pointer', fontFamily: C.fontSans }}>Close</button>
+          </div>
+        </div>
+      );
+    }
+
     function AdminUsers() {
       const [users, setUsers] = useState([]);
       const [openId, setOpenId] = useState(null);
@@ -1288,48 +1335,6 @@ Rules:
       const others = users.filter(u => u.status !== 'pending');
       const inp = { width: '100%', padding: '8px 10px', background: C.surfaceHover, border: `1px solid ${C.border}`, borderRadius: 8, color: C.textPrimary, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans };
       const lbl = { fontSize: '0.6rem', color: C.textSecondary, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3, fontFamily: C.fontSans };
-
-      const Editor = ({ u }) => {
-        const [emp, setEmp] = useState(u.employee_id || '');
-        const [hireDate, setHireDate] = useState(u.hire_date || '');
-        const [title, setTitle] = useState(u.title || '');
-        const [reports, setReports] = useState(u.reports_to || '');
-        const [assignedTc, setAssignedTc] = useState(u.assigned_tc || '');
-        const [roles, setRoles] = useState(toRoles(u.access));
-        const [status, setStatus] = useState(u.status || 'pending');
-        const [saving, setSaving] = useState(false);
-        async function save() {
-          setSaving(true);
-          // Newly approved (any non-active → active) with an email → pop a ready-to-send welcome email.
-          const justApproved = status === 'active' && u.status !== 'active' && !!u.email;
-          // Open the tab synchronously (inside the click) so it isn't popup-blocked; fill it after the save succeeds.
-          const mailTab = justApproved ? window.open('', '_blank') : null;
-          try {
-            await ProfileDB.adminUpdate(u.id, { employee_id: emp, hire_date: hireDate || null, title, reports_to: reports || null, assigned_tc: assignedTc || null, access: roles, status });
-            await refresh(); setOpenId(null);
-            if (mailTab) mailTab.location.href = gmailComposeUrl(u);
-          }
-          catch (e) { if (mailTab) mailTab.close(); alert('Could not save: ' + (e.message || e)); }
-          finally { setSaving(false); }
-        }
-        return (
-          <div style={{ padding: '10px 12px', background: C.bg, borderRadius: 10, marginTop: 6 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              <div><div style={lbl}>Employee ID</div><input value={emp} onChange={e => setEmp(e.target.value)} style={inp} /></div>
-              <div><div style={lbl}>Hire date</div><input type="date" value={hireDate} onChange={e => setHireDate(e.target.value)} style={inp} /></div>
-              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Title</div><input value={title} onChange={e => setTitle(e.target.value)} style={inp} /></div>
-              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Access <span style={{ textTransform: 'none', fontWeight: 400 }}>(one or more)</span></div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{['admin', 'operations', 'agent', 'tc'].map(a => { const on = roles.includes(a); return <button key={a} type="button" onClick={() => setRoles(on ? roles.filter(r => r !== a) : [...roles, a])} style={{ padding: '6px 10px', borderRadius: 8, border: `1px solid ${on ? C.navy : C.border}`, background: on ? C.navy : C.surface, color: on ? '#fff' : C.textSecondary, fontSize: '0.74rem', fontWeight: on ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans }}>{ACCESS_LABEL[a]}</button>; })}</div></div>
-              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Status</div><select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{['active', 'pending', 'disabled'].map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select></div>
-              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Reports to</div><select value={reports} onChange={e => setReports(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => x.id !== u.id).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
-              <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Assigned TC</div><select value={assignedTc} onChange={e => setAssignedTc(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => toRoles(x.access).includes('tc')).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-              <button onClick={save} disabled={saving} style={{ flex: 1, padding: '8px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Saving…' : 'Save'}</button>
-              <button onClick={() => setOpenId(null)} style={{ flex: 1, padding: '8px', background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: '0.8rem', cursor: 'pointer', fontFamily: C.fontSans }}>Close</button>
-            </div>
-          </div>
-        );
-      };
 
       const row = (u) => (
         <div key={u.id} style={{ borderBottom: `1px solid ${C.border}`, padding: '8px 0' }}>
@@ -1342,7 +1347,7 @@ Rules:
             <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 600, padding: '2px 7px', borderRadius: 8, background: C.surfaceHover, color: C.gold }}>{accessLabel(u.access)}</span>
             <i className={`ti ti-chevron-${openId === u.id ? 'up' : 'down'}`} style={{ fontSize: 14, color: C.textMuted, flexShrink: 0 }} />
           </div>
-          {openId === u.id && <Editor u={u} />}
+          {openId === u.id && <UserEditor u={u} users={users} refresh={refresh} setOpenId={setOpenId} nameOf={nameOf} inp={inp} lbl={lbl} />}
         </div>
       );
 

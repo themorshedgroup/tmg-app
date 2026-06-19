@@ -27,6 +27,10 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
           // Plain Google sign-in. (The Calendar scope / offline access was removed —
           // it's part of the parked Google Calendar feature whose backend isn't set up,
           // and requesting that unconfigured sensitive scope broke the OAuth return.)
+          // Always show the account chooser so users with a personal + TMG Google
+          // account pick the right one (avoids the 403 org_internal block when Google
+          // silently defaults to a non-org account).
+          queryParams: { prompt: 'select_account' },
           redirectTo: _cleanUrl,
         },
       });

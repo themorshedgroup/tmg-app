@@ -23,7 +23,9 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     try {
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
-        options: { redirectTo: _cleanUrl },
+        // Always show the account chooser so users with both a personal and a TMG
+        // Google account pick the right one (avoids the 403 org_internal block).
+        options: { queryParams: { prompt: 'select_account' }, redirectTo: _cleanUrl },
       });
       if (error) {
         console.error('[SA] signIn error:', error.message);

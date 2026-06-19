@@ -599,6 +599,15 @@
       while ((m = MEN_RE.exec(s))) matches.push({ start: m.index, end: m.index + m[0].length, type: 'mention', id: m[1] || null, handle: m[2] || null });
       const CH_RE = /(^|[\s.,!?])#([a-z0-9][a-z0-9-]*)/g;
       while ((m = CH_RE.exec(s))) { const st = m.index + (m[1] || '').length; matches.push({ start: st, end: st + 1 + m[2].length, type: 'channel', name: m[2] }); }
+      // Markdown-ish formatting (precedence follows push order via the overlap guard):
+      const CODE_RE = /`([^`\n]+)`/g;
+      while ((m = CODE_RE.exec(s))) matches.push({ start: m.index, end: m.index + m[0].length, type: 'code', inner: m[1] });
+      const LINK_RE = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+      while ((m = LINK_RE.exec(s))) matches.push({ start: m.index, end: m.index + m[0].length, type: 'mdlink', inner: m[1], url: m[2] });
+      const BOLD_RE = /\*\*([^*\n]+)\*\*/g;
+      while ((m = BOLD_RE.exec(s))) matches.push({ start: m.index, end: m.index + m[0].length, type: 'bold', inner: m[1] });
+      const ITAL_RE = /(?:^|[^A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])/g;
+      while ((m = ITAL_RE.exec(s))) { const st = s.indexOf('_', m.index); matches.push({ start: st, end: st + 2 + m[1].length, type: 'italic', inner: m[1] }); }
       matches.sort((a, b) => a.start - b.start);
       const out = []; let idx = 0, key = 0, lastEnd = 0;
       const chip = ctx.chipColor || (ctx.dark ? '#C9A45A' : '#AD832F');
@@ -615,8 +624,19 @@
         } else if (t.type === 'mention') {
           let nm = (t.id && ctx.byId && ctx.byId[t.id]) ? ctx.byId[t.id] : null;
           out.push(React.createElement('span', { key: key++, style: { color: chip, fontWeight: 600 } }, '@' + (nm || t.handle || 'unknown')));
-        } else {
+        } else if (t.type === 'channel') {
           out.push(React.createElement('span', { key: key++, style: { color: chip, fontWeight: 600 } }, '#' + t.name));
+        } else if (t.type === 'code') {
+          out.push(React.createElement('span', { key: key++, style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: '0.92em', background: ctx.dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,26,74,0.08)', padding: '1px 5px', borderRadius: 5 } }, t.inner));
+        } else if (t.type === 'mdlink') {
+          const href = chatSafeHref(t.url);
+          out.push(href
+            ? React.createElement('a', { key: key++, href, target: '_blank', rel: 'noopener noreferrer', style: { color: link, textDecoration: 'underline', wordBreak: 'break-all' } }, t.inner)
+            : s.slice(t.start, t.end));
+        } else if (t.type === 'bold') {
+          out.push(React.createElement('span', { key: key++, style: { fontWeight: 700 } }, renderMessageContent(t.inner, ctx)));
+        } else if (t.type === 'italic') {
+          out.push(React.createElement('span', { key: key++, style: { fontStyle: 'italic' } }, renderMessageContent(t.inner, ctx)));
         }
         idx = t.end; lastEnd = t.end;
       }
@@ -853,6 +873,12 @@
 
     // ─── Team Chat ("Chat") — real, realtime, backed by ChatDB ───────
     const CHAT_EMOJIS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥', '👀', '✅'];
+    // Flat palette for the composer emoji picker (insert into the input). Distinct from CHAT_EMOJIS (reactions).
+    const COMPOSER_EMOJIS = [
+      '😀', '😄', '😅', '😂', '🙂', '😉', '😊', '😍', '😎', '🤔', '😴', '😢',
+      '😭', '😡', '🥳', '😬', '👍', '👎', '👏', '🙌', '🙏', '👌', '🤙', '💪',
+      '❤️', '🧡', '💛', '💚', '💙', '💜', '🔥', '🎉', '✅', '⭐', '💡', '📌',
+    ];
 
     function NewChannelModal({ dark, isAdmin, onClose, onCreated }) {
       const J = "'Jost', sans-serif";
@@ -949,9 +975,10 @@
 
       const [messages, setMessages] = useState([]); const [loading, setLoading] = useState(true);
       const [text, setText] = useState(''); const [sending, setSending] = useState(false); const [menu, setMenu] = useState(null);
+      const [emojiPicker, setEmojiPicker] = useState(null); // 'main' | 'thread' | null
       const [actionFor, setActionFor] = useState(null); const [editId, setEditId] = useState(null); const [editText, setEditText] = useState('');
       const [thread, setThread] = useState(null); const [threadMsgs, setThreadMsgs] = useState([]); const [threadText, setThreadText] = useState(''); const [tSending, setTSending] = useState(false);
-      const listRef = useRef(null); const composerRef = useRef(null); const threadRef = useRef(null);
+      const listRef = useRef(null); const composerRef = useRef(null); const threadComposerRef = useRef(null); const threadRef = useRef(null);
       threadRef.current = thread;
       const scrollDown = () => { const el = listRef.current; if (el) el.scrollTop = el.scrollHeight; };
       const fmtTime = (iso) => { try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
@@ -1026,6 +1053,7 @@
         } else {
           (channels || []).forEach(c => { if (!qy || c.name.toLowerCase().includes(qy)) items.push({ label: '#' + c.name, insert: '#' + c.name }); });
         }
+        if (items.length) setEmojiPicker(null);
         setMenu(items.length ? { items: items.slice(0, 6), tokenStart, pos } : null);
       };
       const pickMention = (item) => {
@@ -1033,6 +1061,27 @@
         const nt = text.slice(0, menu.tokenStart) + item.insert + ' ' + text.slice(pos);
         setText(nt); setMenu(null);
         setTimeout(() => { if (ta) { ta.focus(); const c = menu.tokenStart + item.insert.length + 1; try { ta.setSelectionRange(c, c); } catch (e) {} } }, 10);
+      };
+      // Insert an emoji at the caret of the given textarea; keep the picker open (Slack-like).
+      const insertEmoji = (em, kRef, setter, val) => {
+        const ta = kRef && kRef.current; const v = String(val == null ? '' : val);
+        const start = ta ? (ta.selectionStart != null ? ta.selectionStart : v.length) : v.length;
+        const end = ta ? (ta.selectionEnd != null ? ta.selectionEnd : start) : start;
+        const nt = v.slice(0, start) + em + v.slice(end);
+        setter(nt);
+        setTimeout(() => { if (ta) { ta.focus(); const c = start + em.length; try { ta.setSelectionRange(c, c); } catch (e) {} } }, 10);
+      };
+      // Wrap the current selection (or insert a placeholder when empty) with before/after markup.
+      const wrapSelection = (kRef, val, setter, before, after, placeholder) => {
+        const ta = kRef && kRef.current; const v = String(val == null ? '' : val);
+        const start = ta ? (ta.selectionStart != null ? ta.selectionStart : v.length) : v.length;
+        const end = ta ? (ta.selectionEnd != null ? ta.selectionEnd : start) : start;
+        const sel = v.slice(start, end) || (placeholder || 'text');
+        const nt = v.slice(0, start) + before + sel + after + v.slice(end);
+        setter(nt);
+        // Reselect the inner text so the user can keep typing over it.
+        const innerStart = start + before.length; const innerEnd = innerStart + sel.length;
+        setTimeout(() => { if (ta) { ta.focus(); try { ta.setSelectionRange(innerStart, innerEnd); } catch (e) {} } }, 10);
       };
 
       const toggleReaction = (mm, emoji) => {
@@ -1107,8 +1156,14 @@
         );
       };
 
-      const composer = (val, onChange, onSend, busy, kRef, placeholder, autoMenu) => (
-        <div style={{ flexShrink: 0, borderTop: `1px solid ${inBarBord}`, background: inBarBg, padding: '8px 12px calc(10px + env(safe-area-inset-bottom))', position: 'relative' }}>
+      const composer = (val, onChange, onSend, busy, kRef, placeholder, autoMenu, pickerKey) => {
+        const iconCol = dark ? 'rgba(255,255,255,0.55)' : '#8A8676';
+        const fmtBtn = (icon, before, after, ph) => (
+          <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => wrapSelection(kRef, val, kRef === composerRef ? setText : setThreadText, before, after, ph)} aria-label={icon} style={{ width: 26, height: 26, borderRadius: 7, border: 'none', background: 'transparent', cursor: 'pointer', color: iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className={`ti ${icon}`} style={{ fontSize: 14 }} /></button>
+        );
+        const setterFor = (kRef === composerRef ? setText : setThreadText);
+        return (
+        <div style={{ flexShrink: 0, borderTop: `1px solid ${inBarBord}`, background: inBarBg, padding: '6px 12px calc(10px + env(safe-area-inset-bottom))', position: 'relative' }}>
           {autoMenu && menu && menu.items.length > 0 && (
             <div style={{ position: 'absolute', left: 12, right: 12, bottom: 'calc(100% - 2px)', background: dark ? '#0A1730' : '#fff', border: `1px solid ${reactBord}`, borderRadius: 12, boxShadow: '0 -4px 16px rgba(0,0,0,0.16)', overflow: 'hidden', maxHeight: 200, overflowY: 'auto', zIndex: 5 }}>
               {menu.items.map((it, k) => (
@@ -1120,12 +1175,31 @@
               ))}
             </div>
           )}
+          {emojiPicker === pickerKey && (
+            <div style={{ position: 'absolute', left: 12, right: 12, bottom: 'calc(100% - 2px)', background: dark ? '#0A1730' : '#fff', border: `1px solid ${reactBord}`, borderRadius: 12, boxShadow: '0 -4px 16px rgba(0,0,0,0.16)', padding: 8, zIndex: 5, display: 'flex', flexWrap: 'wrap', gap: 2, maxHeight: 168, overflowY: 'auto' }}>
+              {COMPOSER_EMOJIS.map((em, k) => (
+                <button key={k} type="button" onMouseDown={e => e.preventDefault()} onClick={() => insertEmoji(em, kRef, setterFor, val)} aria-label={'Insert ' + em} style={{ width: 30, height: 30, borderRadius: 7, border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{em}</button>
+              ))}
+            </div>
+          )}
+          {/* Formatting toolbar (bold / italic / code / link) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginBottom: 4 }}>
+            {fmtBtn('ti-bold', '**', '**', 'bold')}
+            {fmtBtn('ti-italic', '_', '_', 'italic')}
+            {fmtBtn('ti-code', '`', '`', 'code')}
+            <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => wrapSelection(kRef, val, setterFor, '[', '](url)', 'text')} aria-label="ti-link" style={{ width: 26, height: 26, borderRadius: 7, border: 'none', background: 'transparent', cursor: 'pointer', color: iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-link" style={{ fontSize: 14 }} /></button>
+          </div>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 7 }}>
+            {autoMenu && (
+              <button type="button" disabled aria-label="Screen recording (coming soon)" title="Screen recording — coming soon" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'transparent', flexShrink: 0, cursor: 'not-allowed', color: dark ? 'rgba(255,255,255,0.30)' : '#B4B2A9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-device-desktop" style={{ fontSize: 16 }} /></button>
+            )}
             <textarea ref={kRef} value={val} onChange={onChange} onKeyDown={onKey(onSend)} rows={1} placeholder={placeholder} aria-label={placeholder} style={{ flex: 1, resize: 'none', maxHeight: 96, minHeight: 34, borderRadius: 17, padding: '8px 12px', fontFamily: J, fontSize: 11, lineHeight: 1.4, color: dark ? '#fff' : '#001A4A', background: inFieldBg, border: `1px solid ${inFieldBord}`, outline: 'none', boxSizing: 'border-box' }} />
+            <button type="button" onClick={() => { setMenu(null); setEmojiPicker(p => p === pickerKey ? null : pickerKey); }} aria-label="Emoji" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'transparent', flexShrink: 0, cursor: 'pointer', color: emojiPicker === pickerKey ? senderGold : iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-mood-smile" style={{ fontSize: 18 }} /></button>
             <button onClick={onSend} disabled={!val.trim() || busy} aria-label="Send" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: val.trim() ? 'pointer' : 'default', flexShrink: 0, background: val.trim() ? sendBg : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-arrow-up" style={{ fontSize: 15 }} /></button>
           </div>
         </div>
-      );
+        );
+      };
 
       const parent = thread;
       return (
@@ -1142,7 +1216,7 @@
             {!loading && messages.length === 0 && <div style={{ fontFamily: J, fontSize: 11, color: subCol, textAlign: 'center', padding: 24 }}>No messages yet. Say hello 👋</div>}
             {messages.map((mm, i) => renderRow(mm, i, messages, false))}
           </div>
-          {composer(text, onComposerChange, send, sending, composerRef, 'Message ' + scope.title, true)}
+          {composer(text, onComposerChange, send, sending, composerRef, 'Message ' + scope.title, true, 'main')}
 
           {/* Thread overlay */}
           <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: msgBg, transform: parent ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 200ms ease', boxShadow: parent && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none', pointerEvents: parent ? 'auto' : 'none', zIndex: 6 }}>
@@ -1157,7 +1231,7 @@
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0' }}><div style={{ flex: 1, height: 1, background: barBord }} /><span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.12em', textTransform: 'uppercase', color: subCol }}>{threadMsgs.length} {threadMsgs.length === 1 ? 'reply' : 'replies'}</span><div style={{ flex: 1, height: 1, background: barBord }} /></div>
                   {threadMsgs.map((tm, i) => renderRow(tm, i, threadMsgs, true))}
                 </div>
-                {composer(threadText, e => setThreadText(e.target.value), sendThread, tSending, null, 'Reply…', false)}
+                {composer(threadText, e => setThreadText(e.target.value), sendThread, tSending, threadComposerRef, 'Reply…', false, 'thread')}
               </React.Fragment>
             )}
           </div>

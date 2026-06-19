@@ -594,27 +594,43 @@ Rules:
       if (!ok) throw new Error(data.error || 'Contact search failed');
       return data.contacts || [];
     }
+    // Valid picklist options for the "Other KPI" fields — Zoho rejects any other value.
+    const ALLOWED_OTHER_KPIS = [
+      'Agent Recruiting for Tarek', 'Agent Training for Tarek', 'EO Work for Brad',
+      'Networking Event for Brett', 'Generate Clients/Relationships', 'Open House',
+      'Pre-Hotzone Action', 'Professional Development',
+    ];
     async function createAgentKpi(payload) {
-      // Build the Zoho record from the app payload.
-      // Field API names are placeholders — Symon confirms the real ones from Zoho.
-      const record = {
-        KPI_Date: payload.date || kpiTodayStr(),
-        CTC_Hours: payload.ctc != null ? Number(payload.ctc) : undefined,
-        Owner: payload.owner || '',
-      };
-      (payload.persons || []).forEach((p, i) => {
-        const n = i + 1;
-        record['Person_' + n + '_Name'] = p.name;
-        record['Person_' + n + '_Applicable_KPI'] = (p.kpis || []).join('; ');
+      // Maps the app payload onto the REAL Agent_KPIs module fields (verified against Zoho 2026-06-20).
+      // Owner is omitted on purpose — Zoho auto-assigns the record owner (it's a user lookup).
+      const record = { KPI_Date: payload.date || kpiTodayStr() };
+      if (payload.ctc != null && payload.ctc !== '') record.CTC_Hours_2 = Number(payload.ctc);
+
+      // Zoho only has Person_1..10 slots — cap at 10.
+      const persons = (payload.persons || []).slice(0, 10);
+      for (let i = 0; i < persons.length; i++) {
+        const p = persons[i], n = i + 1;
+        // Applicable KPIs is a MULTI-SELECT picklist → send an array of the exact option strings.
+        if ((p.kpis || []).length) record['Person_' + n + '_Applicable_KPIs'] = p.kpis;
         if ((p.kpis || []).some(k => /hotzone/i.test(k)) && p.hotzone_count) {
-          record['Person_' + n + '_Hotzone_Actions'] = Number(p.hotzone_count);
+          record['Number_of_Hotzone_Actions_' + n] = Number(p.hotzone_count);
         }
-      });
-      (payload.others || []).forEach((o, i) => {
+        // Person_N_Name is a Contacts LOOKUP. Link by record id only on a single, unambiguous
+        // match (avoids attaching a KPI to the wrong contact). Unmatched names stay blank.
+        try {
+          const matches = await searchZohoContacts(p.name);
+          if (matches.length === 1) record['Person_' + n + '_Name'] = { id: matches[0].id };
+        } catch (e) { /* leave unlinked if the search fails */ }
+      }
+
+      // Other KPIs: 3 slots, and the value must be one of the allowed picklist options.
+      (payload.others || []).slice(0, 3).forEach((o, i) => {
+        if (!ALLOWED_OTHER_KPIS.includes(o.label)) return;
         const n = i + 1;
         record['Other_KPI_' + n] = o.label;
         if (o.count) record['Other_KPI_' + n + '_Count'] = Number(o.count);
       });
+
       const { ok, data } = await callZoho({ action: 'create_agent_kpi', record });
       if (!ok) throw new Error(data.error || 'Failed to create Agent KPI');
       return data;

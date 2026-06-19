@@ -5518,7 +5518,7 @@ Rules:
       );
       const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, padding: '2px 6px', borderRadius: 10, background: statusColor(st) + '22', color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
       const decCard = (t) => {
-        const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = [t.description, t.context].filter(Boolean).join(' · ');
+        const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = t.description || '';
         return (
           <div key={t.id} style={{ borderBottom: `0.5px solid ${K.rowBd}`, padding: '9px 12px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -5530,6 +5530,7 @@ Rules:
               {dd && <span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 600, color: dd.color }}>Decide by {dd.label}</span>}
               {asg && <span style={{ fontFamily: J, fontSize: 8.5, color: K.reg }}>Assignee: {asg}</span>}
             </div>
+            {t.context && <div style={{ fontFamily: J, fontSize: 8.5, color: K.reg, lineHeight: 1.5, marginTop: 4, whiteSpace: 'pre-wrap' }}><b style={{ color: K.gold }}>Context:</b> {t.context}</div>}
             {t.decision_question && <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 600, color: K.date, margin: '8px 0 6px', lineHeight: 1.4 }}>{t.decision_question}</div>}
             {(d.options || []).map((o, i) => (
               <div key={o.id || i} onClick={() => chooseOption(t.id, i)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px', marginBottom: 4, borderRadius: 7, cursor: 'pointer', background: o.is_chosen ? (dark ? 'rgba(15,110,86,.18)' : '#E6F2EC') : (dark ? '#0C1830' : '#FAF8F3'), border: `1px solid ${o.is_chosen ? (dark ? '#1E6B4E' : '#9FD3BC') : K.cellBd}` }}>
@@ -5732,7 +5733,7 @@ Rules:
       const statusPill = (st) => <span style={{ fontFamily: J, fontSize: 7.5, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: statusColor(st) + '22', color: statusColor(st), flexShrink: 0 }}>{statusLabel(st)}</span>;
 
       const decCard = (t) => {
-        const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = [t.description, t.context].filter(Boolean).join(' · ');
+        const d = decData[t.id] || {}; const dd = decDueInfo(t); const maker = roleNames(t.id, 'decision_maker'); const asg = roleNames(t.id, 'assignee'); const extra = t.description || '';
         return (
           <div key={t.id} style={{ borderBottom: `0.5px solid ${K.rowBd}`, padding: '11px 14px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -5744,6 +5745,7 @@ Rules:
               {dd && <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: dd.color }}>Decide by {dd.label}</span>}
               {asg && <span style={{ fontFamily: J, fontSize: 9, color: K.reg }}>Assignee: {asg}</span>}
             </div>
+            {t.context && <div style={{ fontFamily: J, fontSize: 9, color: K.reg, lineHeight: 1.5, marginTop: 4, whiteSpace: 'pre-wrap' }}><b style={{ color: K.gold }}>Context:</b> {t.context}</div>}
             {t.decision_question && <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: K.date, margin: '8px 0 6px', lineHeight: 1.4 }}>{t.decision_question}</div>}
             {(d.options || []).map((o, i) => (
               <div key={o.id || i} onClick={() => chooseOption(t.id, i)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '6px 9px', marginBottom: 4, borderRadius: 7, cursor: 'pointer', background: o.is_chosen ? (dark ? 'rgba(15,110,86,.18)' : '#E6F2EC') : (dark ? '#0C1830' : '#FAF8F3'), border: `1px solid ${o.is_chosen ? (dark ? '#1E6B4E' : '#9FD3BC') : K.cellBd}` }}>

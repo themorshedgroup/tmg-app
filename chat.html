@@ -290,6 +290,47 @@
       return value;
     }
 
+    // ─── Attachment helpers (module-level, reusable for a future voice-message feature) ──
+    const ATTACH_BUCKET = 'chat-attachments';
+    const ATTACH_MAX_BYTES = 25 * 1024 * 1024; // ~25MB per file
+    const _signedUrlCache = new Map();          // storage_path → signed url (https) | object url (dev)
+    // Dev-mode object/preview URLs keyed by fake storage_path (so signedUrl() can resolve them on localhost).
+    const _devAttachUrls = {};
+    // Seed the dev fixture image so localhost renders an inline attachment without real Storage.
+    _devAttachUrls['dev/sample-floorplan.svg'] = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="220" height="150" viewBox="0 0 220 150">' +
+      '<rect width="220" height="150" fill="#F3EBDA"/>' +
+      '<rect x="12" y="12" width="120" height="90" fill="none" stroke="#AD832F" stroke-width="2"/>' +
+      '<rect x="132" y="12" width="76" height="44" fill="none" stroke="#AD832F" stroke-width="2"/>' +
+      '<rect x="132" y="56" width="76" height="46" fill="none" stroke="#AD832F" stroke-width="2"/>' +
+      '<line x1="12" y1="102" x2="208" y2="102" stroke="#001A4A" stroke-width="2"/>' +
+      '<text x="110" y="132" font-family="Jost,sans-serif" font-size="13" fill="#001A4A" text-anchor="middle">Sample Floor Plan</text>' +
+      '</svg>'
+    );
+    // Strip path separators / unsafe chars so the storage key stays well-formed.
+    function sanitizeFileName(name) {
+      return String(name || 'file').replace(/[\/\\]+/g, '_').replace(/[^A-Za-z0-9._-]/g, '_').replace(/_{2,}/g, '_').slice(0, 120) || 'file';
+    }
+    function humanFileSize(bytes) {
+      const b = Number(bytes) || 0;
+      if (b < 1024) return b + ' B';
+      if (b < 1024 * 1024) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' KB';
+      return (b / (1024 * 1024)).toFixed(b < 10 * 1024 * 1024 ? 1 : 0) + ' MB';
+    }
+    function isImageMime(m) { return /^image\//.test(String(m || '')); }
+    // Decode an image File to grab natural width/height (best-effort; resolves nulls on failure).
+    function imageDims(file) {
+      return new Promise((resolve) => {
+        if (!isImageMime(file.type) || typeof URL === 'undefined' || !URL.createObjectURL) { resolve({ width: null, height: null }); return; }
+        try {
+          const url = URL.createObjectURL(file); const img = new Image();
+          img.onload = () => { resolve({ width: img.naturalWidth || null, height: img.naturalHeight || null }); URL.revokeObjectURL(url); };
+          img.onerror = () => { resolve({ width: null, height: null }); URL.revokeObjectURL(url); };
+          img.src = url;
+        } catch (e) { resolve({ width: null, height: null }); }
+      });
+    }
+
     // ─── ChatDB (Supabase + localhost dev fixture) ────────────────────
     const ChatDB = {
       client() { return window.SupabaseAuth?._client || null; },
@@ -314,7 +355,7 @@
           ],
           messages: {
             devc1: [
-              { id: 'm1', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'Welcome to the new Chat! 🎉 Notes at https://themorshedgroup.com', created_at: ago(3600000), reactions: [{ emoji: '🎉', user_id: 'dev-user-id' }, { emoji: '🎉', user_id: 'dev-alex' }], reply_count: 2 },
+              { id: 'm1', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'Welcome to the new Chat! 🎉 Notes at https://themorshedgroup.com', created_at: ago(3600000), reactions: [{ emoji: '🎉', user_id: 'dev-user-id' }, { emoji: '🎉', user_id: 'dev-alex' }], reply_count: 2, attachments: [{ id: 'devatt1', message_id: 'm1', storage_path: 'dev/sample-floorplan.svg', file_name: 'floorplan.svg', mime_type: 'image/svg+xml', file_size: 4200, width: 220, height: 150 }] },
               { id: 'm2', channel_id: 'devc1', author_id: 'dev-user-id',  content: 'Looks great. @Tarek can you review the #deals pipeline?', created_at: ago(1800000), reactions: [], reply_count: 0 },
               { id: 'm3', channel_id: 'devc1', author_id: 'dev-tarek',    content: 'XSS test: <img src=x onerror=alert(1)> <script>alert(1)<\/script> javascript:alert(1)', created_at: ago(600000), edited_at: ago(300000), reactions: [], reply_count: 0 },
             ],
@@ -399,7 +440,8 @@
         const rxBy = {}; (rx || []).forEach(r => { (rxBy[r.message_id] = rxBy[r.message_id] || []).push({ emoji: r.emoji, user_id: r.user_id }); });
         const { data: rep } = await this.client().from('chat_messages').select('thread_parent_id').eq(col, scope.id).not('thread_parent_id', 'is', null).in('thread_parent_id', ids);
         const repBy = {}; (rep || []).forEach(r => { repBy[r.thread_parent_id] = (repBy[r.thread_parent_id] || 0) + 1; });
-        msgs.forEach(m => { m.reactions = rxBy[m.id] || []; m.reply_count = repBy[m.id] || 0; });
+        const byAtt = await this.loadAttachments(ids);
+        msgs.forEach(m => { m.reactions = rxBy[m.id] || []; m.reply_count = repBy[m.id] || 0; m.attachments = byAtt[m.id] || []; });
       },
 
       async threadReplies(scope, parentId) {
@@ -427,6 +469,68 @@
         const { data, error } = await this.client().from('chat_messages').insert(base).select().single();
         if (error) { console.error('[ChatDB] send:', error.message); throw error; }
         return data;
+      },
+
+      // ── Attachments substrate (reused later for voice messages) ──────
+      // Upload a File to private Storage; returns the meta row to insert into chat_message_attachments.
+      // Dev-mode (no client): stash an object URL and return a fake storage_path so the UI is fully testable.
+      async uploadAttachment(scope, file) {
+        const dims = await imageDims(file);
+        if (!this.client()) {
+          const fakePath = 'dev/' + (crypto.randomUUID ? crypto.randomUUID() : Date.now()) + '-' + sanitizeFileName(file.name);
+          const previewUrl = (typeof URL !== 'undefined' && URL.createObjectURL) ? URL.createObjectURL(file) : '';
+          _devAttachUrls[fakePath] = previewUrl;
+          return { storage_path: fakePath, file_name: file.name, mime_type: file.type || 'application/octet-stream', file_size: file.size, width: dims.width, height: dims.height, previewUrl };
+        }
+        const uid = this.uid();
+        const path = `${uid}/chat-${scope.id}/${crypto.randomUUID()}-${sanitizeFileName(file.name)}`;
+        const { error } = await this.client().storage.from(ATTACH_BUCKET).upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
+        if (error) { console.error('[ChatDB] uploadAttachment:', error.message); throw error; }
+        return { storage_path: path, file_name: file.name, mime_type: file.type || 'application/octet-stream', file_size: file.size, width: dims.width, height: dims.height };
+      },
+
+      // Insert the attachment row for a (real) message id. RLS gates insert to the message author.
+      async addAttachmentRow(messageId, meta) {
+        const row = { message_id: messageId, storage_path: meta.storage_path, file_name: meta.file_name, mime_type: meta.mime_type, file_size: meta.file_size, width: meta.width ?? null, height: meta.height ?? null };
+        if (!this.client()) {
+          const d = this._dev(); const rec = { id: 'devatt-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now()), ...row };
+          const push = (m) => { if (m.id === messageId) m.attachments = [...(m.attachments || []), rec]; };
+          Object.keys(d.messages).forEach(k => d.messages[k].forEach(push));
+          Object.keys(d.threads).forEach(k => d.threads[k].forEach(push));
+          return rec;
+        }
+        const { data, error } = await this.client().from('chat_message_attachments').insert(row).select().single();
+        if (error) { console.error('[ChatDB] addAttachmentRow:', error.message); throw error; }
+        return data;
+      },
+
+      // Resolve (and cache) a signed URL for a private-bucket object. Dev-mode → the stored object/preview URL.
+      async signedUrl(storagePath) {
+        if (!storagePath) return '';
+        if (_signedUrlCache.has(storagePath)) return _signedUrlCache.get(storagePath);
+        if (!this.client()) { const u = _devAttachUrls[storagePath] || ''; if (u) _signedUrlCache.set(storagePath, u); return u; }
+        const { data, error } = await this.client().storage.from(ATTACH_BUCKET).createSignedUrl(storagePath, 3600);
+        if (error || !data?.signedUrl) { console.error('[ChatDB] signedUrl:', error && error.message); return ''; }
+        _signedUrlCache.set(storagePath, data.signedUrl);
+        return data.signedUrl;
+      },
+
+      // Bulk-load attachment rows for a set of message ids → { [message_id]: [rows] }.
+      async loadAttachments(messageIds) {
+        const ids = (messageIds || []).filter(Boolean);
+        const out = {};
+        if (!ids.length) return out;
+        if (!this.client()) {
+          const d = this._dev();
+          const scan = (m) => { if (ids.includes(m.id) && (m.attachments || []).length) out[m.id] = m.attachments.slice(); };
+          Object.keys(d.messages).forEach(k => d.messages[k].forEach(scan));
+          Object.keys(d.threads).forEach(k => d.threads[k].forEach(scan));
+          return out;
+        }
+        const { data, error } = await this.client().from('chat_message_attachments').select('*').in('message_id', ids);
+        if (error) { console.error('[ChatDB] loadAttachments:', error.message); return out; }
+        (data || []).forEach(r => { (out[r.message_id] = out[r.message_id] || []).push(r); });
+        return out;
       },
 
       async editMessage(id, content) {
@@ -777,6 +881,33 @@
       return <div style={{ width: size, height: size, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.navy, color: C.goldSoft, fontFamily: "'Jost', sans-serif", fontWeight: 600, fontSize: Math.round(size * 0.4) }}>{(name || '?').trim().charAt(0).toUpperCase()}</div>;
     }
 
+    // Inline image attachment: resolves a (private-bucket) signed URL on mount, shows a placeholder
+    // while loading, then a rounded thumbnail that opens full-size in a new tab. Falls back to a
+    // staged previewUrl (optimistic/dev) before any signed URL is available.
+    function AttachmentImage({ att, dark }) {
+      const [url, setUrl] = useState(att.previewUrl || '');
+      const [err, setErr] = useState(false);
+      useEffect(() => {
+        let active = true;
+        ChatDB.signedUrl(att.storage_path).then(u => { if (active && u) setUrl(u); }).catch(() => {});
+        return () => { active = false; };
+      }, [att.storage_path]);
+      const ph = dark ? '#0A1730' : '#F3EBDA', phBord = dark ? '#152545' : '#E4DFD4', phCol = dark ? 'rgba(255,255,255,0.4)' : '#8A8676';
+      if (err || (!url && !att.previewUrl)) {
+        if (err) return (
+          <div style={{ maxWidth: 220, padding: '10px 12px', borderRadius: 10, background: ph, border: `1px solid ${phBord}`, color: phCol, fontFamily: "'Jost', sans-serif", fontSize: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <i className="ti ti-photo-off" style={{ fontSize: 14 }} />{att.file_name || 'Image unavailable'}
+          </div>
+        );
+        return <div style={{ width: 160, height: 110, borderRadius: 10, background: ph, border: `1px solid ${phBord}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: phCol }}><i className="ti ti-photo" style={{ fontSize: 22 }} /></div>;
+      }
+      return (
+        <img src={url} alt={att.file_name || 'attachment'} onError={() => setErr(true)}
+          onClick={() => { const u = url || att.previewUrl; if (u) window.open(u, '_blank', 'noopener,noreferrer'); }}
+          style={{ maxWidth: 220, maxHeight: 240, width: 'auto', height: 'auto', borderRadius: 10, cursor: 'pointer', display: 'block', objectFit: 'cover', border: `1px solid ${phBord}` }} />
+      );
+    }
+
     // Merge live Supabase profiles OVER the curated TEAM seed (see note above).
     function buildRoster(profiles) {
       profiles = profiles || [];
@@ -1013,6 +1144,8 @@
       const [hoverId, setHoverId] = useState(null); const [memberReads, setMemberReads] = useState([]);
       const isTouch = typeof window !== 'undefined' && 'ontouchstart' in window;
       const [thread, setThread] = useState(null); const [threadMsgs, setThreadMsgs] = useState([]); const [threadText, setThreadText] = useState(''); const [tSending, setTSending] = useState(false);
+      const [pending, setPending] = useState([]); // staged attachments: { id, file, meta, status, previewUrl }
+      const fileRef = useRef(null);
       const listRef = useRef(null); const composerRef = useRef(null); const threadComposerRef = useRef(null); const threadRef = useRef(null);
       const prevMsgCount = useRef(0);
       threadRef.current = thread;
@@ -1049,11 +1182,23 @@
         const readCh = ChatDB.subscribeMemberReads(scope, upsertRead);
         const ch = ChatDB.subscribeScope(scope, {
           onInsert: (row) => {
+            // Attachments live in a separate table, so realtime delivers the message row without them.
+            // For messages that aren't my own optimistic echo, fetch + patch attachments so images appear live.
+            const isMine = row.author_id === me;
+            const patchAttachments = () => {
+              if (isMine) return; // my own row already carries its (optimistic→real) attachments
+              ChatDB.loadAttachments([row.id]).then(byId => {
+                const atts = byId[row.id] || []; if (!atts.length) return;
+                const apply = (l) => l.map(x => x.id === row.id ? { ...x, attachments: atts } : x);
+                setMessages(apply); setThreadMsgs(apply);
+              });
+            };
             if (row.thread_parent_id) {
               setMessages(prev => prev.map(x => x.id === row.thread_parent_id ? { ...x, reply_count: (x.reply_count || 0) + 1 } : x));
-              if (threadRef.current && threadRef.current.id === row.thread_parent_id) setThreadMsgs(prev => dedupeAdd(prev, row));
+              if (threadRef.current && threadRef.current.id === row.thread_parent_id) { setThreadMsgs(prev => dedupeAdd(prev, row)); patchAttachments(); }
             } else {
               setMessages(prev => dedupeAdd(prev, row));
+              patchAttachments();
               ChatDB.markRead(scope, row.id).then(() => onRead && onRead());
             }
           },
@@ -1070,26 +1215,59 @@
         if (grew && nearBottom()) scrollDown();
       }, [messages.length]);
 
-      const doSend = async (body, threadParentId, clear, setBusy) => {
-        if (!body.trim()) return;
+      const doSend = async (body, threadParentId, clear, setBusy, staged) => {
+        // Only upload "ready" attachments; drop ones still uploading or errored.
+        const ready = (staged || []).filter(p => p.status === 'ready' && p.meta);
+        if (!body.trim() && !ready.length) return;
         const clientId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('c' + Date.now() + Math.round(performance.now()));
-        const optimistic = { id: 'tmp-' + clientId, author_id: me, content: body, client_id: clientId, created_at: new Date().toISOString(), reactions: [], reply_count: 0, _pending: true, thread_parent_id: threadParentId || null };
+        // Optimistic attachments render immediately from the already-staged preview/meta.
+        const optimisticAtt = ready.map(p => ({ id: 'tmpatt-' + p.id, message_id: 'tmp-' + clientId, ...p.meta }));
+        const optimistic = { id: 'tmp-' + clientId, author_id: me, content: body, client_id: clientId, created_at: new Date().toISOString(), reactions: [], reply_count: 0, attachments: optimisticAtt, _pending: true, thread_parent_id: threadParentId || null };
         if (threadParentId) setThreadMsgs(prev => [...prev, optimistic]); else setMessages(prev => [...prev, optimistic]);
         clear(); setBusy(true);
         try {
+          // RLS: insert the message FIRST so the real row id exists, THEN attach rows (insert gated to author).
           const row = await ChatDB.sendMessage(scope, { content: body, clientId, threadParentId });
           const mentions = parseChatMentions(body, scope, roster, channels);
           if (mentions.length && row.id) ChatDB.insertMentions(row.id, mentions);
-          if (threadParentId) { setThreadMsgs(prev => prev.map(x => x.client_id === clientId ? { ...row, reactions: [] } : x)); setMessages(prev => prev.map(x => x.id === threadParentId ? { ...x, reply_count: (x.reply_count || 0) + 1 } : x)); }
-          else setMessages(prev => prev.map(x => x.client_id === clientId ? { ...row, reactions: [] } : x));
+          let attachments = [];
+          for (const p of ready) {
+            try { const ar = await ChatDB.addAttachmentRow(row.id, p.meta); attachments.push(ar); }
+            catch (e) { /* keep the optimistic preview so the user still sees their file */ attachments.push({ id: 'tmpatt-' + p.id, message_id: row.id, ...p.meta }); }
+          }
+          const merged = { ...row, reactions: [], attachments };
+          if (threadParentId) { setThreadMsgs(prev => prev.map(x => x.client_id === clientId ? merged : x)); setMessages(prev => prev.map(x => x.id === threadParentId ? { ...x, reply_count: (x.reply_count || 0) + 1 } : x)); }
+          else setMessages(prev => prev.map(x => x.client_id === clientId ? merged : x));
         } catch (e) {
           const mark = (l) => l.map(x => x.client_id === clientId ? { ...x, _pending: false, _failed: true } : x);
           if (threadParentId) setThreadMsgs(mark); else setMessages(mark);
         } finally { setBusy(false); setTimeout(scrollDown, 40); }
       };
-      const send = () => doSend(text, null, () => setText(''), setSending);
-      const sendThread = () => doSend(threadText, thread && thread.id, () => setThreadText(''), setTSending);
+      const send = () => doSend(text, null, () => { setText(''); setPending([]); }, setSending, pending);
+      const sendThread = () => doSend(threadText, thread && thread.id, () => { setThreadText(''); setPending([]); }, setTSending, pending);
       const onKey = (fn) => (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); fn(); } };
+
+      // Allowed upload types: images + common docs (others rejected). Cap each at ATTACH_MAX_BYTES.
+      const okType = (f) => isImageMime(f.type) || /^(application\/pdf|application\/msword|application\/vnd\.openxmlformats|application\/vnd\.ms-|text\/|application\/zip|application\/json|application\/octet-stream)/.test(f.type || '') || /\.(pdf|docx?|xlsx?|pptx?|txt|csv|zip|key|pages|numbers)$/i.test(f.name || '');
+      const openFilePicker = () => { if (fileRef.current) { fileRef.current.value = ''; fileRef.current.click(); } };
+      const onPickFiles = async (e) => {
+        const files = Array.from((e.target && e.target.files) || []);
+        if (e.target) e.target.value = '';
+        for (const file of files) {
+          if (file.size > ATTACH_MAX_BYTES) { alert(`"${file.name}" is too large (max 25 MB).`); continue; }
+          if (!okType(file)) { alert(`"${file.name}" — that file type isn't supported.`); continue; }
+          const id = (crypto.randomUUID ? crypto.randomUUID() : ('a' + Date.now() + Math.random()));
+          const previewUrl = isImageMime(file.type) && typeof URL !== 'undefined' && URL.createObjectURL ? URL.createObjectURL(file) : '';
+          setPending(prev => [...prev, { id, file, meta: null, status: 'uploading', previewUrl }]);
+          try {
+            const meta = await ChatDB.uploadAttachment(scope, file);
+            setPending(prev => prev.map(p => p.id === id ? { ...p, meta, status: 'ready', previewUrl: p.previewUrl || meta.previewUrl || '' } : p));
+          } catch (err) {
+            setPending(prev => prev.map(p => p.id === id ? { ...p, status: 'error' } : p));
+          }
+        }
+      };
+      const removePending = (id) => setPending(prev => prev.filter(p => p.id !== id));
 
       // Shared @-mention / #-channel autocomplete. target ('main' | 'thread') tells pickMention which composer to write into.
       const onComposerChangeFor = (target, setVal) => (e) => {
@@ -1217,6 +1395,23 @@
                 <button type="button" aria-label="React" onClick={(e) => { e.stopPropagation(); setActionFor(actionFor === mm.id ? null : mm.id); }} style={{ width: 22, height: 22, flexShrink: 0, borderRadius: '50%', border: `1px solid ${reactBord}`, background: dark ? '#0A1730' : '#fff', color: trigCol, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, opacity: triggerOpacity, transition: 'opacity 140ms ease' }}><i className="ti ti-mood-plus" style={{ fontSize: 13 }} /></button>
               )}
             </div>
+            {/* attachments (images render inline; other files as a chip) — works in threads too */}
+            {(mm.attachments || []).length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4, marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0, justifyContent: mine ? 'flex-end' : 'flex-start', maxWidth: '82%', alignSelf: mine ? 'flex-end' : 'flex-start' }}>
+                {(mm.attachments || []).map(att => isImageMime(att.mime_type)
+                  ? <AttachmentImage key={att.id || att.storage_path} att={att} dark={dark} />
+                  : (
+                    <button key={att.id || att.storage_path} type="button" onClick={async () => { const u = att.previewUrl || await ChatDB.signedUrl(att.storage_path); if (u) window.open(u, '_blank', 'noopener,noreferrer'); }}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 8, maxWidth: 240, padding: '8px 10px', borderRadius: 10, cursor: 'pointer', textAlign: 'left', background: dark ? '#0A1730' : '#fff', border: `1px solid ${reactBord}`, color: dark ? '#fff' : '#001A4A' }}>
+                      <i className="ti ti-file" style={{ fontSize: 18, color: senderGold, flexShrink: 0 }} />
+                      <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                        <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{att.file_name || 'File'}</span>
+                        <span style={{ fontFamily: J, fontSize: 8, color: subCol }}>{humanFileSize(att.file_size)}</span>
+                      </span>
+                    </button>
+                  ))}
+              </div>
+            )}
             {/* reactions strip */}
             {Object.keys(rg).length > 0 && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0, justifyContent: mine ? 'flex-end' : 'flex-start', marginTop: 2 }}>
@@ -1266,6 +1461,7 @@
 
       const composer = (val, onChange, onSend, busy, kRef, placeholder, autoMenu, pickerKey) => {
         const iconCol = dark ? 'rgba(255,255,255,0.55)' : '#8A8676';
+        const pendingReady = pending.some(p => p.status === 'ready'); // allow sending attachment-only messages
         const fmtBtn = (icon, before, after, ph) => (
           <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => wrapSelection(kRef, val, kRef === composerRef ? setText : setThreadText, before, after, ph)} aria-label={icon} style={{ width: 26, height: 26, borderRadius: 7, border: 'none', background: 'transparent', cursor: 'pointer', color: iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className={`ti ${icon}`} style={{ fontSize: 14 }} /></button>
         );
@@ -1297,13 +1493,39 @@
             {fmtBtn('ti-code', '`', '`', 'code')}
             <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => wrapSelection(kRef, val, setterFor, '[', '](url)', 'text')} aria-label="ti-link" style={{ width: 26, height: 26, borderRadius: 7, border: 'none', background: 'transparent', cursor: 'pointer', color: iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-link" style={{ fontSize: 14 }} /></button>
           </div>
+          {/* Attachment preview strip (image thumbs / file chips, each removable) */}
+          {pending.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+              {pending.map(p => {
+                const img = isImageMime(p.file && p.file.type);
+                const uploading = p.status === 'uploading', errored = p.status === 'error';
+                return (
+                  <div key={p.id} style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 6, padding: img ? 0 : '6px 8px', paddingRight: img ? 0 : 22, borderRadius: 9, background: img ? 'transparent' : (dark ? '#0A1730' : '#fff'), border: `1px solid ${errored ? '#C0392B' : reactBord}`, maxWidth: 200, opacity: uploading ? 0.7 : 1 }}>
+                    {img
+                      ? <div style={{ position: 'relative', width: 52, height: 52, borderRadius: 9, overflow: 'hidden', border: `1px solid ${reactBord}` }}>
+                          {p.previewUrl ? <img src={p.previewUrl} alt={p.file.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <div style={{ width: '100%', height: '100%', background: dark ? '#0A1730' : '#F3EBDA' }} />}
+                          {uploading && <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,13,38,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 13 }}><i className="ti ti-loader-2" style={{ animation: 'tmg-spin 0.8s linear infinite' }} /></div>}
+                        </div>
+                      : <React.Fragment>
+                          <i className={`ti ${errored ? 'ti-alert-triangle' : (uploading ? 'ti-loader-2' : 'ti-file')}`} style={{ fontSize: 16, color: errored ? '#C0392B' : senderGold, flexShrink: 0, animation: uploading ? 'tmg-spin 0.8s linear infinite' : 'none' }} />
+                          <span style={{ fontFamily: J, fontSize: 9.5, fontWeight: 600, color: dark ? '#fff' : '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.file ? p.file.name : 'File'}</span>
+                        </React.Fragment>}
+                    <button type="button" onClick={() => removePending(p.id)} aria-label="Remove attachment" style={{ position: 'absolute', top: img ? -6 : '50%', right: -6, transform: img ? 'none' : 'translateY(-50%)', width: 17, height: 17, borderRadius: '50%', border: 'none', cursor: 'pointer', background: dark ? '#1A2A45' : '#001A4A', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, boxShadow: '0 1px 3px rgba(0,0,0,0.25)' }}><i className="ti ti-x" style={{ fontSize: 11 }} /></button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 7 }}>
             {autoMenu && (
               <button type="button" disabled aria-label="Screen recording (coming soon)" title="Screen recording — coming soon" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'transparent', flexShrink: 0, cursor: 'not-allowed', color: dark ? 'rgba(255,255,255,0.30)' : '#B4B2A9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-device-desktop" style={{ fontSize: 16 }} /></button>
             )}
+            <button type="button" onClick={openFilePicker} aria-label="Attach file" title="Attach a file or image" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'transparent', flexShrink: 0, cursor: 'pointer', color: iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-paperclip" style={{ fontSize: 17 }} /></button>
             <textarea ref={kRef} value={val} onChange={onChange} onKeyDown={onKey(onSend)} rows={1} placeholder={placeholder} aria-label={placeholder} style={{ flex: 1, resize: 'none', maxHeight: 96, minHeight: 34, borderRadius: 17, padding: '8px 12px', fontFamily: J, fontSize: 11, lineHeight: 1.4, color: dark ? '#fff' : '#001A4A', background: inFieldBg, border: `1px solid ${inFieldBord}`, outline: 'none', boxSizing: 'border-box' }} />
             <button type="button" onClick={() => { setMenu(null); setEmojiPicker(p => p === pickerKey ? null : pickerKey); }} aria-label="Emoji" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'transparent', flexShrink: 0, cursor: 'pointer', color: emojiPicker === pickerKey ? senderGold : iconCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-mood-smile" style={{ fontSize: 18 }} /></button>
-            <button onClick={onSend} disabled={!val.trim() || busy} aria-label="Send" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: val.trim() ? 'pointer' : 'default', flexShrink: 0, background: val.trim() ? sendBg : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-arrow-up" style={{ fontSize: 15 }} /></button>
+            {(() => { const canSend = (val.trim().length > 0 || pendingReady) && !busy; return (
+            <button onClick={onSend} disabled={!canSend} aria-label="Send" style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', cursor: canSend ? 'pointer' : 'default', flexShrink: 0, background: canSend ? sendBg : (dark ? '#1A2A45' : '#C9CDD6'), color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-arrow-up" style={{ fontSize: 15 }} /></button>
+            ); })()}
           </div>
         </div>
         );
@@ -1311,6 +1533,9 @@
 
       return (
         <React.Fragment>
+          {/* Hidden file input shared by the (single mounted) composer's attach button */}
+          <input ref={fileRef} type="file" multiple onChange={onPickFiles} style={{ display: 'none' }} aria-hidden="true"
+            accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip" />
           {(() => {
             const iconCircleBg = dark ? '#0A1730' : '#F5F2EE', iconCircleCol = dark ? '#C9A45A' : '#AD832F';
             const awayCol = dark ? '#E0A93B' : '#B07A00';

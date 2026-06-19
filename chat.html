@@ -468,6 +468,36 @@
         if (error) console.error('[ChatDB] markRead:', error.message);
       },
 
+      // Other members' read state (for sent/delivered/seen ticks). Reuses last_read_at — no schema change.
+      async loadMemberReads(scope) {
+        if (!this.client()) {
+          // Dev: seed a "seen" read for the DM peer (last_read_at = now) so the green seen tick can be demoed.
+          const cv = (this._dev().conversations || []).find(c => c.id === scope.id);
+          if (cv && cv.type === 'dm') {
+            const peer = cv.memberIds.find(id => id !== this.uid());
+            if (peer) return [{ user_id: peer, last_read_at: new Date().toISOString(), last_read_message_id: null }];
+          }
+          return [];
+        }
+        const tbl = scope.kind === 'channel' ? 'chat_channel_members' : 'chat_conversation_members';
+        const col = scope.kind === 'channel' ? 'channel_id' : 'conversation_id';
+        const { data, error } = await this.client().from(tbl)
+          .select('user_id,last_read_at,last_read_message_id').eq(col, scope.id);
+        if (error) { console.error('[ChatDB] loadMemberReads:', error.message); return []; }
+        return data || [];
+      },
+
+      // Realtime UPDATE stream on the member table for this scope (read-receipt changes).
+      subscribeMemberReads(scope, onUpdate) {
+        const c = this.client(); if (!c || !scope) return null;
+        const tbl = scope.kind === 'channel' ? 'chat_channel_members' : 'chat_conversation_members';
+        const col = scope.kind === 'channel' ? 'channel_id' : 'conversation_id';
+        const ch = c.channel('chatreads:' + scope.kind + ':' + scope.id)
+          .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: tbl, filter: col + '=eq.' + scope.id }, (p) => onUpdate && onUpdate(p.new))
+          .subscribe();
+        return ch;
+      },
+
       // { total, mentions, byScope: { id: {unread, mentions} } } — polled (privacy-safe; no global stream)
       async unreadSummary() {
         if (!this.client()) {
@@ -980,6 +1010,8 @@
       const [text, setText] = useState(''); const [sending, setSending] = useState(false); const [menu, setMenu] = useState(null);
       const [emojiPicker, setEmojiPicker] = useState(null); // 'main' | 'thread' | null
       const [actionFor, setActionFor] = useState(null); const [editId, setEditId] = useState(null); const [editText, setEditText] = useState('');
+      const [hoverId, setHoverId] = useState(null); const [memberReads, setMemberReads] = useState([]);
+      const isTouch = typeof window !== 'undefined' && 'ontouchstart' in window;
       const [thread, setThread] = useState(null); const [threadMsgs, setThreadMsgs] = useState([]); const [threadText, setThreadText] = useState(''); const [tSending, setTSending] = useState(false);
       const listRef = useRef(null); const composerRef = useRef(null); const threadComposerRef = useRef(null); const threadRef = useRef(null);
       threadRef.current = thread;
@@ -1002,8 +1034,17 @@
       };
 
       useEffect(() => {
-        let active = true; setLoading(true);
+        let active = true; setLoading(true); setMemberReads([]);
         ChatDB.loadMessages(scope).then(ms => { if (active) { setMessages(ms); setLoading(false); setTimeout(scrollDown, 40); ChatDB.markRead(scope, ms.length ? ms[ms.length - 1].id : null).then(() => onRead && onRead()); } });
+        ChatDB.loadMemberReads(scope).then(rows => { if (active) setMemberReads((rows || []).filter(r => r.user_id !== me)); });
+        const upsertRead = (row) => setMemberReads(prev => {
+          if (!row || row.user_id === me) return prev;
+          const i = prev.findIndex(r => r.user_id === row.user_id);
+          const next = { user_id: row.user_id, last_read_at: row.last_read_at, last_read_message_id: row.last_read_message_id };
+          if (i < 0) return [...prev, next];
+          const copy = prev.slice(); copy[i] = { ...copy[i], ...next }; return copy;
+        });
+        const readCh = ChatDB.subscribeMemberReads(scope, upsertRead);
         const ch = ChatDB.subscribeScope(scope, {
           onInsert: (row) => {
             if (row.thread_parent_id) {
@@ -1017,7 +1058,7 @@
           onUpdate: (row) => { setMessages(prev => prev.map(x => x.id === row.id ? { ...x, ...row } : x)); setThreadMsgs(prev => prev.map(x => x.id === row.id ? { ...x, ...row } : x)); },
           onReaction: (p) => { setMessages(prev => applyReaction(prev, p)); setThreadMsgs(prev => applyReaction(prev, p)); },
         });
-        return () => { active = false; ChatDB.unsubscribe(ch); };
+        return () => { active = false; ChatDB.unsubscribe(ch); ChatDB.unsubscribe(readCh); };
       }, [scope.id]);
       useEffect(() => { scrollDown(); }, [messages.length]);
 
@@ -1106,14 +1147,26 @@
 
       const groupRx = (rx) => { const g = {}; (rx || []).forEach(r => { (g[r.emoji] = g[r.emoji] || { count: 0, mine: false }); g[r.emoji].count++; if (r.user_id === me) g[r.emoji].mine = true; }); return g; };
 
+      // Read receipt state for one of MY messages: failed | sent (pending) | seen (a member read past it) | delivered.
+      const receiptFor = (mm) => {
+        if (mm._failed) return 'failed';
+        if (mm._pending || String(mm.id).startsWith('tmp')) return 'sent';
+        const t = new Date(mm.created_at);
+        if (memberReads.some(r => r.user_id !== me && r.last_read_at && new Date(r.last_read_at) >= t)) return 'seen';
+        return 'delivered';
+      };
+
       const renderRow = (mm, i, list, inThread) => {
         const mine = mm.author_id === me;
         const prev = list[i - 1];
         const showSender = (isGroup || inThread) && !mine && (!prev || prev.author_id !== mm.author_id);
         const rg = groupRx(mm.reactions);
         const editing = editId === mm.id;
+        const canReact = !mm._pending && !mm._failed && !editing;
+        const triggerOpacity = isTouch ? 0.4 : (hoverId === mm.id ? 1 : 0);
+        const trigCol = dark ? 'rgba(255,255,255,0.55)' : '#8A8676';
         return (
-          <div key={mm.id} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div key={mm.id} onMouseEnter={() => setHoverId(mm.id)} onMouseLeave={() => setHoverId(h => h === mm.id ? null : h)} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             {showSender && <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.06em', fontWeight: 600, marginLeft: 28, color: senderGold }}>{nameOf(mm.author_id)}</div>}
             <div style={{ display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'flex-end', gap: 6 }}>
               {!mine ? <Avatar photo={photoOf(mm.author_id)} name={nameOf(mm.author_id)} size={22} /> : <div style={{ width: 1 }} />}
@@ -1130,6 +1183,10 @@
                   {renderMessageContent(mm.content, ctxFor(mine))}
                   {mm.edited_at && <span style={{ fontSize: 8, opacity: 0.6, marginLeft: 5 }}>(edited)</span>}
                 </div>
+              )}
+              {/* hover react trigger — opens the existing action bar */}
+              {canReact && (
+                <button type="button" aria-label="React" onClick={(e) => { e.stopPropagation(); setActionFor(actionFor === mm.id ? null : mm.id); }} style={{ width: 22, height: 22, flexShrink: 0, borderRadius: '50%', border: `1px solid ${reactBord}`, background: dark ? '#0A1730' : '#fff', color: trigCol, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, opacity: triggerOpacity, transition: 'opacity 140ms ease' }}><i className="ti ti-mood-plus" style={{ fontSize: 13 }} /></button>
               )}
             </div>
             {/* reactions strip */}
@@ -1152,8 +1209,14 @@
                 {mine && <button onClick={() => startEdit(mm)} aria-label="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: subCol, padding: '2px 4px', display: 'flex' }}><i className="ti ti-pencil" style={{ fontSize: 15 }} /></button>}
               </div>
             )}
-            <div style={{ fontFamily: J, fontSize: 7, color: mm._failed ? '#C0392B' : timeCol, textAlign: mine ? 'right' : 'left', marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0 }}>
-              {mm._failed ? 'Failed to send' : (mm._pending ? 'Sending…' : fmtTime(mm.created_at))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3, fontFamily: J, fontSize: 7, color: mm._failed ? '#C0392B' : timeCol, justifyContent: mine ? 'flex-end' : 'flex-start', marginLeft: mine ? 0 : 28, marginRight: mine ? 4 : 0 }}>
+              <span>{mm._failed ? 'Failed to send' : (mm._pending ? 'Sending…' : fmtTime(mm.created_at))}</span>
+              {mine && !mm._failed && (() => {
+                const rcpt = receiptFor(mm);
+                if (rcpt === 'sent') return <i className="ti ti-check" style={{ fontSize: 10, color: timeCol }} aria-label="Sent" />;
+                if (rcpt === 'seen') return <i className="ti ti-checks" style={{ fontSize: 10, color: dark ? '#2FBF6B' : '#1E6B40' }} aria-label="Seen" />;
+                return <i className="ti ti-checks" style={{ fontSize: 10, color: timeCol }} aria-label="Delivered" />;
+              })()}
             </div>
           </div>
         );

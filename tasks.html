@@ -1638,6 +1638,77 @@ Rules:
     // Embeds the standalone SFFU app (same origin + same Supabase login) as a TMG view.
     // The header row drives SFFU's actions via postMessage; SFFU keeps its own settings.
 
+    // ─── Custom TMG-styled date picker (replaces the unstyleable native <input type="date">) ──
+    // Value is a 'YYYY-MM-DD' string; calendar expands inline below the field.
+    function DateField({ value, onChange, dark, inp, bord, ink, sub, placeholder }) {
+      const gold = dark ? '#C9A45A' : '#AD832F';
+      const navy = '#001A4A';
+      const J = C.fontSans;
+      const [open, setOpen] = useState(false);
+      const parse = (v) => { if (!v) return null; const p = String(v).split('-'); if (p.length !== 3) return null; const d = new Date(+p[0], +p[1] - 1, +p[2]); return isNaN(d.getTime()) ? null : d; };
+      const pad = (n) => String(n).padStart(2, '0');
+      const toISO = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      const same = (a, b) => a && b && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+      const selected = parse(value);
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const [cursor, setCursor] = useState(() => { const b = selected || new Date(); return new Date(b.getFullYear(), b.getMonth(), 1); });
+      useEffect(() => { if (open) { const b = parse(value) || new Date(); setCursor(new Date(b.getFullYear(), b.getMonth(), 1)); } }, [open]);
+      const stepMonth = (n) => setCursor(c => new Date(c.getFullYear(), c.getMonth() + n, 1));
+      const stepYear = (n) => setCursor(c => new Date(c.getFullYear() + n, c.getMonth(), 1));
+      const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+      const gridStart = new Date(first); gridStart.setDate(1 - first.getDay());
+      const cells = Array.from({ length: 42 }, (_, i) => { const d = new Date(gridStart); d.setDate(gridStart.getDate() + i); return d; });
+      const panelBg = dark ? '#0A1730' : '#FFFFFF';
+      const navBtn = { width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 7, border: `1px solid ${bord}`, background: dark ? '#06101F' : '#F7F4EE', color: gold, cursor: 'pointer', padding: 0, fontSize: 13 };
+      const display = selected ? selected.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : (placeholder || 'Select date');
+      return (
+        <div style={{ flex: '1 1 150px', minWidth: 0 }}>
+          <div onClick={() => setOpen(o => !o)} style={{ ...inp, display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', gap: 8 }}>
+            <span style={{ color: selected ? ink : sub, fontFamily: J, fontSize: '0.86rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{display}</span>
+            <i className="ti ti-calendar" style={{ fontSize: 15, color: gold, flexShrink: 0 }} />
+          </div>
+          {open && (
+            <div style={{ marginTop: 6, background: panelBg, border: `1px solid ${bord}`, borderRadius: 12, padding: 10, boxShadow: dark ? '0 10px 30px rgba(0,0,0,0.4)' : '0 10px 30px rgba(0,26,74,0.12)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ fontFamily: C.fontDisplay, fontSize: '1.05rem', fontWeight: 600, fontStyle: 'italic', color: dark ? '#EFE9DC' : navy }}>{cursor.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <button type="button" title="Previous month" onClick={() => stepMonth(-1)} style={navBtn}><i className="ti ti-chevron-left" /></button>
+                  <button type="button" title="Next month" onClick={() => stepMonth(1)} style={navBtn}><i className="ti ti-chevron-right" /></button>
+                  <div style={{ width: 1, height: 16, background: bord, margin: '0 2px' }} />
+                  <button type="button" title="Year ascending" onClick={() => stepYear(1)} style={navBtn}><i className="ti ti-chevron-up" /></button>
+                  <button type="button" title="Year descending" onClick={() => stepYear(-1)} style={navBtn}><i className="ti ti-chevron-down" /></button>
+                </div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 2, marginBottom: 3 }}>
+                {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w, i) => <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.04em', color: sub, padding: '2px 0' }}>{w}</div>)}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 2 }}>
+                {cells.map((d, i) => {
+                  const inMonth = d.getMonth() === cursor.getMonth();
+                  const isSel = same(d, selected);
+                  const isToday = same(d, today);
+                  return (
+                    <button type="button" key={i} onClick={() => { onChange(toISO(d)); setOpen(false); }} style={{
+                      height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: J,
+                      fontSize: '0.8rem', fontWeight: isSel ? 700 : 500,
+                      color: isSel ? '#fff' : (inMonth ? ink : (dark ? 'rgba(255,255,255,.26)' : '#C4BBA9')),
+                      background: isSel ? gold : 'transparent',
+                      border: isToday && !isSel ? `1.5px solid ${gold}` : '1.5px solid transparent',
+                      borderRadius: 8, cursor: 'pointer', padding: 0, lineHeight: 1, WebkitAppearance: 'none', outline: 'none',
+                    }}>{d.getDate()}</button>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 9, paddingTop: 8, borderTop: `1px solid ${bord}` }}>
+                <button type="button" onClick={() => { onChange(''); setOpen(false); }} style={{ fontFamily: J, fontSize: '0.72rem', fontWeight: 600, color: sub, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>Clear</button>
+                <button type="button" onClick={() => { onChange(toISO(today)); setOpen(false); }} style={{ fontFamily: J, fontSize: '0.72rem', fontWeight: 700, color: gold, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>Today</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ─── Tasks module (full screen, opened from the top-bar Tasks chip) ──
     function TaskForm({ dark, task, team, user, onSave, onCancel }) {
       const t = task || {};
@@ -1763,7 +1834,7 @@ Rules:
                 <div style={{ flex: 1 }}>{field('Weekly rank', sel(weeklyRank, setWeeklyRank, RANKS))}</div>
               </div>
               <div style={{ display: 'flex', gap: 10 }}>
-                <div style={{ flex: 1.5 }}>{field('Daily priority', <input type="date" value={dailyPriority} onChange={e => setDailyPriority(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={inp} />)}</div>
+                <div style={{ flex: 1.5 }}>{field('Daily priority', <DateField value={dailyPriority} onChange={setDailyPriority} dark={dark} inp={inp} bord={bord} ink={ink} sub={sub} placeholder="Select date" />)}</div>
                 <div style={{ flex: 1 }}>{field('Daily rank', sel(dailyRank, setDailyRank, RANKS))}</div>
               </div>
             </div>}
@@ -1774,7 +1845,7 @@ Rules:
           <div style={{ marginBottom: 13 }}>
             <div style={lbl}>Due date</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={{ ...inp, flex: '1 1 150px' }} />
+              <DateField value={dueDate} onChange={setDueDate} dark={dark} inp={inp} bord={bord} ink={ink} sub={sub} placeholder="Select date" />
               <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={hasTime} onChange={e => setHasTime(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Time</label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={repeats} onChange={e => setRepeats(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Repeat</label>
             </div>
@@ -1846,7 +1917,7 @@ Rules:
               <div style={{ marginBottom: 13 }}>
                 <div style={lbl}>Decision due date</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                  <input type="date" value={decisionDueDate} onChange={e => setDecisionDueDate(e.target.value)} onClick={e => { try { e.currentTarget.showPicker(); } catch (er) {} }} style={{ ...inp, flex: '1 1 150px' }} />
+                  <DateField value={decisionDueDate} onChange={setDecisionDueDate} dark={dark} inp={inp} bord={bord} ink={ink} sub={sub} placeholder="Select date" />
                   <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: '0.78rem', color: ink, fontFamily: C.fontSans }}><input type="checkbox" checked={decisionHasTime} onChange={e => setDecisionHasTime(e.target.checked)} style={{ accentColor: C.navy, width: 15, height: 15 }} />Time</label>
                 </div>
                 {decisionHasTime && <input type="time" value={decisionDueTime} onChange={e => setDecisionDueTime(e.target.value)} style={{ ...inp, marginTop: 8 }} />}

@@ -2303,7 +2303,9 @@ Rules:
       const [loading, setLoading] = useState(true);
       const [view, setView] = useState('list');   // list | detail | form | labels
       const [current, setCurrent] = useState(null);
-      const [sortBy, setSortBy] = useState('status');   // status | due | label
+      const [sortBy, setSortBy] = useState('status');   // status | due | label  (primary: sets grouping)
+      const [thenBy, setThenBy] = useState(() => localStorage.getItem('tmg-task-thenby') || 'due');  // secondary: orders rows within each group
+      useEffect(() => { localStorage.setItem('tmg-task-thenby', thenBy); }, [thenBy]);
       const [labelColors, setLabelColors] = useState({});
       const [vis, setVis] = useState(false);
       const wide = useWide(700);   // tablet/desktop → two-pane master-detail
@@ -2372,8 +2374,17 @@ Rules:
         </div>
       );
       const renderList = () => {
+        // Secondary sort applied WITHIN each group (or as a tie-breaker in the flat due list).
+        const PRI = { high: 0, medium: 1, low: 2 };
+        const dueCmp = (a, b) => { if (!a.due_at && !b.due_at) return 0; if (!a.due_at) return 1; if (!b.due_at) return -1; return new Date(a.due_at) - new Date(b.due_at); };
+        const byThen = (a, b) => {
+          if (thenBy === 'priority') return (PRI[a.priority] ?? 1) - (PRI[b.priority] ?? 1);
+          if (thenBy === 'title') return (a.title || '').localeCompare(b.title || '');
+          if (thenBy === 'created') return new Date(b.created_at || 0) - new Date(a.created_at || 0);  // newest first
+          return dueCmp(a, b);  // 'due' (soonest first, undated last)
+        };
         if (sortBy === 'due') {
-          const sorted = [...data.tasks].sort((a, b) => { if (!a.due_at && !b.due_at) return 0; if (!a.due_at) return 1; if (!b.due_at) return -1; return new Date(a.due_at) - new Date(b.due_at); });
+          const sorted = [...data.tasks].sort((a, b) => dueCmp(a, b) || byThen(a, b));
           return <div>{groupHead(dark ? '#C9A45A' : '#AD832F', 'By due date · ' + sorted.length)}{sorted.map(t => taskRow(t, true))}</div>;
         }
         if (sortBy === 'label') {
@@ -2382,13 +2393,13 @@ Rules:
           const names = Object.keys(groups).sort((a, b) => a.localeCompare(b));
           return (
             <React.Fragment>
-              {names.map(n => <div key={n} style={{ marginBottom: 16 }}>{groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length)}{groups[n].map(t => taskRow(t, true))}</div>)}
-              {unlabeled.length > 0 && <div style={{ marginBottom: 16 }}>{groupHead(sub, 'Unlabeled · ' + unlabeled.length)}{unlabeled.map(t => taskRow(t, true))}</div>}
+              {names.map(n => <div key={n} style={{ marginBottom: 16 }}>{groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length)}{groups[n].slice().sort(byThen).map(t => taskRow(t, true))}</div>)}
+              {unlabeled.length > 0 && <div style={{ marginBottom: 16 }}>{groupHead(sub, 'Unlabeled · ' + unlabeled.length)}{unlabeled.slice().sort(byThen).map(t => taskRow(t, true))}</div>}
             </React.Fragment>
           );
         }
         return TASK_STATUS.map(col => {
-          const items = data.tasks.filter(t => t.status === col.id);
+          const items = data.tasks.filter(t => t.status === col.id).sort(byThen);
           if (!items.length) return null;
           return <div key={col.id} style={{ marginBottom: 16 }}>{groupHead(col.color, col.label + ' · ' + items.length)}{items.map(t => taskRow(t, false))}</div>;
         });
@@ -2396,7 +2407,8 @@ Rules:
       // ── Shared header controls (reused by both layouts) ──
       const searchBtn = <i className="ti ti-search" title="Search (coming soon)" aria-label="Search" style={{ fontSize: 15, color: dark ? 'rgba(255,255,255,0.35)' : '#B4B2A9', cursor: 'default', flexShrink: 0 }} />;
       const labelsBtn = <i className="ti ti-tag" onClick={() => setView('labels')} title="Manage labels" style={{ fontSize: 16, cursor: 'pointer', color: gold, flexShrink: 0 }} />;
-      const sortSelect = <select value={sortBy} onChange={e => setSortBy(e.target.value)} title="Sort tasks by" style={{ fontFamily: C.fontSans, fontSize: '0.66rem', fontWeight: 600, color: gold, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 4px 4px 7px', cursor: 'pointer', outline: 'none', maxWidth: '100%' }}><option value="status">Status</option><option value="due">Due date</option><option value="label">Label</option></select>;
+      const sortSelect = <select value={sortBy} onChange={e => setSortBy(e.target.value)} title="Group tasks by" style={{ fontFamily: C.fontSans, fontSize: '0.66rem', fontWeight: 600, color: gold, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 4px 4px 7px', cursor: 'pointer', outline: 'none', maxWidth: '100%' }}><option value="status">Status</option><option value="due">Due date</option><option value="label">Label</option></select>;
+      const thenBySelect = <select value={thenBy} onChange={e => setThenBy(e.target.value)} title="Then sort within each group" style={{ fontFamily: C.fontSans, fontSize: '0.66rem', fontWeight: 600, color: sub, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 4px 4px 7px', cursor: 'pointer', outline: 'none', maxWidth: '100%' }}><option value="due">↳ Due date</option><option value="priority">↳ Priority</option><option value="title">↳ Title</option><option value="created">↳ Recently added</option></select>;
       const newBtn = <button onClick={() => { setCurrent(null); setView('form'); }} aria-label="New task" style={{ display: 'flex', alignItems: 'center', gap: 4, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '4px 10px', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>;
       const listInner = (compact) => (
         <div style={{ padding: compact ? '10px 10px 24px' : '12px 14px 24px' }}>
@@ -2432,6 +2444,7 @@ Rules:
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>{sortSelect}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>{thenBySelect}</div>
                     {newBtn}
                   </div>
                   <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>{listInner(true)}</div>
@@ -2459,9 +2472,10 @@ Rules:
                     <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleText}</span>
                   </div>
                   {view === 'list'
-                    ? <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0 }}>
+                    ? <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                         {searchBtn}
                         {sortSelect}
+                        {thenBySelect}
                         {labelsBtn}
                         {newBtn}
                       </div>

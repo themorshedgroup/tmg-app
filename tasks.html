@@ -124,8 +124,12 @@
 
   <!-- ─── Auth Overlay ─── -->
   <div id="auth-overlay" style="position:fixed;inset:0;z-index:9999;background:#001A4A;">
+<!-- ========== SPLASH (shown during the async auth check → prevents the login-page flash) ========== -->
+<div class="screen" id="splash-screen" style="background:#001A4A;align-items:center;justify-content:center;">
+<img src="m-monogram.png" alt="" style="width:84px;height:auto;opacity:.95;" />
+</div>
 <!-- ========== LOGIN SCREEN ========== -->
-<div class="screen" id="login-screen">
+<div class="screen" id="login-screen" hidden>
 <div class="ring r1"></div>
 <div class="ring r2"></div>
 <div class="ring r3"></div>
@@ -3715,7 +3719,7 @@ Rules:
 
       const AUTHORIZED_DOMAIN = 'themorshedgroup.com';
       function _showScreen(id) {
-        ['login-screen', 'denied-screen', 'pending-screen'].forEach(function (s) { var el = document.getElementById(s); if (el) el.hidden = (s !== id); });
+        ['splash-screen', 'login-screen', 'denied-screen', 'pending-screen'].forEach(function (s) { var el = document.getElementById(s); if (el) el.hidden = (s !== id); });
         document.getElementById('auth-overlay').style.display = 'block';
       }
       function showSignin()   { _showScreen('login-screen'); }

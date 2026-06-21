@@ -49,7 +49,7 @@
     #auth-overlay .screen { width:100%; max-width:440px; min-height:100vh; min-height:100dvh; margin:0 auto; display:flex; flex-direction:column; padding:0 32px env(safe-area-inset-bottom) 32px; position:relative; overflow:hidden; background:radial-gradient(ellipse 80% 50% at 50% 36%, #0A2A6B 0%, #001A4A 62%); }
     #auth-overlay .screen[hidden] { display:none; }
     /* Splash shown during the async auth check — blends into the (white) popout panel; theme-aware. */
-    #auth-overlay #splash-screen { background:#fff; }
+    #auth-overlay #splash-screen { background:#fff; max-width:none; }
     body.dark #auth-overlay #splash-screen { background:#0A1730; }
     #auth-overlay .tmg-spin { width:26px; height:26px; border-radius:50%; border:3px solid rgba(201,164,90,.22); border-top-color:#C9A45A; animation:tmg-spin .8s linear infinite; }
     @keyframes tmg-spin { to { transform:rotate(360deg); } }
@@ -3083,15 +3083,20 @@ Rules:
 
       // TOP-anchored: top is the top of the conversation area (just under the app top bar);
       // grows DOWNWARD. Day/Week fill to the input bar (bottom = input-bar height); Month is auto.
-      return (
-        <React.Fragment>
-          <div onClick={onClose} style={{ position: 'fixed', top: POPOUT_TOP, left: 0, right: 0, bottom: 0, zIndex: 9, background: dark ? 'rgba(0,0,0,.35)' : 'rgba(0,26,74,.18)' }} />
-          <div onClick={(e) => e.stopPropagation()} style={{
+      // Embedded (inside the app's iframe popout) → fill edge-to-edge like Tasks/Decisions;
+      // standalone → the narrow top-right floating panel.
+      const calStyle = TASKS_EMBED
+        ? { position: 'fixed', inset: 0, zIndex: 10, background: K.pop, opacity: vis ? 1 : 0, transition: 'opacity 150ms ease', display: 'flex', flexDirection: 'column', overflow: 'hidden' }
+        : {
             position: 'fixed', top: POPOUT_TOP, right: 10, width: 'min(calc(100% - 20px), 560px)', bottom: view === 'month' ? 'auto' : (zoneH || 0), zIndex: 10,
             background: K.pop, border: `1px solid ${K.bd}`, borderTop: 'none', borderRadius: '0 0 14px 14px', boxShadow: K.shadow,
             opacity: vis ? 1 : 0, transition: 'opacity 150ms ease', display: 'flex', flexDirection: 'column', overflow: 'hidden',
             maxHeight: view === 'month' ? 'calc(100vh - 90px - env(safe-area-inset-top))' : 'none',
-          }}>
+          };
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', top: POPOUT_TOP, left: 0, right: 0, bottom: 0, zIndex: 9, background: dark ? 'rgba(0,0,0,.35)' : 'rgba(0,26,74,.18)' }} />
+          <div onClick={(e) => e.stopPropagation()} style={calStyle}>
             {navBar}
             {view !== 'month' && taskStrip}
             {view !== 'month' && dateStrip}

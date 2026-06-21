@@ -48,6 +48,11 @@
     #auth-overlay * { box-sizing: border-box; margin: 0; padding: 0; }
     #auth-overlay .screen { width:100%; max-width:440px; min-height:100vh; min-height:100dvh; margin:0 auto; display:flex; flex-direction:column; padding:0 32px env(safe-area-inset-bottom) 32px; position:relative; overflow:hidden; background:radial-gradient(ellipse 80% 50% at 50% 36%, #0A2A6B 0%, #001A4A 62%); }
     #auth-overlay .screen[hidden] { display:none; }
+    /* Splash shown during the async auth check — blends into the (white) popout panel; theme-aware. */
+    #auth-overlay #splash-screen { background:#fff; }
+    body.dark #auth-overlay #splash-screen { background:#0A1730; }
+    #auth-overlay .tmg-spin { width:26px; height:26px; border-radius:50%; border:3px solid rgba(201,164,90,.22); border-top-color:#C9A45A; animation:tmg-spin .8s linear infinite; }
+    @keyframes tmg-spin { to { transform:rotate(360deg); } }
     #auth-overlay .ring { position:absolute; left:50%; transform:translateX(-50%); border:1px solid rgba(201,164,90,.07); border-radius:50%; z-index:1; pointer-events:none; }
     #auth-overlay .r1 { top:-90px; width:360px; height:360px; }
     #auth-overlay .r2 { top:-36px; width:250px; height:250px; border-color:rgba(201,164,90,.05); }
@@ -125,8 +130,8 @@
   <!-- ─── Auth Overlay ─── -->
   <div id="auth-overlay" style="position:fixed;inset:0;z-index:9999;background:#001A4A;">
 <!-- ========== SPLASH (shown during the async auth check → prevents the login-page flash) ========== -->
-<div class="screen" id="splash-screen" style="background:#001A4A;align-items:center;justify-content:center;">
-<img src="m-monogram.png" alt="" style="width:84px;height:auto;opacity:.95;" />
+<div class="screen" id="splash-screen" style="align-items:center;justify-content:center;">
+<div class="tmg-spin" aria-label="Loading"></div>
 </div>
 <!-- ========== LOGIN SCREEN ========== -->
 <div class="screen" id="login-screen" hidden>

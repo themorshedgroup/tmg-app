@@ -4963,7 +4963,7 @@ Rules:
       return (
         <React.Fragment>
           <div onClick={onClose} style={{ position: 'fixed', top, bottom: zoneH || 0, left: 0, right: 0, background: 'rgba(0,26,74,0.20)', zIndex: 9 }} />
-          <div style={{ position: 'fixed', top, bottom: zoneH || 0, zIndex: 10, background: '#fff', overflow: 'hidden', ...panel }}>
+          <div style={{ position: 'fixed', top, bottom: (zoneH || 0) + 10, zIndex: 10, background: '#fff', overflow: 'hidden', ...panel }}>
             <iframe src={src} title="Tasks" style={{ width: '100%', height: '100%', border: 'none', display: 'block' }} />
           </div>
         </React.Fragment>

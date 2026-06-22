@@ -838,7 +838,7 @@ Rules:
     // Pills carry a `mode` ('work' | 'ai') — they show on the matching chat mode.
     const FALLBACK_PILLS = [
       { id: 'fb-task', label: 'Add To Do', icon: 'ti-checklist', colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   mode: 'work', config: { instruction: TASK_PILL_INSTRUCTION, seed: 'To Do: ' }, enabled: true },
-      { id: 'fb-kpis', label: 'KPIs',      icon: 'ti-chart-bar', colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', mode: 'work', config: { kpi: true, prompt: 'Enter KPI' },                       enabled: true },
+      { id: 'fb-kpis', label: 'Add KPIs',  icon: 'ti-chart-bar', colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', mode: 'work', config: { kpi: true, prompt: 'Enter KPI' },                       enabled: true },
     ];
 
     // Built-in pill, always shown first in BOTH modes — starts a fresh chat.

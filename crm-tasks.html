@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#001A4A" />
+  <title>TMG CRM · Tasks</title>
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <link rel="icon" type="image/png" href="icon-192.png" />
+  <meta name="apple-mobile-web-app-title" content="TMG Tasks" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
+  <style>
+    :root {
+      --tmg-navy:#001A4A; --tmg-gold:#AD832F; --tmg-gold-soft:#C9A45A;
+      --tmg-paper:#FCFBF8; --tmg-border:#E4DFD4; --tmg-slate:#6B6B6B;
+    }
+    *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+    html, body, #root { height:100%; width:100%; }
+    body { font-family:-apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif; background:#FCFBF8; overscroll-behavior:none; color:#001A4A; }
+    ::-webkit-scrollbar { width:9px; height:9px; }
+    ::-webkit-scrollbar-thumb { background:#E4DFD4; border-radius:8px; }
+    ::-webkit-scrollbar-track { background:transparent; }
+
+    /* ── Auth gate (same as crm.html) ── */
+    #auth-overlay { font-family:'Jost', sans-serif; }
+    #auth-overlay * { box-sizing:border-box; margin:0; padding:0; }
+    #auth-overlay .screen { width:100%; max-width:440px; min-height:100vh; margin:0 auto; display:flex; flex-direction:column; padding:0 32px; position:relative; overflow:hidden; background:radial-gradient(ellipse 80% 50% at 50% 36%, #0A2A6B 0%, #001A4A 62%); }
+    #auth-overlay .screen[hidden] { display:none; }
+    #auth-overlay .ring { position:absolute; left:50%; transform:translateX(-50%); border:1px solid rgba(201,164,90,.07); border-radius:50%; z-index:1; pointer-events:none; }
+    #auth-overlay .r1 { top:-90px; width:360px; height:360px; }
+    #auth-overlay .r2 { top:-36px; width:250px; height:250px; border-color:rgba(201,164,90,.05); }
+    #auth-overlay .r3 { bottom:-110px; width:320px; height:320px; border-color:rgba(201,164,90,.05); }
+    #auth-overlay .main { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; z-index:2; text-align:center; }
+    #auth-overlay .foot { display:flex; flex-direction:column; align-items:center; gap:18px; padding-bottom:34px; position:relative; z-index:2; }
+    #auth-overlay .glow-gold { position:absolute; top:36%; left:50%; transform:translate(-50%,-50%); width:250px; height:250px; border-radius:50%; background:radial-gradient(circle,rgba(201,164,90,.1) 0%,transparent 66%); z-index:1; pointer-events:none; }
+    #auth-overlay .logo { width:160px; object-fit:contain; margin-bottom:22px; }
+    #auth-overlay .wordmark { font-size:42px; font-weight:600; letter-spacing:.14em; color:#fff; line-height:1; }
+    #auth-overlay .sub { font-size:10px; letter-spacing:.34em; font-weight:500; text-transform:uppercase; color:#C9A45A; margin-top:12px; }
+    #auth-overlay .btn-wrap { width:100%; }
+    #auth-overlay .btn-google { display:flex; align-items:center; justify-content:center; gap:10px; width:80%; margin:0 auto; padding:15px; border-radius:11px; cursor:pointer; font-family:'Jost',sans-serif; font-size:11px; letter-spacing:.14em; font-weight:500; background:#fff; color:#001A4A; border:none; transition:transform .12s ease,opacity .12s ease; }
+    #auth-overlay .btn-google:hover { opacity:.92; }
+    #auth-overlay .btn-google:active { transform:scale(.98); }
+    #auth-overlay .terms { font-size:8px; letter-spacing:.1em; color:rgba(255,255,255,.22); text-align:center; margin-top:10px; }
+    #auth-overlay .glow-red { position:absolute; top:34%; left:50%; transform:translate(-50%,-50%); width:250px; height:250px; border-radius:50%; background:radial-gradient(circle,rgba(155,28,28,.14) 0%,transparent 66%); z-index:1; pointer-events:none; }
+    #auth-overlay .lockwrap { width:60px; height:60px; border-radius:50%; border:1px solid rgba(248,113,113,.3); background:rgba(155,28,28,.12); display:flex; align-items:center; justify-content:center; margin-bottom:24px; }
+    #auth-overlay .lockwrap i { font-size:28px; color:#F87171; }
+    #auth-overlay .title { font-size:20px; font-weight:600; letter-spacing:.05em; color:#fff; margin-bottom:12px; }
+    #auth-overlay .msg { font-size:12px; line-height:1.65; color:rgba(255,255,255,.55); max-width:260px; }
+    #auth-overlay .contact-card { width:100%; background:rgba(255,255,255,.04); border:1px solid rgba(201,164,90,.18); border-radius:12px; padding:16px; text-align:center; }
+    #auth-overlay .contact-lbl { font-size:8px; letter-spacing:.2em; text-transform:uppercase; color:rgba(201,164,90,.6); margin-bottom:7px; }
+    #auth-overlay .contact-email { font-size:12px; font-weight:500; letter-spacing:.02em; color:#C9A45A; text-decoration:none; }
+    #auth-overlay .btn-back { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:14px; border-radius:11px; cursor:pointer; font-family:'Jost',sans-serif; font-size:10px; letter-spacing:.14em; font-weight:500; background:transparent; border:1px solid rgba(255,255,255,.16); color:rgba(255,255,255,.6); transition:background .12s ease; }
+    #auth-overlay .btn-back:hover { background:rgba(255,255,255,.04); }
+    #auth-overlay .btn-back i { font-size:13px; }
+    @keyframes tmg-spin { to { transform:rotate(360deg); } }
+    @keyframes tmg-fade { from { opacity:0; transform:translateY(6px);} to { opacity:1; transform:translateY(0);} }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
+  <script src="supabase.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+<body>
+  <!-- ─── Auth Overlay (same gate as crm.html / index.html) ─── -->
+  <div id="auth-overlay" style="position:fixed;inset:0;z-index:9999;background:#001A4A;">
+    <div class="screen" id="login-screen">
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+      <div class="glow-gold"></div>
+      <div class="main">
+        <img class="logo" src="Morshed Group Logo White.png" alt="The Morshed Group" />
+        <div class="wordmark">TMG CRM</div>
+        <div class="sub">Tasks &amp; Activities</div>
+      </div>
+      <div class="foot">
+        <div class="btn-wrap">
+          <button class="btn-google" id="google-signin" onclick="SupabaseAuth.signInWithGoogle()">
+            <svg width="17" height="17" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0">
+              <path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"/>
+              <path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z"/>
+              <path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z"/>
+              <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/>
+            </svg>
+            Continue with TMG Gmail
+          </button>
+          <div class="terms">Authorized TMG team members only</div>
+        </div>
+      </div>
+    </div>
+    <div class="screen" id="denied-screen" hidden>
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+      <div class="glow-red"></div>
+      <div class="main">
+        <div class="lockwrap"><i class="ti ti-lock-x" aria-hidden="true"></i></div>
+        <div class="title">Access Denied</div>
+        <div class="msg">This account isn't authorized for the TMG App. Access is limited to approved Morshed Group team members.</div>
+      </div>
+      <div class="foot">
+        <div class="contact-card">
+          <div class="contact-lbl">Need Access?</div>
+          <a class="contact-email" href="mailto:manager@themorshedgroup.com">manager@themorshedgroup.com</a>
+        </div>
+        <button class="btn-back" onclick="SupabaseAuth.signOut()"><i class="ti ti-arrow-left" aria-hidden="true"></i>Back to sign in</button>
+      </div>
+    </div>
+    <div class="screen" id="pending-screen" hidden>
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+      <div class="glow-gold"></div>
+      <div class="main">
+        <div class="title" style="font-family:'Cormorant Garamond',Georgia,serif;font-style:italic;font-size:32px;font-weight:400;">Welcome to the TMG App!</div>
+        <div class="msg">We've received your request. Your account will be ready within <b style="color:rgba(255,255,255,.9);font-weight:500;">24 hours</b>.</div>
+      </div>
+      <div class="foot">
+        <button class="btn-back" onclick="SupabaseAuth.signOut()"><i class="ti ti-arrow-left" aria-hidden="true"></i>Back to sign in</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="root"></div>
+
+  <!-- ─── Dev localhost mock (mirrors crm.html / index.html) ─── -->
+  <script>
+  window.TMG_DEV = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:');
+  if (window.TMG_DEV) {
+    window.SupabaseAuth = {
+      _state: { session: { user: { id: 'dev-user-id', email: 'symon@morshedgroup.com', user_metadata: { full_name: 'Symon' } }, access_token: 'dev-token' } },
+      signInWithGoogle: function() {},
+      signOut: function() { location.reload(); },
+      getSession: function() { return Promise.resolve(window.SupabaseAuth._state.session); },
+      onAuthStateChange: function(cb) { setTimeout(function() { cb({ session: window.SupabaseAuth._state.session }); }, 50); }
+    };
+  }
+  </script>
+
+  <!-- ─── Tasks App ─── -->
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // ─── Design tokens (TMG Brand — editorial dialect, matches crm.html) ──
+    const C = {
+      bg:'#FCFBF8', surface:'#FFFFFF', surfaceHover:'#F3EBDA', surfaceAlt:'#FAF8F3', border:'#E4DFD4',
+      navy:'#001A4A', navyHover:'#0A2552', gold:'#AD832F', goldSoft:'#C9A45A',
+      textPrimary:'#001A4A', textSecondary:'#6B6B6B', textMuted:'#9B9380',
+      red:'#C0392B', green:'#1E6B40', amber:'#B07A00', blue:'#2563EB',
+      fontSans:"-apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif",
+      fontDisplay:"'Cormorant Garamond', Georgia, serif",
+      mono:"ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace",
+    };
+
+    // Shares the org's Zoho proxy function (zoho-crm). Phase 1 uses the
+    // read-only `list_tasks` + `get_fields` actions.
+    const ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-crm';
+    const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
+    function authToken() { return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON; }
+    function isDev() { return !!window.TMG_DEV; }
+
+    async function callZoho(payload) {
+      const res = await fetch(ENDPOINT, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + authToken(), 'apikey':SUPABASE_ANON },
+        body:JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok:res.ok, status:res.status, data };
+    }
+
+    // ─── Dev sample (mirrors the live Zoho Tasks list shape) ──────────
+    const O = { name:'Tarek Morshed' };
+    const DEV_TASKS = [
+      { id:'1', Owner:O, Subject:'C Touch Call: Molly Kinney', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-09-25', Who_Id:{ name:'Molly Kinney' }, Closed_Time:null, Trigger:null },
+      { id:'2', Owner:O, Subject:'A Touch Call: Brian Plaisance', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-07-12', Who_Id:{ name:'Brian Plaisance' }, Closed_Time:null, Trigger:null },
+      { id:'3', Owner:O, Subject:"Note : Kelly O'rourke", Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-15', Who_Id:{ name:"Kelly O'rourke" }, Closed_Time:'2026-06-22T07:08:00-05:00', Trigger:null },
+      { id:'4', Owner:O, Subject:'A Touch Call: Morgan Birch', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-07-31', Who_Id:{ name:'Morgan Birch' }, Closed_Time:null, Trigger:null },
+      { id:'5', Owner:O, Subject:'B Touch Call: Rashad Rahman', Task_Type:'Call', Description:'917-239-2145 | No spouse | Tarek Referral', Status:'Not Started', Due_Date:'2026-09-15', Who_Id:{ name:'Rashad Rahman' }, Closed_Time:null, Trigger:null },
+      { id:'6', Owner:O, Subject:'B Touch Call: Alok Mody', Task_Type:'Call', Description:'732-841-9409 | No spouse', Status:'Not Started', Due_Date:'2026-09-02', Who_Id:{ name:'Alok Mody' }, Closed_Time:null, Trigger:null },
+      { id:'7', Owner:O, Subject:'Pop-by : James Gill', Task_Type:'Pop-by', Description:null, Status:'Completed', Due_Date:'2026-06-18', Who_Id:{ name:'James Gill' }, Closed_Time:'2026-06-22T07:12:00-05:00', Trigger:null },
+      { id:'8', Owner:O, Subject:'Note : Alex Zreik', Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-17', Who_Id:{ name:'Alex Zreik' }, Closed_Time:'2026-06-22T07:11:00-05:00', Trigger:null },
+      { id:'9', Owner:O, Subject:'Note : Delfo Trombetta', Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-16', Who_Id:{ name:'Delfo Trombetta' }, Closed_Time:'2026-06-22T07:09:00-05:00', Trigger:null },
+      { id:'10', Owner:O, Subject:'A Touch Call: Neil Patel', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-07-10', Who_Id:{ name:'Neil Patel' }, Closed_Time:null, Trigger:null },
+      { id:'11', Owner:O, Subject:'Note : Jeremy Bell', Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-15', Who_Id:{ name:'Jeremy Bell' }, Closed_Time:'2026-06-22T07:08:00-05:00', Trigger:null },
+      { id:'12', Owner:O, Subject:'Note : Neil Patel', Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-15', Who_Id:{ name:'Neil Patel' }, Closed_Time:'2026-06-22T07:08:00-05:00', Trigger:null },
+    ];
+
+    // ─── Formatting helpers ───────────────────────────────────────────
+    const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    function fmtDate(s) {
+      if (!s) return '';
+      const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+      if (!m) return s;
+      return `${MON[+m[2]-1]} ${+m[3]}, ${m[1]}`;
+    }
+    function fmtDateTime(s) {
+      if (!s) return '';
+      const d = new Date(s);
+      if (isNaN(d)) return s;
+      let h = d.getHours(), ap = h >= 12 ? 'PM' : 'AM';
+      h = h % 12; if (h === 0) h = 12;
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${MON[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${String(h).padStart(2,'0')}:${mm} ${ap}`;
+    }
+
+    // ─── Status pill ──────────────────────────────────────────────────
+    function statusColor(s) {
+      const t = (s || '').toLowerCase();
+      if (t.includes('complete')) return C.green;
+      if (t.includes('progress')) return C.blue;
+      if (t.includes('defer') || t.includes('wait')) return C.amber;
+      return C.textSecondary; // Not Started / unknown
+    }
+    function StatusPill({ value }) {
+      if (!value) return <span style={{ color:C.textMuted }}>—</span>;
+      const col = statusColor(value);
+      return (
+        <span style={{ display:'inline-flex', alignItems:'center', gap:6, fontSize:'0.76rem', fontWeight:600, color:col, background:col+'14', border:'1px solid '+col+'33', padding:'3px 10px', borderRadius:20, whiteSpace:'nowrap' }}>
+          <span style={{ width:6, height:6, borderRadius:'50%', background:col }} />
+          {value}
+        </span>
+      );
+    }
+
+    function Spinner({ size=20, color=C.gold }) {
+      return <i className="ti ti-loader-2" style={{ fontSize:size, color, display:'inline-block', animation:'tmg-spin 0.8s linear infinite' }} />;
+    }
+
+    // ─── Column definitions ───────────────────────────────────────────
+    //  `m` = resolved api-name map for the org's custom fields.
+    const COLUMNS = [
+      { key:'owner',       label:'Task Owner',   min:150, get:(t)   => t.Owner?.name || '' },
+      { key:'subject',     label:'Subject',      min:220, strong:true, get:(t) => t.Subject || '' },
+      { key:'type',        label:'Task Type',    min:110, get:(t,m) => t[m.type] || '' },
+      { key:'description', label:'Description',  min:220, wrap:true, get:(t) => t.Description || '' },
+      { key:'status',      label:'Status',       min:140, status:true, get:(t) => t.Status || '' },
+      { key:'due',         label:'Due Date',     min:130, date:true, get:(t) => t.Due_Date || '' },
+      { key:'contact',     label:'Contact Name', min:170, get:(t)   => t.Who_Id?.name || '' },
+      { key:'closed',      label:'Closed Time',  min:180, datetime:true, get:(t) => t.Closed_Time || '' },
+      { key:'trigger',     label:'Trigger',      min:130, get:(t,m) => t[m.trigger] || '' },
+    ];
+
+    // ─── Filter popover ───────────────────────────────────────────────
+    function FilterPopover({ tasks, colMap, sel, setSel, onClose }) {
+      const groups = useMemo(() => {
+        const uniq = (vals) => Array.from(new Set(vals.filter(Boolean))).sort();
+        return {
+          status: uniq(tasks.map(t => t.Status)),
+          type:   uniq(tasks.map(t => t[colMap.type])),
+          owner:  uniq(tasks.map(t => t.Owner?.name)),
+        };
+      }, [tasks, colMap]);
+
+      function toggle(group, val) {
+        setSel(prev => {
+          const cur = new Set(prev[group] || []);
+          cur.has(val) ? cur.delete(val) : cur.add(val);
+          return { ...prev, [group]:[...cur] };
+        });
+      }
+      const Section = ({ title, group, values }) => (
+        <div style={{ marginBottom:14 }}>
+          <div style={{ fontSize:'0.62rem', fontWeight:600, letterSpacing:'.12em', textTransform:'uppercase', color:C.textMuted, marginBottom:8 }}>{title}</div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:7 }}>
+            {values.length === 0 && <span style={{ fontSize:'0.76rem', color:C.textMuted }}>—</span>}
+            {values.map(v => {
+              const on = (sel[group] || []).includes(v);
+              return (
+                <button key={v} onClick={() => toggle(group, v)} style={{
+                  fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:on?600:400, cursor:'pointer',
+                  padding:'5px 11px', borderRadius:20,
+                  color:on?'#fff':C.textSecondary, background:on?C.gold:C.surface,
+                  border:'1px solid '+(on?C.gold:C.border),
+                }}>{v}</button>
+              );
+            })}
+          </div>
+        </div>
+      );
+      return (
+        <div style={{ position:'absolute', top:'calc(100% + 8px)', left:0, width:320, background:C.surface, border:'1px solid '+C.border, borderRadius:14, boxShadow:'0 16px 40px rgba(0,26,74,.14)', padding:18, zIndex:20, animation:'tmg-fade .14s ease' }}>
+          <Section title="Status" group="status" values={groups.status} />
+          <Section title="Task Type" group="type" values={groups.type} />
+          <Section title="Owner" group="owner" values={groups.owner} />
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:6, paddingTop:12, borderTop:'1px solid '+C.border }}>
+            <button onClick={() => setSel({})} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', color:C.textSecondary, background:'transparent', border:'none', cursor:'pointer', padding:0 }}>Clear all</button>
+            <button onClick={onClose} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, color:'#fff', background:C.navy, border:'none', borderRadius:8, padding:'6px 14px', cursor:'pointer' }}>Done</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Deferred-feature drawer (Phase 2/3 foreshadow) ───────────────
+    function ComingDrawer({ kind, onClose }) {
+      const isAI = kind === 'ai';
+      return (
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:40, display:'flex', justifyContent:'flex-end' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width:'min(420px, 92vw)', height:'100%', background:C.surface, borderLeft:'1px solid '+C.border, boxShadow:'-20px 0 50px rgba(0,26,74,.18)', padding:'26px 24px', animation:'tmg-fade .18s ease', overflowY:'auto' }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:9 }}>
+                <i className={'ti ' + (isAI ? 'ti-sparkles' : 'ti-plus')} style={{ fontSize:19, color:C.gold }} />
+                <span style={{ fontFamily:C.fontDisplay, fontSize:'1.5rem', fontWeight:600, color:C.navy }}>{isAI ? 'Tasks AI Companion' : 'Create Task'}</span>
+              </div>
+              <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
+            </div>
+            <div style={{ fontSize:'0.6rem', fontWeight:600, letterSpacing:'.16em', textTransform:'uppercase', color:C.gold, background:C.surfaceHover, display:'inline-block', padding:'4px 10px', borderRadius:20, marginBottom:16 }}>Next update</div>
+            {isAI ? (
+              <div style={{ fontSize:'0.9rem', lineHeight:1.7, color:C.textSecondary }}>
+                <p style={{ marginBottom:12 }}>This companion will <b style={{ color:C.navy }}>read every task in view</b> and act on your words:</p>
+                <ul style={{ paddingLeft:18, marginBottom:14, display:'flex', flexDirection:'column', gap:7 }}>
+                  <li>"How many of Tarek's calls are overdue?"</li>
+                  <li>"Mark the James Gill pop-by complete."</li>
+                  <li>"Create a C-touch call for Molly Kinney next Friday."</li>
+                  <li>"Reschedule all of this week's notes to Monday."</li>
+                </ul>
+                <p style={{ fontSize:'0.82rem', color:C.textMuted }}>Every change is previewed for your confirmation before it touches Zoho — nothing is written silently.</p>
+              </div>
+            ) : (
+              <div style={{ fontSize:'0.9rem', lineHeight:1.7, color:C.textSecondary }}>
+                <p>Creating, editing, completing and deleting tasks lands in the next update — wired to Zoho through the same secure proxy, with a confirm step before any write.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Main app ──────────────────────────────────────────────────────
+    function App({ user, profile }) {
+      const [tasks, setTasks] = useState(null);     // null = loading
+      const [err, setErr] = useState('');
+      const [needsDeploy, setNeedsDeploy] = useState(false);
+      const [colMap, setColMap] = useState({ type:'Task_Type', trigger:'Trigger' });
+      const [q, setQ] = useState('');
+      const [sel, setSel] = useState({});            // filters
+      const [showFilter, setShowFilter] = useState(false);
+      const [sortKey, setSortKey] = useState('due');
+      const [sortDir, setSortDir] = useState('desc');
+      const [drawer, setDrawer] = useState(null);    // 'ai' | 'create' | null
+
+      async function load() {
+        setTasks(null); setErr(''); setNeedsDeploy(false);
+        if (isDev()) {
+          await new Promise(r => setTimeout(r, 350));
+          setColMap({ type:'Task_Type', trigger:'Trigger' });
+          setTasks(DEV_TASKS);
+          return;
+        }
+        // Resolve this org's custom field api-names (Task Type / Trigger).
+        let type = 'Task_Type', trigger = 'Trigger';
+        const fres = await callZoho({ action:'get_fields', module:'Tasks' });
+        if (fres.ok) {
+          const fields = fres.data.fields || [];
+          const find = (re) => (fields.find(f => re.test(f.field_label || '')) || {}).api_name;
+          type = find(/task\s*type/i) || type;
+          trigger = find(/^trigger/i) || trigger;
+        }
+        setColMap({ type, trigger });
+        // Pull the tasks.
+        const reqFields = ['Owner','Subject','Status','Due_Date','Closed_Time','Description','Who_Id', type, trigger]
+          .filter((v, i, a) => v && a.indexOf(v) === i);
+        const res = await callZoho({ action:'list_tasks', fields:reqFields, per_page:200, sort_by:'Due_Date', sort_order:'desc' });
+        if (!res.ok && /unknown action/i.test(res.data?.error || '')) { setNeedsDeploy(true); setTasks([]); return; }
+        if (!res.ok) { setErr(res.data?.error || 'Could not load tasks.'); setTasks([]); return; }
+        setTasks(res.data.tasks || []);
+      }
+      useEffect(() => { load(); }, []);
+
+      function clickSort(key) {
+        if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+        else { setSortKey(key); setSortDir('asc'); }
+      }
+
+      const view = useMemo(() => {
+        if (!tasks) return [];
+        const col = COLUMNS.find(c => c.key === sortKey) || COLUMNS[0];
+        const t = q.trim().toLowerCase();
+        let out = tasks.filter(row => {
+          if (t) {
+            const hay = [row.Subject, row.Who_Id?.name, row.Description, row.Owner?.name, row[colMap.type]].join(' ').toLowerCase();
+            if (!hay.includes(t)) return false;
+          }
+          if ((sel.status || []).length && !sel.status.includes(row.Status)) return false;
+          if ((sel.type || []).length && !sel.type.includes(row[colMap.type])) return false;
+          if ((sel.owner || []).length && !sel.owner.includes(row.Owner?.name)) return false;
+          return true;
+        });
+        out = out.slice().sort((a, b) => {
+          let av = col.get(a, colMap), bv = col.get(b, colMap);
+          if (col.date || col.datetime) { av = av ? Date.parse(av) : 0; bv = bv ? Date.parse(bv) : 0; }
+          else { av = (av || '').toString().toLowerCase(); bv = (bv || '').toString().toLowerCase(); }
+          if (av < bv) return sortDir === 'asc' ? -1 : 1;
+          if (av > bv) return sortDir === 'asc' ? 1 : -1;
+          return 0;
+        });
+        return out;
+      }, [tasks, q, sel, sortKey, sortDir, colMap]);
+
+      const activeFilters = (sel.status?.length || 0) + (sel.type?.length || 0) + (sel.owner?.length || 0);
+
+      const iconBtn = { display:'inline-flex', alignItems:'center', gap:7, fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:500, color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:9, padding:'8px 13px', cursor:'pointer' };
+
+      return (
+        <div style={{ display:'flex', flexDirection:'column', height:'100%', background:C.bg }}>
+          {/* Header */}
+          <header style={{ flexShrink:0, background:C.navy, color:'#fff', padding:'0 20px', height:58, display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+              <a href="index.html" title="Back to TMG App" style={{ color:'rgba(255,255,255,.7)', textDecoration:'none', display:'flex', alignItems:'center' }}><i className="ti ti-arrow-left" style={{ fontSize:18 }} /></a>
+              <div style={{ fontWeight:600, letterSpacing:'.18em', fontSize:'0.95rem' }}>TMG CRM</div>
+              <span style={{ fontSize:'0.62rem', fontWeight:600, letterSpacing:'.1em', textTransform:'uppercase', color:C.goldSoft, border:'1px solid rgba(201,164,90,.4)', padding:'2px 8px', borderRadius:20 }}>Tasks</span>
+            </div>
+            <div style={{ display:'flex', alignItems:'center', gap:14 }}>
+              <a href="crm.html" style={{ fontSize:'0.74rem', color:'rgba(255,255,255,.65)', textDecoration:'none', display:'flex', alignItems:'center', gap:5 }}><i className="ti ti-table" style={{ fontSize:14 }} />Schema</a>
+              <span style={{ fontSize:'0.78rem', color:'rgba(255,255,255,.7)' }}>{profile?.email || user?.email}</span>
+              <button onClick={() => window.SupabaseAuth.signOut()} style={{ background:'transparent', border:'1px solid rgba(255,255,255,.2)', color:'rgba(255,255,255,.8)', fontSize:'0.72rem', padding:'6px 12px', borderRadius:8, cursor:'pointer', fontFamily:C.fontSans }}>Sign out</button>
+            </div>
+          </header>
+
+          {/* Infra banner */}
+          <div style={{ flexShrink:0, background:C.surfaceHover, borderBottom:'1px solid '+C.border, padding:'8px 20px', fontSize:'0.74rem', color:C.textSecondary, display:'flex', alignItems:'center', gap:8 }}>
+            <i className="ti ti-shield-check" style={{ color:C.green, fontSize:15 }} />
+            Live Zoho <b style={{ color:C.textPrimary, fontWeight:600 }}>&nbsp;Tasks&nbsp;</b> — read-only preview.
+            {isDev() && <span style={{ marginLeft:'auto', color:C.amber, fontWeight:600 }}>DEV PREVIEW (sample data)</span>}
+          </div>
+
+          {/* Toolbar */}
+          <div style={{ flexShrink:0, padding:'16px 22px 12px', borderBottom:'1px solid '+C.border, background:C.bg, position:'relative', zIndex:30 }}>
+            <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:16, flexWrap:'wrap', marginBottom:13 }}>
+              <div>
+                <h1 style={{ fontFamily:C.fontDisplay, fontSize:'1.7rem', fontWeight:600, color:C.navy, lineHeight:1.05 }}>All Tasks</h1>
+                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{tasks ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` : 'Loading…'}</div>
+              </div>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                <button onClick={() => setDrawer('ai')} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background:C.gold+'0f', fontWeight:600 }}>
+                  <i className="ti ti-sparkles" style={{ fontSize:15 }} /> Ask AI
+                </button>
+                <button onClick={() => setDrawer('create')} style={{ ...iconBtn, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
+                  <i className="ti ti-plus" style={{ fontSize:15 }} /> Create Task
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
+              <div style={{ position:'relative', flex:'1 1 240px', maxWidth:340 }}>
+                <i className="ti ti-search" style={{ position:'absolute', left:12, top:'50%', transform:'translateY(-50%)', fontSize:15, color:C.textMuted }} />
+                <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search subject, contact, notes…"
+                  style={{ width:'100%', fontFamily:C.fontSans, fontSize:'0.82rem', padding:'9px 12px 9px 34px', border:'1px solid '+C.border, borderRadius:9, background:C.surface, color:C.textPrimary, outline:'none' }} />
+              </div>
+              <div style={{ position:'relative' }}>
+                <button onClick={() => setShowFilter(s => !s)} style={{ ...iconBtn, color:activeFilters?C.gold:C.navy, borderColor:activeFilters?C.gold:C.border }}>
+                  <i className="ti ti-filter" style={{ fontSize:15 }} /> Filter
+                  {activeFilters > 0 && <span style={{ fontSize:'0.66rem', fontWeight:700, color:'#fff', background:C.gold, borderRadius:20, padding:'1px 7px' }}>{activeFilters}</span>}
+                </button>
+                {showFilter && <FilterPopover tasks={tasks || []} colMap={colMap} sel={sel} setSel={setSel} onClose={() => setShowFilter(false)} />}
+              </div>
+              <button onClick={load} title="Refresh" style={iconBtn}><i className="ti ti-refresh" style={{ fontSize:15 }} /></button>
+            </div>
+          </div>
+
+          {/* Deploy hint */}
+          {needsDeploy && (
+            <div style={{ margin:'16px 22px 0', padding:14, border:'1px solid '+C.amber+'44', background:C.amber+'0f', borderRadius:10, color:C.amber, fontSize:'0.8rem', lineHeight:1.5 }}>
+              The deployed <b>zoho-crm</b> function doesn't have the <b>list_tasks</b> action yet. Re-deploy the updated function in Supabase to load live tasks.
+            </div>
+          )}
+          {err && (
+            <div style={{ margin:'16px 22px 0', padding:14, border:'1px solid '+C.red+'44', background:C.red+'0d', borderRadius:10, color:C.red, fontSize:'0.82rem', lineHeight:1.5 }}>{err}</div>
+          )}
+
+          {/* Table */}
+          <main style={{ flex:1, overflow:'auto', minHeight:0 }}>
+            {tasks === null && <div style={{ padding:40, textAlign:'center' }}><Spinner size={26} /></div>}
+            {tasks && view.length === 0 && !err && (
+              <div style={{ padding:48, textAlign:'center', color:C.textMuted, fontSize:'0.88rem' }}>
+                {tasks.length === 0 ? (needsDeploy ? 'Deploy the function to see tasks.' : 'No tasks found.') : 'No tasks match your filters.'}
+              </div>
+            )}
+            {tasks && view.length > 0 && (
+              <table style={{ borderCollapse:'collapse', width:'100%', minWidth:1280 }}>
+                <thead>
+                  <tr>
+                    {COLUMNS.map(col => {
+                      const on = sortKey === col.key;
+                      return (
+                        <th key={col.key} onClick={() => clickSort(col.key)} style={{
+                          position:'sticky', top:0, zIndex:1, cursor:'pointer', userSelect:'none',
+                          textAlign:'left', whiteSpace:'nowrap', minWidth:col.min,
+                          padding:'11px 16px', background:C.surface, borderBottom:'1px solid '+C.border,
+                          fontSize:'0.62rem', fontWeight:600, letterSpacing:'.1em', textTransform:'uppercase',
+                          color:on?C.gold:C.textMuted,
+                        }}>
+                          {col.label}
+                          <i className={'ti ' + (on ? (sortDir==='asc'?'ti-arrow-up':'ti-arrow-down') : 'ti-arrows-sort')} style={{ fontSize:13, marginLeft:6, verticalAlign:'-2px', opacity:on?1:.4 }} />
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {view.map(row => (
+                    <tr key={row.id} style={{ borderBottom:'1px solid '+C.border }}
+                        onMouseEnter={e => e.currentTarget.style.background=C.surfaceAlt}
+                        onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+                      {COLUMNS.map(col => {
+                        const raw = col.get(row, colMap);
+                        let content;
+                        if (col.status) content = <StatusPill value={raw} />;
+                        else if (col.date) content = raw ? fmtDate(raw) : <span style={{ color:C.textMuted }}>—</span>;
+                        else if (col.datetime) content = raw ? fmtDateTime(raw) : <span style={{ color:C.textMuted }}>—</span>;
+                        else if (!raw) content = <span style={{ color:C.textMuted }}>—</span>;
+                        else content = raw;
+                        return (
+                          <td key={col.key} style={{
+                            padding:'13px 16px', verticalAlign:'top',
+                            fontSize:'0.84rem', color:col.strong?C.navy:C.textSecondary, fontWeight:col.strong?500:400,
+                            whiteSpace:col.wrap?'normal':'nowrap', maxWidth:col.wrap?320:undefined, lineHeight:col.wrap?1.5:1.3,
+                          }}>{content}</td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </main>
+
+          {drawer && <ComingDrawer kind={drawer} onClose={() => setDrawer(null)} />}
+        </div>
+      );
+    }
+
+    // ─── Mount + auth gate (mirrors crm.html) ────────────────────────
+    (function mount() {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      const AUTHORIZED_DOMAIN = 'themorshedgroup.com';
+      function _showScreen(id) {
+        ['login-screen','denied-screen','pending-screen'].forEach(function(s){ var el=document.getElementById(s); if(el) el.hidden=(s!==id); });
+        document.getElementById('auth-overlay').style.display='block';
+      }
+      function showSignin()  { _showScreen('login-screen'); }
+      function showRejected(){ _showScreen('denied-screen'); }
+      function showPending() { _showScreen('pending-screen'); }
+      function hideOverlay() { document.getElementById('auth-overlay').style.display='none'; }
+
+      if (window.TMG_DEV) {
+        root.render(<App user={window.SupabaseAuth._state.session?.user} profile={{ email:'symon@morshedgroup.com', first_name:'Symon', access:'admin', status:'active' }} />);
+        hideOverlay();
+        return;
+      }
+
+      async function fetchProfile(userId) {
+        try {
+          const c = window.SupabaseAuth._client;
+          const { data } = await c.from('profiles').select('*').eq('id', userId).maybeSingle();
+          return data || null;
+        } catch (e) { return null; }
+      }
+
+      window.SupabaseAuth.onAuthStateChange(async function({ session }) {
+        if (!session) { showSignin(); return; }
+        const email = (session.user.email || '').toLowerCase();
+        if (!email.endsWith('@' + AUTHORIZED_DOMAIN)) { showRejected(); return; }
+        const profile = await fetchProfile(session.user.id);
+        if (profile && profile.status === 'pending') { showPending(); return; }
+        if (profile && profile.status && profile.status !== 'active') { showRejected(); return; }
+        root.render(<App user={session.user} profile={profile} />);
+        hideOverlay();
+      });
+    })();
+  </script>
+</body>
+</html>

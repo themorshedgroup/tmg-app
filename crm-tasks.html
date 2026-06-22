@@ -508,7 +508,7 @@
         "Use get_contact for a contact's details; combine it with search_tasks to answer history questions.",
         "When a task should be linked to a contact, call find_contact first to resolve the name to an id, then pass contact_id and contact_name.",
         "For update_task / delete_task, use the exact task id from the JSON. Valid statuses: " + (meta.statusOptions || []).join(", ") + ".",
-        "Be concise. After a change is confirmed, briefly say what happened.",
+        "Be concise — after a change is applied the app shows the exact records changed below your message, so a short confirmation is enough.",
         "",
         "TASKS IN VIEW (JSON):",
         JSON.stringify(rows),
@@ -667,7 +667,9 @@
               const ok = await confirmWrite(tu);
               if (!ok) { results.push({ type:'tool_result', tool_use_id: tu.id, content:'User declined this action.' }); continue; }
               const wr = await onWrite(tu.name, tu.input);
-              results.push({ type:'tool_result', tool_use_id: tu.id, content: wr && wr.ok ? (wr.summary || 'Success.') : ('Error: ' + ((wr && wr.error) || 'failed')), is_error: !(wr && wr.ok) });
+              results.push({ type:'tool_result', tool_use_id: tu.id, content: wr && wr.ok ? (wr.ai || wr.summary || 'Success.') : ('Error: ' + ((wr && wr.error) || 'failed')), is_error: !(wr && wr.ok) });
+              if (wr && wr.ok) push({ type:'result', summary: wr.summary || 'Change applied', records: wr.records || [] });
+              else push({ type:'note', text: 'Couldn’t apply that — ' + ((wr && wr.error) || 'failed') });
             }
           }
           claudeRef.current.push({ role:'user', content: results });
@@ -718,6 +720,16 @@
                 if (item.type === 'user') return <div key={item.id} style={{ alignSelf:'flex-end', ...bubble, background:C.navy, color:'#fff' }}>{item.text}</div>;
                 if (item.type === 'ai') return <div key={item.id} style={{ alignSelf:'flex-start', ...bubble, background:C.surface, color:C.textPrimary, border:'1px solid '+C.border }}>{item.text}</div>;
                 if (item.type === 'note') return <div key={item.id} style={{ alignSelf:'center', fontSize:'0.74rem', color:C.amber, background:C.amber+'12', border:'1px solid '+C.amber+'33', borderRadius:10, padding:'7px 11px', lineHeight:1.45, maxWidth:'90%' }}>{item.text}</div>;
+                if (item.type === 'result') return (
+                  <div key={item.id} style={{ alignSelf:'stretch', background:C.green+'0d', border:'1px solid '+C.green+'33', borderRadius:12, padding:'10px 13px' }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:7, marginBottom:(item.records && item.records.length) ? 6 : 0 }}>
+                      <i className="ti ti-circle-check" style={{ fontSize:15, color:C.green }} />
+                      <span style={{ fontSize:'0.8rem', fontWeight:600, color:C.green }}>{item.summary}</span>
+                    </div>
+                    {(item.records || []).slice(0, 8).map((r, i) => <div key={i} style={{ fontSize:'0.8rem', color:C.textPrimary, lineHeight:1.55, paddingLeft:22, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>· {r}</div>)}
+                    {item.records && item.records.length > 8 && <div style={{ fontSize:'0.76rem', color:C.textMuted, paddingLeft:22 }}>+{item.records.length - 8} more</div>}
+                  </div>
+                );
                 if (item.type === 'confirm') {
                   const s = summarizeTool(item.tool, tasks, colMap);
                   const accent = s.danger ? C.red : C.gold;
@@ -904,6 +916,17 @@
         if (name === 'get_contact') return await execGetContact(input);
         return { error:'unknown read tool' };
       }
+      function taskTitle(id) { const t = (tasks || []).find(x => x.id === id); return t ? t.Subject : ('task ' + id); }
+      function changeWords(input) {
+        const c = [];
+        if (input.subject != null) c.push('subject → "' + input.subject + '"');
+        if (input.status != null) c.push('status → ' + input.status);
+        if (input.task_type != null) c.push('type → ' + input.task_type);
+        if (input.due_date != null) c.push('due → ' + fmtDate(input.due_date));
+        if (input.contact_name != null) c.push('contact → ' + input.contact_name);
+        if (input.description != null) c.push('notes updated');
+        return c.join(', ');
+      }
       async function applyAiWrite(name, input) {
         if (name === 'create_task') {
           const record = { Subject:(input.subject || '').trim(), Status: input.status || 'Not Started', Description: input.description || null };
@@ -914,7 +937,10 @@
           patch[colMap.type] = input.task_type || null;
           patch.Who_Id = input.contact_name ? { id: input.contact_id || '', name: input.contact_name } : null;
           if ((record.Status || '').toLowerCase().includes('complete')) patch.Closed_Time = new Date().toISOString();
-          return await writeTask({ mode:'create', record, patch });
+          const r = await writeTask({ mode:'create', record, patch });
+          if (!r.ok) return r;
+          const ttl = record.Subject || 'task';
+          return { ok:true, summary:'Created task', records:[ttl], ai:`Created task "${ttl}"` };
         }
         if (name === 'update_task') {
           const id = input.id;
@@ -930,9 +956,18 @@
           if (input.contact_name != null) patch.Who_Id = input.contact_name ? { id: input.contact_id || '', name: input.contact_name } : null;
           if ((patch.Status || '').toLowerCase().includes('complete') && !existing.Closed_Time) patch.Closed_Time = new Date().toISOString();
           if (!Object.keys(record).length) return { ok:false, error:'No fields to update.' };
-          return await writeTask({ mode:'edit', id, record, patch });
+          const r = await writeTask({ mode:'edit', id, record, patch });
+          if (!r.ok) return r;
+          const ttl = existing.Subject || ('task ' + id);
+          const cw = changeWords(input);
+          return { ok:true, summary: 'Updated' + (cw ? ' · ' + cw : ''), records:[ttl], ai:`Updated "${ttl}"${cw ? ' (' + cw + ')' : ''}` };
         }
-        if (name === 'delete_task') return await removeTask(input.id);
+        if (name === 'delete_task') {
+          const ttl = taskTitle(input.id);
+          const r = await removeTask(input.id);
+          if (!r.ok) return r;
+          return { ok:true, summary:'Deleted task', records:[ttl], ai:`Deleted "${ttl}"` };
+        }
         if (name === 'bulk_update_tasks') {
           const ids = input.ids || [];
           if (!ids.length) return { ok:false, error:'No tasks specified.' };
@@ -940,16 +975,19 @@
           if (input.status != null) changes.status = input.status;
           if (input.due_date != null) changes.due_date = input.due_date;
           if (input.task_type != null) changes.task_type = input.task_type;
+          const names = ids.map(taskTitle);
           let okN = 0, errN = 0;
           for (const id of ids) { const r = await applyAiWrite('update_task', { id, ...changes }); if (r && r.ok) okN++; else errN++; }
-          return { ok: errN === 0, count: okN, summary: `Updated ${okN} task${okN === 1 ? '' : 's'}` + (errN ? `, ${errN} failed` : ''), error: errN ? `${errN} failed` : undefined };
+          const cw = changeWords(input);
+          return { ok: errN === 0, count: okN, summary: `Updated ${okN} task${okN === 1 ? '' : 's'}` + (cw ? ' · ' + cw : ''), records: names, ai: `Updated ${okN} tasks${cw ? ' (' + cw + ')' : ''}: ${names.join(', ')}`, error: errN ? `${errN} failed` : undefined };
         }
         if (name === 'bulk_delete_tasks') {
           const ids = input.ids || [];
           if (!ids.length) return { ok:false, error:'No tasks specified.' };
+          const names = ids.map(taskTitle);
           let okN = 0, errN = 0;
           for (const id of ids) { const r = await removeTask(id); if (r && r.ok) okN++; else errN++; }
-          return { ok: errN === 0, count: okN, summary: `Deleted ${okN} task${okN === 1 ? '' : 's'}` + (errN ? `, ${errN} failed` : ''), error: errN ? `${errN} failed` : undefined };
+          return { ok: errN === 0, count: okN, summary: `Deleted ${okN} task${okN === 1 ? '' : 's'}`, records: names, ai: `Deleted ${okN} tasks: ${names.join(', ')}`, error: errN ? `${errN} failed` : undefined };
         }
         return { ok:false, error:'Unknown action.' };
       }

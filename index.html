@@ -7,6 +7,16 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#001A4A" />
   <title>TMG App</title>
+  <!-- Single Page Apps for GitHub Pages: restore a deep-link path (e.g. /guide/get-started)
+       that 404.html re-encoded as /?/… . Must run before supabase.js reads the URL. -->
+  <script>
+    (function (l) {
+      if (l.search[1] === '/') {
+        var decoded = l.search.slice(1).split('&').map(function (s) { return s.replace(/~and~/g, '&'); }).join('?');
+        window.history.replaceState(null, null, l.pathname.slice(0, -1) + decoded + l.hash);
+      }
+    }(window.location));
+  </script>
   <!-- Home-screen / PWA icons -->
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <link rel="icon" type="image/png" href="icon-192.png" />
@@ -4280,11 +4290,27 @@ Rules:
         GuideDB.loadAll().then((d) => {
           if (!on) return;
           setNotes(d); setLoading(false);
-          try { const m = (location.hash || '').match(/guide\/([a-z0-9-]+)/i); if (m) { const f = d.find(n => n.slug === m[1]); if (f) setSelectedId(f.id); } } catch (e) {}
+          try {
+            const pm = (location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i);
+            const hm = (location.hash || '').match(/guide\/([a-z0-9-]+)/i);
+            const sl = pm ? pm[1] : (hm ? hm[1] : null);
+            if (sl) { const f = d.find(n => n.slug === sl); if (f) setSelectedId(f.id); }
+          } catch (e) {}
         });
         return () => { on = false; };
       }, []);
       useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
+      useEffect(() => {
+        const onPop = () => {
+          try {
+            const pm = (location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i);
+            if (pm) { const f = notes.find(n => n.slug === pm[1]); setSelectedId(f ? f.id : null); }
+            else setSelectedId(null);
+          } catch (e) {}
+        };
+        window.addEventListener('popstate', onPop);
+        return () => window.removeEventListener('popstate', onPop);
+      }, [notes]);
       useEffect(() => { if (editing && edRef.current) edRef.current.innerHTML = guideSanitize(sel ? sel.body_html : ''); }, [editing, selectedId]); // eslint-disable-line
 
       const sel = notes.find(n => n.id === selectedId) || null;
@@ -4294,7 +4320,14 @@ Rules:
         .map(sec => ({ sec, items: notes.filter(n => (n.section || 'App Guides') === sec && matches(n)).sort((a, b) => (a.sort - b.sort) || a.title.localeCompare(b.title)) }))
         .filter(g => g.items.length);
 
-      const selectNote = (id) => { setSelectedId(id); setEditing(false); setDotsOpen(false); };
+      const selectNote = (id) => {
+        setSelectedId(id); setEditing(false); setDotsOpen(false);
+        try {
+          const n = id ? notes.find(x => x.id === id) : null;
+          const url = (n && n.slug) ? ('/guide/' + n.slug) : '/guide';
+          if (id) history.pushState(null, '', url); else history.replaceState(null, '', url);
+        } catch (e) {}
+      };
       const copyLink = (slug) => { try { navigator.clipboard.writeText('app.themorshedgroup.com/guide/' + slug); setCopied(true); setTimeout(() => setCopied(false), 1400); } catch (e) {} };
 
       const openNew = () => { setNTitle(''); setNDesc(''); setNSlug(''); setNSection('App Guides'); setNBody(''); setSlugTouched(false); setShowNew(true); };
@@ -5359,6 +5392,16 @@ Rules:
       if (ROUTE_TABS.indexOf(h) !== -1) return { tab: h, view: null };
       return { tab: 'chat', view: null };
     }
+    // Guide uses a real clean path (/guide or /guide/<slug>) instead of a #hash, so
+    // links are shareable/bookmarkable. Returns a parseRoute-shaped result, or null
+    // when the current path isn't a guide path (then hash routing applies as before).
+    function parsePath() {
+      try {
+        const m = (location.pathname || '').match(/^\/guide(?:\/([a-z0-9-]+))?\/?$/i);
+        if (m) return { tab: 'more', view: 'guide', slug: m[1] || null };
+      } catch (e) {}
+      return null;
+    }
 
     // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
     // /tasks app. The top-bar icons open it in an iframe popout inside the content
@@ -5386,7 +5429,8 @@ Rules:
     }
 
     function App({ user, profile }) {
-      const [activeTab, setActiveTab] = useState(() => parseRoute(typeof location !== 'undefined' ? location.hash : '').tab);
+      const _boot = (typeof location !== 'undefined') ? (parsePath() || parseRoute(location.hash)) : { tab: 'chat', view: null };
+      const [activeTab, setActiveTab] = useState(() => _boot.tab);
       const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
       const [fontScale, setFontScale] = useState(() => parseFloat(localStorage.getItem('tmg-fontscale')) || 1);
       const [accessCfg, setAccessCfg] = useState(DEFAULT_ACCESS);
@@ -5473,14 +5517,14 @@ Rules:
       const [kpiFlow, setKpiFlow] = useState(null); // inline Enter KPI card: { step:'choice'|'form'|'summary', payload? }
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
-      const [moreView, setMoreView] = useState(() => parseRoute(typeof location !== 'undefined' ? location.hash : '').view || 'directory');
+      const [moreView, setMoreView] = useState(() => _boot.view || 'directory');
       const [moreMenuOpen, setMoreMenuOpen] = useState(false);
 
       // ── URL hash <-> nav state ──
       const firstSync = useRef(true);
       useEffect(() => {
         const apply = () => {
-          const r = parseRoute(location.hash);
+          const r = parsePath() || parseRoute(location.hash);
           setActiveTab(r.tab);
           if (r.tab === 'more' && r.view) setMoreView(r.view);
           setMoreMenuOpen(false); setDrawerOpen(false);
@@ -5493,7 +5537,19 @@ Rules:
       useEffect(() => {
         if (location.hash.indexOf('=') !== -1) return; // never clobber the OAuth #access_token=... hash
         const token = activeTab === 'more' ? (moreView || 'directory') : activeTab;
-        if (location.hash.replace(/^#\/?/, '') !== token) {
+        const onGuidePath = /^\/guide(\/|$)/i.test(location.pathname);
+        if (token === 'guide') {
+          // Guide owns a real /guide[/slug] path; GuideTab manages the slug segment.
+          if (!onGuidePath) {
+            try { firstSync.current ? history.replaceState(null, '', '/guide') : history.pushState(null, '', '/guide'); } catch (e) {}
+          }
+          firstSync.current = false;
+          return;
+        }
+        if (onGuidePath) {
+          // Leaving a guide deep-link for another tab → reset to root with the tab hash.
+          try { history.pushState(null, '', '/#' + token); } catch (e) { try { location.hash = token; } catch (e2) {} }
+        } else if (location.hash.replace(/^#\/?/, '') !== token) {
           try { firstSync.current ? history.replaceState(null, '', '#' + token) : history.pushState(null, '', '#' + token); }
           catch (e) { location.hash = token; }
         }

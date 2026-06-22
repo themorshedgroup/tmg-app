@@ -16,6 +16,12 @@
         window.history.replaceState(null, null, l.pathname.slice(0, -1) + decoded + l.hash);
       }
     }(window.location));
+    // Remember a /guide/<slug> deep-link so it survives the login/OAuth round-trip
+    // (Supabase can redirect back to the site root, losing the path). Consumed after mount.
+    try {
+      var _gm = (window.location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i);
+      if (_gm) sessionStorage.setItem('tmg-guide-deeplink', _gm[1]);
+    } catch (e) {}
   </script>
   <!-- Home-screen / PWA icons -->
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
@@ -6062,6 +6068,18 @@ Rules:
       // AI memory + projects load
       const refreshProjects = () => ProjectDB.list().then(setProjects);
       useEffect(() => { AIMemoryDB.get().then(setAiMemory); refreshProjects(); }, []);
+      // Consume a stashed /guide/<slug> deep-link (set in <head> before login) — opens the
+      // Guide tab + note even if the OAuth round-trip dropped the path back to the site root.
+      useEffect(() => {
+        try {
+          const dl = sessionStorage.getItem('tmg-guide-deeplink');
+          if (dl) {
+            sessionStorage.removeItem('tmg-guide-deeplink');
+            try { history.replaceState(null, '', '/guide/' + dl); } catch (e) {}
+            setActiveTab('more'); setMoreView('guide');
+          }
+        } catch (e) {}
+      }, []);
       useEffect(() => {
         let on = true;
         if (activeProjectId) ProjectDB.listFiles(activeProjectId).then(f => { if (on) setActiveProjectFiles(f); });

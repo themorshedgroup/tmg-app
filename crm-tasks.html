@@ -808,6 +808,7 @@
       const [tasks, setTasks] = useState(null);     // null = loading
       const [err, setErr] = useState('');
       const [needsDeploy, setNeedsDeploy] = useState(false);
+      const [capped, setCapped] = useState(false);
       const [colMap, setColMap] = useState({ type:'Task_Type', trigger:'Trigger' });
       const [meta, setMeta] = useState({ statusOptions:['Not Started','Deferred','In Progress','Completed','Waiting on someone else'], typeOptions:['Call','Note','Pop-by','Lunch','Email','Meeting'] });
       const [q, setQ] = useState('');
@@ -842,13 +843,23 @@
           }));
         }
         setColMap({ type, trigger });
-        // Pull the tasks.
+        // Pull the tasks — Zoho returns max 200 per page, so page through
+        // them and combine, up to a safety cap (huge sets stay responsive;
+        // beyond the cap, Filter/search narrows it down).
         const reqFields = ['Owner','Subject','Status','Due_Date','Closed_Time','Description','Who_Id', type, trigger]
           .filter((v, i, a) => v && a.indexOf(v) === i);
-        const res = await callZoho({ action:'list_tasks', fields:reqFields, per_page:200 });
-        if (!res.ok && /unknown action/i.test(res.data?.error || '')) { setNeedsDeploy(true); setTasks([]); return; }
-        if (!res.ok) { setErr(res.data?.error || 'Could not load tasks.'); setTasks([]); return; }
-        setTasks(res.data.tasks || []);
+        const CAP = 2000;
+        let all = [], page = 1, more = true;
+        while (more && all.length < CAP && page <= 10) {
+          const res = await callZoho({ action:'list_tasks', fields:reqFields, per_page:200, page });
+          if (!res.ok && /unknown action/i.test(res.data?.error || '')) { setNeedsDeploy(true); setTasks([]); return; }
+          if (!res.ok) { if (page === 1) { setErr(res.data?.error || 'Could not load tasks.'); setTasks([]); return; } break; }
+          all = all.concat(res.data.tasks || []);
+          more = !!(res.data.info && res.data.info.more_records);
+          page++;
+        }
+        setCapped(more && all.length >= CAP);
+        setTasks(all);
       }
       useEffect(() => { load(); }, []);
 
@@ -1075,7 +1086,7 @@
             <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:16, flexWrap:'wrap', marginBottom:13 }}>
               <div>
                 <h1 style={{ fontFamily:C.fontDisplay, fontSize:'1.7rem', fontWeight:600, color:C.navy, lineHeight:1.05 }}>All Tasks</h1>
-                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{tasks ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` : 'Loading…'}</div>
+                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{tasks ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` + (capped ? ' · first 2000 — filter to narrow' : '') : 'Loading…'}</div>
               </div>
               <div style={{ display:'flex', alignItems:'center', gap:10 }}>
                 <button onClick={() => setDrawer(d => d?.mode === 'ai' ? null : { mode:'ai' })} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background: aiOpen ? C.gold+'22' : C.gold+'0f', fontWeight:600 }}>

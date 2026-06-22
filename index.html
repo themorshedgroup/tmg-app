@@ -757,16 +757,14 @@ Rules:
 
     // ─── Work Mode pills ─────────────────────────────────────────────
     // Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
+    // Pills carry a `mode` ('work' | 'ai') — they show on the matching chat mode.
     const FALLBACK_PILLS = [
-      { id: 'fb-task',    label: 'Add To Do',            icon: 'ti-checklist',       colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   config: { instruction: TASK_PILL_INSTRUCTION, seed: 'To Do: ' }, enabled: true },
-      { id: 'fb-kpis',    label: 'Enter KPI',            icon: 'ti-chart-bar',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { kpi: true, prompt: 'Enter KPI' }, enabled: true },
-      { id: 'fb-listing', label: 'Listing Presentation', icon: 'ti-presentation',    colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Listing Presentation' }, enabled: true },
-      { id: 'fb-showing', label: 'Add Showing',          icon: 'ti-home',            colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Add Showing' },          enabled: true },
-      { id: 'fb-comm',    label: 'Commission Log',       icon: 'ti-currency-dollar', colorLight: '#0F6E56', colorDark: '#5DCAA5',               type: 'prompt', config: { prompt: 'Commission Log' },       enabled: true },
-      { id: 'fb-score',   label: 'Team Scorecard',       icon: 'ti-users',           colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'Team Scorecard' },        enabled: true },
-      { id: 'fb-eod',     label: 'EOD Report',           icon: 'ti-file-text',       colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', config: { prompt: 'EOD Report' },            enabled: true },
-      { id: 'fb-weekly',  label: 'Weekly Summary',       icon: 'ti-calendar-stats',  colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'prompt', config: { prompt: 'Weekly Summary' },        enabled: true },
+      { id: 'fb-task', label: 'Add To Do', icon: 'ti-checklist', colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   mode: 'work', config: { instruction: TASK_PILL_INSTRUCTION, seed: 'To Do: ' }, enabled: true },
+      { id: 'fb-kpis', label: 'KPIs',      icon: 'ti-chart-bar', colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', mode: 'work', config: { kpi: true, prompt: 'Enter KPI' },                       enabled: true },
     ];
+
+    // Built-in pill, always shown first in BOTH modes — starts a fresh chat.
+    const NEW_CHAT_PILL = { id: 'new-chat', label: 'New Chat', icon: 'ti-message-plus', colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'newchat', config: {} };
 
     // Curated icon set for the pill builder's icon picker (all verified Tabler names).
     const PILL_ICONS = ['ti-chart-bar', 'ti-presentation', 'ti-home', 'ti-currency-dollar', 'ti-users', 'ti-file-text', 'ti-calendar-stats', 'ti-sparkles', 'ti-clipboard', 'ti-clipboard-list', 'ti-mail', 'ti-phone', 'ti-map-pin', 'ti-building', 'ti-key', 'ti-calendar', 'ti-checklist', 'ti-notes', 'ti-report', 'ti-target', 'ti-trophy', 'ti-coin', 'ti-briefcase', 'ti-message'];
@@ -795,7 +793,7 @@ Rules:
     const PillDB = {
       client() { return window.SupabaseAuth?._client || null; },
       uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
-      _map(r) { return { id: r.id, label: r.label, icon: r.icon, colorLight: r.color_light, colorDark: r.color_dark, type: r.type, config: r.config || {}, enabled: r.enabled, sortOrder: r.sort_order }; },
+      _map(r) { return { id: r.id, label: r.label, icon: r.icon, colorLight: r.color_light, colorDark: r.color_dark, type: r.type, mode: r.mode || 'work', config: r.config || {}, enabled: r.enabled, sortOrder: r.sort_order }; },
       async list() {
         if (!this.client()) return null;
         const { data, error } = await this.client().from('work_pills').select('*').order('sort_order', { ascending: true }).order('created_at', { ascending: true });
@@ -806,7 +804,7 @@ Rules:
         if (!this.client()) return;
         const { error } = await this.client().from('work_pills').insert({
           label: p.label, icon: p.icon, color_light: p.colorLight, color_dark: p.colorDark,
-          type: p.type, config: p.config || {}, enabled: p.enabled !== false, sort_order: p.sortOrder || 0, created_by: this.uid(),
+          type: p.type, mode: p.mode || 'work', config: p.config || {}, enabled: p.enabled !== false, sort_order: p.sortOrder || 0, created_by: this.uid(),
         });
         if (error) { console.error('[PillDB] create:', error.message); throw error; }
       },
@@ -818,6 +816,7 @@ Rules:
         if (f.colorLight !== undefined) m.color_light = f.colorLight;
         if (f.colorDark !== undefined) m.color_dark = f.colorDark;
         if (f.type !== undefined) m.type = f.type;
+        if (f.mode !== undefined) m.mode = f.mode;
         if (f.config !== undefined) m.config = f.config;
         if (f.enabled !== undefined) m.enabled = f.enabled;
         if (f.sortOrder !== undefined) m.sort_order = f.sortOrder;
@@ -852,7 +851,7 @@ Rules:
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {/* Messages */}
-          <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: mode === 'work' ? '20px 16px 64px' : '20px 16px' }}>
+          <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '20px 16px 64px' }}>
             {empty ? (
               <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 24px' }}>
                 <div style={{ fontSize: '2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>
@@ -913,8 +912,8 @@ Rules:
               </div>
             )}
           </div>
-          {/* Work-mode quick-action chips — floated above the chat bar so the greeting stays put */}
-          {mode === 'work' && pills && pills.length > 0 && (
+          {/* Quick-action chips (New Chat + this mode's pills) — floated above the chat bar */}
+          {pills && pills.length > 0 && (
             <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, display: 'flex', gap: 7, overflowX: 'auto', padding: '10px 16px', borderTop: `1px solid ${dark ? '#152545' : C.border}`, background: dark ? '#000D26' : C.bg }}>
               {pills.map((chip) => (
                 <button key={chip.id} onClick={() => onPill(chip)} style={{
@@ -1797,6 +1796,7 @@ Rules:
       const [colorLight, setColorLight] = useState(pill?.colorLight || PILL_COLORS[0].l);
       const [colorDark, setColorDark] = useState(pill?.colorDark || PILL_COLORS[0].d);
       const [type, setType] = useState(pill?.type || 'prompt');
+      const [pmode, setPmode] = useState(pill?.mode || 'work');
       const [enabled, setEnabled] = useState(pill?.enabled !== false);
       const [config, setConfig] = useState(pill?.config || {});
       const [saving, setSaving] = useState(false);
@@ -1835,7 +1835,7 @@ Rules:
         const err = validate();
         if (err) { alert(err); return; }
         setSaving(true);
-        try { await onSave({ label: label.trim(), icon, colorLight, colorDark, type, enabled, config }, pill?.id); }
+        try { await onSave({ label: label.trim(), icon, colorLight, colorDark, type, mode: pmode, enabled, config }, pill?.id); }
         finally { setSaving(false); }
       }
 
@@ -1843,7 +1843,14 @@ Rules:
         <div>
           <div style={section}>
             <div style={lbl}>Label</div>
-            <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. Enter KPIs" style={inp} />
+            <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. KPIs" style={inp} />
+            <div style={{ ...lbl, marginTop: 14 }}>Mode</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {[{ v: 'work', t: 'Work Mode' }, { v: 'ai', t: 'AI Mode' }].map(o => {
+                const on = pmode === o.v;
+                return <button key={o.v} onClick={() => setPmode(o.v)} style={{ flex: 1, padding: '9px 10px', borderRadius: 9, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.8rem', fontWeight: on ? 600 : 500, border: `1px solid ${on ? (dark ? C.gold : C.navy) : bord}`, background: on ? (dark ? C.gold : C.navy) : 'transparent', color: on ? '#fff' : sub }}>{o.t}</button>;
+              })}
+            </div>
             <div style={{ ...lbl, marginTop: 14 }}>Icon</div>
             <IconGridPicker dark={dark} value={icon} onChange={setIcon} />
             <div style={{ ...lbl, marginTop: 14 }}>Color</div>
@@ -1929,9 +1936,13 @@ Rules:
         try { await PillDB.remove(id); await refresh(); onSaved && onSaved(); }
         catch (e) { alert('Could not delete: ' + (e.message || e)); }
       }
-      async function move(idx, dir) {
+      async function move(pill, dir) {
         if (!pills) return;
-        const j = idx + dir;
+        const idx = pills.findIndex(p => p.id === pill.id);
+        if (idx < 0) return;
+        const md = pill.mode || 'work';
+        let j = idx + dir;
+        while (j >= 0 && j < pills.length && (pills[j].mode || 'work') !== md) j += dir; // nearest same-mode neighbor
         if (j < 0 || j >= pills.length) return;
         const arr = pills.slice();
         const t = arr[idx]; arr[idx] = arr[j]; arr[j] = t;
@@ -1944,7 +1955,7 @@ Rules:
         <div style={{ position: 'fixed', inset: 0, zIndex: 50, background: bg, display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 'calc(12px + env(safe-area-inset-top)) 16px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
             <button onClick={editing ? () => setEditing(null) : onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: txt, fontSize: 22, display: 'flex', alignItems: 'center', padding: 0 }}><i className="ti ti-chevron-left" /></button>
-            <div style={{ flex: 1, fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.25rem', color: txt }}>{editing ? (editing.__new ? 'New Pill' : 'Edit Pill') : 'Work Mode Pills'}</div>
+            <div style={{ flex: 1, fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.25rem', color: txt }}>{editing ? (editing.__new ? 'New Pill' : 'Edit Pill') : 'AI Chat Pills'}</div>
             {!editing && <button onClick={() => setEditing({ __new: true })} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 12px', borderRadius: 20, border: 'none', cursor: 'pointer', background: dark ? C.gold : C.navy, color: '#fff', fontFamily: C.fontSans, fontSize: '0.8rem', fontWeight: 500 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />Add</button>}
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px 40px' }}>
@@ -1953,11 +1964,21 @@ Rules:
             ) : pills === null ? (
               <div style={{ textAlign: 'center', color: sub, fontSize: '0.85rem', padding: '40px 0' }}>Loading…</div>
             ) : pills.length === 0 ? (
-              <div style={{ textAlign: 'center', color: sub, fontSize: '0.85rem', padding: '40px 16px', lineHeight: 1.6 }}>No pills yet.<br />Tap <b style={{ color: txt }}>Add</b> to create your first Work Mode pill.</div>
+              <div style={{ textAlign: 'center', color: sub, fontSize: '0.85rem', padding: '40px 16px', lineHeight: 1.6 }}>No pills yet.<br />Tap <b style={{ color: txt }}>Add</b> to create your first pill.</div>
             ) : (
-              pills.map((p, i) => (
-                <PillRow key={p.id} dark={dark} pill={p} first={i === 0} last={i === pills.length - 1} onEdit={() => setEditing(p)} onDelete={() => deletePill(p.id)} onUp={() => move(i, -1)} onDown={() => move(i, 1)} />
-              ))
+              [{ key: 'work', title: 'Work Mode Pills' }, { key: 'ai', title: 'AI Mode Pills' }].map(g => {
+                const group = pills.filter(p => (p.mode || 'work') === g.key);
+                return (
+                  <div key={g.key} style={{ marginBottom: 18 }}>
+                    <div style={{ fontFamily: C.fontSans, fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, marginBottom: 8 }}>{g.title}<span style={{ opacity: 0.55 }}> · {group.length}</span></div>
+                    {group.length === 0
+                      ? <div style={{ fontFamily: C.fontSans, fontSize: '0.78rem', color: sub, opacity: 0.7, padding: '2px 0 6px' }}>None yet — tap Add and choose <b>{g.title.replace(' Pills', '')}</b>.</div>
+                      : group.map((p, gi) => (
+                        <PillRow key={p.id} dark={dark} pill={p} first={gi === 0} last={gi === group.length - 1} onEdit={() => setEditing(p)} onDelete={() => deletePill(p.id)} onUp={() => move(p, -1)} onDown={() => move(p, 1)} />
+                      ))}
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
@@ -2406,8 +2427,8 @@ Rules:
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-layout-grid" style={{ fontSize: 18, color: C.gold }} /></div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Work Mode Pills</div>
-                <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Design the work-mode shortcuts and what each one does.</div>
+                <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>AI Chat Pills</div>
+                <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Design the AI &amp; Work Mode shortcuts and what each one does.</div>
               </div>
               <i className="ti ti-chevron-right" style={{ fontSize: 18, color: C.textMuted, flexShrink: 0 }} />
             </div>
@@ -5659,6 +5680,8 @@ Rules:
       }, [pills, isAdmin]);
       // Effective pills: DB pills when present, else the built-in fallback; only enabled ones show.
       const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false);
+      // New Chat first, then the pills tagged for the current mode (legacy pills default to Work).
+      const shownPills = [NEW_CHAT_PILL].concat(effectivePills.filter(p => (p.mode || 'work') === mode));
       useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
 
       // Per-conversation draft autosave (device-local). Key 'new' before a conversation exists.
@@ -5862,6 +5885,7 @@ Rules:
       // Tap a work-mode pill → run its configured behavior.
       function dispatchPill(pill) {
         if (!pill) return;
+        if (pill.id === 'new-chat' || pill.type === 'newchat') { newChat(); return; }
         if (pill.id === 'fb-kpis' || (pill.config && pill.config.kpi)) {
           setTaskInstruction(null); setKpiInstruction(null);
           setMessages(prev => [...prev, { role: 'assistant', content: 'Let’s get started 👋 — would you like to fill out a form, or paste your notes?' }]);
@@ -5924,7 +5948,7 @@ Rules:
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>
                 {/* Chat stays full width behind; history overlaps it at 50% */}
-                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={effectivePills} onPill={dispatchPill}
+                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={shownPills} onPill={dispatchPill}
                   flowKey={kpiFlow ? kpiFlow.step : ''}
                   flowCard={kpiFlow ? (
                     <KpiFlowCard

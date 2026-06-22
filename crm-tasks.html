@@ -311,6 +311,14 @@
       { id:'c3', full_name:'Alex Zreik' }, { id:'c4', full_name:'Neil Patel' },
       { id:'c5', full_name:'Morgan Birch' }, { id:'c6', full_name:'Rashad Rahman' },
     ];
+    // Dev-only spouse pairs (live uses the Zoho Spouse lookup). Kelly↔Jeremy
+    // share a due date (aligned); Molly↔Morgan don't (mismatch) — for demoing.
+    const DEV_SPOUSES = { "Kelly O'rourke":'Jeremy Bell', 'Jeremy Bell':"Kelly O'rourke", 'Molly Kinney':'Morgan Birch', 'Morgan Birch':'Molly Kinney' };
+    function devSpouseLinks(keys) {
+      const out = {};
+      keys.forEach(k => { const sp = DEV_SPOUSES[k]; out[k] = sp ? { id: sp, name: sp } : null; });
+      return out;
+    }
     function ContactPicker({ value, onChange }) {
       const [q, setQ] = useState('');
       const [results, setResults] = useState(null);
@@ -501,6 +509,8 @@
         input_schema:{ type:'object', properties:{ ids:{ type:'array', items:{type:'string'} }, status:{type:'string'}, due_date:{type:'string', description:'YYYY-MM-DD'}, task_type:{type:'string'} }, required:['ids'] } },
       { name:'bulk_delete_tasks', description:'Delete many tasks at once with a single confirmation.',
         input_schema:{ type:'object', properties:{ ids:{ type:'array', items:{type:'string'} } }, required:['ids'] } },
+      { name:'audit_spouse_dates', description:'Check the tasks in view for married couples (via the contact Spouse lookup) whose tasks have DIFFERENT due dates. Returns each couple with both partners’ tasks (including task ids and due dates) and whether they are aligned. Use when the user asks about spouses / couples sharing a due date. After reporting any mismatches, offer to align a couple by setting both partners’ task(s) to the same due_date — ask which date first, then use bulk_update_tasks with those task ids.',
+        input_schema:{ type:'object', properties:{} } },
     ];
 
     function todayISO() { return new Date().toISOString().slice(0, 10); }
@@ -519,6 +529,7 @@
         "The JSON below is ONLY the tasks currently on screen. For anything beyond it (all overdue, someone else's tasks, a date range, company-wide), call search_tasks — never guess from the on-screen list.",
         "To change MANY tasks at once, use bulk_update_tasks or bulk_delete_tasks (one confirmation for the whole batch) instead of repeating single-task calls. Gather the ids first (from the JSON or search_tasks).",
         "Use get_contact for a contact's details; combine it with search_tasks to answer history questions.",
+        "To check married couples, call audit_spouse_dates — it follows the contact Spouse link among the tasks in view and reports couples whose tasks have different due dates. After reporting mismatches, offer to align each couple by setting both partners' task(s) to one due_date (ask which date), via bulk_update_tasks with the task ids it returned.",
         "When a task should be linked to a contact, call find_contact first to resolve the name to an id, then pass contact_id and contact_name.",
         "For update_task / delete_task, use the exact task id from the JSON. Valid statuses: " + (meta.statusOptions || []).join(", ") + ".",
         "Be concise — after a change is applied the app shows the exact records changed below your message, so a short confirmation is enough.",
@@ -575,12 +586,23 @@
         let parsed = null; try { parsed = JSON.parse(raw); } catch (e) {}
         if (parsed && Array.isArray(parsed.tasks)) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`Found ${parsed.tasks.length} matching task${parsed.tasks.length === 1 ? '' : 's'} across Zoho. [dev preview]` }] };
         if (parsed && parsed.contact) { const c = parsed.contact; return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${c.full_name} — ${c.email || 'no email'}${c.phone ? ', ' + c.phone : ''}${c.city ? ', ' + c.city : ''}. [dev preview]` }] }; }
+        if (parsed && Array.isArray(parsed.couples)) {
+          if (!parsed.couples.length) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text: (parsed.note || 'No couples found among the tasks in view.') + ' [dev preview]' }] };
+          const mm = parsed.couples.filter(c => !c.match);
+          const fmtP = (p) => `${p.name} (${p.tasks.map(x => fmtDate(x.due) || 'no date').join(', ')})`;
+          if (!mm.length) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`All ${parsed.couples.length} couple(s) in view are aligned. [dev preview]` }] };
+          const lines = mm.map(c => `• ${fmtP(c.a)}  ↔  ${fmtP(c.b)}`).join('\n');
+          return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${mm.length} of ${parsed.couples.length} couple(s) have mismatched due dates:\n${lines}\n\nWant me to align each pair to the same date? [dev preview]` }] };
+        }
         const declined = /declined|error/i.test(raw);
         return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text: declined ? "Okay, I left it unchanged." : "Done — that's updated in your tasks. Anything else?" }] };
       }
       const text = (last && typeof last.content === 'string') ? last.content : '';
       const t = text.toLowerCase();
       const list = tasks || [];
+      if (/spouse|couple|married|partner|same due date/.test(t)) {
+        return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:'Checking the couples in view…' }, { type:'tool_use', id:'dev-spouse', name:'audit_spouse_dates', input:{} }] };
+      }
       const known = DEV_CONTACTS.find(c => t.includes(c.full_name.toLowerCase()));
       if (known && /(who|detail|contact|email|phone|last touch|when did|info on)/.test(t)) {
         return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:`Let me pull up ${known.full_name}.` }, { type:'tool_use', id:'dev-contact', name:'get_contact', input:{ name: known.full_name } }] };
@@ -670,7 +692,7 @@
         const toolUses = content.filter(b => b.type === 'tool_use');
         if (res.stop_reason === 'tool_use' && toolUses.length) {
           claudeRef.current.push({ role:'assistant', content });
-          const READS = ['find_contact', 'search_tasks', 'get_contact'];
+          const READS = ['find_contact', 'search_tasks', 'get_contact', 'audit_spouse_dates'];
           const results = [];
           for (const tu of toolUses) {
             if (READS.includes(tu.name)) {
@@ -942,7 +964,44 @@
         if (name === 'find_contact') return await execFindContact(input);
         if (name === 'search_tasks') return await execSearchTasks(input);
         if (name === 'get_contact') return await execGetContact(input);
+        if (name === 'audit_spouse_dates') return await execAuditSpouses();
         return { error:'unknown read tool' };
+      }
+      // Pairs up married contacts (via the Spouse lookup) among the tasks in
+      // view and flags couples whose tasks have different due dates.
+      async function execAuditSpouses() {
+        const rows = view || [];
+        const byKey = {};
+        for (const t of rows) {
+          const key = t.Who_Id?.id || t.Who_Id?.name;
+          if (!key) continue;
+          if (!byKey[key]) byKey[key] = { name: t.Who_Id?.name || String(key), tasks: [] };
+          byKey[key].tasks.push({ id: t.id, subject: t.Subject, due: t.Due_Date || null });
+        }
+        const keys = Object.keys(byKey);
+        if (!keys.length) return { couples: [], note: 'No tasks with a contact in the current view.' };
+        let links;
+        if (isDev()) { links = devSpouseLinks(keys); }
+        else {
+          const { ok, data } = await callZoho({ action:'spouse_links', contact_ids: keys.slice(0, 60) });
+          if (!ok) return { couples: [], error: data?.error || 'Could not read spouse links.' };
+          if (data.error) return { couples: [], note: data.error };
+          links = data.links || {};
+        }
+        const seen = new Set();
+        const couples = [];
+        for (const k of keys) {
+          const sp = links[k];
+          if (!sp || !sp.id || !byKey[sp.id]) continue;   // no spouse, or spouse not in view
+          const pair = [k, sp.id].sort().join('|');
+          if (seen.has(pair)) continue;
+          seen.add(pair);
+          const a = byKey[k], b = byKey[sp.id];
+          const datesA = JSON.stringify([...new Set(a.tasks.map(x => x.due))].sort());
+          const datesB = JSON.stringify([...new Set(b.tasks.map(x => x.due))].sort());
+          couples.push({ a: { name:a.name, tasks:a.tasks }, b: { name:b.name, tasks:b.tasks }, match: datesA === datesB });
+        }
+        return { couples, mismatch_count: couples.filter(c => !c.match).length, match_count: couples.filter(c => c.match).length };
       }
       function taskTitle(id) { const t = (tasks || []).find(x => x.id === id); return t ? t.Subject : ('task ' + id); }
       function changeWords(input) {

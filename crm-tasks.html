@@ -466,28 +466,253 @@
       );
     }
 
-    // ─── AI companion drawer (Phase 3 foreshadow) ─────────────────────
-    function AIDrawer({ onClose }) {
+    // ─── AI companion (agentic chat with confirm-before-write) ────────
+    const TASKS_AI_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/tasks-ai';
+
+    // Tools Claude can call. Reads (find_contact) auto-run; writes pause for
+    // the user's confirmation in the chat before they touch Zoho.
+    const AI_TOOLS = [
+      { name:'find_contact', description:'Search Zoho contacts by name to get a contact id. Call this before create_task/update_task whenever a task should be linked to a contact.',
+        input_schema:{ type:'object', properties:{ query:{ type:'string', description:'Full or partial contact name' } }, required:['query'] } },
+      { name:'create_task', description:'Create a new Zoho task. The user confirms before it runs.',
+        input_schema:{ type:'object', properties:{ subject:{type:'string'}, task_type:{type:'string', description:'e.g. Call, Note, Pop-by'}, status:{type:'string'}, due_date:{type:'string', description:'YYYY-MM-DD'}, contact_id:{type:'string'}, contact_name:{type:'string'}, description:{type:'string'} }, required:['subject'] } },
+      { name:'update_task', description:'Update fields on an existing task by its id. Only include the fields you want to change.',
+        input_schema:{ type:'object', properties:{ id:{type:'string'}, subject:{type:'string'}, task_type:{type:'string'}, status:{type:'string'}, due_date:{type:'string'}, contact_id:{type:'string'}, contact_name:{type:'string'}, description:{type:'string'} }, required:['id'] } },
+      { name:'delete_task', description:'Delete a task by its id.',
+        input_schema:{ type:'object', properties:{ id:{type:'string'} }, required:['id'] } },
+    ];
+
+    function todayISO() { return new Date().toISOString().slice(0, 10); }
+
+    function aiSystem(tasks, colMap, meta) {
+      const rows = (tasks || []).map(t => ({
+        id: t.id, subject: t.Subject, type: t[colMap.type] || null, status: t.Status || null,
+        due_date: t.Due_Date || null, contact: t.Who_Id?.name || null, closed_time: t.Closed_Time || null, owner: t.Owner?.name || null,
+      }));
+      return [
+        "You are the TMG CRM Tasks assistant. You help the user understand and manage their Zoho CRM Tasks (calls, notes, pop-bys, follow-ups).",
+        "Today is " + todayISO() + ". Dates are formatted YYYY-MM-DD.",
+        "You can read the tasks currently in view (JSON below) and answer questions about them directly — no tool needed for questions.",
+        "To CHANGE data use the tools create_task / update_task / delete_task. Every tool call is shown to the user to confirm before it runs, so just propose the change.",
+        "When a task should be linked to a contact, call find_contact first to resolve the name to an id, then pass contact_id and contact_name.",
+        "For update_task / delete_task, use the exact task id from the JSON. Valid statuses: " + (meta.statusOptions || []).join(", ") + ".",
+        "Be concise. After a change is confirmed, briefly say what happened.",
+        "",
+        "TASKS IN VIEW (JSON):",
+        JSON.stringify(rows),
+      ].join("\n");
+    }
+
+    // Human-readable summary of a proposed write, for the confirm card.
+    function summarizeTool(tool, tasks, colMap) {
+      const inp = tool.input || {};
+      const label = (id) => { const t = (tasks || []).find(x => x.id === id); return t ? t.Subject : ('task ' + id); };
+      if (tool.name === 'create_task') {
+        const bits = [];
+        if (inp.task_type) bits.push(inp.task_type);
+        if (inp.status) bits.push(inp.status);
+        if (inp.due_date) bits.push('due ' + fmtDate(inp.due_date));
+        if (inp.contact_name) bits.push('for ' + inp.contact_name);
+        return { verb:'Create task', title: inp.subject || '(no subject)', detail: bits.join(' · '), danger:false };
+      }
+      if (tool.name === 'update_task') {
+        const changes = [];
+        if (inp.subject != null) changes.push('subject → "' + inp.subject + '"');
+        if (inp.status != null) changes.push('status → ' + inp.status);
+        if (inp.task_type != null) changes.push('type → ' + inp.task_type);
+        if (inp.due_date != null) changes.push('due → ' + fmtDate(inp.due_date));
+        if (inp.contact_name != null) changes.push('contact → ' + inp.contact_name);
+        if (inp.description != null) changes.push('notes updated');
+        return { verb:'Update', title: label(inp.id), detail: changes.join(' · ') || 'no changes', danger:false };
+      }
+      if (tool.name === 'delete_task') return { verb:'Delete', title: label(inp.id), detail:'Removes it from Zoho', danger:true };
+      return { verb: tool.name, title:'', detail: JSON.stringify(inp), danger:true };
+    }
+
+    // Dev mock so the chat + confirm flow is reviewable on localhost.
+    function devTasksAI(messages, tasks, colMap) {
+      const last = messages[messages.length - 1];
+      if (last && last.role === 'user' && Array.isArray(last.content) && last.content.some(b => b.type === 'tool_result')) {
+        const tr = last.content.find(b => b.type === 'tool_result');
+        const declined = /declined|error/i.test(typeof tr.content === 'string' ? tr.content : '');
+        return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text: declined ? "Okay, I left it unchanged." : "Done — that's updated in your tasks. Anything else?" }] };
+      }
+      const text = (last && typeof last.content === 'string') ? last.content : '';
+      const t = text.toLowerCase();
+      const list = tasks || [];
+      if (/how many|count|number of/.test(t)) {
+        let sub = list;
+        if (/overdue/.test(t)) { const d = todayISO(); sub = list.filter(x => x.Status !== 'Completed' && x.Due_Date && x.Due_Date < d); }
+        else if (/call/.test(t)) sub = list.filter(x => (x[colMap.type] || '').toLowerCase() === 'call');
+        else if (/note/.test(t)) sub = list.filter(x => (x[colMap.type] || '').toLowerCase() === 'note');
+        else if (/complete|done/.test(t)) sub = list.filter(x => (x.Status || '').toLowerCase().includes('complete'));
+        else if (/not started|open|pending/.test(t)) sub = list.filter(x => (x.Status || '') === 'Not Started');
+        return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${sub.length} matching task${sub.length === 1 ? '' : 's'} in view (of ${list.length}). [dev preview]` }] };
+      }
+      if (/(complete|mark.*done|finish)/.test(t)) {
+        const m = list.find(x => (x.Who_Id?.name || '').length > 2 && t.includes((x.Who_Id.name).toLowerCase()));
+        if (m) return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:`Sure — I'll mark "${m.Subject}" as Completed.` }, { type:'tool_use', id:'dev-update', name:'update_task', input:{ id:m.id, status:'Completed' } }] };
+      }
+      if (/(create|add|new task|schedule)/.test(t)) {
+        return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:"Here's the task I'll create — confirm to add it." }, { type:'tool_use', id:'dev-create', name:'create_task', input:{ subject:'Follow-up call (dev preview)', task_type:'Call', status:'Not Started', due_date: todayISO() } }] };
+      }
+      return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`I can answer questions about your ${list.length} tasks in view, or create / update / complete them — just ask. [dev preview]` }] };
+    }
+
+    async function callTasksAI({ system, messages, tasks, colMap }) {
+      if (isDev()) { await new Promise(r => setTimeout(r, 450)); return devTasksAI(messages, tasks, colMap); }
+      const res = await fetch(TASKS_AI_ENDPOINT, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + authToken(), 'apikey':SUPABASE_ANON },
+        body: JSON.stringify({ system, messages, tools: AI_TOOLS, max_tokens: 2048 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (/unknown|not set|could not|function/i.test(data?.error || '') || res.status === 404)
+          return { ok:false, error:'AI isn’t deployed yet — add the tasks-ai function in Supabase.' };
+        return { ok:false, error: data?.error || 'AI request failed.' };
+      }
+      return { ok:true, content: data.content || [], stop_reason: data.stop_reason };
+    }
+
+    function AIChat({ tasks, colMap, meta, onFind, onWrite, onClose }) {
+      const [log, setLog] = useState([]);
+      const [input, setInput] = useState('');
+      const [busy, setBusy] = useState(false);
+      const claudeRef = useRef([]);
+      const idRef = useRef(0);
+      const resolvers = useRef({});
+      const scrollRef = useRef(null);
+      const nextId = () => ++idRef.current;
+
+      useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [log, busy]);
+
+      function push(item) { setLog(l => [...l, { id: nextId(), ...item }]); }
+      function confirmWrite(tool) {
+        return new Promise(resolve => {
+          const cid = nextId();
+          setLog(l => [...l, { id: cid, type:'confirm', tool, status:'pending' }]);
+          resolvers.current[cid] = (decision) => { setLog(l => l.map(it => it.id === cid ? { ...it, status: decision ? 'confirmed' : 'cancelled' } : it)); resolve(decision); };
+        });
+      }
+      function decide(cid, d) { const r = resolvers.current[cid]; if (r) { delete resolvers.current[cid]; r(d); } }
+
+      async function step(depth) {
+        if (depth > 6) { push({ type:'note', text:'(stopped — too many steps)' }); return; }
+        setBusy(true);
+        const res = await callTasksAI({ system: aiSystem(tasks, colMap, meta), messages: claudeRef.current, tasks, colMap });
+        setBusy(false);
+        if (!res.ok) { push({ type:'note', text: res.error || 'Something went wrong.' }); return; }
+        const content = res.content || [];
+        const textOut = content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+        if (textOut) push({ type:'ai', text: textOut });
+        const toolUses = content.filter(b => b.type === 'tool_use');
+        if (res.stop_reason === 'tool_use' && toolUses.length) {
+          claudeRef.current.push({ role:'assistant', content });
+          const results = [];
+          for (const tu of toolUses) {
+            if (tu.name === 'find_contact') {
+              const r = await onFind(tu.input);
+              results.push({ type:'tool_result', tool_use_id: tu.id, content: JSON.stringify(r) });
+            } else {
+              const ok = await confirmWrite(tu);
+              if (!ok) { results.push({ type:'tool_result', tool_use_id: tu.id, content:'User declined this action.' }); continue; }
+              const wr = await onWrite(tu.name, tu.input);
+              results.push({ type:'tool_result', tool_use_id: tu.id, content: wr && wr.ok ? 'Success.' : ('Error: ' + ((wr && wr.error) || 'failed')), is_error: !(wr && wr.ok) });
+            }
+          }
+          claudeRef.current.push({ role:'user', content: results });
+          await step(depth + 1);
+        }
+      }
+
+      async function send(text) {
+        const msg = (text != null ? text : input).trim();
+        if (!msg || busy) return;
+        setInput('');
+        push({ type:'user', text: msg });
+        claudeRef.current.push({ role:'user', content: msg });
+        await step(0);
+      }
+
+      const SUGGESTIONS = ['How many calls are overdue?', 'Mark the James Gill pop-by complete', 'Create a follow-up call for Molly Kinney'];
+      const bubble = { maxWidth:'85%', padding:'9px 13px', borderRadius:14, fontSize:'0.86rem', lineHeight:1.5, whiteSpace:'pre-wrap' };
+
       return (
         <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:40, display:'flex', justifyContent:'flex-end' }}>
-          <div onClick={e => e.stopPropagation()} style={{ width:'min(420px,92vw)', height:'100%', background:C.surface, borderLeft:'1px solid '+C.border, boxShadow:'-20px 0 50px rgba(0,26,74,.18)', padding:'26px 24px', animation:'tmg-fade .18s ease', overflowY:'auto' }}>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
+          <div onClick={e => e.stopPropagation()} style={{ width:'min(440px,94vw)', height:'100%', background:C.bg, borderLeft:'1px solid '+C.border, boxShadow:'-20px 0 50px rgba(0,26,74,.18)', display:'flex', flexDirection:'column', animation:'tmg-fade .18s ease' }}>
+            {/* head */}
+            <div style={{ flexShrink:0, display:'flex', alignItems:'center', justifyContent:'space-between', padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface }}>
               <div style={{ display:'flex', alignItems:'center', gap:9 }}>
-                <i className="ti ti-sparkles" style={{ fontSize:19, color:C.gold }} />
-                <span style={{ fontFamily:C.fontDisplay, fontSize:'1.5rem', fontWeight:600, color:C.navy }}>Tasks AI Companion</span>
+                <i className="ti ti-sparkles" style={{ fontSize:18, color:C.gold }} />
+                <span style={{ fontFamily:C.fontDisplay, fontSize:'1.45rem', fontWeight:600, color:C.navy }}>Tasks AI</span>
+                <span style={{ fontSize:'0.66rem', color:C.textMuted }}>· reads {tasks ? tasks.length : 0} in view</span>
               </div>
               <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
             </div>
-            <div style={{ fontSize:'0.6rem', fontWeight:600, letterSpacing:'.16em', textTransform:'uppercase', color:C.gold, background:C.surfaceHover, display:'inline-block', padding:'4px 10px', borderRadius:20, marginBottom:16 }}>Next update</div>
-            <div style={{ fontSize:'0.9rem', lineHeight:1.7, color:C.textSecondary }}>
-              <p style={{ marginBottom:12 }}>This companion will <b style={{ color:C.navy }}>read every task in view</b> and act on your words:</p>
-              <ul style={{ paddingLeft:18, marginBottom:14, display:'flex', flexDirection:'column', gap:7 }}>
-                <li>"How many of Tarek's calls are overdue?"</li>
-                <li>"Mark the James Gill pop-by complete."</li>
-                <li>"Create a C-touch call for Molly Kinney next Friday."</li>
-                <li>"Reschedule all of this week's notes to Monday."</li>
-              </ul>
-              <p style={{ fontSize:'0.82rem', color:C.textMuted }}>Every change is previewed for your confirmation before it touches Zoho — nothing is written silently.</p>
+
+            {/* messages */}
+            <div ref={scrollRef} style={{ flex:1, overflowY:'auto', padding:'18px 18px', display:'flex', flexDirection:'column', gap:12 }}>
+              {log.length === 0 && (
+                <div style={{ margin:'auto 0', textAlign:'center', color:C.textSecondary }}>
+                  <i className="ti ti-sparkles" style={{ fontSize:30, color:C.goldSoft }} />
+                  <div style={{ fontFamily:C.fontDisplay, fontSize:'1.3rem', color:C.navy, margin:'8px 0 4px' }}>Ask about your tasks</div>
+                  <div style={{ fontSize:'0.8rem', color:C.textMuted, marginBottom:16, lineHeight:1.5 }}>I can read everything in view and make changes — with your confirmation.</div>
+                  <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                    {SUGGESTIONS.map(s => (
+                      <button key={s} onClick={() => send(s)} style={{ fontFamily:C.fontSans, fontSize:'0.8rem', color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:10, padding:'9px 12px', cursor:'pointer', textAlign:'left' }}>{s}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {log.map(item => {
+                if (item.type === 'user') return <div key={item.id} style={{ alignSelf:'flex-end', ...bubble, background:C.navy, color:'#fff' }}>{item.text}</div>;
+                if (item.type === 'ai') return <div key={item.id} style={{ alignSelf:'flex-start', ...bubble, background:C.surface, color:C.textPrimary, border:'1px solid '+C.border }}>{item.text}</div>;
+                if (item.type === 'note') return <div key={item.id} style={{ alignSelf:'center', fontSize:'0.74rem', color:C.amber, background:C.amber+'12', border:'1px solid '+C.amber+'33', borderRadius:10, padding:'7px 11px', lineHeight:1.45, maxWidth:'90%' }}>{item.text}</div>;
+                if (item.type === 'confirm') {
+                  const s = summarizeTool(item.tool, tasks, colMap);
+                  const accent = s.danger ? C.red : C.gold;
+                  return (
+                    <div key={item.id} style={{ alignSelf:'stretch', background:C.surface, border:'1px solid '+accent+'55', borderRadius:14, overflow:'hidden' }}>
+                      <div style={{ padding:'12px 14px', borderBottom:'1px solid '+C.border }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:7, marginBottom:5 }}>
+                          <i className={'ti ' + (s.danger ? 'ti-trash' : item.tool.name === 'create_task' ? 'ti-plus' : 'ti-edit')} style={{ fontSize:15, color:accent }} />
+                          <span style={{ fontSize:'0.68rem', fontWeight:600, letterSpacing:'.08em', textTransform:'uppercase', color:accent }}>{s.verb}</span>
+                        </div>
+                        <div style={{ fontSize:'0.9rem', fontWeight:600, color:C.navy }}>{s.title}</div>
+                        {s.detail && <div style={{ fontSize:'0.78rem', color:C.textSecondary, marginTop:3 }}>{s.detail}</div>}
+                      </div>
+                      <div style={{ padding:'9px 14px', display:'flex', alignItems:'center', gap:9, background:C.surfaceAlt }}>
+                        {item.status === 'pending' ? (<>
+                          <button onClick={() => decide(item.id, true)} style={{ fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:600, color:'#fff', background: s.danger ? C.red : C.navy, border:'none', borderRadius:8, padding:'7px 16px', cursor:'pointer' }}>{s.danger ? 'Delete' : 'Confirm'}</button>
+                          <button onClick={() => decide(item.id, false)} style={{ fontFamily:C.fontSans, fontSize:'0.8rem', color:C.textSecondary, background:'transparent', border:'1px solid '+C.border, borderRadius:8, padding:'7px 14px', cursor:'pointer' }}>Cancel</button>
+                        </>) : (
+                          <span style={{ fontSize:'0.78rem', fontWeight:600, color: item.status === 'confirmed' ? C.green : C.textMuted, display:'inline-flex', alignItems:'center', gap:6 }}>
+                            <i className={'ti ' + (item.status === 'confirmed' ? 'ti-circle-check' : 'ti-circle-x')} style={{ fontSize:15 }} />
+                            {item.status === 'confirmed' ? 'Confirmed' : 'Cancelled'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              })}
+              {busy && <div style={{ alignSelf:'flex-start', ...bubble, background:C.surface, border:'1px solid '+C.border, color:C.textMuted }}><Spinner size={15} /> thinking…</div>}
+            </div>
+
+            {/* composer */}
+            <div style={{ flexShrink:0, padding:'12px 16px', borderTop:'1px solid '+C.border, background:C.surface }}>
+              <div style={{ display:'flex', alignItems:'flex-end', gap:9 }}>
+                <textarea value={input} onChange={e => setInput(e.target.value)} rows={1}
+                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+                  placeholder="Ask or tell me what to do…"
+                  style={{ flex:1, resize:'none', fontFamily:C.fontSans, fontSize:'0.86rem', padding:'10px 12px', border:'1px solid '+C.border, borderRadius:11, background:C.bg, color:C.textPrimary, outline:'none', maxHeight:120 }} />
+                <button onClick={() => send()} disabled={busy || !input.trim()} style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'none', cursor: busy || !input.trim() ? 'default' : 'pointer', background: busy || !input.trim() ? C.border : C.navy, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                  <i className="ti ti-arrow-up" style={{ fontSize:18 }} />
+                </button>
+              </div>
+              <div style={{ fontSize:'0.66rem', color:C.textMuted, marginTop:7, textAlign:'center' }}>Changes are previewed for your confirmation — nothing writes to Zoho silently.</div>
             </div>
           </div>
         </div>
@@ -570,6 +795,50 @@
         const res = await callZoho({ action:'delete_record', module:'Tasks', id });
         if (res.ok) await load();
         return { ok:res.ok, error: res.data?.error };
+      }
+
+      // ── AI companion executors (passed to AIChat) ──
+      async function execFindContact(input) {
+        const q = (input.query || '').trim();
+        if (q.length < 2) return { matches: [] };
+        if (isDev()) {
+          const t = q.toLowerCase();
+          return { matches: DEV_CONTACTS.filter(c => c.full_name.toLowerCase().includes(t)).map(c => ({ id:c.id, name:c.full_name })) };
+        }
+        const { ok, data } = await callZoho({ action:'search_contacts', query:q });
+        if (!ok) return { matches:[], error: data?.error };
+        return { matches: (data.contacts || []).map(c => ({ id:c.id, name:c.full_name })) };
+      }
+      async function applyAiWrite(name, input) {
+        if (name === 'create_task') {
+          const record = { Subject:(input.subject || '').trim(), Status: input.status || 'Not Started', Description: input.description || null };
+          if (input.task_type) record[colMap.type] = input.task_type;
+          if (input.due_date) record.Due_Date = input.due_date;
+          if (input.contact_id) record.Who_Id = input.contact_id;
+          const patch = { Subject: record.Subject, Status: record.Status, Due_Date: input.due_date || null, Description: record.Description };
+          patch[colMap.type] = input.task_type || null;
+          patch.Who_Id = input.contact_name ? { id: input.contact_id || '', name: input.contact_name } : null;
+          if ((record.Status || '').toLowerCase().includes('complete')) patch.Closed_Time = new Date().toISOString();
+          return await writeTask({ mode:'create', record, patch });
+        }
+        if (name === 'update_task') {
+          const id = input.id;
+          const existing = (tasks || []).find(t => t.id === id) || {};
+          const record = {};
+          const patch = { ...existing };
+          if (input.subject != null) { record.Subject = input.subject; patch.Subject = input.subject; }
+          if (input.status != null) { record.Status = input.status; patch.Status = input.status; }
+          if (input.task_type != null) { record[colMap.type] = input.task_type; patch[colMap.type] = input.task_type; }
+          if (input.due_date != null) { record.Due_Date = input.due_date; patch.Due_Date = input.due_date; }
+          if (input.description != null) { record.Description = input.description; patch.Description = input.description; }
+          if (input.contact_id != null) record.Who_Id = input.contact_id;
+          if (input.contact_name != null) patch.Who_Id = input.contact_name ? { id: input.contact_id || '', name: input.contact_name } : null;
+          if ((patch.Status || '').toLowerCase().includes('complete') && !existing.Closed_Time) patch.Closed_Time = new Date().toISOString();
+          if (!Object.keys(record).length) return { ok:false, error:'No fields to update.' };
+          return await writeTask({ mode:'edit', id, record, patch });
+        }
+        if (name === 'delete_task') return await removeTask(input.id);
+        return { ok:false, error:'Unknown action.' };
       }
 
       function clickSort(key) {
@@ -731,7 +1000,7 @@
             )}
           </main>
 
-          {drawer?.mode === 'ai' && <AIDrawer onClose={() => setDrawer(null)} />}
+          {drawer?.mode === 'ai' && <AIChat tasks={tasks} colMap={colMap} meta={meta} onFind={execFindContact} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
           {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
             <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}
               onClose={() => setDrawer(null)} onWrite={writeTask} onDelete={removeTask} />

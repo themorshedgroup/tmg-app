@@ -154,6 +154,13 @@
     .nc-edit:empty:before { content: attr(data-ph); color: #C4BFBA; }
     .guide-note-item:hover { background: #EDE7DC !important; }
     .guide-tool:hover { background: #EDE7DC !important; }
+    /* AI Chat history sidebar */
+    .hp-row:hover { background: #EDE7DC; }
+    .hp-dots { opacity: 0; transition: opacity 0.12s; }
+    .hp-row:hover .hp-dots { opacity: 1; }
+    @media (hover: none) { .hp-dots { opacity: 1; } }
+    .hp-opt:hover { background: #F9F6F0; }
+    .hp-plus:hover { background: #EDE7DC; color: #6B6B6B; }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
@@ -375,7 +382,7 @@ Continue with TMG Gmail
       userId()  { return window.SupabaseAuth?._state?.session?.user?.id || null; },
 
       async loadConversations() {
-        if (!this.client()) return [];
+        if (!this.client()) return devConvSeed().slice();
         const { data, error } = await this.client()
           .from('ai_conversations').select('*')
           .order('pinned', { ascending: false })
@@ -483,8 +490,33 @@ Continue with TMG Gmail
     // ─── AI assistant memory + Projects (personal, per user) ──────────
     // localhost has no Supabase client, so these fall back to in-memory fixtures.
     let _devAiMemory = '';
-    let _devProjects = [];
+    let _devProjects = [
+      { id: 'dp1', name: 'TMG App', instructions: '', memory: '', archived: false, updatedAt: new Date().toISOString() },
+      { id: 'dp2', name: 'KPIs', instructions: '', memory: '', archived: false, updatedAt: new Date().toISOString() },
+      { id: 'dp3', name: 'Deals', instructions: '', memory: '', archived: false, updatedAt: new Date().toISOString() },
+    ];
     let _devProjectFiles = {}; // projectId -> [files]
+    // Sample conversations for the localhost preview only (prod loads real ai_conversations).
+    let _devConvs = null;
+    function devConvSeed() {
+      if (_devConvs) return _devConvs;
+      const now = Date.now(), DAY = 86400000, HR = 3600000;
+      const iso = (ms) => new Date(now - ms).toISOString();
+      const mk = (id, title, type, o) => ({ id, title, type, workRequest: null, pinned: !!(o && o.pinned), archived: false, projectId: (o && o.projectId) || null, updatedAt: iso((o && o.age) || 0) });
+      _devConvs = [
+        mk('dc1', 'KPI Notes June 2026 Recap', 'work', { pinned: true, age: 1 * HR }),
+        mk('dc2', 'KPI Notes Agent Training Log', 'work', { age: 3 * HR, projectId: 'dp2' }),
+        mk('dc3', 'KPI Notes June 2026 Recap', 'work', { age: 6 * HR }),
+        mk('dc4', 'Add New Chat Pill Feature', 'work', { age: 3 * DAY, projectId: 'dp1' }),
+        mk('dc5', 'Enter KPIs Data Tracking', 'work', { age: 4 * DAY, projectId: 'dp2' }),
+        mk('dc6', 'How Something Works Explained', 'ai', { age: 4 * DAY }),
+        mk('dc7', 'Simple Test Message Exchange', 'ai', { age: 5 * DAY }),
+        mk('dc8', 'TMG App Design Session 3', 'work', { age: 20 * DAY, projectId: 'dp1' }),
+        mk('dc9', 'Commission Disbursement Flow', 'work', { age: 25 * DAY, projectId: 'dp3' }),
+        mk('dc10', 'Bookkeeper Hiring Criteria', 'work', { age: 30 * DAY }),
+      ];
+      return _devConvs;
+    }
 
     const AIMemoryDB = {
       client() { return window.SupabaseAuth?._client || null; },
@@ -997,20 +1029,25 @@ Rules:
               </div>
             )}
           </div>
-          {/* Quick-action chips (New Chat + this mode's pills) — floated above the chat bar */}
-          {pills && pills.length > 0 && (
-            <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, display: 'flex', gap: 7, overflowX: 'auto', padding: '10px 16px', borderTop: `1px solid ${dark ? '#152545' : C.border}`, background: dark ? '#000D26' : C.bg }}>
-              {pills.map((chip) => (
-                <button key={chip.id} onClick={() => onPill(chip)} style={{
-                  display: 'flex', alignItems: 'center', gap: 6, borderRadius: 20, padding: '7px 13px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
-                  background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E4DFD4'}`,
-                }}>
-                  <i className={`ti ${chip.icon}`} style={{ fontSize: 13, color: dark ? chip.colorDark : chip.colorLight }} />
-                  <span style={{ fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 500, letterSpacing: '0.08em', color: dark ? 'rgba(255,255,255,0.7)' : '#001A4A' }}>{chip.label}</span>
-                </button>
-              ))}
-            </div>
-          )}
+          {/* Quick-action chips (New Chat + this mode's pills) — colored to match the active mode */}
+          {pills && pills.length > 0 && (() => {
+            const pt = mode === 'work'
+              ? { icon: dark ? '#C9A45A' : '#AD832F', label: dark ? '#C9A45A' : '#7A5B1E', border: dark ? '#1E3360' : '#E8D9BC', bg: dark ? '#0A1730' : '#FDF8F0' }
+              : { icon: dark ? '#7A9AFF' : '#4A6FD4', label: dark ? '#7A9AFF' : '#2A4FA4', border: dark ? '#1A2060' : '#C8D0F0', bg: dark ? '#0A1730' : '#F0F4FF' };
+            return (
+              <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, display: 'flex', gap: 7, overflowX: 'auto', padding: '10px 16px', borderTop: `1px solid ${dark ? '#152545' : C.border}`, background: dark ? '#000D26' : C.bg }}>
+                {pills.map((chip) => (
+                  <button key={chip.id} onClick={() => onPill(chip)} style={{
+                    display: 'flex', alignItems: 'center', gap: 6, borderRadius: 20, padding: '7px 13px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+                    background: pt.bg, border: `1px solid ${pt.border}`,
+                  }}>
+                    <i className={`ti ${chip.icon}`} style={{ fontSize: 13, color: pt.icon }} />
+                    <span style={{ fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 500, letterSpacing: '0.08em', color: pt.label }}>{chip.label}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
         </div>
       );
     }
@@ -5334,117 +5371,143 @@ Rules:
       return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     }
 
-    // In-flow chat history panel — fills the area between the top bar and the bottom zone.
-    function HistoryPanel({ dark, conversations, projects, onSelect, onNewChat, onPin, onArchive, onRename, onDelete, onOpenMemory, onNewProject, onOpenProject, onMoveToProject }) {
+    // In-flow chat history sidebar — filter/sort, projects, pinned + date groups.
+    function HistoryPanel({ dark, conversations, projects, currentConvId, wide, onSelect, onNewChat, onPin, onArchive, onRename, onDelete, onShare, onOpenMemory, onNewProject, onOpenProject, onMoveToProject }) {
       const [menuId, setMenuId] = useState(null);
-      const [movingId, setMovingId] = useState(null); // conv being moved to a project
-      const panelBg    = dark ? '#070F1E' : '#FFFFFF';
-      const headBord   = dark ? '#0D1E3A' : '#F0EBE3';
-      const titleCol   = dark ? '#FFFFFF' : '#001A4A';
-      const btnBg      = dark ? '#AD832F' : '#001A4A';
-      const rowBord    = dark ? '#0D1E3A' : '#F5F2EE';
-      const previewCol = dark ? 'rgba(255,255,255,0.35)' : '#888888';
-      const timeCol    = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+      const [movingId, setMovingId] = useState(null);
+      const [projMenuId, setProjMenuId] = useState(null);
+      const [filterOpen, setFilterOpen] = useState(false);
+      const [showWork, setShowWork] = useState(true);
+      const [showAI, setShowAI] = useState(true);
+      const [sortBy, setSortBy] = useState('recent');
+      const [projectFilter, setProjectFilter] = useState(null);
       const J = "'Jost', sans-serif";
-      const menuBord = dark ? '#1A2D4D' : '#EAE3D6';
-      const pinCol   = dark ? '#C9A45A' : '#AD832F';
-      const list = (conversations || []).filter(c => !c.archived && !c.projectId)
-        .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)); // pinned float to top; project chats live in their project
-      const ico = (type) => type === 'work'
-        ? { bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', color: dark ? '#C9A45A' : '#AD832F', icon: 'ti-briefcase' }
-        : { bg: dark ? 'rgba(255,255,255,0.07)' : '#EEF0F8', color: dark ? 'rgba(255,255,255,0.6)' : '#001A4A', icon: 'ti-sparkles' };
+      const titleCol = '#001A4A', previewCol = '#B4B2A9', pinCol = '#AD832F', panelBg = '#fff', menuBord = '#EAE3D6';
+      const iconBtn = wide ? 26 : 28;
+      const filterActive = !showWork || !showAI || sortBy !== 'recent';
+
+      const all = (conversations || []).filter(c => !c.archived);
+      const workHidden = !showWork ? all.filter(c => c.type === 'work').length : 0;
+      const aiHidden = !showAI ? all.filter(c => c.type !== 'work').length : 0;
+      let pool = all.filter(c => (c.type === 'work' ? showWork : showAI));
+      if (projectFilter) pool = pool.filter(c => c.projectId === projectFilter);
+      const sortFn = sortBy === 'alpha'
+        ? (a, b) => (a.title || '').localeCompare(b.title || '')
+        : (a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+      const pinnedList = pool.filter(c => c.pinned).sort(sortFn);
+      const rest = pool.filter(c => !c.pinned).sort(sortFn);
+      const groupOf = (c) => { const d = new Date(c.updatedAt || 0), n = new Date(); if (d.toDateString() === n.toDateString()) return 'Today'; if ((n - d) / 86400000 < 7) return 'This week'; return 'Earlier'; };
+      const groups = sortBy === 'alpha' ? [['All chats', rest]] : ['Today', 'This week', 'Earlier'].map(g => [g, rest.filter(c => groupOf(c) === g)]).filter(x => x[1].length);
+
+      const checkbox = (on) => <div style={{ width: 16, height: 16, borderRadius: 4, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `1.5px solid ${on ? '#001A4A' : '#C4B9A8'}`, background: on ? '#001A4A' : 'transparent' }}>{on && <i className="ti ti-check" style={{ fontSize: 10, color: '#fff' }} />}</div>;
+      const modeTag = (w) => <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: w ? '#F3EBDA' : '#EEF3FB', color: w ? '#AD832F' : '#185FA5', padding: '2px 7px', borderRadius: 5, fontFamily: J, fontSize: 8, fontWeight: 600 }}><i className={`ti ${w ? 'ti-briefcase' : 'ti-sparkles'}`} style={{ fontSize: 9 }} />{w ? 'Work Mode' : 'AI Mode'}</span>;
+      const sectionLabel = (txt, right) => <div style={{ display: 'flex', alignItems: 'center', padding: '12px 14px 4px' }}><div style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: '#9A958A', flex: 1 }}>{txt}</div>{right}</div>;
+
+      const chatRow = (c) => {
+        const active = c.id === currentConvId;
+        const open = menuId === c.id;
+        const w = c.type === 'work';
+        return (
+          <div key={c.id} className="hp-row" onClick={() => onSelect(c.id)} onContextMenu={(e) => { e.preventDefault(); setMenuId(open ? null : c.id); }} style={{ position: 'relative', padding: '9px 14px', borderRadius: 8, margin: '1px 6px', cursor: 'pointer', background: active ? '#E8E3DB' : undefined, transition: 'background 0.1s' }}>
+            {c.pinned && <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginBottom: 1 }}><i className="ti ti-pin-filled" style={{ fontSize: 9, color: '#AD832F' }} /><span style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: '#AD832F' }}>Pinned</span></div>}
+            <div style={{ fontFamily: J, fontSize: 13, fontWeight: 400, color: '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: 1.3, paddingRight: 16 }}>{c.title}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 2 }}><i className={`ti ${w ? 'ti-briefcase' : 'ti-sparkles'}`} style={{ fontSize: 10, color: w ? '#C9A45A' : '#8A9CC0' }} /><span style={{ fontSize: 8.5, color: '#B4B2A9', fontFamily: J }}>{w ? 'Work Mode' : 'AI Mode'}</span></div>
+            <button className="hp-dots" onClick={(e) => { e.stopPropagation(); setMenuId(open ? null : c.id); }} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: '#D4D0CC', fontSize: 12, display: 'flex', opacity: active ? 0.5 : undefined }}><i className="ti ti-dots" /></button>
+            {open && (
+              <React.Fragment>
+                <div onClick={(e) => { e.stopPropagation(); setMenuId(null); }} style={{ position: 'fixed', inset: 0, zIndex: 120 }} />
+                <div style={{ position: 'absolute', top: '72%', right: 12, zIndex: 121, minWidth: 150, background: panelBg, border: `1px solid ${menuBord}`, borderRadius: 10, boxShadow: '0 8px 28px rgba(0,0,0,0.18)', padding: 5 }}>
+                  {[
+                    c.pinned ? { t: 'Unpin', i: 'ti-pinned-off', fn: () => onPin(c.id, false) } : { t: 'Pin', i: 'ti-pin', fn: () => onPin(c.id, true) },
+                    { t: 'Rename', i: 'ti-pencil', fn: () => onRename(c.id) },
+                    { t: 'Move to project', i: 'ti-folder', fn: () => setMovingId(c.id) },
+                    { t: 'Share', i: 'ti-share', fn: () => onShare && onShare(c.id) },
+                    { t: 'Archive', i: 'ti-archive', fn: () => onArchive(c.id, true) },
+                    { t: 'Delete', i: 'ti-trash', fn: () => onDelete(c.id), danger: true },
+                  ].map(a => (
+                    <button key={a.t} onClick={(e) => { e.stopPropagation(); setMenuId(null); a.fn(); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 7, border: 'none', cursor: 'pointer', background: 'none', color: a.danger ? C.red : titleCol, fontFamily: J, fontSize: 11 }}><i className={`ti ${a.i}`} style={{ fontSize: 14 }} />{a.t}</button>
+                  ))}
+                </div>
+              </React.Fragment>
+            )}
+          </div>
+        );
+      };
 
       return (
-        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: panelBg }}>
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#F5F0E8' }}>
           {/* Header */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px 9px', borderBottom: `1px solid ${headBord}`, flexShrink: 0 }}>
-            <div style={{ fontFamily: J, fontSize: 11, letterSpacing: '0.14em', fontWeight: 600, color: titleCol }}>AI Chat</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-              <button onClick={onOpenMemory} title="Assistant memory & settings" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 7, border: `1px solid ${headBord}`, cursor: 'pointer', background: 'transparent', color: dark ? 'rgba(255,255,255,0.6)' : '#6B6B6B' }}>
-                <i className="ti ti-settings" style={{ fontSize: 14 }} />
-              </button>
-              <button onClick={onNewChat} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 20, border: 'none', cursor: 'pointer', background: btnBg, color: '#fff', fontFamily: J, fontSize: 8, letterSpacing: '0.14em', fontWeight: 500 }}>
-                <i className="ti ti-plus" style={{ fontSize: 11 }} />New
-              </button>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '11px 14px 9px', borderBottom: '0.5px solid #EDE7DC', background: '#F5F0E8', flexShrink: 0 }}>
+            <div style={{ fontFamily: J, fontSize: 16, fontWeight: 600, color: '#001A4A', flex: 1 }}>AI Chat</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <button onClick={onOpenMemory} title="Assistant memory" style={{ width: iconBtn, height: iconBtn, borderRadius: 7, border: '0.5px solid #E4DFD4', background: '#FCFBF8', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6B6B6B' }}><i className="ti ti-settings" style={{ fontSize: 13 }} /></button>
+              <button onClick={() => setFilterOpen(o => !o)} title="Sort & filter" style={{ width: iconBtn, height: iconBtn, borderRadius: 7, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', border: `0.5px solid ${filterActive ? '#E8D9BC' : '#E4DFD4'}`, background: filterActive ? '#F3EBDA' : '#FCFBF8', color: filterActive ? '#AD832F' : '#6B6B6B' }}><i className="ti ti-adjustments-horizontal" style={{ fontSize: 13 }} /></button>
+              <button onClick={onNewChat} title="New chat" style={{ width: iconBtn, height: iconBtn, borderRadius: 7, border: '0.5px solid #E8D9BC', background: '#F3EBDA', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#AD832F' }}><i className="ti ti-edit" style={{ fontSize: 13 }} /></button>
             </div>
           </div>
-          {/* List */}
-          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+
+          {/* Filter / sort panel */}
+          {filterOpen && (
+            <React.Fragment>
+              <div onClick={() => setFilterOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 18 }} />
+              <div style={{ position: 'relative', zIndex: 19, background: '#fff', border: '0.5px solid #EDE7DC', borderRadius: 10, margin: '6px 10px 0', boxShadow: '0 4px 14px rgba(0,26,74,.10)', overflow: 'hidden', flexShrink: 0 }}>
+                <div style={{ padding: '8px 12px 5px', fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#AD832F', borderBottom: '0.5px solid #F0EBE3' }}>Show chats from</div>
+                {[{ on: showWork, set: setShowWork, w: true }, { on: showAI, set: setShowAI, w: false }].map(o => (
+                  <div key={o.w ? 'w' : 'a'} className="hp-opt" onClick={() => o.set(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: '0.5px solid #F5F2EE', cursor: 'pointer' }}>
+                    {checkbox(o.on)}<span style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: '#001A4A', flex: 1 }}>{o.w ? 'Work Mode' : 'AI Mode'}</span>{modeTag(o.w)}
+                  </div>
+                ))}
+                <div style={{ padding: '8px 12px 5px', fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#AD832F', borderBottom: '0.5px solid #F0EBE3', borderTop: '0.5px solid #F0EBE3' }}>Sort by</div>
+                {[{ v: 'recent', t: 'Most recent first' }, { v: 'alpha', t: 'Alphabetical' }].map((o, i, arr) => (
+                  <div key={o.v} className="hp-opt" onClick={() => setSortBy(o.v)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: i === arr.length - 1 ? 'none' : '0.5px solid #F5F2EE', cursor: 'pointer' }}>
+                    {checkbox(sortBy === o.v)}<span style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: '#001A4A', flex: 1 }}>{o.t}</span>
+                  </div>
+                ))}
+              </div>
+            </React.Fragment>
+          )}
+
+          {/* Scroll area */}
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', paddingBottom: 8, background: '#F5F0E8' }}>
             {/* Projects */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 14px 5px' }}>
-              <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.16em', fontWeight: 700, color: previewCol }}>PROJECTS</div>
-              <button onClick={onNewProject} title="New project" style={{ background: 'none', border: 'none', cursor: 'pointer', color: pinCol, fontSize: 15, display: 'flex', padding: 0 }}><i className="ti ti-plus" /></button>
-            </div>
-            {(projects || []).length === 0 && (
-              <div style={{ padding: '0 14px 8px', fontFamily: J, fontSize: 9, color: previewCol, lineHeight: 1.5 }}>No projects yet. Tap ＋ to group chats with their own instructions &amp; files.</div>
-            )}
+            {sectionLabel('Projects', <button onClick={(e) => { e.stopPropagation(); onNewProject(); }} className="hp-plus" title="New project" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'transparent', cursor: 'pointer', color: '#C4BFBA', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><i className="ti ti-plus" style={{ fontSize: 13 }} /></button>)}
             {(projects || []).map(p => {
-              const count = (conversations || []).filter(c => c.projectId === p.id && !c.archived).length;
+              const cnt = all.filter(c => c.projectId === p.id).length;
+              const sel = projectFilter === p.id;
+              const pm = projMenuId === p.id;
               return (
-                <div key={p.id} onClick={() => onOpenProject(p.id)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}` }}>
-                  <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA' }}>
-                    <i className="ti ti-folder" style={{ fontSize: 14, color: pinCol }} />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
-                    <div style={{ fontFamily: J, fontSize: 8, color: previewCol, marginTop: 1 }}>{count} chat{count === 1 ? '' : 's'}</div>
-                  </div>
-                  <i className="ti ti-chevron-right" style={{ fontSize: 14, color: timeCol, flexShrink: 0 }} />
-                </div>
-              );
-            })}
-            {/* Chats */}
-            <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.16em', fontWeight: 700, color: previewCol, padding: '13px 14px 5px' }}>CHATS</div>
-            {list.length === 0 && (
-              <div style={{ textAlign: 'center', color: previewCol, fontSize: '0.8rem', padding: '20px 16px', fontFamily: J }}>No conversations yet.</div>
-            )}
-            {list.map((c, i) => {
-              const k = ico(c.type);
-              const last = i === list.length - 1;
-              const open = menuId === c.id;
-              return (
-                <div key={c.id} onClick={() => onSelect(c.id)} onContextMenu={(e) => { e.preventDefault(); setMenuId(open ? null : c.id); }} style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 9, padding: '9px 14px', cursor: 'pointer', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
-                  <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: k.bg }}>
-                    <i className={`ti ${k.icon}`} style={{ fontSize: 14, color: k.color }} />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      {c.pinned && <i className="ti ti-pin-filled" style={{ fontSize: 10, color: pinCol, flexShrink: 0 }} />}
-                      <div style={{ fontFamily: J, fontSize: 10, fontWeight: 500, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</div>
-                    </div>
-                    {c.preview && <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{c.preview}</div>}
-                  </div>
-                  <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                    <div style={{ fontFamily: J, fontSize: 8, color: timeCol }}>{shortTime(c.updatedAt)}</div>
-                    {c.unread > 0 && (
-                      <div style={{ width: 16, height: 16, borderRadius: '50%', background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{c.unread}</div>
-                    )}
-                    <button onClick={(e) => { e.stopPropagation(); setMenuId(open ? null : c.id); }} title="Options" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: timeCol, fontSize: 16, display: 'flex', alignItems: 'center' }}>
-                      <i className="ti ti-dots" />
-                    </button>
-                  </div>
-                  {open && (
+                <div key={p.id} className="hp-row" onClick={() => setProjectFilter(sel ? null : p.id)} onContextMenu={(e) => { e.preventDefault(); setProjMenuId(pm ? null : p.id); }} style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderRadius: 8, margin: '1px 6px', cursor: 'pointer', background: sel ? '#E8E3DB' : undefined, transition: 'background 0.1s' }}>
+                  <div style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 13, fontWeight: 400, color: '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+                  <span style={{ fontFamily: J, fontSize: 10, color: '#C4BFBA', flexShrink: 0, marginRight: 2 }}>{cnt}</span>
+                  <button className="hp-dots" onClick={(e) => { e.stopPropagation(); setProjMenuId(pm ? null : p.id); }} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: '#D4D0CC', fontSize: 12, display: 'flex' }}><i className="ti ti-dots" /></button>
+                  {pm && (
                     <React.Fragment>
-                      <div onClick={(e) => { e.stopPropagation(); setMenuId(null); }} style={{ position: 'fixed', inset: 0, zIndex: 120 }} />
-                      <div style={{ position: 'absolute', top: '74%', right: 12, zIndex: 121, minWidth: 146, background: panelBg, border: `1px solid ${menuBord}`, borderRadius: 10, boxShadow: '0 8px 28px rgba(0,0,0,0.28)', padding: 5 }}>
-                        {[
-                          c.pinned ? { t: 'Unpin', i: 'ti-pinned-off', fn: () => onPin(c.id, false) } : { t: 'Pin', i: 'ti-pin', fn: () => onPin(c.id, true) },
-                          { t: 'Rename', i: 'ti-pencil', fn: () => onRename(c.id) },
-                          { t: 'Move to project', i: 'ti-folder', fn: () => setMovingId(c.id) },
-                          { t: 'Archive', i: 'ti-archive', fn: () => onArchive(c.id, true) },
-                          { t: 'Delete', i: 'ti-trash', fn: () => onDelete(c.id), danger: true },
-                        ].map(a => (
-                          <button key={a.t} onClick={(e) => { e.stopPropagation(); setMenuId(null); a.fn(); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 7, border: 'none', cursor: 'pointer', background: 'none', color: a.danger ? C.red : titleCol, fontFamily: J, fontSize: 11 }}>
-                            <i className={`ti ${a.i}`} style={{ fontSize: 14 }} />{a.t}
-                          </button>
-                        ))}
+                      <div onClick={(e) => { e.stopPropagation(); setProjMenuId(null); }} style={{ position: 'fixed', inset: 0, zIndex: 120 }} />
+                      <div style={{ position: 'absolute', top: '80%', right: 12, zIndex: 121, minWidth: 140, background: panelBg, border: `1px solid ${menuBord}`, borderRadius: 10, boxShadow: '0 8px 28px rgba(0,0,0,0.18)', padding: 5 }}>
+                        <button onClick={(e) => { e.stopPropagation(); setProjMenuId(null); onOpenProject(p.id); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 7, border: 'none', cursor: 'pointer', background: 'none', color: titleCol, fontFamily: J, fontSize: 11 }}><i className="ti ti-folder-open" style={{ fontSize: 14 }} />Open / edit</button>
                       </div>
                     </React.Fragment>
                   )}
                 </div>
               );
             })}
+            {(projects || []).length === 0 && <div style={{ padding: '2px 14px 6px', fontFamily: J, fontSize: 10, color: previewCol, lineHeight: 1.5 }}>No projects yet. Tap ＋ to group chats with their own instructions &amp; files.</div>}
+            <div style={{ height: 0.5, background: '#E4DFD4', margin: '6px 14px' }} />
+
+            {/* Pinned */}
+            {pinnedList.length > 0 && <React.Fragment>{sectionLabel('Pinned')}{pinnedList.map(chatRow)}</React.Fragment>}
+
+            {/* Date groups */}
+            {groups.map(([label, arr]) => <React.Fragment key={label}>{sectionLabel(label)}{arr.map(chatRow)}</React.Fragment>)}
+
+            {pool.length === 0 && (
+              <div style={{ textAlign: 'center', color: '#B4B2A9', fontSize: 11, padding: '24px 16px', fontFamily: J }}>{projectFilter ? 'No chats in this project yet.' : 'No conversations yet.'}</div>
+            )}
+
+            {workHidden > 0 && <div style={{ background: '#F9F6F0', borderRadius: 8, border: '0.5px solid #EDE7DC', margin: '10px 14px', padding: '9px 12px', textAlign: 'center', fontFamily: J, fontSize: 10, color: '#B4B2A9' }}>{workHidden} Work Mode chat{workHidden === 1 ? '' : 's'} hidden · <span onClick={() => setShowWork(true)} style={{ color: '#AD832F', fontWeight: 500, cursor: 'pointer' }}>Show all</span></div>}
+            {aiHidden > 0 && <div style={{ background: '#F9F6F0', borderRadius: 8, border: '0.5px solid #EDE7DC', margin: '10px 14px', padding: '9px 12px', textAlign: 'center', fontFamily: J, fontSize: 10, color: '#B4B2A9' }}>{aiHidden} AI Mode chat{aiHidden === 1 ? '' : 's'} hidden · <span onClick={() => setShowAI(true)} style={{ color: '#AD832F', fontWeight: 500, cursor: 'pointer' }}>Show all</span></div>}
           </div>
+
           {movingId && (
             <React.Fragment>
               <div onClick={() => setMovingId(null)} style={{ position: 'fixed', inset: 0, zIndex: 130, background: 'rgba(0,13,38,0.3)' }} />
@@ -5748,6 +5811,43 @@ Rules:
       );
     }
 
+    // Chat panel header (desktop split view) — open chat's title, meta, and actions.
+    function ChatPanelHeader({ conv, projectName, onPin, onShare, onRename, onArchive, onDelete }) {
+      const [menuOpen, setMenuOpen] = useState(false);
+      const w = conv.type === 'work';
+      const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch (e) { return ''; } };
+      const btn = (extra) => ({ width: 28, height: 28, borderRadius: 7, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '0.5px solid #E4DFD4', background: '#FCFBF8', ...(extra || {}) });
+      const mItem = (a) => <button key={a.t} onClick={() => { setMenuOpen(false); a.fn(); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 7, border: 'none', cursor: 'pointer', background: 'none', color: a.danger ? C.red : '#001A4A', fontFamily: C.fontSans, fontSize: 11 }}><i className={`ti ${a.i}`} style={{ fontSize: 14 }} />{a.t}</button>;
+      return (
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 18px', borderBottom: '0.5px solid #EDE7DC', background: '#fff', flexShrink: 0 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+              <div style={{ fontFamily: C.fontSans, fontSize: 14, fontWeight: 600, color: '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{conv.title}</div>
+              {conv.pinned && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: '#F3EBDA', color: '#AD832F', borderRadius: 5, padding: '2px 7px', fontFamily: C.fontSans, fontSize: 8, fontWeight: 700, textTransform: 'uppercase', flexShrink: 0 }}><i className="ti ti-pin-filled" style={{ fontSize: 9 }} />Pinned</span>}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 3, fontFamily: C.fontSans, fontSize: 10, color: '#B4B2A9', flexWrap: 'wrap' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><i className={`ti ${w ? 'ti-briefcase' : 'ti-sparkles'}`} style={{ fontSize: 11, color: w ? '#C9A45A' : '#8A9CC0' }} />{w ? 'Work Mode' : 'AI Mode'}</span>
+              {projectName && <React.Fragment><span>·</span><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><i className="ti ti-folder" style={{ fontSize: 11 }} />{projectName}</span></React.Fragment>}
+              {conv.updatedAt && <React.Fragment><span>·</span><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><i className="ti ti-calendar" style={{ fontSize: 11 }} />{fmtDate(conv.updatedAt)}</span></React.Fragment>}
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, position: 'relative' }}>
+            <button onClick={() => onPin(conv.id, !conv.pinned)} title={conv.pinned ? 'Unpin' : 'Pin'} style={btn(conv.pinned ? { border: '0.5px solid #E8D9BC', background: '#F3EBDA' } : null)}><i className={`ti ${conv.pinned ? 'ti-pin-filled' : 'ti-pin'}`} style={{ fontSize: 14, color: conv.pinned ? '#AD832F' : '#6B6B6B' }} /></button>
+            <button onClick={() => onShare && onShare(conv.id)} title="Share" style={btn()}><i className="ti ti-share" style={{ fontSize: 14, color: '#6B6B6B' }} /></button>
+            <button onClick={() => setMenuOpen(o => !o)} title="More" style={btn()}><i className="ti ti-dots" style={{ fontSize: 14, color: '#6B6B6B' }} /></button>
+            {menuOpen && (
+              <React.Fragment>
+                <div onClick={() => setMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 120 }} />
+                <div style={{ position: 'absolute', top: 34, right: 0, zIndex: 121, minWidth: 140, background: '#fff', border: '1px solid #EAE3D6', borderRadius: 10, boxShadow: '0 8px 28px rgba(0,0,0,0.18)', padding: 5 }}>
+                  {[{ t: 'Rename', i: 'ti-pencil', fn: () => onRename(conv.id) }, { t: 'Archive', i: 'ti-archive', fn: () => onArchive(conv.id, true) }, { t: 'Delete', i: 'ti-trash', fn: () => onDelete(conv.id), danger: true }].map(mItem)}
+                </div>
+              </React.Fragment>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     function App({ user, profile }) {
       const _boot = (typeof location !== 'undefined') ? (parsePath() || parseRoute(location.hash)) : { tab: 'chat', view: null };
       const [activeTab, setActiveTab] = useState(() => _boot.tab);
@@ -5833,6 +5933,12 @@ Rules:
       const [currentConvId, setCurrentConvId] = useState(null);
       const [workRequest, setWorkRequest] = useState(null); // 'kpis' | 'listing_presentation' | null
       const [drawerOpen, setDrawerOpen] = useState(false);
+      const [isWide, setIsWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
+      useEffect(() => { const f = () => setIsWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
+      function shareConversation(id) {
+        const c = conversations.find(x => x.id === id);
+        try { navigator.clipboard.writeText((c && c.title) || 'TMG AI chat'); } catch (e) {}
+      }
       const [historySide, setHistorySide] = useState(() => localStorage.getItem('tmg-history-side') || 'left');
 
       // Work Mode pills (admin-configurable)
@@ -6247,9 +6353,9 @@ Rules:
             return p ? <ProjectModal dark={dark} project={p} conversations={conversations} onSaveFields={saveProject} onDelete={deleteProject} onClose={() => setOpenProjectId(null)} onOpenChat={(cid) => { setOpenProjectId(null); selectConversation(cid); }} onNewChat={(pid) => { setOpenProjectId(null); setDrawerOpen(false); newChat(pid); setActiveTab('chat'); }} onMutated={(pid) => { refreshProjects(); if (pid === activeProjectId) ProjectDB.listFiles(pid).then(setActiveProjectFiles); }} /> : null;
           })()}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
-            {activeTab === 'chat' && (
-              <div style={{ position: 'relative', height: '100%' }}>
-                {/* Chat stays full width behind; history overlaps it at 50% */}
+            {activeTab === 'chat' && (() => {
+              const openConv = conversations.find(c => c.id === currentConvId) || null;
+              const aiChat = (
                 <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={shownPills} onPill={dispatchPill}
                   projectName={activeProject ? activeProject.name : null}
                   flowKey={kpiFlow ? kpiFlow.step : ''}
@@ -6267,21 +6373,26 @@ Rules:
                     />
                   ) : null}
                 />
-                {drawerOpen && (
-                  <div onClick={() => setDrawerOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 29, background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)' }} />
-                )}
-                {drawerOpen && (
-                  <div style={{
-                    position: 'absolute', top: 0, bottom: 0, [historySide === 'right' ? 'right' : 'left']: 0,
-                    width: '50%', zIndex: 30,
-                    boxShadow: historySide === 'right' ? '-10px 0 28px rgba(0,0,0,0.18)' : '10px 0 28px rgba(0,0,0,0.18)',
-                    [historySide === 'right' ? 'borderLeft' : 'borderRight']: `1px solid ${dark ? '#0D1E3A' : '#F0EBE3'}`,
-                  }}>
-                    <HistoryPanel dark={dark} conversations={conversations} projects={projects} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onPin={pinConversation} onArchive={archiveConversation} onRename={renameConversation} onDelete={removeConversation} onOpenMemory={() => setShowMemory(true)} onNewProject={async () => { try { const p = await createProject('New project'); setOpenProjectId(p.id); } catch (e) { alert('Could not create project: ' + (e.message || e)); } }} onOpenProject={(id) => setOpenProjectId(id)} onMoveToProject={(convId, pid) => moveConversationToProject(convId, pid)} />
+              );
+              const sidebar = (
+                <HistoryPanel dark={dark} conversations={conversations} projects={projects} currentConvId={currentConvId} wide={isWide} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onPin={pinConversation} onArchive={archiveConversation} onRename={renameConversation} onDelete={removeConversation} onShare={shareConversation} onOpenMemory={() => setShowMemory(true)} onNewProject={async () => { try { const p = await createProject('New project'); setOpenProjectId(p.id); } catch (e) { alert('Could not create project: ' + (e.message || e)); } }} onOpenProject={(id) => setOpenProjectId(id)} onMoveToProject={(convId, pid) => moveConversationToProject(convId, pid)} />
+              );
+              return isWide ? (
+                <div style={{ display: 'flex', height: '100%' }}>
+                  <div style={{ width: 240, flexShrink: 0, height: '100%', borderRight: '0.5px solid #EDE7DC' }}>{sidebar}</div>
+                  <div style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column' }}>
+                    {openConv && <ChatPanelHeader conv={openConv} projectName={activeProject ? activeProject.name : null} onPin={pinConversation} onShare={shareConversation} onRename={renameConversation} onArchive={archiveConversation} onDelete={removeConversation} />}
+                    <div style={{ flex: 1, minHeight: 0 }}>{aiChat}</div>
                   </div>
-                )}
-              </div>
-            )}
+                </div>
+              ) : (
+                <div style={{ position: 'relative', height: '100%' }}>
+                  {aiChat}
+                  {drawerOpen && <div onClick={() => setDrawerOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 29, background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)' }} />}
+                  {drawerOpen && <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, zIndex: 30, boxShadow: '0 0 28px rgba(0,0,0,0.18)' }}>{sidebar}</div>}
+                </div>
+              );
+            })()}
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'calls' && <CallsTab dark={dark} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}

@@ -710,14 +710,20 @@
         });
       } catch (e) {
         clearTimeout(timer);
-        return { ok:false, error: (e && e.name === 'AbortError') ? 'That took too long — try filtering to a smaller batch of tasks first.' : 'Network error reaching the AI.' };
+        if (e && e.name === 'AbortError') return { ok:false, error:'The AI took too long to respond — filter to a smaller batch of tasks and try again.' };
+        // A missing/misnamed function returns a 404 with no CORS header, which the
+        // browser surfaces as a "Failed to fetch" TypeError — indistinguishable from
+        // a real connection drop, so point at the most likely fix.
+        return { ok:false, error:'Couldn’t reach the AI service. Check the “tasks-ai” function is deployed in Supabase (exact name — no trailing space/dash), or check your internet connection.' };
       }
       clearTimeout(timer);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        if (/unknown|not set|could not|function/i.test(data?.error || '') || res.status === 404)
-          return { ok:false, error:'AI isn’t deployed yet — add the tasks-ai function in Supabase.' };
-        return { ok:false, error: data?.error || 'AI request failed.' };
+        if (res.status === 404 || /unknown action|not set|could not|no such function/i.test(data?.error || ''))
+          return { ok:false, error:'The “tasks-ai” function isn’t deployed yet (or is misnamed) — add it in Supabase.' };
+        if (res.status === 401 || res.status === 403) return { ok:false, error:'Your session expired — refresh the page and sign in again.' };
+        if (res.status >= 500) return { ok:false, error: data?.error || 'The AI service hit a server error — try again in a moment.' };
+        return { ok:false, error: data?.error || ('AI request failed (' + res.status + ').') };
       }
       return { ok:true, content: data.content || [], stop_reason: data.stop_reason };
     }

@@ -478,11 +478,20 @@
         input_schema:{ type:'object', properties:{ subject:{type:'string'}, task_type:{type:'string', description:'e.g. Call, Note, Pop-by'}, status:{type:'string'}, due_date:{type:'string', description:'YYYY-MM-DD'}, contact_id:{type:'string'}, contact_name:{type:'string'}, description:{type:'string'} }, required:['subject'] } },
       { name:'update_task', description:'Update fields on an existing task by its id. Only include the fields you want to change.',
         input_schema:{ type:'object', properties:{ id:{type:'string'}, subject:{type:'string'}, task_type:{type:'string'}, status:{type:'string'}, due_date:{type:'string'}, contact_id:{type:'string'}, contact_name:{type:'string'}, description:{type:'string'} }, required:['id'] } },
-      { name:'delete_task', description:'Delete a task by its id.',
+      { name:'delete_task', description:'Delete a single task by its id.',
         input_schema:{ type:'object', properties:{ id:{type:'string'} }, required:['id'] } },
+      { name:'search_tasks', description:'Search ALL Zoho tasks beyond the ones currently in view (e.g. everything overdue, a person’s upcoming tasks, a date range). Use whenever the answer might involve tasks not in the on-screen list. Returns matching tasks.',
+        input_schema:{ type:'object', properties:{ status:{type:'string'}, status_not:{type:'string', description:'e.g. Completed — to find open/incomplete tasks'}, due_before:{type:'string', description:'YYYY-MM-DD'}, due_after:{type:'string', description:'YYYY-MM-DD'}, due_on:{type:'string', description:'YYYY-MM-DD'}, type:{type:'string', description:'e.g. Call, Note, Pop-by'}, owner:{type:'string', description:'task owner full name'} } } },
+      { name:'get_contact', description:'Look up a contact’s details (email, phone, city, lead source) by id or name. Combine with search_tasks to answer history questions like “when did we last touch X”.',
+        input_schema:{ type:'object', properties:{ id:{type:'string'}, name:{type:'string'} } } },
+      { name:'bulk_update_tasks', description:'Apply the SAME change to many tasks at once with a single confirmation. Pass the task ids and the fields to change.',
+        input_schema:{ type:'object', properties:{ ids:{ type:'array', items:{type:'string'} }, status:{type:'string'}, due_date:{type:'string', description:'YYYY-MM-DD'}, task_type:{type:'string'} }, required:['ids'] } },
+      { name:'bulk_delete_tasks', description:'Delete many tasks at once with a single confirmation.',
+        input_schema:{ type:'object', properties:{ ids:{ type:'array', items:{type:'string'} } }, required:['ids'] } },
     ];
 
     function todayISO() { return new Date().toISOString().slice(0, 10); }
+    function nextMonday() { const d = new Date(); const add = ((8 - d.getDay()) % 7) || 7; d.setDate(d.getDate() + add); return d.toISOString().slice(0, 10); }
 
     function aiSystem(tasks, colMap, meta) {
       const rows = (tasks || []).map(t => ({
@@ -494,6 +503,9 @@
         "Today is " + todayISO() + ". Dates are formatted YYYY-MM-DD.",
         "You can read the tasks currently in view (JSON below) and answer questions about them directly — no tool needed for questions.",
         "To CHANGE data use the tools create_task / update_task / delete_task. Every tool call is shown to the user to confirm before it runs, so just propose the change.",
+        "The JSON below is ONLY the tasks currently on screen. For anything beyond it (all overdue, someone else's tasks, a date range, company-wide), call search_tasks — never guess from the on-screen list.",
+        "To change MANY tasks at once, use bulk_update_tasks or bulk_delete_tasks (one confirmation for the whole batch) instead of repeating single-task calls. Gather the ids first (from the JSON or search_tasks).",
+        "Use get_contact for a contact's details; combine it with search_tasks to answer history questions.",
         "When a task should be linked to a contact, call find_contact first to resolve the name to an id, then pass contact_id and contact_name.",
         "For update_task / delete_task, use the exact task id from the JSON. Valid statuses: " + (meta.statusOptions || []).join(", ") + ".",
         "Be concise. After a change is confirmed, briefly say what happened.",
@@ -526,6 +538,18 @@
         return { verb:'Update', title: label(inp.id), detail: changes.join(' · ') || 'no changes', danger:false };
       }
       if (tool.name === 'delete_task') return { verb:'Delete', title: label(inp.id), detail:'Removes it from Zoho', danger:true };
+      if (tool.name === 'bulk_update_tasks') {
+        const ids = inp.ids || [];
+        const changes = [];
+        if (inp.status != null) changes.push('status → ' + inp.status);
+        if (inp.due_date != null) changes.push('due → ' + fmtDate(inp.due_date));
+        if (inp.task_type != null) changes.push('type → ' + inp.task_type);
+        return { verb:'Update ' + ids.length + ' task' + (ids.length === 1 ? '' : 's'), title: changes.join(' · ') || 'no changes', detail:'', items: ids.map(label), danger:false };
+      }
+      if (tool.name === 'bulk_delete_tasks') {
+        const ids = inp.ids || [];
+        return { verb:'Delete ' + ids.length + ' task' + (ids.length === 1 ? '' : 's'), title:'Removes them from Zoho', detail:'', items: ids.map(label), danger:true };
+      }
       return { verb: tool.name, title:'', detail: JSON.stringify(inp), danger:true };
     }
 
@@ -534,12 +558,36 @@
       const last = messages[messages.length - 1];
       if (last && last.role === 'user' && Array.isArray(last.content) && last.content.some(b => b.type === 'tool_result')) {
         const tr = last.content.find(b => b.type === 'tool_result');
-        const declined = /declined|error/i.test(typeof tr.content === 'string' ? tr.content : '');
+        const raw = typeof tr.content === 'string' ? tr.content : '';
+        let parsed = null; try { parsed = JSON.parse(raw); } catch (e) {}
+        if (parsed && Array.isArray(parsed.tasks)) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`Found ${parsed.tasks.length} matching task${parsed.tasks.length === 1 ? '' : 's'} across Zoho. [dev preview]` }] };
+        if (parsed && parsed.contact) { const c = parsed.contact; return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${c.full_name} — ${c.email || 'no email'}${c.phone ? ', ' + c.phone : ''}${c.city ? ', ' + c.city : ''}. [dev preview]` }] }; }
+        const declined = /declined|error/i.test(raw);
         return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text: declined ? "Okay, I left it unchanged." : "Done — that's updated in your tasks. Anything else?" }] };
       }
       const text = (last && typeof last.content === 'string') ? last.content : '';
       const t = text.toLowerCase();
       const list = tasks || [];
+      const known = DEV_CONTACTS.find(c => t.includes(c.full_name.toLowerCase()));
+      if (known && /(who|detail|contact|email|phone|last touch|when did|info on)/.test(t)) {
+        return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:`Let me pull up ${known.full_name}.` }, { type:'tool_use', id:'dev-contact', name:'get_contact', input:{ name: known.full_name } }] };
+      }
+      if (/(reschedule|move|push|bump|delete|remove|complete|mark).*(all|every|these|notes|calls|pop)/.test(t)) {
+        let target = list;
+        if (/note/.test(t)) target = list.filter(x => (x[colMap.type] || '').toLowerCase() === 'note');
+        else if (/call/.test(t)) target = list.filter(x => (x[colMap.type] || '').toLowerCase() === 'call');
+        else if (/pop/.test(t)) target = list.filter(x => (x[colMap.type] || '').toLowerCase() === 'pop-by');
+        const ids = target.map(x => x.id);
+        if (ids.length) {
+          if (/delete|remove/.test(t)) return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:`I'll delete ${ids.length} task${ids.length === 1 ? '' : 's'} — confirm below.` }, { type:'tool_use', id:'dev-bulkdel', name:'bulk_delete_tasks', input:{ ids } }] };
+          if (/complete|done/.test(t)) return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:`I'll mark ${ids.length} task${ids.length === 1 ? '' : 's'} complete — confirm below.` }, { type:'tool_use', id:'dev-bulkupd', name:'bulk_update_tasks', input:{ ids, status:'Completed' } }] };
+          const due = nextMonday();
+          return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:`I'll move ${ids.length} task${ids.length === 1 ? '' : 's'} to ${fmtDate(due)} — confirm below.` }, { type:'tool_use', id:'dev-bulkupd', name:'bulk_update_tasks', input:{ ids, due_date: due } }] };
+        }
+      }
+      if (/overdue/.test(t) && /(all|everyone|across|every|company|beyond|whole)/.test(t)) {
+        return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:'Searching all of Zoho for overdue tasks…' }, { type:'tool_use', id:'dev-search', name:'search_tasks', input:{ status_not:'Completed', due_before: todayISO() } }] };
+      }
       if (/how many|count|number of/.test(t)) {
         let sub = list;
         if (/overdue/.test(t)) { const d = todayISO(); sub = list.filter(x => x.Status !== 'Completed' && x.Due_Date && x.Due_Date < d); }
@@ -575,7 +623,7 @@
       return { ok:true, content: data.content || [], stop_reason: data.stop_reason };
     }
 
-    function AIChat({ tasks, colMap, meta, onFind, onWrite, onClose }) {
+    function AIChat({ tasks, colMap, meta, onRead, onWrite, onClose }) {
       const [log, setLog] = useState([]);
       const [input, setInput] = useState('');
       const [busy, setBusy] = useState(false);
@@ -609,16 +657,17 @@
         const toolUses = content.filter(b => b.type === 'tool_use');
         if (res.stop_reason === 'tool_use' && toolUses.length) {
           claudeRef.current.push({ role:'assistant', content });
+          const READS = ['find_contact', 'search_tasks', 'get_contact'];
           const results = [];
           for (const tu of toolUses) {
-            if (tu.name === 'find_contact') {
-              const r = await onFind(tu.input);
+            if (READS.includes(tu.name)) {
+              const r = await onRead(tu.name, tu.input);
               results.push({ type:'tool_result', tool_use_id: tu.id, content: JSON.stringify(r) });
             } else {
               const ok = await confirmWrite(tu);
               if (!ok) { results.push({ type:'tool_result', tool_use_id: tu.id, content:'User declined this action.' }); continue; }
               const wr = await onWrite(tu.name, tu.input);
-              results.push({ type:'tool_result', tool_use_id: tu.id, content: wr && wr.ok ? 'Success.' : ('Error: ' + ((wr && wr.error) || 'failed')), is_error: !(wr && wr.ok) });
+              results.push({ type:'tool_result', tool_use_id: tu.id, content: wr && wr.ok ? (wr.summary || 'Success.') : ('Error: ' + ((wr && wr.error) || 'failed')), is_error: !(wr && wr.ok) });
             }
           }
           claudeRef.current.push({ role:'user', content: results });
@@ -681,6 +730,12 @@
                         </div>
                         <div style={{ fontSize:'0.9rem', fontWeight:600, color:C.navy }}>{s.title}</div>
                         {s.detail && <div style={{ fontSize:'0.78rem', color:C.textSecondary, marginTop:3 }}>{s.detail}</div>}
+                        {s.items && s.items.length > 0 && (
+                          <div style={{ marginTop:7, fontSize:'0.76rem', color:C.textSecondary, lineHeight:1.6 }}>
+                            {s.items.slice(0, 5).map((it, i) => <div key={i} style={{ whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>· {it}</div>)}
+                            {s.items.length > 5 && <div style={{ color:C.textMuted }}>+{s.items.length - 5} more</div>}
+                          </div>
+                        )}
                       </div>
                       <div style={{ padding:'9px 14px', display:'flex', alignItems:'center', gap:9, background:C.surfaceAlt }}>
                         {item.status === 'pending' ? (<>
@@ -809,6 +864,46 @@
         if (!ok) return { matches:[], error: data?.error };
         return { matches: (data.contacts || []).map(c => ({ id:c.id, name:c.full_name })) };
       }
+      function compactTask(x) {
+        return { id:x.id, subject:x.Subject, type:x[colMap.type] || null, status:x.Status || null, due_date:x.Due_Date || null, contact:x.Who_Id?.name || null, owner:x.Owner?.name || null, closed_time:x.Closed_Time || null };
+      }
+      async function execSearchTasks(input) {
+        if (isDev()) {
+          await new Promise(r => setTimeout(r, 320));
+          let res = (tasks || []).slice();
+          if (input.status) res = res.filter(x => x.Status === input.status);
+          if (input.status_not) res = res.filter(x => x.Status !== input.status_not);
+          if (input.due_before) res = res.filter(x => x.Due_Date && x.Due_Date < input.due_before);
+          if (input.due_after) res = res.filter(x => x.Due_Date && x.Due_Date > input.due_after);
+          if (input.due_on) res = res.filter(x => x.Due_Date === input.due_on);
+          if (input.type) res = res.filter(x => (x[colMap.type] || '').toLowerCase() === String(input.type).toLowerCase());
+          return { tasks: res.map(compactTask) };
+        }
+        const args = { action:'search_tasks', type_field: colMap.type };
+        ['status', 'status_not', 'due_before', 'due_after', 'due_on', 'type', 'owner'].forEach(k => { if (input[k] != null) args[k] = input[k]; });
+        const { ok, data } = await callZoho(args);
+        if (!ok) return { tasks:[], error: data?.error };
+        return { tasks: (data.tasks || []).map(compactTask) };
+      }
+      async function execGetContact(input) {
+        if (isDev()) {
+          await new Promise(r => setTimeout(r, 250));
+          const q = (input.name || '').toLowerCase();
+          const c = DEV_CONTACTS.find(x => (input.id && x.id === input.id) || (q && x.full_name.toLowerCase().includes(q)));
+          if (!c) return { contact:null };
+          const first = (c.full_name.split(' ')[0] || 'x').toLowerCase();
+          return { contact:{ id:c.id, full_name:c.full_name, email:first + '@example.com', phone:'(555) 010-0000', city:'Austin', state:'TX', lead_source:'Referral' } };
+        }
+        const { ok, data } = await callZoho({ action:'get_contact', id: input.id, name: input.name });
+        if (!ok) return { contact:null, error: data?.error };
+        return { contact: data.contact || null };
+      }
+      async function onRead(name, input) {
+        if (name === 'find_contact') return await execFindContact(input);
+        if (name === 'search_tasks') return await execSearchTasks(input);
+        if (name === 'get_contact') return await execGetContact(input);
+        return { error:'unknown read tool' };
+      }
       async function applyAiWrite(name, input) {
         if (name === 'create_task') {
           const record = { Subject:(input.subject || '').trim(), Status: input.status || 'Not Started', Description: input.description || null };
@@ -838,6 +933,24 @@
           return await writeTask({ mode:'edit', id, record, patch });
         }
         if (name === 'delete_task') return await removeTask(input.id);
+        if (name === 'bulk_update_tasks') {
+          const ids = input.ids || [];
+          if (!ids.length) return { ok:false, error:'No tasks specified.' };
+          const changes = {};
+          if (input.status != null) changes.status = input.status;
+          if (input.due_date != null) changes.due_date = input.due_date;
+          if (input.task_type != null) changes.task_type = input.task_type;
+          let okN = 0, errN = 0;
+          for (const id of ids) { const r = await applyAiWrite('update_task', { id, ...changes }); if (r && r.ok) okN++; else errN++; }
+          return { ok: errN === 0, count: okN, summary: `Updated ${okN} task${okN === 1 ? '' : 's'}` + (errN ? `, ${errN} failed` : ''), error: errN ? `${errN} failed` : undefined };
+        }
+        if (name === 'bulk_delete_tasks') {
+          const ids = input.ids || [];
+          if (!ids.length) return { ok:false, error:'No tasks specified.' };
+          let okN = 0, errN = 0;
+          for (const id of ids) { const r = await removeTask(id); if (r && r.ok) okN++; else errN++; }
+          return { ok: errN === 0, count: okN, summary: `Deleted ${okN} task${okN === 1 ? '' : 's'}` + (errN ? `, ${errN} failed` : ''), error: errN ? `${errN} failed` : undefined };
+        }
         return { ok:false, error:'Unknown action.' };
       }
 
@@ -1000,7 +1113,7 @@
             )}
           </main>
 
-          {drawer?.mode === 'ai' && <AIChat tasks={tasks} colMap={colMap} meta={meta} onFind={execFindContact} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
+          {drawer?.mode === 'ai' && <AIChat tasks={tasks} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
           {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
             <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}
               onClose={() => setDrawer(null)} onWrite={writeTask} onDelete={removeTask} />

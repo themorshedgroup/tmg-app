@@ -845,7 +845,7 @@
         // Pull the tasks.
         const reqFields = ['Owner','Subject','Status','Due_Date','Closed_Time','Description','Who_Id', type, trigger]
           .filter((v, i, a) => v && a.indexOf(v) === i);
-        const res = await callZoho({ action:'list_tasks', fields:reqFields, per_page:200, sort_by:'Due_Date', sort_order:'desc' });
+        const res = await callZoho({ action:'list_tasks', fields:reqFields, per_page:200 });
         if (!res.ok && /unknown action/i.test(res.data?.error || '')) { setNeedsDeploy(true); setTasks([]); return; }
         if (!res.ok) { setErr(res.data?.error || 'Could not load tasks.'); setTasks([]); return; }
         setTasks(res.data.tasks || []);

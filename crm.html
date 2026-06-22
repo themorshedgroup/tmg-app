@@ -210,8 +210,8 @@
     //      without a live Zoho connection). Live site uses real Zoho.
     const DEV_MODULES = [
       { api_name: 'Contacts', plural_label: 'Contacts', singular_label: 'Contact', generated_type: 'default', creatable: true, editable: true, deletable: true, viewable: true },
-      { api_name: 'Leads', plural_label: 'Leads', singular_label: 'Lead', generated_type: 'default', creatable: true, editable: true, deletable: true, viewable: true },
-      { api_name: 'Deals', plural_label: 'Deals', singular_label: 'Deal', generated_type: 'default', creatable: true, editable: true, deletable: true, viewable: true },
+      { api_name: 'Leads', plural_label: 'Leads', singular_label: 'Lead', generated_type: 'default', creatable: true, editable: false, deletable: false, viewable: true },
+      { api_name: 'Deals', plural_label: 'Deals', singular_label: 'Deal', generated_type: 'default', creatable: true, editable: true, deletable: false, viewable: true },
       { api_name: 'Accounts', plural_label: 'Accounts', singular_label: 'Account', generated_type: 'default', creatable: true, editable: true, deletable: true, viewable: true },
       { api_name: 'Properties', plural_label: 'Properties', singular_label: 'Property', generated_type: 'custom', creatable: true, editable: true, deletable: true, viewable: true },
     ];
@@ -248,6 +248,53 @@
       };
       const col = map[type] || C.textMuted;
       return <span style={{ fontFamily: C.mono, fontSize: '0.66rem', fontWeight: 600, color: col, background: col + '14', border: '1px solid ' + col + '33', padding: '2px 7px', borderRadius: 6, whiteSpace: 'nowrap' }}>{type}</span>;
+    }
+
+    // ─── Module permissions ──────────────────────────────────────────
+    //  Zoho's settings/modules metadata returns creatable/editable/deletable/
+    //  viewable per module. These reflect the connected Zoho account's PROFILE
+    //  permission — NOT the OAuth scope (a separate gate). Green = allowed.
+
+    // Compact pencil + trash for the modules rail (at-a-glance edit/delete).
+    function RailPerm({ m }) {
+      return (
+        <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
+          <i className="ti ti-pencil" title={m.editable ? 'Editable' : 'Not editable'} style={{ fontSize: 12.5, color: m.editable ? C.green : C.border }} />
+          <i className="ti ti-trash" title={m.deletable ? 'Deletable' : 'Not deletable'} style={{ fontSize: 12.5, color: m.deletable ? C.green : C.border }} />
+        </span>
+      );
+    }
+
+    // Full labeled row for the active module header.
+    function PermPills({ m }) {
+      const caps = [
+        { on: m.viewable,  icon: 'ti-eye',    label: 'View' },
+        { on: m.creatable, icon: 'ti-plus',   label: 'Create' },
+        { on: m.editable,  icon: 'ti-pencil', label: 'Edit' },
+        { on: m.deletable, icon: 'ti-trash',  label: 'Delete' },
+      ];
+      return (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {caps.map(c => (
+              <span key={c.label} title={(c.on ? 'Allowed' : 'Not allowed') + ' — ' + c.label} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '0.72rem', fontWeight: 600,
+                padding: '4px 11px', borderRadius: 20,
+                color: c.on ? C.green : C.textMuted,
+                background: c.on ? C.green + '12' : '#F1EFEA',
+                border: '1px solid ' + (c.on ? C.green + '33' : C.border),
+                opacity: c.on ? 1 : 0.75,
+              }}>
+                <i className={'ti ' + (c.on ? c.icon : 'ti-lock')} style={{ fontSize: 13.5 }} />
+                {c.label}
+              </span>
+            ))}
+          </div>
+          <div style={{ fontSize: '0.68rem', color: C.textMuted, marginTop: 7, lineHeight: 1.4 }}>
+            Reflects the connected Zoho account's profile permissions (not the API scope).
+          </div>
+        </div>
+      );
     }
 
     // ─── Field row ───────────────────────────────────────────────────
@@ -373,8 +420,11 @@
                 const on = m.api_name === active;
                 return (
                   <button key={m.api_name} onClick={() => setActive(m.api_name)} style={{ width: '100%', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '10px 18px', background: on ? C.surfaceHover : 'transparent', border: 'none', borderLeft: '3px solid ' + (on ? C.gold : 'transparent'), cursor: 'pointer', fontFamily: C.fontSans }}>
-                    <span style={{ fontSize: '0.86rem', fontWeight: on ? 600 : 400, color: on ? C.navy : C.textSecondary }}>{m.plural_label || m.api_name}</span>
-                    {m.generated_type === 'custom' && <span style={{ fontSize: '0.56rem', fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: C.gold }}>Custom</span>}
+                    <span style={{ fontSize: '0.86rem', fontWeight: on ? 600 : 400, color: on ? C.navy : C.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.plural_label || m.api_name}</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                      {m.generated_type === 'custom' && <span style={{ fontSize: '0.56rem', fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: C.gold }}>Custom</span>}
+                      <RailPerm m={m} />
+                    </span>
                   </button>
                 );
               })}
@@ -390,6 +440,7 @@
                       <div>
                         <h1 style={{ fontFamily: C.fontDisplay, fontSize: '1.7rem', fontWeight: 600, color: C.navy, lineHeight: 1.1 }}>{activeMod?.plural_label || active}</h1>
                         <div style={{ fontFamily: C.mono, fontSize: '0.72rem', color: C.textMuted, marginTop: 3 }}>{active}{activeFields ? ` · ${activeFields.length} fields` : ''}</div>
+                        {activeMod && <PermPills m={activeMod} />}
                       </div>
                       <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter fields…" style={{ fontFamily: C.fontSans, fontSize: '0.82rem', padding: '8px 12px', border: '1px solid ' + C.border, borderRadius: 9, background: C.surface, color: C.textPrimary, width: 200, outline: 'none' }} />
                     </div>

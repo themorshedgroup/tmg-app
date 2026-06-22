@@ -297,6 +297,93 @@
       );
     }
 
+    // ─── Live OAuth-scope probe ──────────────────────────────────────
+    //  The pills above show the Zoho PROFILE gate. This tests the OTHER gate:
+    //  whether the connection's OAuth token scope actually permits update/
+    //  delete. It calls the zoho-crm `probe_scopes` action, which sends a
+    //  harmless update + delete for a fake record id ("1") — no data touched.
+    function ScopeFlag({ label, v }) {
+      let icon = 'ti-help-circle', color = C.amber, text = 'Couldn’t determine';
+      if (v && v.determinate !== false && v.allowed !== null) {
+        if (v.allowed) { icon = 'ti-circle-check'; color = C.green; text = 'Allowed'; }
+        else { icon = 'ti-ban'; color = C.red; text = 'Blocked — scope missing'; }
+      }
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem' }}>
+          <span style={{ width: 54, color: C.textSecondary, fontWeight: 600 }}>{label}</span>
+          <i className={'ti ' + icon} style={{ fontSize: 16, color }} />
+          <span style={{ color, fontWeight: 600 }}>{text}</span>
+        </div>
+      );
+    }
+
+    function ScopeProbe({ module }) {
+      const [phase, setPhase] = useState('idle');  // idle | loading | done | needs_deploy | error
+      const [res, setRes] = useState(null);
+      const [msg, setMsg] = useState('');
+
+      async function run() {
+        setPhase('loading'); setMsg('');
+        if (isDev()) {
+          await new Promise(r => setTimeout(r, 700));
+          // Dev demo: token can edit but not delete (shows both outcomes).
+          setRes({ update: { allowed: true, determinate: true }, delete: { allowed: false, determinate: true } });
+          setPhase('done'); return;
+        }
+        const { ok, data } = await callZoho({ action: 'probe_scopes', module });
+        if (!ok && /unknown action/i.test(data?.error || '')) { setPhase('needs_deploy'); return; }
+        if (!ok) { setMsg(data?.error || 'Probe failed.'); setPhase('error'); return; }
+        setRes(data); setPhase('done');
+      }
+
+      const btn = {
+        display: 'inline-flex', alignItems: 'center', gap: 7, fontFamily: C.fontSans,
+        fontSize: '0.76rem', fontWeight: 600, color: C.navy, background: C.surface,
+        border: '1px solid ' + C.border, borderRadius: 9, padding: '7px 13px', cursor: 'pointer',
+      };
+
+      return (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px dashed ' + C.border }}>
+          {(phase === 'idle' || phase === 'error' || phase === 'needs_deploy') && (
+            <button onClick={run} style={btn}>
+              <i className="ti ti-shield-bolt" style={{ fontSize: 15, color: C.gold }} />
+              Test live write access (OAuth scope)
+            </button>
+          )}
+          {phase === 'loading' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: '0.8rem', color: C.textSecondary }}>
+              <Spinner size={16} /> Testing… sending a harmless request (fake record id, nothing changes).
+            </div>
+          )}
+          {phase === 'needs_deploy' && (
+            <div style={{ marginTop: 10, fontSize: '0.74rem', color: C.amber, lineHeight: 1.5 }}>
+              The deployed <b>zoho-crm</b> function doesn’t have this check yet. Re-deploy the updated function in Supabase to enable it.
+            </div>
+          )}
+          {phase === 'error' && (
+            <div style={{ marginTop: 10, fontSize: '0.74rem', color: C.red, lineHeight: 1.5 }}>{msg}</div>
+          )}
+          {phase === 'done' && res && (
+            <div>
+              <div style={{ fontSize: '0.64rem', fontWeight: 600, letterSpacing: '.12em', textTransform: 'uppercase', color: C.textMuted, marginBottom: 8 }}>
+                OAuth token scope · live test
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                <ScopeFlag label="Edit" v={res.update} />
+                <ScopeFlag label="Delete" v={res.delete} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+                <span style={{ fontSize: '0.68rem', color: C.textMuted, lineHeight: 1.4 }}>
+                  Sent a no-op request with a fake record id — no records were created, changed, or deleted.
+                </span>
+                <button onClick={run} style={{ ...btn, padding: '4px 9px', fontSize: '0.7rem', flexShrink: 0 }}>Re-test</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ─── Field row ───────────────────────────────────────────────────
     function FieldRow({ f }) {
       const [copied, setCopied] = useState(false);
@@ -441,6 +528,7 @@
                         <h1 style={{ fontFamily: C.fontDisplay, fontSize: '1.7rem', fontWeight: 600, color: C.navy, lineHeight: 1.1 }}>{activeMod?.plural_label || active}</h1>
                         <div style={{ fontFamily: C.mono, fontSize: '0.72rem', color: C.textMuted, marginTop: 3 }}>{active}{activeFields ? ` · ${activeFields.length} fields` : ''}</div>
                         {activeMod && <PermPills m={activeMod} />}
+                        {activeMod && <ScopeProbe module={active} key={active} />}
                       </div>
                       <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter fields…" style={{ fontFamily: C.fontSans, fontSize: '0.82rem', padding: '8px 12px', border: '1px solid ' + C.border, borderRadius: 9, background: C.surface, color: C.textPrimary, width: 200, outline: 'none' }} />
                     </div>

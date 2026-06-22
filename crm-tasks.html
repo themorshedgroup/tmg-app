@@ -199,6 +199,7 @@
       { id:'11', Owner:O, Subject:'Note : Jeremy Bell', Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-15', Who_Id:{ name:'Jeremy Bell' }, Closed_Time:'2026-06-22T07:08:00-05:00', Trigger:null },
       { id:'12', Owner:O, Subject:'Note : Neil Patel', Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-15', Who_Id:{ name:'Neil Patel' }, Closed_Time:'2026-06-22T07:08:00-05:00', Trigger:null },
       { id:'13', Owner:O, Subject:'A Touch Call: Molly Kinney', Task_Type:'Call', Description:null, Status:'Completed', Due_Date:'2026-06-01', Who_Id:{ name:'Molly Kinney' }, Closed_Time:'2026-06-01T09:00:00-05:00', Trigger:null },
+      { id:'14', Owner:O, Subject:'A Touch Call: Neil Patel', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-20', Who_Id:{ name:'Neil Patel' }, Closed_Time:null, Trigger:null },
     ];
 
     // ─── Formatting helpers ───────────────────────────────────────────
@@ -521,6 +522,8 @@
         input_schema:{ type:'object', properties:{} } },
       { name:'check_couple_cadence', description:'For contacts in view who have a Spouse (lookup), check BOTH conditions for the couple: (1) each partner’s Not-Started call is on the touch cadence (contact’s last completed call + interval by contact owner & class — Tarek: A45/B90/C120, else A30/B60/C90), AND (2) both partners’ calls share the SAME due date. Returns each couple with both partners’ call due/expected dates, on-cadence flags, and aligned flag. Use when the user wants to verify spouses’ calls are correct AND aligned. After reporting, offer to set both partners’ calls to one due_date (ask which) via bulk_update_tasks with the returned task ids.',
         input_schema:{ type:'object', properties:{} } },
+      { name:'find_duplicate_calls', description:'Find contacts in view who have MORE THAN ONE Not-Started call task (duplicates). Runs over ALL tasks in view. Returns each such contact with the call to keep (earliest-due) and the extra task ids to remove. Use when asked to clean up / dedupe duplicate calls so each contact has only one. After reporting, offer to delete the extras via bulk_delete_tasks with the returned ids.',
+        input_schema:{ type:'object', properties:{} } },
     ];
 
     function todayISO() { return new Date().toISOString().slice(0, 10); }
@@ -533,6 +536,7 @@
     function dateOnly(s) { const m = /^(\d{4}-\d{2}-\d{2})/.exec(s || ''); return m ? m[1] : null; }
     function addDaysISO(iso, days) { const base = dateOnly(iso); if (!base) return null; const p = base.split('-').map(Number); const d = new Date(Date.UTC(p[0], p[1] - 1, p[2])); if (isNaN(d)) return null; d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); }
 
+    const AI_CONTEXT_CAP = 200; // max tasks fed into the AI prompt; tools cover the rest
     function aiSystem(tasks, colMap, meta) {
       const rows = (tasks || []).map(t => ({
         id: t.id, subject: t.Subject, type: t[colMap.type] || null, status: t.Status || null,
@@ -551,10 +555,12 @@
         "To check couples together — that each spouse's call is on cadence AND both share the same due date — call check_couple_cadence. After reporting, offer to set both partners' calls to one due_date (ask which) via bulk_update_tasks.",
         "When a task should be linked to a contact, call find_contact first to resolve the name to an id, then pass contact_id and contact_name.",
         "For update_task / delete_task, use the exact task id from the JSON. Valid statuses: " + (meta.statusOptions || []).join(", ") + ".",
+        "To clean up duplicate calls (a contact with more than one Not-Started call), call find_duplicate_calls — it returns each such contact with the call to keep and the extras to remove; then offer to delete the extras via bulk_delete_tasks.",
         "Be concise — after a change is applied the app shows the exact records changed below your message, so a short confirmation is enough.",
+        rows.length > AI_CONTEXT_CAP ? `IMPORTANT: ${rows.length} tasks are in view, but only the first ${AI_CONTEXT_CAP} are listed below. Do NOT infer totals, counts, duplicates, or audits from this partial list — use the tools (find_duplicate_calls, check_call_due_dates, check_couple_cadence, search_tasks), which run over ALL tasks in view, and report from their results.` : "",
         "",
-        "TASKS IN VIEW (JSON):",
-        JSON.stringify(rows),
+        "TASKS IN VIEW (JSON" + (rows.length > AI_CONTEXT_CAP ? `, first ${AI_CONTEXT_CAP} of ${rows.length}` : "") + "):",
+        JSON.stringify(rows.slice(0, AI_CONTEXT_CAP)),
       ].join("\n");
     }
 
@@ -605,6 +611,11 @@
         let parsed = null; try { parsed = JSON.parse(raw); } catch (e) {}
         if (parsed && Array.isArray(parsed.tasks)) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`Found ${parsed.tasks.length} matching task${parsed.tasks.length === 1 ? '' : 's'} across Zoho. [dev preview]` }] };
         if (parsed && parsed.contact) { const c = parsed.contact; return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${c.full_name} — ${c.email || 'no email'}${c.phone ? ', ' + c.phone : ''}${c.city ? ', ' + c.city : ''}. [dev preview]` }] }; }
+        if (parsed && Array.isArray(parsed.duplicates)) {
+          if (!parsed.duplicates.length) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:'No contacts have duplicate Not-Started calls in view. [dev preview]' }] };
+          const lines = parsed.duplicates.map(d => `• ${d.contact}: keep ${fmtDate(d.keep.due) || '—'}, delete ${d.remove.map(r => fmtDate(r.due) || '—').join(', ')}`).join('\n');
+          return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${parsed.duplicates.length} contact(s) have duplicate calls:\n${lines}\n\nWant me to delete the extras (keeping the earliest-due)? [dev preview]` }] };
+        }
         if (parsed && Array.isArray(parsed.couples) && ('flagged' in parsed)) {
           if (!parsed.couples.length) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text: (parsed.note || 'No couples with calls to check in view.') + ' [dev preview]' }] };
           const bad = parsed.couples.filter(c => !c.ok);
@@ -634,6 +645,9 @@
       const text = (last && typeof last.content === 'string') ? last.content : '';
       const t = text.toLowerCase();
       const list = tasks || [];
+      if (/duplicate|dedup|more than one call|extra call|only one call/.test(t)) {
+        return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:'Scanning for duplicate calls…' }, { type:'tool_use', id:'dev-dups', name:'find_duplicate_calls', input:{} }] };
+      }
       if ((/(spouse|couple|married)/.test(t) && /(cadence|correct|on track|on cadence|right|same)/.test(t)) || /(cadence|correct).*(spouse|couple)/.test(t)) {
         return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:'Checking couples for cadence + alignment…' }, { type:'tool_use', id:'dev-couplecad', name:'check_couple_cadence', input:{} }] };
       }
@@ -684,11 +698,21 @@
 
     async function callTasksAI({ system, messages, tasks, colMap }) {
       if (isDev()) { await new Promise(r => setTimeout(r, 450)); return devTasksAI(messages, tasks, colMap); }
-      const res = await fetch(TASKS_AI_ENDPOINT, {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + authToken(), 'apikey':SUPABASE_ANON },
-        body: JSON.stringify({ system, messages, tools: AI_TOOLS, max_tokens: 2048 }),
-      });
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 75000);
+      let res;
+      try {
+        res = await fetch(TASKS_AI_ENDPOINT, {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + authToken(), 'apikey':SUPABASE_ANON },
+          body: JSON.stringify({ system, messages, tools: AI_TOOLS, max_tokens: 2048 }),
+          signal: ctrl.signal,
+        });
+      } catch (e) {
+        clearTimeout(timer);
+        return { ok:false, error: (e && e.name === 'AbortError') ? 'That took too long — try filtering to a smaller batch of tasks first.' : 'Network error reaching the AI.' };
+      }
+      clearTimeout(timer);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         if (/unknown|not set|could not|function/i.test(data?.error || '') || res.status === 404)
@@ -732,7 +756,7 @@
         const toolUses = content.filter(b => b.type === 'tool_use');
         if (res.stop_reason === 'tool_use' && toolUses.length) {
           claudeRef.current.push({ role:'assistant', content });
-          const READS = ['find_contact', 'search_tasks', 'get_contact', 'audit_spouse_dates', 'check_call_due_dates', 'check_couple_cadence'];
+          const READS = ['find_contact', 'search_tasks', 'get_contact', 'audit_spouse_dates', 'check_call_due_dates', 'check_couple_cadence', 'find_duplicate_calls'];
           const results = [];
           for (const tu of toolUses) {
             if (READS.includes(tu.name)) {
@@ -771,7 +795,7 @@
               <div style={{ display:'flex', alignItems:'center', gap:9 }}>
                 <i className="ti ti-sparkles" style={{ fontSize:18, color:C.gold }} />
                 <span style={{ fontFamily:C.fontDisplay, fontSize:'1.45rem', fontWeight:600, color:C.navy }}>Tasks AI</span>
-                <span style={{ fontSize:'0.66rem', color:C.textMuted }}>· reads {tasks ? tasks.length : 0} in view</span>
+                <span style={{ fontSize:'0.66rem', color:C.textMuted }}>· {tasks ? tasks.length : 0} in view</span>
               </div>
               <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
             </div>
@@ -1007,7 +1031,29 @@
         if (name === 'audit_spouse_dates') return await execAuditSpouses();
         if (name === 'check_call_due_dates') return await execCheckCallDates();
         if (name === 'check_couple_cadence') return await execCoupleCadence();
+        if (name === 'find_duplicate_calls') return execFindDuplicateCalls();
         return { error:'unknown read tool' };
+      }
+      // Finds contacts in view with more than one Not-Started call task.
+      // Pure client-side over the whole view — scales to thousands.
+      function execFindDuplicateCalls() {
+        const rows = view || [];
+        const byContact = {};
+        for (const t of rows) {
+          const isCall = ((t[colMap.type] || '') + '').toLowerCase() === 'call' || /touch call/i.test(t.Subject || '');
+          if ((t.Status || '') !== 'Not Started' || !isCall) continue;
+          const k = t.Who_Id?.id || t.Who_Id?.name;
+          if (!k) continue;
+          (byContact[k] = byContact[k] || { name: t.Who_Id?.name || String(k), tasks: [] }).tasks.push({ id: t.id, subject: t.Subject, due: t.Due_Date || null });
+        }
+        const duplicates = [];
+        for (const k of Object.keys(byContact)) {
+          const c = byContact[k];
+          if (c.tasks.length < 2) continue;
+          const sorted = c.tasks.slice().sort((a, b) => String(a.due || '9999-99-99').localeCompare(String(b.due || '9999-99-99')));
+          duplicates.push({ contact: c.name, keep: sorted[0], remove: sorted.slice(1), remove_ids: sorted.slice(1).map(x => x.id) });
+        }
+        return { duplicates, count: duplicates.length };
       }
       // Combined: for contacts in view with a Spouse, checks each partner's
       // call is on cadence AND the couple shares the same due date.

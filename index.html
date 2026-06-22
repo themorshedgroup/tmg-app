@@ -5381,6 +5381,9 @@ Rules:
       const [showAI, setShowAI] = useState(true);
       const [sortBy, setSortBy] = useState('recent');
       const [projectFilter, setProjectFilter] = useState(null);
+      // Clear the filter if its project no longer exists (e.g. it was deleted) — otherwise
+      // the list filters to a phantom project with no way back to the regular chats.
+      useEffect(() => { if (projectFilter && !(projects || []).some(p => p.id === projectFilter)) setProjectFilter(null); }, [projects, projectFilter]);
       const J = "'Jost', sans-serif";
       const titleCol = '#001A4A', previewCol = '#B4B2A9', pinCol = '#AD832F', panelBg = '#fff', menuBord = '#EAE3D6';
       const iconBtn = wide ? 26 : 28;
@@ -5501,7 +5504,7 @@ Rules:
             {groups.map(([label, arr]) => <React.Fragment key={label}>{sectionLabel(label)}{arr.map(chatRow)}</React.Fragment>)}
 
             {pool.length === 0 && (
-              <div style={{ textAlign: 'center', color: '#B4B2A9', fontSize: 11, padding: '24px 16px', fontFamily: J }}>{projectFilter ? 'No chats in this project yet.' : 'No conversations yet.'}</div>
+              <div style={{ textAlign: 'center', color: '#B4B2A9', fontSize: 11, padding: '24px 16px', fontFamily: J }}>{projectFilter ? <React.Fragment>No chats in this project yet.<br /><span onClick={() => setProjectFilter(null)} style={{ color: '#AD832F', fontWeight: 500, cursor: 'pointer' }}>Show all chats</span></React.Fragment> : 'No conversations yet.'}</div>
             )}
 
             {workHidden > 0 && <div style={{ background: '#F9F6F0', borderRadius: 8, border: '0.5px solid #EDE7DC', margin: '10px 14px', padding: '9px 12px', textAlign: 'center', fontFamily: J, fontSize: 10, color: '#B4B2A9' }}>{workHidden} Work Mode chat{workHidden === 1 ? '' : 's'} hidden · <span onClick={() => setShowWork(true)} style={{ color: '#AD832F', fontWeight: 500, cursor: 'pointer' }}>Show all</span></div>}
@@ -5848,6 +5851,41 @@ Rules:
       );
     }
 
+    // Lightweight "new project" popout — name (+ optional instructions). Memory/files
+    // are added later by opening the project from the sidebar.
+    function NewProjectModal({ onCreate, onClose }) {
+      const [name, setName] = useState('');
+      const [instructions, setInstructions] = useState('');
+      const [busy, setBusy] = useState(false);
+      const wide = typeof window !== 'undefined' && window.innerWidth >= 769;
+      const bord = '#E4DFD4', txt = '#001A4A', sub = '#6B6B6B';
+      const lbl = { fontFamily: C.fontSans, fontSize: '0.62rem', color: sub, letterSpacing: '0.07em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 5 };
+      const create = async () => {
+        if (!name.trim() || busy) return; setBusy(true);
+        try { await onCreate(name.trim(), instructions.trim()); onClose(); }
+        catch (e) { alert('Could not create project: ' + (e.message || e)); setBusy(false); }
+      };
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 142, background: 'rgba(0,26,74,0.42)', display: 'flex', alignItems: wide ? 'center' : 'flex-end', justifyContent: 'center', padding: wide ? 16 : 0 }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: wide ? 'min(440px, 95vw)' : '100%', background: '#fff', borderRadius: wide ? 16 : '16px 16px 0 0', padding: '20px 18px', boxShadow: '0 12px 40px rgba(0,26,74,0.22)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+              <i className="ti ti-folder-plus" style={{ fontSize: 18, color: '#AD832F' }} />
+              <div style={{ fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.35rem', color: txt }}>New project</div>
+            </div>
+            <div style={lbl}>Name</div>
+            <input autoFocus value={name} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') create(); }} placeholder="e.g. 123 Main St Listing" style={{ width: '100%', border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', fontFamily: C.fontSans, fontSize: 14, fontWeight: 600, color: txt, background: '#FCFBF8', outline: 'none', boxSizing: 'border-box', marginBottom: 14 }} />
+            <div style={lbl}>Instructions <span style={{ textTransform: 'none', fontWeight: 400 }}>(optional)</span></div>
+            <textarea value={instructions} onChange={e => setInstructions(e.target.value)} placeholder="How should the assistant behave in this project?" style={{ width: '100%', minHeight: 70, resize: 'vertical', border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', fontFamily: C.fontSans, fontSize: 12.5, lineHeight: 1.6, color: txt, background: '#FCFBF8', outline: 'none', boxSizing: 'border-box' }} />
+            <div style={{ fontFamily: C.fontSans, fontSize: 10, color: sub, marginTop: 8 }}>Add memory and files after creating — open the project from the sidebar.</div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+              <button onClick={onClose} style={{ fontFamily: C.fontSans, fontSize: 12, fontWeight: 500, color: sub, background: '#FCFBF8', border: `1px solid ${bord}`, borderRadius: 9, padding: '9px 18px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={create} disabled={!name.trim() || busy} style={{ fontFamily: C.fontSans, fontSize: 12, fontWeight: 600, color: '#fff', background: '#001A4A', border: 'none', borderRadius: 9, padding: '9px 18px', cursor: 'pointer', opacity: (!name.trim() || busy) ? 0.5 : 1 }}>{busy ? 'Creating…' : 'Create project'}</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     function App({ user, profile }) {
       const _boot = (typeof location !== 'undefined') ? (parsePath() || parseRoute(location.hash)) : { tab: 'chat', view: null };
       const [activeTab, setActiveTab] = useState(() => _boot.tab);
@@ -5930,6 +5968,7 @@ Rules:
       const [activeProjectFiles, setActiveProjectFiles] = useState([]);
       const [showMemory, setShowMemory] = useState(false);
       const [openProjectId, setOpenProjectId] = useState(null); // project detail overlay
+      const [showNewProject, setShowNewProject] = useState(false); // new-project popout
       const [currentConvId, setCurrentConvId] = useState(null);
       const [workRequest, setWorkRequest] = useState(null); // 'kpis' | 'listing_presentation' | null
       const [drawerOpen, setDrawerOpen] = useState(false);
@@ -6352,6 +6391,7 @@ Rules:
             const p = projects.find(x => x.id === openProjectId);
             return p ? <ProjectModal dark={dark} project={p} conversations={conversations} onSaveFields={saveProject} onDelete={deleteProject} onClose={() => setOpenProjectId(null)} onOpenChat={(cid) => { setOpenProjectId(null); selectConversation(cid); }} onNewChat={(pid) => { setOpenProjectId(null); setDrawerOpen(false); newChat(pid); setActiveTab('chat'); }} onMutated={(pid) => { refreshProjects(); if (pid === activeProjectId) ProjectDB.listFiles(pid).then(setActiveProjectFiles); }} /> : null;
           })()}
+          {showNewProject && <NewProjectModal onCreate={async (name, instructions) => { const p = await ProjectDB.create(name); if (instructions) await ProjectDB.update(p.id, { instructions }); await refreshProjects(); }} onClose={() => setShowNewProject(false)} />}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (() => {
               const openConv = conversations.find(c => c.id === currentConvId) || null;
@@ -6375,7 +6415,7 @@ Rules:
                 />
               );
               const sidebar = (
-                <HistoryPanel dark={dark} conversations={conversations} projects={projects} currentConvId={currentConvId} wide={isWide} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onPin={pinConversation} onArchive={archiveConversation} onRename={renameConversation} onDelete={removeConversation} onShare={shareConversation} onOpenMemory={() => setShowMemory(true)} onNewProject={async () => { try { const p = await createProject('New project'); setOpenProjectId(p.id); } catch (e) { alert('Could not create project: ' + (e.message || e)); } }} onOpenProject={(id) => setOpenProjectId(id)} onMoveToProject={(convId, pid) => moveConversationToProject(convId, pid)} />
+                <HistoryPanel dark={dark} conversations={conversations} projects={projects} currentConvId={currentConvId} wide={isWide} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onPin={pinConversation} onArchive={archiveConversation} onRename={renameConversation} onDelete={removeConversation} onShare={shareConversation} onOpenMemory={() => setShowMemory(true)} onNewProject={() => setShowNewProject(true)} onOpenProject={(id) => setOpenProjectId(id)} onMoveToProject={(convId, pid) => moveConversationToProject(convId, pid)} />
               );
               return isWide ? (
                 <div style={{ display: 'flex', height: '100%' }}>

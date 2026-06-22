@@ -16,7 +16,10 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
   });
 
   const _state = { session: null, ready: false };
-  const _cleanUrl = window.location.origin + window.location.pathname;
+  // /guide/<slug> deep-links aren't real pages (served via 404.html) and usually aren't
+  // allowed OAuth redirect URLs, which blocks sign-in. Send OAuth back to the site root
+  // for those — the app restores the guide from its sessionStorage deep-link stash.
+  const _cleanUrl = window.location.origin + (/^\/guide(\/|$)/i.test(window.location.pathname) ? '/' : window.location.pathname);
   const _listeners = [];
 
   async function signInWithGoogle() {

@@ -109,6 +109,41 @@
       .deals-mobile-only  { display: none !important; }
       .deals-desktop-only { display: flex !important; }
     }
+
+    /* ─── Guide tab: macOS-Notes content typography (styles stored note HTML) ─── */
+    .nc-body { font-family: 'Jost', sans-serif; }
+    .nc-h1 { font-family: 'Cormorant Garamond', Georgia, serif; font-style: italic; font-size: 18px; color: #001A4A; line-height: 1.3; margin: 18px 0 10px; }
+    .nc-h2 { display: flex; align-items: center; gap: 7px; font-family: 'Jost', sans-serif; font-size: 9px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: #AD832F; margin: 18px 0 7px; }
+    .nc-h2::after { content: ''; flex: 1; height: 0.5px; background: #EDE7DC; }
+    .nc-p { font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 300; color: #3A3A3A; line-height: 1.75; margin: 0 0 10px; }
+    .nc-p b, .nc-step-desc b, .nc-p strong { font-weight: 600; color: #001A4A; }
+    .nc-step { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 9px; }
+    .nc-step-num { width: 20px; height: 20px; border-radius: 50%; background: #001A4A; color: #fff; font-family: 'Jost', sans-serif; font-size: 9px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
+    .nc-step-title { font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 600; color: #001A4A; margin-bottom: 2px; }
+    .nc-step-desc { font-family: 'Jost', sans-serif; font-size: 10px; color: #6B6B6B; line-height: 1.6; }
+    .nc-code { background: #F0EBE3; border: 0.5px solid #E4DFD4; border-radius: 6px; padding: 3px 8px; font-size: 10px; color: #001A4A; font-family: monospace; display: inline-block; }
+    .nc-tip { display: flex; gap: 8px; background: #FDF8F0; border: 0.5px solid #E8D9BC; border-left: 3px solid #AD832F; border-radius: 6px; padding: 9px 11px; margin-bottom: 10px; }
+    .nc-tip > i { color: #AD832F; font-size: 13px; flex-shrink: 0; margin-top: 1px; }
+    .nc-tip > div { font-family: 'Jost', sans-serif; font-size: 10px; color: #6B6B6B; line-height: 1.6; }
+    .nc-warn { display: flex; gap: 8px; background: #FEF2F2; border: 0.5px solid #FBBCBC; border-left: 3px solid #9B1C1C; border-radius: 6px; padding: 9px 11px; margin-bottom: 10px; }
+    .nc-warn > i { color: #9B1C1C; font-size: 13px; flex-shrink: 0; margin-top: 1px; }
+    .nc-warn > div { font-family: 'Jost', sans-serif; font-size: 10px; color: #6B6B6B; line-height: 1.6; }
+    .nc-check { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 6px; }
+    .nc-check > i { color: #0F6E56; font-size: 12px; flex-shrink: 0; margin-top: 1px; }
+    .nc-check > div { font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 300; color: #3A3A3A; line-height: 1.6; }
+    .nc-check.incomplete > i { color: #D4D0CC; }
+    .nc-check.incomplete > div { color: #9A958A; }
+    .nc-divider { height: 0.5px; background: #EDE7DC; margin: 14px 0; border: 0; }
+    .nc-tags { margin-bottom: 10px; }
+    .nc-tag { display: inline-flex; align-items: center; gap: 4px; background: #F3EBDA; border: 0.5px solid #E8D9BC; border-radius: 14px; padding: 2px 9px; font-family: 'Jost', sans-serif; font-size: 9px; font-weight: 600; color: #AD832F; margin: 2px 3px 2px 0; }
+    .nc-tag > i { font-size: 10px; color: #AD832F; }
+    .nc-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 10px; }
+    .nc-table th { text-align: left; padding: 6px 8px; font-family: 'Jost', sans-serif; font-size: 8px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #AD832F; border-bottom: 1px solid #EDE7DC; background: #F9F6F0; }
+    .nc-table td { padding: 7px 8px; border-bottom: 0.5px solid #F5F2EE; color: #3A3A3A; font-weight: 300; vertical-align: top; font-family: 'Jost', sans-serif; }
+    .nc-table td:first-child { font-weight: 500; color: #001A4A; white-space: nowrap; }
+    .nc-edit:empty:before { content: attr(data-ph); color: #C4BFBA; }
+    .guide-note-item:hover { background: #EDE7DC !important; }
+    .guide-tool:hover { background: #EDE7DC !important; }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
@@ -932,6 +967,131 @@ Rules:
         if (!this.client()) return;
         const { error } = await this.client().from('app_access').upsert({ id: 1, config, updated_at: new Date().toISOString() });
         if (error) { console.error('[AccessDB] save:', error.message); throw error; }
+      },
+    };
+
+    // ─── Guide notes (macOS-Notes-style internal docs) ────────────────
+    const GUIDE_SECTIONS = ['Pinned', 'App Guides', 'Reference'];
+
+    // The one fully-authored starter note. Other notes ship as empty shells.
+    const GUIDE_GETSTARTED_HTML = `<section class="nc-h2">Install the App</section>
+<p class="nc-p">Install the TMG App on your iPhone in under 60 seconds — no App Store needed. Be Irreplaceable · Accountability · Growth Mindset · Servant Leaders · Teamwork.</p>
+<div class="nc-step"><div class="nc-step-num">1</div><div class="nc-step-body"><div class="nc-step-title">Open the link on your iPhone</div><div class="nc-step-desc">Tap <span class="nc-code">app.themorshedgroup.com</span> in Safari or Chrome. Make sure your TMG Gmail account is signed in on this device before continuing.</div></div></div>
+<div class="nc-step"><div class="nc-step-num">2</div><div class="nc-step-body"><div class="nc-step-title">Sign in with TMG Gmail</div><div class="nc-step-desc">Tap "Continue with TMG Gmail." Sign in with your @themorshedgroup.com account. If you see an Access Denied screen, contact Symon — your account hasn't been added yet.</div></div></div>
+<div class="nc-step"><div class="nc-step-num">3</div><div class="nc-step-body"><div class="nc-step-title">Add to Home Screen</div><div class="nc-step-desc"><b>Safari:</b> Tap the Share icon (box with arrow up, bottom center) → scroll the share sheet → Add to Home Screen → tap Add. <b>Chrome:</b> Tap ⋯ (bottom-right) → Add to Home Screen → tap Add. On iOS 26, look for an "Install App" banner at the top of the browser — tap that directly instead.</div></div></div>
+<div class="nc-tip"><i class="ti ti-info-circle"></i><div>Always open the TMG App from the home screen icon — not from a browser bookmark or link. The icon gives you the full-screen experience and keeps you signed in.</div></div>
+<div class="nc-divider"></div>
+<section class="nc-h2">What's Available Now</section>
+<div class="nc-tags"><span class="nc-tag"><i class="ti ti-sparkles"></i>AI Chat</span><span class="nc-tag"><i class="ti ti-chart-bar"></i>KPI Entries</span><span class="nc-tag"><i class="ti ti-message"></i>Showings Feedback</span></div>
+<p class="nc-p">Three features are live in beta. Claude AI Chat supports projects and file uploads. KPI Entries lets agents submit scores via form or plain text. Showings Feedback Automation is managed by Alexa — end-to-end SMS follow-up.</p>
+<div class="nc-divider"></div>
+<section class="nc-h2">Troubleshooting</section>
+<table class="nc-table"><thead><tr><th>Issue</th><th>What to Do</th></tr></thead><tbody>
+<tr><td>🔒 Access Denied</td><td>Your account hasn't been added. Contact Symon.</td></tr>
+<tr><td>⏳ Pending Screen</td><td>Account is being set up. Check email within 24 hours.</td></tr>
+<tr><td>❌ Sign-in fails</td><td>Must use @themorshedgroup.com — other accounts won't work.</td></tr>
+<tr><td>📱 Can't find Add to Home Screen</td><td>On iOS 26, look for the "Install App" banner instead.</td></tr>
+</tbody></table>
+<div class="nc-warn"><i class="ti ti-lock"></i><div>If your account shows Access Denied after sign-in, your access hasn't been provisioned yet. Contact Symon — accounts are usually activated within one business day.</div></div>
+<div class="nc-divider"></div>
+<section class="nc-h2">Coming Soon — Q3 2026</section>
+<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Team Chat</div></div>
+<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>CRM Integration</div></div>
+<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Task Management (full)</div></div>
+<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Gmail Integration</div></div>
+<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Google Calendar Sync</div></div>
+<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Scorecard (full)</div></div>`;
+
+    // Convert any string into a URL-safe slug (lowercase, hyphenated).
+    function guideSlugify(s) {
+      return (s || '').toLowerCase().trim()
+        .replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-')
+        .replace(/^-+|-+$/g, '').slice(0, 60);
+    }
+
+    // Strip anything executable from stored note HTML before rendering (defense in depth;
+    // writes are admin-only via RLS, but never trust stored HTML blindly).
+    function guideSanitize(html) {
+      try {
+        const doc = new DOMParser().parseFromString('<div>' + (html || '') + '</div>', 'text/html');
+        const root = doc.body.firstChild;
+        const walk = (node) => {
+          Array.prototype.slice.call(node.children).forEach((el) => {
+            const tag = el.tagName.toLowerCase();
+            if (['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'form', 'input', 'button', 'svg'].includes(tag)) { el.remove(); return; }
+            Array.prototype.slice.call(el.attributes).forEach((a) => {
+              const n = a.name.toLowerCase();
+              if (n.startsWith('on')) el.removeAttribute(a.name);
+              if ((n === 'href' || n === 'src') && /^\s*(javascript|data):/i.test(a.value)) el.removeAttribute(a.name);
+            });
+            walk(el);
+          });
+        };
+        walk(root);
+        return root.innerHTML;
+      } catch (e) { return ''; }
+    }
+
+    // localhost has no Supabase _client, so drive the preview from an in-memory fixture.
+    let _guideDev = null;
+    function guideDevSeed() {
+      if (_guideDev) return _guideDev;
+      const now = new Date().toISOString();
+      const mk = (emoji, title, description, slug, section, pinned, sort, body) =>
+        ({ id: 'dev-' + slug, emoji, title, description, slug, section, pinned, sort, body_html: body || '', author_name: 'Symon Yongco', author_id: 'dev-user-id', created_at: now, updated_at: now });
+      _guideDev = [
+        mk('🚀', 'Get Started', 'Install the TMG App on your iPhone in under 60 seconds — no App Store needed.', 'get-started', 'Pinned', true, 0, GUIDE_GETSTARTED_HTML),
+        mk('📅', 'Calendar & Timezone', 'TX and PH time zones, day/week/month views.', 'calendar-timezone', 'App Guides', false, 0, ''),
+        mk('✅', 'Tasks & Decisions', 'How to create, assign, and track tasks.', 'tasks-decisions', 'App Guides', false, 1, ''),
+        mk('💰', 'Deals Pipeline', 'Stage overview, Kanban board, deal cards.', 'deals-pipeline', 'App Guides', false, 2, ''),
+        mk('📊', 'KPIs & Scorecard', 'Reading your weekly achievement chart.', 'kpis-scorecard', 'App Guides', false, 3, ''),
+        mk('🤖', 'AI Assistant', 'How to use Claude, Work Mode, prompts.', 'ai-assistant', 'App Guides', false, 4, ''),
+        mk('🔧', 'Troubleshooting', 'Access denied, sign-in, install issues.', 'troubleshooting', 'Reference', false, 0, ''),
+        mk('📋', 'App Roadmap', "What's live and what's coming in Q3 2026.", 'app-roadmap', 'Reference', false, 1, ''),
+        mk('🤝', 'Team Directory', 'Team members, roles, time zones.', 'team-directory', 'Reference', false, 2, ''),
+      ];
+      return _guideDev;
+    }
+
+    const GuideDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+      async loadAll() {
+        if (!this.client()) return guideDevSeed().slice();
+        const { data, error } = await this.client().from('guide_notes').select('*')
+          .order('sort', { ascending: true }).order('created_at', { ascending: true });
+        if (error) { console.error('[GuideDB] loadAll:', error.message); return []; }
+        return data || [];
+      },
+      async create(note) {
+        const row = {
+          emoji: note.emoji || '', title: note.title || 'Untitled', description: note.description || '',
+          slug: note.slug, body_html: note.body_html || '', section: note.section || 'App Guides',
+          pinned: !!note.pinned, sort: note.sort || 0, author_id: this.uid(), author_name: note.author_name || '',
+        };
+        if (!this.client()) {
+          const r = { ...row, id: 'dev-' + (row.slug || Math.random().toString(36).slice(2)), created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+          guideDevSeed().push(r); return r;
+        }
+        const { data, error } = await this.client().from('guide_notes').insert(row).select().single();
+        if (error) { console.error('[GuideDB] create:', error.message); throw error; }
+        return data;
+      },
+      async update(id, patch) {
+        const p = { ...patch, updated_at: new Date().toISOString() };
+        if (!this.client()) {
+          const arr = guideDevSeed(); const i = arr.findIndex(n => n.id === id);
+          if (i >= 0) arr[i] = { ...arr[i], ...p };
+          return i >= 0 ? arr[i] : null;
+        }
+        const { data, error } = await this.client().from('guide_notes').update(p).eq('id', id).select().single();
+        if (error) { console.error('[GuideDB] update:', error.message); throw error; }
+        return data;
+      },
+      async remove(id) {
+        if (!this.client()) { _guideDev = guideDevSeed().filter(n => n.id !== id); return; }
+        const { error } = await this.client().from('guide_notes').delete().eq('id', id);
+        if (error) { console.error('[GuideDB] remove:', error.message); throw error; }
       },
     };
 
@@ -4090,6 +4250,258 @@ Rules:
       { id: 'more',     label: 'More',  icon: 'ti-dots'            },
     ];
 
+    // ─── Guide tab (macOS-Notes-style internal documentation) ─────────
+    // Light mode only for v1 (dark mode deferred per spec). Read = everyone;
+    // create / edit / delete affordances show for admins only (matches RLS).
+    function GuideTab({ dark, profile, isAdmin }) {
+      const [notes, setNotes] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [selectedId, setSelectedId] = useState(null);
+      const [search, setSearch] = useState('');
+      const [searchFocus, setSearchFocus] = useState(false);
+      const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
+      const [showNew, setShowNew] = useState(false);
+      const [nTitle, setNTitle] = useState(''); const [nDesc, setNDesc] = useState('');
+      const [nSlug, setNSlug] = useState(''); const [nSection, setNSection] = useState('App Guides');
+      const [nBody, setNBody] = useState('');
+      const [slugTouched, setSlugTouched] = useState(false);
+      const [editing, setEditing] = useState(false);
+      const [eTitle, setETitle] = useState(''); const [eDesc, setEDesc] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [copied, setCopied] = useState(false);
+      const [dotsOpen, setDotsOpen] = useState(false);
+      const edRef = useRef(null);
+
+      const meName = (profile && ((profile.first_name || '') + ' ' + (profile.last_name || '')).trim()) || 'TMG Team';
+      const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); } catch (e) { return ''; } };
+
+      useEffect(() => {
+        let on = true; setLoading(true);
+        GuideDB.loadAll().then((d) => {
+          if (!on) return;
+          setNotes(d); setLoading(false);
+          try { const m = (location.hash || '').match(/guide\/([a-z0-9-]+)/i); if (m) { const f = d.find(n => n.slug === m[1]); if (f) setSelectedId(f.id); } } catch (e) {}
+        });
+        return () => { on = false; };
+      }, []);
+      useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
+      useEffect(() => { if (editing && edRef.current) edRef.current.innerHTML = guideSanitize(sel ? sel.body_html : ''); }, [editing, selectedId]); // eslint-disable-line
+
+      const sel = notes.find(n => n.id === selectedId) || null;
+      const q = search.trim().toLowerCase();
+      const matches = (n) => !q || ((n.emoji || '') + ' ' + n.title + ' ' + n.description).toLowerCase().includes(q);
+      const groups = GUIDE_SECTIONS
+        .map(sec => ({ sec, items: notes.filter(n => (n.section || 'App Guides') === sec && matches(n)).sort((a, b) => (a.sort - b.sort) || a.title.localeCompare(b.title)) }))
+        .filter(g => g.items.length);
+
+      const selectNote = (id) => { setSelectedId(id); setEditing(false); setDotsOpen(false); };
+      const copyLink = (slug) => { try { navigator.clipboard.writeText('app.themorshedgroup.com/guide/' + slug); setCopied(true); setTimeout(() => setCopied(false), 1400); } catch (e) {} };
+
+      const openNew = () => { setNTitle(''); setNDesc(''); setNSlug(''); setNSection('App Guides'); setNBody(''); setSlugTouched(false); setShowNew(true); };
+      const textToHtml = (t) => (t || '').trim()
+        ? t.trim().split(/\n\s*\n+/).map(p => '<p class="nc-p">' + p.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br/>') + '</p>').join('\n')
+        : '';
+      const onNTitle = (v) => { setNTitle(v); if (!slugTouched) setNSlug(guideSlugify(v)); };
+      const createNote = async () => {
+        if (!nTitle.trim() || busy) return; setBusy(true);
+        try {
+          const slug = guideSlugify(nSlug || nTitle) || ('note-' + Date.now());
+          const created = await GuideDB.create({ title: nTitle.trim(), description: nDesc.trim(), slug, section: nSection, body_html: textToHtml(nBody), author_name: meName });
+          setNotes(ns => [...ns, created]); setShowNew(false); setSelectedId(created.id); setEditing(false);
+        } catch (e) { alert('Could not create note: ' + (e.message || e)); } finally { setBusy(false); }
+      };
+
+      const startEdit = () => { if (!sel) return; setETitle(sel.title); setEDesc(sel.description); setEditing(true); };
+      const cancelEdit = () => setEditing(false);
+      const saveEdit = async () => {
+        if (!sel || busy) return; setBusy(true);
+        try {
+          const html = guideSanitize(edRef.current ? edRef.current.innerHTML : sel.body_html);
+          const patch = { title: (eTitle.trim() || 'Untitled'), description: eDesc.trim(), body_html: html };
+          await GuideDB.update(sel.id, patch);
+          setNotes(ns => ns.map(n => n.id === sel.id ? { ...n, ...patch } : n));
+          setEditing(false);
+        } catch (e) { alert('Could not save: ' + (e.message || e)); } finally { setBusy(false); }
+      };
+      const delNote = async () => {
+        if (!sel) return;
+        if (!confirm('Delete "' + sel.title + '"? This cannot be undone.')) return;
+        const id = sel.id;
+        try { await GuideDB.remove(id); setNotes(ns => ns.filter(n => n.id !== id)); setSelectedId(null); setDotsOpen(false); }
+        catch (e) { alert('Could not delete: ' + (e.message || e)); }
+      };
+      const format = (cmd, val) => { try { document.execCommand(cmd, false, val || null); edRef.current && edRef.current.focus(); } catch (e) {} };
+      const insertHtml = (html) => { try { document.execCommand('insertHTML', false, html); edRef.current && edRef.current.focus(); } catch (e) {} };
+
+      const toolBtn = (icon, onClick, opts) => {
+        opts = opts || {};
+        return <button title={opts.title || ''} onMouseDown={e => e.preventDefault()} onClick={onClick} className="guide-tool" style={{ width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 7, border: 'none', background: 'transparent', cursor: 'pointer', color: opts.gold ? '#AD832F' : '#6B6B6B', fontSize: 13 }}><i className={'ti ' + icon} aria-hidden="true" /></button>;
+      };
+
+      const HAIR = '0.5px solid #EDE7DC';
+
+      // ── List / sidebar ──────────────────────────────────────────────
+      const listPane = (
+        <div style={{ width: wide ? 220 : '100%', flexShrink: 0, height: '100%', display: 'flex', flexDirection: 'column', background: '#F5F0E8', borderRight: wide ? HAIR : 'none' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px 8px', borderBottom: HAIR }}>
+            <div style={{ fontFamily: C.fontSans, fontSize: wide ? 16 : 18, fontWeight: 600, color: '#001A4A' }}>Guide</div>
+            {isAdmin && (
+              <button onClick={openNew} title="New note" style={{ width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA', border: '0.5px solid #E8D9BC', borderRadius: 7, cursor: 'pointer', color: '#AD832F', fontSize: 14 }}><i className="ti ti-plus" aria-hidden="true" /></button>
+            )}
+          </div>
+          <div style={{ padding: '7px 10px', borderBottom: HAIR, background: '#F5F0E8' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: searchFocus ? '#fff' : '#EDE7DC', border: searchFocus ? '0.5px solid #E4DFD4' : '0.5px solid transparent', borderRadius: 8, padding: '5px 9px' }}>
+              <i className="ti ti-search" style={{ fontSize: 12, color: '#B4B2A9' }} aria-hidden="true" />
+              <input value={search} onChange={e => setSearch(e.target.value)} onFocus={() => setSearchFocus(true)} onBlur={() => setSearchFocus(false)} placeholder="Search" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: C.fontSans, fontSize: 10, color: '#001A4A' }} />
+            </div>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#F5F0E8' }}>
+            {loading && <div style={{ padding: 16, fontFamily: C.fontSans, fontSize: 10, color: '#B4B2A9' }}>Loading…</div>}
+            {!loading && !groups.length && <div style={{ padding: 16, fontFamily: C.fontSans, fontSize: 10, color: '#B4B2A9' }}>No notes found.</div>}
+            {groups.map(g => (
+              <div key={g.sec}>
+                <div style={{ padding: '8px 12px 3px', fontFamily: C.fontSans, fontSize: 7, fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: '#B4B2A9' }}>{g.sec}</div>
+                {g.items.map(n => {
+                  const on = n.id === selectedId;
+                  return (
+                    <div key={n.id} className="guide-note-item" onClick={() => selectNote(n.id)} style={{ padding: '9px 12px', borderBottom: HAIR, cursor: 'pointer', background: on ? '#fff' : 'transparent', borderRight: on ? '2.5px solid #AD832F' : '2.5px solid transparent' }}>
+                      <div style={{ fontFamily: C.fontSans, fontSize: 12, fontWeight: 600, color: '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginBottom: 2 }}>{(n.emoji ? n.emoji + ' ' : '') + n.title}</div>
+                      <div style={{ fontFamily: C.fontSans, fontSize: 9, color: '#9A958A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{n.description || '—'}</div>
+                      <div style={{ fontFamily: C.fontSans, fontSize: 8.5, color: '#B4B2A9', marginTop: 1 }}>{fmtDate(n.updated_at || n.created_at)}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          {wide && (
+            <div style={{ borderTop: HAIR, padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <i className="ti ti-notes" style={{ fontSize: 12, color: '#AD832F' }} aria-hidden="true" />
+              <span style={{ fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9' }}>{notes.length} note{notes.length === 1 ? '' : 's'}</span>
+            </div>
+          )}
+        </div>
+      );
+
+      const dotsMenu = sel ? (
+        <React.Fragment>
+          <div onClick={() => setDotsOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 60 }} />
+          <div style={{ position: 'absolute', top: 30, right: 0, zIndex: 61, background: '#fff', border: '0.5px solid #E4DFD4', borderRadius: 10, boxShadow: '0 8px 24px rgba(0,26,74,.14)', padding: 4, minWidth: 130 }}>
+            <button onClick={() => { copyLink(sel.slug); setDotsOpen(false); }} style={dotsItem}>Copy link</button>
+            {isAdmin && <button onClick={() => { startEdit(); setDotsOpen(false); }} style={dotsItem}>Edit</button>}
+            {isAdmin && <button onClick={delNote} style={{ ...dotsItem, color: '#C0392B' }}>Delete</button>}
+          </div>
+        </React.Fragment>
+      ) : null;
+
+      // ── Note body view ──────────────────────────────────────────────
+      const hasBody = sel && sel.body_html && guideSanitize(sel.body_html).trim();
+      const notePane = (
+        <div style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column', background: '#fff' }}>
+          {!sel && wide && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+              <i className="ti ti-book" style={{ fontSize: 34, color: '#E4DFD4' }} aria-hidden="true" />
+              <div style={{ fontFamily: C.fontSans, fontSize: 12, fontStyle: 'italic', color: '#C4BFBA' }}>Select a guide to read.</div>
+            </div>
+          )}
+          {sel && (
+            <React.Fragment>
+              {!wide && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '9px 12px', borderBottom: HAIR, background: '#fff' }}>
+                  <button onClick={() => selectNote(null)} style={{ display: 'flex', alignItems: 'center', gap: 3, border: 'none', background: 'none', cursor: 'pointer', fontFamily: C.fontSans, fontSize: 11, fontWeight: 500, color: '#185FA5', padding: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 14 }} aria-hidden="true" />Guide</button>
+                  <div style={{ position: 'relative' }}>
+                    <button onClick={() => setDotsOpen(o => !o)} style={{ width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA', border: '0.5px solid #E8D9BC', borderRadius: 7, cursor: 'pointer', color: '#AD832F', fontSize: 13 }}><i className="ti ti-dots" aria-hidden="true" /></button>
+                    {dotsOpen && dotsMenu}
+                  </div>
+                </div>
+              )}
+              <div style={{ padding: '14px 16px 10px', borderBottom: HAIR, background: '#fff', flexShrink: 0 }}>
+                {editing
+                  ? <input value={eTitle} onChange={e => setETitle(e.target.value)} style={{ width: '100%', border: 'none', outline: 'none', fontFamily: C.fontSans, fontSize: 18, fontWeight: 600, color: '#001A4A', marginBottom: 4 }} />
+                  : <div style={{ fontFamily: C.fontSans, fontSize: 18, fontWeight: 600, color: '#001A4A', lineHeight: 1.2, marginBottom: 4 }}>{(sel.emoji ? sel.emoji + ' ' : '') + sel.title}</div>}
+                <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9' }}>
+                  <span>{fmtDate(sel.updated_at || sel.created_at)}</span>
+                  {sel.pinned && <React.Fragment><span style={{ width: 3, height: 3, borderRadius: '50%', background: '#D4D0CC' }} /><span>Pinned</span></React.Fragment>}
+                  {sel.author_name && <React.Fragment><span style={{ width: 3, height: 3, borderRadius: '50%', background: '#D4D0CC' }} /><span>{sel.author_name}</span></React.Fragment>}
+                  {wide && isAdmin && !editing && <React.Fragment><span style={{ width: 3, height: 3, borderRadius: '50%', background: '#D4D0CC' }} /><span onClick={delNote} style={{ cursor: 'pointer', color: '#C0392B' }}>Delete</span></React.Fragment>}
+                </div>
+                {editing
+                  ? <input value={eDesc} onChange={e => setEDesc(e.target.value)} placeholder="Short description for the list preview…" style={{ width: '100%', border: 'none', outline: 'none', fontFamily: C.fontSans, fontSize: 11, color: '#6B6B6B', marginTop: 5 }} />
+                  : (
+                    <div onClick={() => copyLink(sel.slug)} title="Copy link" style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 5, fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9', cursor: 'pointer' }}>
+                      <i className="ti ti-link" style={{ fontSize: 10, color: '#AD832F' }} aria-hidden="true" />
+                      <span>{copied ? 'Copied to clipboard!' : 'app.themorshedgroup.com/guide/' + sel.slug}</span>
+                    </div>
+                  )}
+              </div>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 16px 18px', background: '#fff' }}>
+                {editing
+                  ? <div ref={edRef} className="nc-body nc-edit" contentEditable suppressContentEditableWarning data-ph="Start writing…" style={{ outline: 'none', minHeight: 200, fontFamily: C.fontSans, fontSize: 12, color: '#3A3A3A', lineHeight: 1.75 }} />
+                  : (hasBody
+                    ? <div className="nc-body" dangerouslySetInnerHTML={{ __html: guideSanitize(sel.body_html) }} />
+                    : (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 220, gap: 7 }}>
+                        <i className="ti ti-notes" style={{ fontSize: 32, color: '#E4DFD4' }} aria-hidden="true" />
+                        <div style={{ fontFamily: C.fontSans, fontSize: 12, fontStyle: 'italic', color: '#C4BFBA' }}>This guide is coming soon.</div>
+                        {isAdmin && <div style={{ fontFamily: C.fontSans, fontSize: 10, color: '#D4D0CC' }}>Tap the pencil to start writing.</div>}
+                      </div>
+                    ))}
+              </div>
+              {isAdmin && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 14px', borderTop: HAIR, background: '#F5F0E8', flexShrink: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    {editing && toolBtn('ti-bold', () => format('bold'), { title: 'Bold' })}
+                    {editing && toolBtn('ti-italic', () => format('italic'), { title: 'Italic' })}
+                    {editing && toolBtn('ti-list', () => format('insertUnorderedList'), { title: 'Bullet list' })}
+                    {editing && toolBtn('ti-checklist', () => insertHtml('<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>To do</div></div>'), { title: 'Checklist item' })}
+                    {editing && toolBtn('ti-link', () => { const u = prompt('Link URL (https://…)'); if (u) format('createLink', u); }, { title: 'Link' })}
+                    {!editing && <span style={{ fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9' }}>Tap the pencil to edit</span>}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    {editing && toolBtn('ti-photo', () => { const u = prompt('Image URL'); if (u) insertHtml('<img src="' + u + '" style="max-width:100%;border-radius:8px;margin:6px 0;" />'); }, { title: 'Insert image' })}
+                    {!editing && toolBtn('ti-share', () => copyLink(sel.slug), { title: 'Copy link' })}
+                    {editing
+                      ? <React.Fragment>{toolBtn('ti-x', cancelEdit, { title: 'Cancel' })}{toolBtn('ti-check', saveEdit, { gold: true, title: 'Save' })}</React.Fragment>
+                      : toolBtn('ti-pencil', startEdit, { gold: true, title: 'Edit' })}
+                  </div>
+                </div>
+              )}
+            </React.Fragment>
+          )}
+        </div>
+      );
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'row', background: '#F5F0E8', fontFamily: C.fontSans }}>
+          {(wide || !sel) && listPane}
+          {(wide || sel) && notePane}
+          {showNew && (
+            <div onClick={() => setShowNew(false)} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,26,74,.28)', display: 'flex', alignItems: wide ? 'center' : 'flex-end', justifyContent: 'center', padding: wide ? 20 : 0 }}>
+              <div onClick={e => e.stopPropagation()} style={{ width: wide ? 'min(560px, 94vw)' : '100%', maxHeight: '88vh', overflowY: 'auto', background: '#fff', borderRadius: wide ? 14 : '14px 14px 0 0', padding: '20px 18px', boxShadow: '0 8px 32px rgba(0,26,74,.16)', display: 'flex', flexDirection: 'column' }}>
+                <input autoFocus value={nTitle} onChange={e => onNTitle(e.target.value)} placeholder="Note title…" style={{ border: 'none', borderBottom: HAIR, outline: 'none', padding: '8px 0', fontFamily: C.fontSans, fontSize: 18, fontWeight: 600, color: '#001A4A' }} />
+                <input value={nDesc} onChange={e => setNDesc(e.target.value)} placeholder="Short description for the list preview…" style={{ border: 'none', borderBottom: HAIR, outline: 'none', padding: '7px 0', fontFamily: C.fontSans, fontSize: 12, color: '#6B6B6B' }} />
+                <div style={{ display: 'flex', alignItems: 'center', borderBottom: HAIR, padding: '7px 0' }}>
+                  <span style={{ fontFamily: C.fontSans, fontSize: 10, color: '#B4B2A9' }}>app.themorshedgroup.com/guide/</span>
+                  <input value={nSlug} onChange={e => { setSlugTouched(true); setNSlug(guideSlugify(e.target.value)); }} placeholder="slug-here" style={{ flex: 1, border: 'none', outline: 'none', fontFamily: C.fontSans, fontSize: 10, fontWeight: 500, color: '#001A4A' }} />
+                </div>
+                <div style={{ display: 'flex', gap: 6, padding: '10px 0 4px' }}>
+                  {GUIDE_SECTIONS.map(s => (
+                    <button key={s} onClick={() => setNSection(s)} style={{ padding: '4px 10px', borderRadius: 14, border: '0.5px solid ' + (nSection === s ? '#001A4A' : '#E4DFD4'), background: nSection === s ? '#001A4A' : '#FCFBF8', color: nSection === s ? '#fff' : '#6B6B6B', fontFamily: C.fontSans, fontSize: 9, fontWeight: 600, cursor: 'pointer' }}>{s}</button>
+                  ))}
+                </div>
+                <textarea value={nBody} onChange={e => setNBody(e.target.value)} placeholder="Start writing…" style={{ border: 'none', outline: 'none', resize: 'none', minHeight: 160, padding: '8px 0', fontFamily: C.fontSans, fontSize: 12, color: '#3A3A3A', lineHeight: 1.75, background: 'transparent' }} />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
+                  <button onClick={() => setShowNew(false)} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 500, color: '#6B6B6B', background: '#FCFBF8', border: '0.5px solid #E4DFD4', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}>Cancel</button>
+                  <button onClick={createNote} disabled={!nTitle.trim() || busy} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 600, color: '#fff', background: '#001A4A', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', opacity: (!nTitle.trim() || busy) ? 0.5 : 1 }}>{busy ? 'Creating…' : 'Create Note'}</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+    const dotsItem = { display: 'block', width: '100%', textAlign: 'left', border: 'none', background: 'none', cursor: 'pointer', fontFamily: C.fontSans, fontSize: 11, color: '#001A4A', padding: '8px 10px', borderRadius: 7 };
+
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
     function BottomZone({ active, activeMoreView, tabs, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
       const navTabs = tabs || TABS;
@@ -4940,7 +5352,7 @@ Rules:
     // (hash only, no server config). Overlays (calendar/tasks/profile) close on
     // Back but aren't deep-linked yet. parseRoute maps a hash → {tab, view}.
     const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
-    const ROUTE_MORE = ['drives', 'directory', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
+    const ROUTE_MORE = ['guide', 'drives', 'directory', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
@@ -4996,6 +5408,7 @@ Rules:
       // All possible items the user could see (access-filtered).
       const defaultNavIds = (appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS).map(t => t.id);
       const allMoreDefs = []
+        .concat([{ id: 'guide', label: 'Guide', icon: 'ti-book' }])
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
         .concat([{ id: 'tasks', label: 'Tasks', icon: 'ti-checklist', href: 'tasks.html' }])
@@ -5439,6 +5852,7 @@ Rules:
             {activeTab === 'deals' && <DealsTab />}
             {activeTab === 'more' && (
               moreView === 'admin' && isAdmin ? <AdminTab onOpenBuilder={() => setBuilderOpen(true)} />
+              : moreView === 'guide' ? <GuideTab dark={dark} profile={profile} isAdmin={isAdmin} />
               : moreView === 'app-masterplan' && isAdmin ? <AppRoadmap dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />

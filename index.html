@@ -984,25 +984,43 @@ Rules:
     const GUIDE_SECTIONS = ['Pinned', 'App Guides', 'Reference'];
 
     // The one fully-authored starter note. Other notes ship as empty shells.
-    const GUIDE_GETSTARTED_HTML = `<section class="nc-h2">Install the App</section>
-<p class="nc-p">Install the TMG App on your iPhone in under 60 seconds — no App Store needed. Be Irreplaceable · Accountability · Growth Mindset · Servant Leaders · Teamwork.</p>
-<div class="nc-step"><div class="nc-step-num">1</div><div class="nc-step-body"><div class="nc-step-title">Open the link on your iPhone</div><div class="nc-step-desc">Tap <span class="nc-code">app.themorshedgroup.com</span> in Safari or Chrome. Make sure your TMG Gmail account is signed in on this device before continuing.</div></div></div>
-<div class="nc-step"><div class="nc-step-num">2</div><div class="nc-step-body"><div class="nc-step-title">Sign in with TMG Gmail</div><div class="nc-step-desc">Tap "Continue with TMG Gmail." Sign in with your @themorshedgroup.com account. If you see an Access Denied screen, contact Symon — your account hasn't been added yet.</div></div></div>
-<div class="nc-step"><div class="nc-step-num">3</div><div class="nc-step-body"><div class="nc-step-title">Add to Home Screen</div><div class="nc-step-desc"><b>Safari:</b> Tap the Share icon (box with arrow up, bottom center) → scroll the share sheet → Add to Home Screen → tap Add. <b>Chrome:</b> Tap ⋯ (bottom-right) → Add to Home Screen → tap Add. On iOS 26, look for an "Install App" banner at the top of the browser — tap that directly instead.</div></div></div>
-<div class="nc-tip"><i class="ti ti-info-circle"></i><div>Always open the TMG App from the home screen icon — not from a browser bookmark or link. The icon gives you the full-screen experience and keeps you signed in.</div></div>
+    const GUIDE_GETSTARTED_HTML = `<section class="nc-h2">1 · Open the link</section>
+<div class="nc-h1">Tap this link on your iPhone</div>
+<p class="nc-p">Open it in <b>Safari</b> or <b>Chrome</b>. Make sure your TMG Gmail account is signed in on this device before continuing.</p>
+<div class="nc-tip"><i class="ti ti-link"></i><div>Open <a href="https://app.themorshedgroup.com" target="_blank" rel="noopener noreferrer">app.themorshedgroup.com</a> in your browser.</div></div>
+<div class="nc-divider"></div>
+<section class="nc-h2">2 · Sign in</section>
+<div class="nc-h1">Tap "Continue with TMG Gmail"</div>
+<p class="nc-p">Sign in with your <b>@themorshedgroup.com</b> account. Brand-new accounts first see a quick "account being set up" screen — you'll have full access within 24 hours.</p>
+<div class="nc-divider"></div>
+<section class="nc-h2">3 · Add to Home Screen</section>
+<div class="nc-h1">Install it — choose your browser</div>
+<p class="nc-p">These screens show <b>iOS 26</b> (the current iPhone software). Older iPhones look slightly different — see the gold notes under each step.</p>
+<section class="nc-h2">Safari</section>
+<div class="nc-step"><div class="nc-step-num">a</div><div class="nc-step-body"><div class="nc-step-title">Tap the ☰ menu</div><div class="nc-step-desc">On iOS 26, Safari's bar floats at the bottom. Tap the <b>☰ menu</b> on the <b>left</b> of the address bar — just right of the Back arrow — to open the Share sheet.</div></div></div>
+<div class="nc-tip"><i class="ti ti-info-circle"></i><div><b>Older iPhone (iOS 18)?</b> The Share button (a box with an up-arrow) sits right in the bottom toolbar — tap it and skip to step b.</div></div>
+<div class="nc-step"><div class="nc-step-num">b</div><div class="nc-step-body"><div class="nc-step-title">Tap "Add to Home Screen"</div><div class="nc-step-desc">Scroll down the Share sheet, then tap <b>Add to Home Screen</b>.</div></div></div>
+<div class="nc-tip"><i class="ti ti-info-circle"></i><div>Don't see it? You may be in an in-app browser. Open the link in <b>Safari</b> or <b>Chrome</b> directly.</div></div>
+<div class="nc-step"><div class="nc-step-num">c</div><div class="nc-step-body"><div class="nc-step-title">Keep "Open as Web App" on, tap Add</div><div class="nc-step-desc">The name pre-fills as "TMG App." Leave <b>Open as Web App</b> on (this is what makes it full-screen), then tap <b>Add</b> in the top-right.</div></div></div>
+<section class="nc-h2">Chrome</section>
+<div class="nc-step"><div class="nc-step-num">a</div><div class="nc-step-body"><div class="nc-step-title">Tap the Share icon</div><div class="nc-step-desc">Chrome installs it through the <b>same iOS Share sheet</b>. Tap the <b>Share icon</b> (a box with an up-arrow) on the <b>right</b> of the address bar — not the three-dot menu.</div></div></div>
+<div class="nc-tip"><i class="ti ti-info-circle"></i><div>Signed into Chrome with your TMG Gmail account? Good — that keeps you logged in.</div></div>
+<div class="nc-step"><div class="nc-step-num">b</div><div class="nc-step-body"><div class="nc-step-title">Tap "Add to Home Screen"</div><div class="nc-step-desc">Scroll down the Share sheet and tap <b>Add to Home Screen</b> — it's near the bottom, below <b>Print</b>.</div></div></div>
+<div class="nc-tip"><i class="ti ti-info-circle"></i><div>No "Add to Home Screen"? Update Chrome in the App Store, or use <b>Safari</b> instead.</div></div>
+<div class="nc-step"><div class="nc-step-num">c</div><div class="nc-step-body"><div class="nc-step-title">Confirm and tap Add</div><div class="nc-step-desc">Leave the name as "TMG App" and tap <b>Add</b>.</div></div></div>
+<div class="nc-warn"><i class="ti ti-lock"></i><div><b>Important:</b> Always open the TMG App from the <b>home screen icon</b> — not from a browser bookmark or link. The icon gives you the full-screen experience and keeps you signed in.</div></div>
+<div class="nc-divider"></div>
+<section class="nc-h2">Troubleshooting</section>
+<table class="nc-table"><thead><tr><th>Issue</th><th>What to do</th></tr></thead><tbody>
+<tr><td>Can't see the app after signing in?</td><td>Your account is being set up — you'll have access within 24 hours and receive an email notification once it's ready.</td></tr>
+<tr><td>App opens in browser, not full-screen</td><td>Tap the TMG App icon on your home screen — don't open it from a browser bookmark or link. On iOS 26, make sure Open as Web App was on when you added it.</td></tr>
+<tr><td>Can't find the icon after installing</td><td>Swipe through all your home screen pages, or search "TMG App" using iPhone Spotlight (swipe down from the home screen).</td></tr>
+<tr><td>Still stuck?</td><td>Message Symon in the TMG App team chat, or email manager@themorshedgroup.com with a screenshot and your iOS version.</td></tr>
+</tbody></table>
 <div class="nc-divider"></div>
 <section class="nc-h2">What's Available Now</section>
 <div class="nc-tags"><span class="nc-tag"><i class="ti ti-sparkles"></i>AI Chat</span><span class="nc-tag"><i class="ti ti-chart-bar"></i>KPI Entries</span><span class="nc-tag"><i class="ti ti-message"></i>Showings Feedback</span></div>
 <p class="nc-p">Three features are live in beta. Claude AI Chat supports projects and file uploads. KPI Entries lets agents submit scores via form or plain text. Showings Feedback Automation is managed by Alexa — end-to-end SMS follow-up.</p>
-<div class="nc-divider"></div>
-<section class="nc-h2">Troubleshooting</section>
-<table class="nc-table"><thead><tr><th>Issue</th><th>What to Do</th></tr></thead><tbody>
-<tr><td>🔒 Access Denied</td><td>Your account hasn't been added. Contact Symon.</td></tr>
-<tr><td>⏳ Pending Screen</td><td>Account is being set up. Check email within 24 hours.</td></tr>
-<tr><td>❌ Sign-in fails</td><td>Must use @themorshedgroup.com — other accounts won't work.</td></tr>
-<tr><td>📱 Can't find Add to Home Screen</td><td>On iOS 26, look for the "Install App" banner instead.</td></tr>
-</tbody></table>
-<div class="nc-warn"><i class="ti ti-lock"></i><div>If your account shows Access Denied after sign-in, your access hasn't been provisioned yet. Contact Symon — accounts are usually activated within one business day.</div></div>
 <div class="nc-divider"></div>
 <section class="nc-h2">Coming Soon — Q3 2026</section>
 <div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Team Chat</div></div>
@@ -4280,7 +4298,10 @@ Rules:
       const [busy, setBusy] = useState(false);
       const [copied, setCopied] = useState(false);
       const [dotsOpen, setDotsOpen] = useState(false);
+      const [showHtml, setShowHtml] = useState(false);
+      const [htmlDraft, setHtmlDraft] = useState('');
       const edRef = useRef(null);
+      const savedRange = useRef(null);
 
       const meName = (profile && ((profile.first_name || '') + ' ' + (profile.last_name || '')).trim()) || 'TMG Team';
       const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); } catch (e) { return ''; } };
@@ -4365,6 +4386,24 @@ Rules:
       };
       const format = (cmd, val) => { try { document.execCommand(cmd, false, val || null); edRef.current && edRef.current.focus(); } catch (e) {} };
       const insertHtml = (html) => { try { document.execCommand('insertHTML', false, html); edRef.current && edRef.current.focus(); } catch (e) {} };
+      // Insert raw HTML at the cursor. Remember the caret first (opening the modal
+      // moves focus away), then restore it and insert the sanitized markup.
+      const openHtmlModal = () => {
+        try { const s = window.getSelection(); savedRange.current = (s && s.rangeCount && edRef.current && edRef.current.contains(s.anchorNode)) ? s.getRangeAt(0).cloneRange() : null; }
+        catch (e) { savedRange.current = null; }
+        setHtmlDraft(''); setShowHtml(true);
+      };
+      const applyHtmlBlock = () => {
+        const clean = guideSanitize(htmlDraft);
+        if (!clean) { setShowHtml(false); return; }
+        try {
+          if (edRef.current) edRef.current.focus();
+          const s = window.getSelection();
+          if (savedRange.current && s) { s.removeAllRanges(); s.addRange(savedRange.current); }
+          document.execCommand('insertHTML', false, clean);
+        } catch (e) { try { if (edRef.current) edRef.current.innerHTML += clean; } catch (e2) {} }
+        setShowHtml(false); setHtmlDraft('');
+      };
 
       const toolBtn = (icon, onClick, opts) => {
         opts = opts || {};
@@ -4488,6 +4527,7 @@ Rules:
                     {editing && toolBtn('ti-list', () => format('insertUnorderedList'), { title: 'Bullet list' })}
                     {editing && toolBtn('ti-checklist', () => insertHtml('<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>To do</div></div>'), { title: 'Checklist item' })}
                     {editing && toolBtn('ti-link', () => { const u = prompt('Link URL (https://…)'); if (u) format('createLink', u); }, { title: 'Link' })}
+                    {editing && toolBtn('ti-code', openHtmlModal, { title: 'Insert HTML' })}
                     {!editing && <span style={{ fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9' }}>Tap the pencil to edit</span>}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -4526,6 +4566,19 @@ Rules:
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
                   <button onClick={() => setShowNew(false)} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 500, color: '#6B6B6B', background: '#FCFBF8', border: '0.5px solid #E4DFD4', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}>Cancel</button>
                   <button onClick={createNote} disabled={!nTitle.trim() || busy} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 600, color: '#fff', background: '#001A4A', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', opacity: (!nTitle.trim() || busy) ? 0.5 : 1 }}>{busy ? 'Creating…' : 'Create Note'}</button>
+                </div>
+              </div>
+            </div>
+          )}
+          {showHtml && (
+            <div onClick={() => setShowHtml(false)} style={{ position: 'fixed', inset: 0, zIndex: 72, background: 'rgba(0,26,74,.28)', display: 'flex', alignItems: wide ? 'center' : 'flex-end', justifyContent: 'center', padding: wide ? 20 : 0 }}>
+              <div onClick={e => e.stopPropagation()} style={{ width: wide ? 'min(640px, 95vw)' : '100%', maxHeight: '88vh', overflowY: 'auto', background: '#fff', borderRadius: wide ? 14 : '14px 14px 0 0', padding: '18px', boxShadow: '0 8px 32px rgba(0,26,74,.16)', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ fontFamily: C.fontSans, fontSize: 14, fontWeight: 600, color: '#001A4A', marginBottom: 4 }}>Insert HTML</div>
+                <div style={{ fontFamily: C.fontSans, fontSize: 10, color: '#9A958A', marginBottom: 10 }}>Pasted at the cursor. Scripts and unsafe attributes are stripped automatically. You can use the guide classes (nc-h1, nc-h2, nc-p, nc-step, nc-tip, nc-warn, nc-table, nc-tag…).</div>
+                <textarea autoFocus value={htmlDraft} onChange={e => setHtmlDraft(e.target.value)} placeholder={'<p class="nc-p">Your HTML…</p>'} spellCheck={false} style={{ width: '100%', minHeight: 220, resize: 'vertical', border: '0.5px solid #E4DFD4', borderRadius: 8, padding: '10px 12px', fontFamily: 'monospace', fontSize: 12, color: '#3A3A3A', lineHeight: 1.6, outline: 'none', background: '#FCFBF8' }} />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+                  <button onClick={() => setShowHtml(false)} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 500, color: '#6B6B6B', background: '#FCFBF8', border: '0.5px solid #E4DFD4', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}>Cancel</button>
+                  <button onClick={applyHtmlBlock} disabled={!htmlDraft.trim()} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 600, color: '#fff', background: '#001A4A', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', opacity: htmlDraft.trim() ? 1 : 0.5 }}>Insert</button>
                 </div>
               </div>
             </div>

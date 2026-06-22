@@ -142,6 +142,19 @@
   <script type="text/babel">
     const { useState, useEffect, useMemo, useRef } = React;
 
+    // True on wide screens — the AI panel splits beside the table; below the
+    // breakpoint it falls back to a full-screen overlay.
+    function useIsWide(bp) {
+      const limit = bp || 880;
+      const [wide, setWide] = useState(typeof window !== 'undefined' ? window.innerWidth >= limit : true);
+      useEffect(() => {
+        const on = () => setWide(window.innerWidth >= limit);
+        window.addEventListener('resize', on);
+        return () => window.removeEventListener('resize', on);
+      }, [limit]);
+      return wide;
+    }
+
     // ─── Design tokens (TMG Brand — editorial dialect, matches crm.html) ──
     const C = {
       bg:'#FCFBF8', surface:'#FFFFFF', surfaceHover:'#F3EBDA', surfaceAlt:'#FAF8F3', border:'#E4DFD4',
@@ -623,7 +636,7 @@
       return { ok:true, content: data.content || [], stop_reason: data.stop_reason };
     }
 
-    function AIChat({ tasks, colMap, meta, onRead, onWrite, onClose }) {
+    function AIChat({ tasks, colMap, meta, onRead, onWrite, onClose, split }) {
       const [log, setLog] = useState([]);
       const [input, setInput] = useState('');
       const [busy, setBusy] = useState(false);
@@ -689,9 +702,8 @@
       const SUGGESTIONS = ['How many calls are overdue?', 'Mark the James Gill pop-by complete', 'Create a follow-up call for Molly Kinney'];
       const bubble = { maxWidth:'85%', padding:'9px 13px', borderRadius:14, fontSize:'0.86rem', lineHeight:1.5, whiteSpace:'pre-wrap' };
 
-      return (
-        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:40, display:'flex', justifyContent:'flex-end' }}>
-          <div onClick={e => e.stopPropagation()} style={{ width:'min(440px,94vw)', height:'100%', background:C.bg, borderLeft:'1px solid '+C.border, boxShadow:'-20px 0 50px rgba(0,26,74,.18)', display:'flex', flexDirection:'column', animation:'tmg-fade .18s ease' }}>
+      const panel = (
+        <div onClick={e => e.stopPropagation()} style={{ width: split ? 'min(460px, 40vw)' : 'min(440px,94vw)', minWidth: split ? 360 : undefined, flexShrink:0, height:'100%', background:C.bg, borderLeft:'1px solid '+C.border, boxShadow: split ? 'none' : '-20px 0 50px rgba(0,26,74,.18)', display:'flex', flexDirection:'column', animation:'tmg-fade .18s ease' }}>
             {/* head */}
             <div style={{ flexShrink:0, display:'flex', alignItems:'center', justifyContent:'space-between', padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface }}>
               <div style={{ display:'flex', alignItems:'center', gap:9 }}>
@@ -782,6 +794,11 @@
               <div style={{ fontSize:'0.66rem', color:C.textMuted, marginTop:7, textAlign:'center' }}>Changes are previewed for your confirmation — nothing writes to Zoho silently.</div>
             </div>
           </div>
+      );
+      if (split) return panel;
+      return (
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:40, display:'flex', justifyContent:'flex-end' }}>
+          {panel}
         </div>
       );
     }
@@ -1023,6 +1040,10 @@
       }, [tasks, q, sel, sortKey, sortDir, colMap]);
 
       const activeFilters = (sel.status?.length || 0) + (sel.type?.length || 0) + (sel.owner?.length || 0);
+      const isWide = useIsWide();
+      const aiOpen = drawer?.mode === 'ai';
+      const aiSplit = aiOpen && isWide;     // dock beside the table
+      const aiOverlay = aiOpen && !isWide;  // full-screen on mobile
 
       const iconBtn = { display:'inline-flex', alignItems:'center', gap:7, fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:500, color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:9, padding:'8px 13px', cursor:'pointer' };
 
@@ -1057,7 +1078,7 @@
                 <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{tasks ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` : 'Loading…'}</div>
               </div>
               <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                <button onClick={() => setDrawer({ mode:'ai' })} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background:C.gold+'0f', fontWeight:600 }}>
+                <button onClick={() => setDrawer(d => d?.mode === 'ai' ? null : { mode:'ai' })} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background: aiOpen ? C.gold+'22' : C.gold+'0f', fontWeight:600 }}>
                   <i className="ti ti-sparkles" style={{ fontSize:15 }} /> Ask AI
                 </button>
                 <button onClick={() => setDrawer({ mode:'create' })} style={{ ...iconBtn, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
@@ -1093,7 +1114,8 @@
             <div style={{ margin:'16px 22px 0', padding:14, border:'1px solid '+C.red+'44', background:C.red+'0d', borderRadius:10, color:C.red, fontSize:'0.82rem', lineHeight:1.5 }}>{err}</div>
           )}
 
-          {/* Table */}
+          {/* Table + (split) AI panel */}
+          <div style={{ flex:1, display:'flex', minHeight:0 }}>
           <main style={{ flex:1, overflow:'auto', minHeight:0 }}>
             {tasks === null && <div style={{ padding:40, textAlign:'center' }}><Spinner size={26} /></div>}
             {tasks && view.length === 0 && !err && (
@@ -1150,8 +1172,10 @@
               </table>
             )}
           </main>
+          {aiSplit && <AIChat tasks={tasks} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} split />}
+          </div>
 
-          {drawer?.mode === 'ai' && <AIChat tasks={tasks} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
+          {aiOverlay && <AIChat tasks={tasks} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
           {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
             <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}
               onClose={() => setDrawer(null)} onWrite={writeTask} onDelete={removeTask} />

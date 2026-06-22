@@ -1183,10 +1183,10 @@
               </table>
             )}
           </main>
-          {aiSplit && <AIChat tasks={tasks} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} split />}
+          {aiSplit && <AIChat tasks={view} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} split />}
           </div>
 
-          {aiOverlay && <AIChat tasks={tasks} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
+          {aiOverlay && <AIChat tasks={view} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
           {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
             <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}
               onClose={() => setDrawer(null)} onWrite={writeTask} onDelete={removeTask} />

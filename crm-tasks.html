@@ -722,7 +722,28 @@
       return { ok:true, content: data.content || [], stop_reason: data.stop_reason };
     }
 
-    function AIChat({ tasks, colMap, meta, onRead, onWrite, onClose, split }) {
+    // Saved prompts persist locally (per browser).
+    const PROMPTS_KEY = 'tmg_tasks_prompts';
+    function loadPrompts() { try { return JSON.parse(localStorage.getItem(PROMPTS_KEY) || '[]'); } catch (e) { return []; } }
+    function savePromptsLS(arr) { try { localStorage.setItem(PROMPTS_KEY, JSON.stringify(arr)); } catch (e) {} }
+
+    // Human labels for the live Activity feed.
+    const ACTIVITY_LABELS = { find_contact:'Looking up a contact', search_tasks:'Searching all tasks', get_contact:'Reading contact details', audit_spouse_dates:'Checking spouse dates', check_call_due_dates:'Checking call cadence', check_couple_cadence:'Checking couples', find_duplicate_calls:'Finding duplicate calls', create_task:'Creating a task', update_task:'Updating a task', delete_task:'Deleting a task' };
+    function activityLabel(name, input) {
+      if (name === 'bulk_update_tasks' || name === 'bulk_delete_tasks') { const n = input && input.ids ? input.ids.length : 0; return (name === 'bulk_delete_tasks' ? 'Deleting ' : 'Updating ') + n + ' task' + (n === 1 ? '' : 's'); }
+      return ACTIVITY_LABELS[name] || name;
+    }
+    function activityDetail(r) {
+      if (!r) return '';
+      if (Array.isArray(r.duplicates)) return r.duplicates.length + ' with duplicates';
+      if (Array.isArray(r.couples)) return r.couples.length + ' couple' + (r.couples.length === 1 ? '' : 's');
+      if (Array.isArray(r.tasks)) return r.tasks.length + ' found';
+      if (Array.isArray(r.matches)) return r.matches.length + ' match' + (r.matches.length === 1 ? '' : 'es');
+      if ('contact' in r) return r.contact ? (r.contact.full_name || 'found') : 'not found';
+      return 'done';
+    }
+
+    function AIChat({ tasks, colMap, meta, onRead, onWrite, onClose, split, showActivity }) {
       const [log, setLog] = useState([]);
       const [input, setInput] = useState('');
       const [busy, setBusy] = useState(false);
@@ -731,10 +752,17 @@
       const resolvers = useRef({});
       const scrollRef = useRef(null);
       const nextId = () => ++idRef.current;
+      const [activity, setActivity] = useState([]);
+      const [savedPrompts, setSavedPrompts] = useState(loadPrompts);
+      const [showSaved, setShowSaved] = useState(false);
 
       useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [log, busy]);
 
       function push(item) { setLog(l => [...l, { id: nextId(), ...item }]); }
+      function pushActivity(entry) { const id = nextId(); setActivity(a => [...a, { id, ...entry }]); return id; }
+      function updateActivity(id, patch) { setActivity(a => a.map(x => x.id === id ? { ...x, ...patch } : x)); }
+      function saveCurrent() { const v = input.trim(); if (!v) return; setSavedPrompts(p => { if (p.includes(v)) return p; const n = [v, ...p].slice(0, 20); savePromptsLS(n); return n; }); setShowSaved(false); }
+      function removePrompt(p) { setSavedPrompts(prev => { const n = prev.filter(x => x !== p); savePromptsLS(n); return n; }); }
       function confirmWrite(tool) {
         return new Promise(resolve => {
           const cid = nextId();
@@ -760,12 +788,17 @@
           const results = [];
           for (const tu of toolUses) {
             if (READS.includes(tu.name)) {
+              const aId = pushActivity({ label: activityLabel(tu.name, tu.input), status:'running' });
               const r = await onRead(tu.name, tu.input);
+              updateActivity(aId, { status:'done', detail: activityDetail(r) });
               results.push({ type:'tool_result', tool_use_id: tu.id, content: JSON.stringify(r) });
             } else {
+              const aId = pushActivity({ label: activityLabel(tu.name, tu.input), status:'await' });
               const ok = await confirmWrite(tu);
-              if (!ok) { results.push({ type:'tool_result', tool_use_id: tu.id, content:'User declined this action.' }); continue; }
+              if (!ok) { updateActivity(aId, { status:'cancelled', detail:'cancelled' }); results.push({ type:'tool_result', tool_use_id: tu.id, content:'User declined this action.' }); continue; }
+              updateActivity(aId, { status:'running' });
               const wr = await onWrite(tu.name, tu.input);
+              updateActivity(aId, { status: wr && wr.ok ? 'done' : 'error', detail: wr && wr.ok ? (wr.summary || 'done') : ((wr && wr.error) || 'failed') });
               results.push({ type:'tool_result', tool_use_id: tu.id, content: wr && wr.ok ? (wr.ai || wr.summary || 'Success.') : ('Error: ' + ((wr && wr.error) || 'failed')), is_error: !(wr && wr.ok) });
               if (wr && wr.ok) push({ type:'result', summary: wr.summary || 'Change applied', records: wr.records || [] });
               else push({ type:'note', text: 'Couldn’t apply that — ' + ((wr && wr.error) || 'failed') });
@@ -788,8 +821,8 @@
       const SUGGESTIONS = ['How many calls are overdue?', 'Mark the James Gill pop-by complete', 'Create a follow-up call for Molly Kinney'];
       const bubble = { maxWidth:'85%', padding:'9px 13px', borderRadius:14, fontSize:'0.86rem', lineHeight:1.5, whiteSpace:'pre-wrap' };
 
-      const panel = (
-        <div onClick={e => e.stopPropagation()} style={{ width: split ? 'min(460px, 40vw)' : 'min(440px,94vw)', minWidth: split ? 360 : undefined, flexShrink:0, height:'100%', background:C.bg, borderLeft:'1px solid '+C.border, boxShadow: split ? 'none' : '-20px 0 50px rgba(0,26,74,.18)', display:'flex', flexDirection:'column', animation:'tmg-fade .18s ease' }}>
+      const chatCol = (
+        <div style={{ width: split ? (showActivity ? 'min(440px,34vw)' : 'min(460px,40vw)') : 'min(440px,94vw)', minWidth: split ? 340 : undefined, flexShrink:0, height:'100%', background:C.bg, display:'flex', flexDirection:'column' }}>
             {/* head */}
             <div style={{ flexShrink:0, display:'flex', alignItems:'center', justifyContent:'space-between', padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface }}>
               <div style={{ display:'flex', alignItems:'center', gap:9 }}>
@@ -808,6 +841,9 @@
                   <div style={{ fontFamily:C.fontDisplay, fontSize:'1.3rem', color:C.navy, margin:'8px 0 4px' }}>Ask about your tasks</div>
                   <div style={{ fontSize:'0.8rem', color:C.textMuted, marginBottom:16, lineHeight:1.5 }}>I can read everything in view and make changes — with your confirmation.</div>
                   <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                    {savedPrompts.map(p => (
+                      <button key={'sv' + p} onClick={() => send(p)} style={{ fontFamily:C.fontSans, fontSize:'0.8rem', color:C.navy, background:C.gold+'14', border:'1px solid '+C.gold+'44', borderRadius:10, padding:'9px 12px', cursor:'pointer', textAlign:'left', display:'flex', alignItems:'flex-start', gap:7 }}><i className="ti ti-bookmark" style={{ fontSize:13, color:C.gold, marginTop:2 }} /><span style={{ flex:1 }}>{p}</span></button>
+                    ))}
                     {SUGGESTIONS.map(s => (
                       <button key={s} onClick={() => send(s)} style={{ fontFamily:C.fontSans, fontSize:'0.8rem', color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:10, padding:'9px 12px', cursor:'pointer', textAlign:'left' }}>{s}</button>
                     ))}
@@ -867,8 +903,22 @@
             </div>
 
             {/* composer */}
-            <div style={{ flexShrink:0, padding:'12px 16px', borderTop:'1px solid '+C.border, background:C.surface }}>
+            <div style={{ flexShrink:0, padding:'12px 16px', borderTop:'1px solid '+C.border, background:C.surface, position:'relative' }}>
+              {showSaved && (
+                <div style={{ position:'absolute', bottom:'calc(100% - 4px)', left:16, right:16, background:C.surface, border:'1px solid '+C.border, borderRadius:12, boxShadow:'0 -10px 30px rgba(0,26,74,.14)', padding:10, maxHeight:240, overflowY:'auto', zIndex:6 }}>
+                  <button onClick={saveCurrent} disabled={!input.trim()} style={{ width:'100%', textAlign:'left', fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:600, color: input.trim() ? C.navy : C.textMuted, background:'transparent', border:'none', cursor: input.trim() ? 'pointer' : 'default', padding:'6px 4px', display:'flex', alignItems:'center', gap:7 }}><i className="ti ti-plus" style={{ fontSize:15 }} />Save current message</button>
+                  {savedPrompts.length > 0 && <div style={{ height:1, background:C.border, margin:'6px 0' }} />}
+                  {savedPrompts.length === 0 && <div style={{ fontSize:'0.74rem', color:C.textMuted, padding:'4px' }}>No saved prompts yet — type one and tap “Save current message.”</div>}
+                  {savedPrompts.map(p => (
+                    <div key={p} style={{ display:'flex', alignItems:'flex-start', gap:6, padding:'5px 4px' }}>
+                      <button onClick={() => { setInput(p); setShowSaved(false); }} style={{ flex:1, textAlign:'left', fontFamily:C.fontSans, fontSize:'0.78rem', color:C.textPrimary, background:'transparent', border:'none', cursor:'pointer', lineHeight:1.45, overflow:'hidden', textOverflow:'ellipsis', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical' }}>{p}</button>
+                      <button onClick={() => removePrompt(p)} title="Remove" style={{ flexShrink:0, background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:14 }} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={{ display:'flex', alignItems:'flex-end', gap:9 }}>
+                <button onClick={() => setShowSaved(s => !s)} title="Saved prompts" style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'1px solid '+(showSaved ? C.gold : C.border), background: showSaved ? C.gold+'14' : C.surface, color: showSaved ? C.gold : C.navy, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center' }}><i className="ti ti-bookmark" style={{ fontSize:17 }} /></button>
                 <textarea value={input} onChange={e => setInput(e.target.value)} rows={1}
                   onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
                   placeholder="Ask or tell me what to do…"
@@ -880,6 +930,37 @@
               <div style={{ fontSize:'0.66rem', color:C.textMuted, marginTop:7, textAlign:'center' }}>Changes are previewed for your confirmation — nothing writes to Zoho silently.</div>
             </div>
           </div>
+      );
+      const activityPanel = (
+        <div style={{ width:300, flexShrink:0, height:'100%', background:C.surfaceAlt, borderLeft:'1px solid '+C.border, display:'flex', flexDirection:'column' }}>
+          <div style={{ flexShrink:0, padding:'18px', borderBottom:'1px solid '+C.border, display:'flex', alignItems:'center', gap:8 }}>
+            <i className="ti ti-activity" style={{ fontSize:15, color:C.gold }} />
+            <span style={{ fontFamily:C.fontDisplay, fontSize:'1.15rem', fontWeight:600, color:C.navy }}>Activity</span>
+          </div>
+          <div style={{ flex:1, overflowY:'auto', padding:'14px 16px', display:'flex', flexDirection:'column', gap:11 }}>
+            {activity.length === 0 && <div style={{ fontSize:'0.78rem', color:C.textMuted, lineHeight:1.55 }}>Steps the AI takes — searches, checks, and changes — show here as it works.</div>}
+            {activity.map(a => {
+              const ic = a.status === 'running' ? 'ti-loader-2' : a.status === 'await' ? 'ti-clock' : a.status === 'cancelled' ? 'ti-circle-x' : a.status === 'error' ? 'ti-alert-circle' : 'ti-circle-check';
+              const col = a.status === 'running' ? C.gold : a.status === 'await' ? C.amber : a.status === 'cancelled' ? C.textMuted : a.status === 'error' ? C.red : C.green;
+              const sub = a.status === 'await' ? 'waiting for your confirm' : (a.detail || '');
+              return (
+                <div key={a.id} style={{ display:'flex', gap:8, alignItems:'flex-start' }}>
+                  <i className={'ti ' + ic} style={{ fontSize:15, color:col, marginTop:2, flexShrink:0, animation: a.status === 'running' ? 'tmg-spin 0.8s linear infinite' : 'none' }} />
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ fontSize:'0.8rem', color:C.textPrimary, fontWeight:500 }}>{a.label}</div>
+                    {sub && <div style={{ fontSize:'0.72rem', color: a.status === 'await' ? C.amber : C.textSecondary, lineHeight:1.4 }}>{sub}</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+      const panel = (
+        <div onClick={e => e.stopPropagation()} style={{ display:'flex', flexShrink:0, height:'100%', borderLeft:'1px solid '+C.border, boxShadow: split ? 'none' : '-20px 0 50px rgba(0,26,74,.18)', animation:'tmg-fade .18s ease' }}>
+          {chatCol}
+          {showActivity && split && activityPanel}
+        </div>
       );
       if (split) return panel;
       return (
@@ -1325,6 +1406,7 @@
 
       const activeFilters = (sel.status?.length || 0) + (sel.type?.length || 0) + (sel.owner?.length || 0);
       const isWide = useIsWide();
+      const isXWide = useIsWide(1180); // room for a third (Activity) column
       const aiOpen = drawer?.mode === 'ai';
       const aiSplit = aiOpen && isWide;     // dock beside the table
       const aiOverlay = aiOpen && !isWide;  // full-screen on mobile
@@ -1456,7 +1538,7 @@
               </table>
             )}
           </main>
-          {aiSplit && <AIChat tasks={view} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} split />}
+          {aiSplit && <AIChat tasks={view} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} split showActivity={isXWide} />}
           </div>
 
           {aiOverlay && <AIChat tasks={view} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}

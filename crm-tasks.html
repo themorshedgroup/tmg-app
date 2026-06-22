@@ -319,6 +319,11 @@
       keys.forEach(k => { const sp = DEV_SPOUSES[k]; out[k] = sp ? { id: sp, name: sp } : null; });
       return out;
     }
+    function devTasksForContacts(keys) {
+      const out = {};
+      keys.forEach(k => { out[k] = DEV_TASKS.filter(t => (t.Who_Id && t.Who_Id.name) === k); });
+      return out;
+    }
     function ContactPicker({ value, onChange }) {
       const [q, setQ] = useState('');
       const [results, setResults] = useState(null);
@@ -980,6 +985,8 @@
         }
         const keys = Object.keys(byKey);
         if (!keys.length) return { couples: [], note: 'No tasks with a contact in the current view.' };
+
+        // Spouse links for the in-view contacts.
         let links;
         if (isDev()) { links = devSpouseLinks(keys); }
         else {
@@ -988,18 +995,36 @@
           if (data.error) return { couples: [], note: data.error };
           links = data.links || {};
         }
+
+        // v2: for spouses NOT in the current view, fetch their tasks so no pair is missed.
+        const missing = [...new Set(keys.map(k => links[k]).filter(sp => sp && sp.id && !byKey[sp.id]).map(sp => sp.id))];
+        let fetched = {};
+        if (missing.length) {
+          if (isDev()) { fetched = devTasksForContacts(missing); }
+          else {
+            const { ok, data } = await callZoho({ action:'tasks_for_contacts', contact_ids: missing.slice(0, 60), type_field: colMap.type });
+            if (ok && data.tasks_by_contact) fetched = data.tasks_by_contact;
+          }
+        }
+        const fromFetched = (spId, spName) => {
+          const arr = fetched[spId] || [];
+          return { name: (arr[0] && arr[0].Who_Id && arr[0].Who_Id.name) || spName || spId, tasks: arr.map(t => ({ id: t.id, subject: t.Subject, due: t.Due_Date || null })) };
+        };
+
         const seen = new Set();
         const couples = [];
         for (const k of keys) {
           const sp = links[k];
-          if (!sp || !sp.id || !byKey[sp.id]) continue;   // no spouse, or spouse not in view
+          if (!sp || !sp.id) continue;                    // contact has no spouse
           const pair = [k, sp.id].sort().join('|');
           if (seen.has(pair)) continue;
+          const a = byKey[k];
+          const b = byKey[sp.id] || fromFetched(sp.id, sp.name);
+          if (!b.tasks || !b.tasks.length) continue;      // spouse has no task to compare
           seen.add(pair);
-          const a = byKey[k], b = byKey[sp.id];
           const datesA = JSON.stringify([...new Set(a.tasks.map(x => x.due))].sort());
           const datesB = JSON.stringify([...new Set(b.tasks.map(x => x.due))].sort());
-          couples.push({ a: { name:a.name, tasks:a.tasks }, b: { name:b.name, tasks:b.tasks }, match: datesA === datesB });
+          couples.push({ a: { name:a.name, tasks:a.tasks }, b: { name:b.name, tasks:b.tasks }, match: datesA === datesB, spouse_in_view: !!byKey[sp.id] });
         }
         return { couples, mismatch_count: couples.filter(c => !c.match).length, match_count: couples.filter(c => c.match).length };
       }

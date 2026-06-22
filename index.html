@@ -384,22 +384,30 @@ Continue with TMG Gmail
         return (data || []).map(r => ({
           id: r.id, type: r.type, workRequest: r.work_request,
           title: r.title || 'New chat', pinned: !!r.pinned, archived: !!r.archived,
+          projectId: r.project_id || null,
           updatedAt: r.updated_at,
         }));
       },
 
-      async createConversation({ type, workRequest, title }) {
+      async createConversation({ type, workRequest, title, projectId }) {
         if (!this.client()) {
-          return { id: 'local-' + Date.now(), type, workRequest: workRequest || null, title: title || 'New chat', pinned: false, archived: false };
+          return { id: 'local-' + Date.now(), type, workRequest: workRequest || null, title: title || 'New chat', pinned: false, archived: false, projectId: projectId || null };
         }
         const { data, error } = await this.client().from('ai_conversations').insert({
           user_id: this.userId(),
           type: type || 'ai',
           work_request: workRequest || null,
           title: title || null,
+          project_id: projectId || null,
         }).select().single();
         if (error) { console.error('[ConvDB] create:', error.message); throw error; }
-        return { id: data.id, type: data.type, workRequest: data.work_request, title: data.title || 'New chat', pinned: false, archived: false };
+        return { id: data.id, type: data.type, workRequest: data.work_request, title: data.title || 'New chat', pinned: false, archived: false, projectId: data.project_id || null };
+      },
+
+      async setProject(id, projectId) {
+        if (!this.client() || String(id).startsWith('local-')) return;
+        const { error } = await this.client().from('ai_conversations').update({ project_id: projectId || null, updated_at: new Date().toISOString() }).eq('id', id);
+        if (error) console.error('[ConvDB] setProject:', error.message);
       },
 
       async updateConversation(id, fields) {
@@ -469,6 +477,76 @@ Continue with TMG Gmail
         const { data, error } = await this.client().storage.from('chat-attachments').createSignedUrl(path, 7200);
         if (error) { console.error('[ConvDB] signedUrl:', error.message); return null; }
         return data?.signedUrl || null;
+      },
+    };
+
+    // ─── AI assistant memory + Projects (personal, per user) ──────────
+    // localhost has no Supabase client, so these fall back to in-memory fixtures.
+    let _devAiMemory = '';
+    let _devProjects = [];
+    let _devProjectFiles = {}; // projectId -> [files]
+
+    const AIMemoryDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+      async get() {
+        if (!this.client()) return _devAiMemory;
+        const { data, error } = await this.client().from('ai_user_memory').select('memory').eq('user_id', this.uid()).maybeSingle();
+        if (error) { console.error('[AIMemoryDB] get:', error.message); return ''; }
+        return (data && data.memory) || '';
+      },
+      async set(memory) {
+        if (!this.client()) { _devAiMemory = memory || ''; return; }
+        const { error } = await this.client().from('ai_user_memory').upsert({ user_id: this.uid(), memory: memory || '', updated_at: new Date().toISOString() });
+        if (error) { console.error('[AIMemoryDB] set:', error.message); throw error; }
+      },
+    };
+
+    const ProjectDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+      _map(r) { return { id: r.id, name: r.name, instructions: r.instructions || '', memory: r.memory || '', archived: !!r.archived, updatedAt: r.updated_at }; },
+      async list() {
+        if (!this.client()) return _devProjects.slice();
+        const { data, error } = await this.client().from('ai_projects').select('*').eq('archived', false).order('updated_at', { ascending: false });
+        if (error) { console.error('[ProjectDB] list:', error.message); return []; }
+        return (data || []).map(this._map);
+      },
+      async create(name) {
+        const row = { name: name || 'New project', instructions: '', memory: '' };
+        if (!this.client()) { const r = { ...row, id: 'devp-' + Math.random().toString(36).slice(2), archived: false, updatedAt: new Date().toISOString() }; _devProjects.unshift(r); return r; }
+        const { data, error } = await this.client().from('ai_projects').insert({ ...row, user_id: this.uid() }).select().single();
+        if (error) { console.error('[ProjectDB] create:', error.message); throw error; }
+        return this._map(data);
+      },
+      async update(id, fields) {
+        const p = { ...fields, updated_at: new Date().toISOString() };
+        if (!this.client()) { const i = _devProjects.findIndex(x => x.id === id); if (i >= 0) _devProjects[i] = { ..._devProjects[i], ...fields }; return; }
+        const { error } = await this.client().from('ai_projects').update(p).eq('id', id);
+        if (error) { console.error('[ProjectDB] update:', error.message); throw error; }
+      },
+      async remove(id) {
+        if (!this.client()) { _devProjects = _devProjects.filter(x => x.id !== id); delete _devProjectFiles[id]; return; }
+        const { error } = await this.client().from('ai_projects').delete().eq('id', id);
+        if (error) { console.error('[ProjectDB] remove:', error.message); throw error; }
+      },
+      async listFiles(projectId) {
+        if (!this.client()) return (_devProjectFiles[projectId] || []).slice();
+        const { data, error } = await this.client().from('ai_project_files').select('*').eq('project_id', projectId).order('created_at', { ascending: true });
+        if (error) { console.error('[ProjectDB] listFiles:', error.message); return []; }
+        return (data || []).map(r => ({ id: r.id, name: r.name, mimeType: r.mime_type, size: r.size, textContent: r.text_content || '' }));
+      },
+      async addFile(projectId, f) {
+        const row = { name: f.name, mime_type: f.mimeType || null, size: f.size || null, text_content: f.textContent || '' };
+        if (!this.client()) { const r = { id: 'devf-' + Math.random().toString(36).slice(2), name: row.name, mimeType: row.mime_type, size: row.size, textContent: row.text_content }; (_devProjectFiles[projectId] = _devProjectFiles[projectId] || []).push(r); return r; }
+        const { data, error } = await this.client().from('ai_project_files').insert({ ...row, project_id: projectId, user_id: this.uid() }).select().single();
+        if (error) { console.error('[ProjectDB] addFile:', error.message); throw error; }
+        return { id: data.id, name: data.name, mimeType: data.mime_type, size: data.size, textContent: data.text_content || '' };
+      },
+      async removeFile(id, projectId) {
+        if (!this.client()) { if (_devProjectFiles[projectId]) _devProjectFiles[projectId] = _devProjectFiles[projectId].filter(x => x.id !== id); return; }
+        const { error } = await this.client().from('ai_project_files').delete().eq('id', id);
+        if (error) { console.error('[ProjectDB] removeFile:', error.message); throw error; }
       },
     };
 
@@ -838,7 +916,7 @@ Rules:
     };
 
     // ─── AI Chat Tab ─────────────────────────────────────────────────
-    function AIChatTab({ user, messages, loading, mode, dark, pills, onPill, flowCard, flowKey }) {
+    function AIChatTab({ user, messages, loading, mode, dark, pills, onPill, flowCard, flowKey, projectName }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
       const scrollRef = useRef(null);
 
@@ -852,6 +930,13 @@ Rules:
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {/* Messages */}
           <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '20px 16px 64px' }}>
+            {projectName && (
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderRadius: 20, background: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', border: `1px solid ${dark ? 'rgba(173,131,47,0.3)' : '#E8D9BC'}`, fontFamily: C.fontSans, fontSize: 11, fontWeight: 600, color: dark ? '#C9A45A' : '#AD832F' }}>
+                  <i className="ti ti-folder" style={{ fontSize: 13 }} />{projectName}
+                </div>
+              </div>
+            )}
             {empty ? (
               <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 24px' }}>
                 <div style={{ fontSize: '2rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, fontFamily: C.fontDisplay }}>
@@ -5250,8 +5335,9 @@ Rules:
     }
 
     // In-flow chat history panel — fills the area between the top bar and the bottom zone.
-    function HistoryPanel({ dark, conversations, onSelect, onNewChat, onPin, onArchive, onRename, onDelete }) {
+    function HistoryPanel({ dark, conversations, projects, onSelect, onNewChat, onPin, onArchive, onRename, onDelete, onOpenMemory, onNewProject, onOpenProject, onMoveToProject }) {
       const [menuId, setMenuId] = useState(null);
+      const [movingId, setMovingId] = useState(null); // conv being moved to a project
       const panelBg    = dark ? '#070F1E' : '#FFFFFF';
       const headBord   = dark ? '#0D1E3A' : '#F0EBE3';
       const titleCol   = dark ? '#FFFFFF' : '#001A4A';
@@ -5262,8 +5348,8 @@ Rules:
       const J = "'Jost', sans-serif";
       const menuBord = dark ? '#1A2D4D' : '#EAE3D6';
       const pinCol   = dark ? '#C9A45A' : '#AD832F';
-      const list = (conversations || []).filter(c => !c.archived)
-        .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)); // pinned float to top
+      const list = (conversations || []).filter(c => !c.archived && !c.projectId)
+        .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)); // pinned float to top; project chats live in their project
       const ico = (type) => type === 'work'
         ? { bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', color: dark ? '#C9A45A' : '#AD832F', icon: 'ti-briefcase' }
         : { bg: dark ? 'rgba(255,255,255,0.07)' : '#EEF0F8', color: dark ? 'rgba(255,255,255,0.6)' : '#001A4A', icon: 'ti-sparkles' };
@@ -5272,15 +5358,45 @@ Rules:
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: panelBg }}>
           {/* Header */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px 9px', borderBottom: `1px solid ${headBord}`, flexShrink: 0 }}>
-            <div style={{ fontFamily: J, fontSize: 10, letterSpacing: '0.18em', fontWeight: 600, color: titleCol }}>Chats</div>
-            <button onClick={onNewChat} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 20, border: 'none', cursor: 'pointer', background: btnBg, color: '#fff', fontFamily: J, fontSize: 8, letterSpacing: '0.14em', fontWeight: 500 }}>
-              <i className="ti ti-plus" style={{ fontSize: 11 }} />New
-            </button>
+            <div style={{ fontFamily: J, fontSize: 11, letterSpacing: '0.14em', fontWeight: 600, color: titleCol }}>AI Chat</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+              <button onClick={onOpenMemory} title="Assistant memory & settings" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 7, border: `1px solid ${headBord}`, cursor: 'pointer', background: 'transparent', color: dark ? 'rgba(255,255,255,0.6)' : '#6B6B6B' }}>
+                <i className="ti ti-settings" style={{ fontSize: 14 }} />
+              </button>
+              <button onClick={onNewChat} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 20, border: 'none', cursor: 'pointer', background: btnBg, color: '#fff', fontFamily: J, fontSize: 8, letterSpacing: '0.14em', fontWeight: 500 }}>
+                <i className="ti ti-plus" style={{ fontSize: 11 }} />New
+              </button>
+            </div>
           </div>
           {/* List */}
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {/* Projects */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 14px 5px' }}>
+              <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.16em', fontWeight: 700, color: previewCol }}>PROJECTS</div>
+              <button onClick={onNewProject} title="New project" style={{ background: 'none', border: 'none', cursor: 'pointer', color: pinCol, fontSize: 15, display: 'flex', padding: 0 }}><i className="ti ti-plus" /></button>
+            </div>
+            {(projects || []).length === 0 && (
+              <div style={{ padding: '0 14px 8px', fontFamily: J, fontSize: 9, color: previewCol, lineHeight: 1.5 }}>No projects yet. Tap ＋ to group chats with their own instructions &amp; files.</div>
+            )}
+            {(projects || []).map(p => {
+              const count = (conversations || []).filter(c => c.projectId === p.id && !c.archived).length;
+              return (
+                <div key={p.id} onClick={() => onOpenProject(p.id)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 14px', cursor: 'pointer', borderBottom: `1px solid ${rowBord}` }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA' }}>
+                    <i className="ti ti-folder" style={{ fontSize: 14, color: pinCol }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: titleCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+                    <div style={{ fontFamily: J, fontSize: 8, color: previewCol, marginTop: 1 }}>{count} chat{count === 1 ? '' : 's'}</div>
+                  </div>
+                  <i className="ti ti-chevron-right" style={{ fontSize: 14, color: timeCol, flexShrink: 0 }} />
+                </div>
+              );
+            })}
+            {/* Chats */}
+            <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.16em', fontWeight: 700, color: previewCol, padding: '13px 14px 5px' }}>CHATS</div>
             {list.length === 0 && (
-              <div style={{ textAlign: 'center', color: previewCol, fontSize: '0.8rem', padding: '32px 16px', fontFamily: J }}>No conversations yet.</div>
+              <div style={{ textAlign: 'center', color: previewCol, fontSize: '0.8rem', padding: '20px 16px', fontFamily: J }}>No conversations yet.</div>
             )}
             {list.map((c, i) => {
               const k = ico(c.type);
@@ -5314,6 +5430,7 @@ Rules:
                         {[
                           c.pinned ? { t: 'Unpin', i: 'ti-pinned-off', fn: () => onPin(c.id, false) } : { t: 'Pin', i: 'ti-pin', fn: () => onPin(c.id, true) },
                           { t: 'Rename', i: 'ti-pencil', fn: () => onRename(c.id) },
+                          { t: 'Move to project', i: 'ti-folder', fn: () => setMovingId(c.id) },
                           { t: 'Archive', i: 'ti-archive', fn: () => onArchive(c.id, true) },
                           { t: 'Delete', i: 'ti-trash', fn: () => onDelete(c.id), danger: true },
                         ].map(a => (
@@ -5328,6 +5445,19 @@ Rules:
               );
             })}
           </div>
+          {movingId && (
+            <React.Fragment>
+              <div onClick={() => setMovingId(null)} style={{ position: 'fixed', inset: 0, zIndex: 130, background: 'rgba(0,13,38,0.3)' }} />
+              <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 131, width: 'min(280px, 86vw)', maxHeight: '70vh', overflowY: 'auto', background: panelBg, border: `1px solid ${menuBord}`, borderRadius: 12, boxShadow: '0 10px 40px rgba(0,0,0,0.3)', padding: 8 }}>
+                <div style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.12em', fontWeight: 700, color: previewCol, padding: '6px 8px 8px' }}>MOVE TO PROJECT</div>
+                <button onClick={() => { onMoveToProject(movingId, null); setMovingId(null); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', background: 'none', color: titleCol, fontFamily: J, fontSize: 11 }}><i className="ti ti-circle-off" style={{ fontSize: 14 }} />No project</button>
+                {(projects || []).map(p => (
+                  <button key={p.id} onClick={() => { onMoveToProject(movingId, p.id); setMovingId(null); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 8, border: 'none', cursor: 'pointer', background: 'none', color: titleCol, fontFamily: J, fontSize: 11 }}><i className="ti ti-folder" style={{ fontSize: 14, color: pinCol }} />{p.name}</button>
+                ))}
+                {(projects || []).length === 0 && <div style={{ fontFamily: J, fontSize: 10, color: previewCol, padding: '4px 8px 8px' }}>No projects yet — create one with ＋.</div>}
+              </div>
+            </React.Fragment>
+          )}
         </div>
       );
     }
@@ -5502,6 +5632,122 @@ Rules:
       );
     }
 
+    // Global assistant memory editor (applies to every AI chat).
+    function GlobalMemoryModal({ dark, initial, onSave, onClose }) {
+      const [text, setText] = useState(initial || '');
+      const [busy, setBusy] = useState(false);
+      const bg = dark ? '#0A1730' : '#fff', bord = dark ? '#152545' : C.border;
+      const txt = dark ? '#fff' : C.navy, sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const save = async () => { setBusy(true); try { await onSave(text); onClose(); } finally { setBusy(false); } };
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 140, background: 'rgba(0,26,74,0.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: 'min(560px, 95vw)', maxHeight: '88vh', overflowY: 'auto', background: bg, borderRadius: 16, padding: '22px 20px', boxShadow: '0 12px 40px rgba(0,26,74,0.22)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <i className="ti ti-brain" style={{ fontSize: 18, color: C.gold }} />
+              <div style={{ fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.4rem', color: txt }}>Assistant Memory</div>
+            </div>
+            <div style={{ fontFamily: C.fontSans, fontSize: 11, color: sub, marginBottom: 14, lineHeight: 1.5 }}>Applied to <b>every</b> AI chat. Tell the assistant what to always keep in mind — your role, your team, preferences, recurring context.</div>
+            <textarea autoFocus value={text} onChange={e => setText(e.target.value)} placeholder={"e.g. I'm Symon, Operations Manager at The Morshed Group (real estate). Keep replies concise. Our agents are …"} style={{ width: '100%', minHeight: 200, resize: 'vertical', border: `1px solid ${bord}`, borderRadius: 10, padding: '12px 14px', fontFamily: C.fontSans, fontSize: 13, lineHeight: 1.6, color: txt, background: dark ? '#06101F' : '#FCFBF8', outline: 'none', boxSizing: 'border-box' }} />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+              <button onClick={onClose} style={{ fontFamily: C.fontSans, fontSize: 12, fontWeight: 500, color: sub, background: 'none', border: `1px solid ${bord}`, borderRadius: 9, padding: '9px 18px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={save} disabled={busy} style={{ fontFamily: C.fontSans, fontSize: 12, fontWeight: 600, color: '#fff', background: dark ? C.gold : C.navy, border: 'none', borderRadius: 9, padding: '9px 18px', cursor: 'pointer' }}>{busy ? 'Saving…' : 'Save memory'}</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Project detail — name, instructions, memory, files (knowledge), and its chats.
+    function ProjectModal({ dark, project, conversations, onSaveFields, onDelete, onClose, onOpenChat, onNewChat, onMutated }) {
+      const [name, setName] = useState(project.name);
+      const [instructions, setInstructions] = useState(project.instructions || '');
+      const [memory, setMemory] = useState(project.memory || '');
+      const [files, setFiles] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const fileRef = useRef(null);
+      useEffect(() => { ProjectDB.listFiles(project.id).then(setFiles); }, [project.id]);
+
+      const bg = dark ? '#000D26' : C.bg, card = dark ? '#0A1730' : '#fff', bord = dark ? '#152545' : C.border;
+      const txt = dark ? '#fff' : C.navy, sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const lbl = { fontFamily: C.fontSans, fontSize: '0.62rem', color: sub, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 6 };
+      const ta = { width: '100%', resize: 'vertical', border: `1px solid ${bord}`, borderRadius: 10, padding: '10px 12px', fontFamily: C.fontSans, fontSize: 12.5, lineHeight: 1.6, color: txt, background: card, outline: 'none', boxSizing: 'border-box' };
+      const fmtSize = (n) => !n ? '' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+
+      const saveAll = async () => { setBusy(true); try { await onSaveFields(project.id, { name: name.trim() || 'Untitled project', instructions, memory }); onMutated(project.id); onClose(); } finally { setBusy(false); } };
+      const onFiles = async (fl) => {
+        const arr = Array.from(fl || []);
+        for (const f of arr) {
+          const type = f.type || '';
+          const isText = type.startsWith('text/') || /\.(txt|csv|md|json|log|tsv)$/i.test(f.name);
+          if (!isText) { alert('"' + f.name + '" — only text files (txt, csv, md, json) can be added as project knowledge right now.'); continue; }
+          if (f.size > 2 * 1024 * 1024) { alert('"' + f.name + '" is over 2 MB and was skipped.'); continue; }
+          try { const content = await f.text(); await ProjectDB.addFile(project.id, { name: f.name, mimeType: type, size: f.size, textContent: content }); }
+          catch (e) { alert('Could not add ' + f.name); }
+        }
+        const fresh = await ProjectDB.listFiles(project.id); setFiles(fresh); onMutated(project.id);
+      };
+      const delFile = async (id) => { try { await ProjectDB.removeFile(id, project.id); setFiles(f => (f || []).filter(x => x.id !== id)); onMutated(project.id); } catch (e) { alert('Could not remove file.'); } };
+      const projChats = (conversations || []).filter(c => c.projectId === project.id && !c.archived);
+
+      return (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 140, background: bg, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 'calc(12px + env(safe-area-inset-top)) 16px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: txt, fontSize: 22, display: 'flex', alignItems: 'center', padding: 0 }}><i className="ti ti-chevron-left" /></button>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <i className="ti ti-folder" style={{ fontSize: 18, color: C.gold, flexShrink: 0 }} />
+              <div style={{ fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.25rem', color: txt, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name || 'Project'}</div>
+            </div>
+            <button onClick={() => { if (window.confirm('Delete project "' + (name || '') + '" and unlink its chats? This cannot be undone.')) onDelete(project.id); }} title="Delete project" style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 18, display: 'flex', padding: 3 }}><i className="ti ti-trash" /></button>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '16px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+            <div style={lbl}>Project name</div>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="Project name" style={{ ...ta, fontWeight: 600, fontSize: 15, marginBottom: 16 }} />
+
+            <div style={lbl}>Instructions</div>
+            <textarea value={instructions} onChange={e => setInstructions(e.target.value)} placeholder="How should the assistant behave in this project? e.g. You are helping with the 123 Main St listing. Always reference the seller's priorities." style={{ ...ta, minHeight: 90, marginBottom: 16 }} />
+
+            <div style={lbl}>Project memory</div>
+            <textarea value={memory} onChange={e => setMemory(e.target.value)} placeholder="Facts to remember within this project — key people, addresses, numbers, decisions." style={{ ...ta, minHeight: 90, marginBottom: 16 }} />
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={lbl}>Files (knowledge)</div>
+              <button onClick={() => fileRef.current && fileRef.current.click()} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 11px', borderRadius: 18, border: `1px solid ${bord}`, cursor: 'pointer', background: 'none', color: dark ? C.goldSoft : C.gold, fontFamily: C.fontSans, fontSize: 11, fontWeight: 600 }}><i className="ti ti-plus" style={{ fontSize: 13 }} />Add file</button>
+              <input ref={fileRef} type="file" multiple accept=".txt,.csv,.md,.json,.log,.tsv,text/*" style={{ display: 'none' }} onChange={e => { onFiles(e.target.files); e.target.value = ''; }} />
+            </div>
+            <div style={{ fontFamily: C.fontSans, fontSize: 10, color: sub, marginBottom: 8 }}>Text files (txt, csv, md, json). Their contents become reference knowledge for this project's chats.</div>
+            {files === null ? <div style={{ fontFamily: C.fontSans, fontSize: 11, color: sub, padding: '4px 0 16px' }}>Loading…</div>
+              : files.length === 0 ? <div style={{ fontFamily: C.fontSans, fontSize: 11.5, color: sub, padding: '4px 0 16px' }}>No files yet.</div>
+              : <div style={{ marginBottom: 16 }}>{files.map(f => (
+                  <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 11px', border: `1px solid ${bord}`, borderRadius: 9, marginBottom: 7, background: card }}>
+                    <i className="ti ti-file-text" style={{ fontSize: 16, color: C.gold, flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: C.fontSans, fontSize: 12.5, color: txt, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.name}</div>
+                      <div style={{ fontFamily: C.fontSans, fontSize: 10, color: sub }}>{fmtSize(f.size)}{f.size ? ' · ' : ''}{(f.textContent || '').length.toLocaleString()} chars</div>
+                    </div>
+                    <button onClick={() => delFile(f.id)} title="Remove" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 16, display: 'flex', padding: 2 }}><i className="ti ti-x" /></button>
+                  </div>
+                ))}</div>}
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, marginTop: 4 }}>
+              <div style={lbl}>Chats in this project</div>
+              <button onClick={() => onNewChat(project.id)} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 11px', borderRadius: 18, border: 'none', cursor: 'pointer', background: dark ? C.gold : C.navy, color: '#fff', fontFamily: C.fontSans, fontSize: 11, fontWeight: 600 }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New chat</button>
+            </div>
+            {projChats.length === 0 ? <div style={{ fontFamily: C.fontSans, fontSize: 11.5, color: sub, padding: '2px 0 16px' }}>No chats yet — start one and it'll use this project's instructions, memory, and files.</div>
+              : <div style={{ marginBottom: 16 }}>{projChats.map(c => (
+                  <div key={c.id} onClick={() => onOpenChat(c.id)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 11px', border: `1px solid ${bord}`, borderRadius: 9, marginBottom: 7, background: card, cursor: 'pointer' }}>
+                    <i className="ti ti-sparkles" style={{ fontSize: 15, color: dark ? C.goldSoft : C.navy, flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0, fontFamily: C.fontSans, fontSize: 12.5, color: txt, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</div>
+                    <i className="ti ti-chevron-right" style={{ fontSize: 14, color: sub, flexShrink: 0 }} />
+                  </div>
+                ))}</div>}
+          </div>
+          <div style={{ flexShrink: 0, display: 'flex', gap: 8, padding: '12px 16px calc(12px + env(safe-area-inset-bottom))', borderTop: `1px solid ${bord}`, maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+            <button onClick={saveAll} disabled={busy} style={{ flex: 1, padding: 12, background: dark ? C.gold : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer' }}>{busy ? 'Saving…' : 'Save project'}</button>
+          </div>
+        </div>
+      );
+    }
+
     function App({ user, profile }) {
       const _boot = (typeof location !== 'undefined') ? (parsePath() || parseRoute(location.hash)) : { tab: 'chat', view: null };
       const [activeTab, setActiveTab] = useState(() => _boot.tab);
@@ -5577,6 +5823,13 @@ Rules:
 
       // Conversation persistence + history
       const [conversations, setConversations] = useState([]);
+      // AI assistant memory (global) + Projects (Claude-style). Personal per user.
+      const [aiMemory, setAiMemory] = useState('');
+      const [projects, setProjects] = useState([]);
+      const [activeProjectId, setActiveProjectId] = useState(null);
+      const [activeProjectFiles, setActiveProjectFiles] = useState([]);
+      const [showMemory, setShowMemory] = useState(false);
+      const [openProjectId, setOpenProjectId] = useState(null); // project detail overlay
       const [currentConvId, setCurrentConvId] = useState(null);
       const [workRequest, setWorkRequest] = useState(null); // 'kpis' | 'listing_presentation' | null
       const [drawerOpen, setDrawerOpen] = useState(false);
@@ -5661,6 +5914,31 @@ Rules:
       const refreshConversations = () => ConvDB.loadConversations().then(setConversations);
       useEffect(() => { refreshConversations(); }, []);
 
+      // AI memory + projects load
+      const refreshProjects = () => ProjectDB.list().then(setProjects);
+      useEffect(() => { AIMemoryDB.get().then(setAiMemory); refreshProjects(); }, []);
+      useEffect(() => {
+        let on = true;
+        if (activeProjectId) ProjectDB.listFiles(activeProjectId).then(f => { if (on) setActiveProjectFiles(f); });
+        else setActiveProjectFiles([]);
+        return () => { on = false; };
+      }, [activeProjectId]);
+      const activeProject = activeProjectId ? projects.find(p => p.id === activeProjectId) : null;
+
+      async function saveMemory(text) { setAiMemory(text); try { await AIMemoryDB.set(text); } catch (e) { alert('Could not save memory: ' + (e.message || e)); } }
+      async function createProject(name) { const p = await ProjectDB.create(name); await refreshProjects(); return p; }
+      async function saveProject(id, fields) { setProjects(ps => ps.map(p => p.id === id ? { ...p, ...fields } : p)); try { await ProjectDB.update(id, fields); } catch (e) { alert('Could not save project: ' + (e.message || e)); } }
+      async function deleteProject(id) {
+        try { await ProjectDB.remove(id); } catch (e) { alert('Could not delete: ' + (e.message || e)); return; }
+        if (activeProjectId === id) setActiveProjectId(null);
+        setOpenProjectId(null); await refreshProjects(); refreshConversations();
+      }
+      async function moveConversationToProject(convId, projectId) {
+        await ConvDB.setProject(convId, projectId);
+        if (convId === currentConvId) setActiveProjectId(projectId || null);
+        refreshConversations();
+      }
+
       const refreshPills = () => PillDB.list().then(setPills);
       useEffect(() => { refreshPills(); }, []);
       // First-run: materialize the default pills into the DB so they're editable in Admin
@@ -5725,6 +6003,23 @@ Rules:
       }, [activeTab, dark, onChat, input, loading, pendingAttachments]);
 
       // Core send: persists the user message, gets a reply, persists it, auto-titles a new conversation.
+      // Assemble the system prompt: base (or the task/KPI instruction when armed)
+      // + the user's global memory + the active project's instructions/memory/files.
+      function buildSystemPrompt(armed) {
+        const parts = [armed || SYSTEM_PROMPT];
+        if (aiMemory && aiMemory.trim()) parts.push('## What to always remember about this user\n' + aiMemory.trim());
+        if (!armed && activeProject) {
+          const p = activeProject;
+          if (p.instructions && p.instructions.trim()) parts.push('## Project instructions — "' + p.name + '"\n' + p.instructions.trim());
+          if (p.memory && p.memory.trim()) parts.push('## Project memory — "' + p.name + '"\n' + p.memory.trim());
+          const knowledge = (activeProjectFiles || []).filter(f => f.textContent && f.textContent.trim())
+            .map(f => '### ' + f.name + '\n' + f.textContent.trim().slice(0, 20000)).join('\n\n');
+          if (knowledge) parts.push('## Project files (reference knowledge)\n' + knowledge);
+        }
+        parts.push('Today is ' + new Date().toISOString().slice(0, 10) + '.');
+        return parts.join('\n\n');
+      }
+
       async function runSend(text, opts = {}) {
         const pend = opts.attachments !== undefined ? opts.attachments : pendingAttachments;
         if ((!text || !text.trim()) && (!pend || !pend.length)) return;
@@ -5744,7 +6039,7 @@ Rules:
         let convId = currentConvId;
         try {
           if (!convId) {
-            const conv = await ConvDB.createConversation({ type: startType, workRequest: startReq });
+            const conv = await ConvDB.createConversation({ type: startType, workRequest: startReq, projectId: activeProjectId });
             convId = conv.id;
             setCurrentConvId(convId);
             refreshConversations();
@@ -5763,7 +6058,7 @@ Rules:
           await ConvDB.insertMessage(convId, 'user', text || '', uploaded);
           const apiMsgs = history.map(m => ({ role: m.role, content: toApiContent(m) }));
           const armed = taskInstruction || kpiInstruction;
-          const sys = armed ? (armed + '\n\nToday is ' + new Date().toISOString().slice(0, 10) + '.') : undefined;
+          const sys = buildSystemPrompt(armed);
           const reply = await callAI(apiMsgs, sys);
           // Add To-Do mode: the AI ends with an ACTION block — read it, create the task, hide the JSON.
           let display = reply;
@@ -5823,13 +6118,14 @@ Rules:
         runSend(text);
       }
 
-      function newChat() {
+      function newChat(projectId) {
         setMessages([]);
         setCurrentConvId(null);
         setWorkRequest(null);
         setTaskInstruction(null);
         setKpiInstruction(null);
         setKpiFlow(null);
+        setActiveProjectId(projectId !== undefined ? (projectId || null) : null);
         setInput(localStorage.getItem('tmg-draft-new') || '');
       }
 
@@ -5847,6 +6143,7 @@ Rules:
         setKpiFlow(null);
         setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
+        setActiveProjectId(conv?.projectId || null);
         if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
         setActiveTab('chat');
         const msgs = await ConvDB.loadMessages(id);
@@ -5944,11 +6241,17 @@ Rules:
           {showDecisions && <TaskFramePopover which="decisions" zoneH={zoneH} onClose={() => setShowDecisions(false)} />}
           {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={navForSettings} moreMenuItems={moreItems} onReorderNav={handleReorderNav} onReorderMore={handleReorderMore} onMoveToMore={handleMoveToMore} onMoveToNav={handleMoveToNav} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
+          {showMemory && <GlobalMemoryModal dark={dark} initial={aiMemory} onSave={saveMemory} onClose={() => setShowMemory(false)} />}
+          {openProjectId && (() => {
+            const p = projects.find(x => x.id === openProjectId);
+            return p ? <ProjectModal dark={dark} project={p} conversations={conversations} onSaveFields={saveProject} onDelete={deleteProject} onClose={() => setOpenProjectId(null)} onOpenChat={(cid) => { setOpenProjectId(null); selectConversation(cid); }} onNewChat={(pid) => { setOpenProjectId(null); setDrawerOpen(false); newChat(pid); setActiveTab('chat'); }} onMutated={(pid) => { refreshProjects(); if (pid === activeProjectId) ProjectDB.listFiles(pid).then(setActiveProjectFiles); }} /> : null;
+          })()}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (
               <div style={{ position: 'relative', height: '100%' }}>
                 {/* Chat stays full width behind; history overlaps it at 50% */}
                 <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={shownPills} onPill={dispatchPill}
+                  projectName={activeProject ? activeProject.name : null}
                   flowKey={kpiFlow ? kpiFlow.step : ''}
                   flowCard={kpiFlow ? (
                     <KpiFlowCard
@@ -5974,7 +6277,7 @@ Rules:
                     boxShadow: historySide === 'right' ? '-10px 0 28px rgba(0,0,0,0.18)' : '10px 0 28px rgba(0,0,0,0.18)',
                     [historySide === 'right' ? 'borderLeft' : 'borderRight']: `1px solid ${dark ? '#0D1E3A' : '#F0EBE3'}`,
                   }}>
-                    <HistoryPanel dark={dark} conversations={conversations} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onPin={pinConversation} onArchive={archiveConversation} onRename={renameConversation} onDelete={removeConversation} />
+                    <HistoryPanel dark={dark} conversations={conversations} projects={projects} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onPin={pinConversation} onArchive={archiveConversation} onRename={renameConversation} onDelete={removeConversation} onOpenMemory={() => setShowMemory(true)} onNewProject={async () => { try { const p = await createProject('New project'); setOpenProjectId(p.id); } catch (e) { alert('Could not create project: ' + (e.message || e)); } }} onOpenProject={(id) => setOpenProjectId(id)} onMoveToProject={(convId, pid) => moveConversationToProject(convId, pid)} />
                   </div>
                 )}
               </div>

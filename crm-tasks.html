@@ -292,36 +292,203 @@
       );
     }
 
-    // ─── Deferred-feature drawer (Phase 2/3 foreshadow) ───────────────
-    function ComingDrawer({ kind, onClose }) {
-      const isAI = kind === 'ai';
+    // ─── Contact picker (uses the existing search_contacts action) ────
+    const DEV_CONTACTS = [
+      { id:'c1', full_name:'Molly Kinney' }, { id:'c2', full_name:'James Gill' },
+      { id:'c3', full_name:'Alex Zreik' }, { id:'c4', full_name:'Neil Patel' },
+      { id:'c5', full_name:'Morgan Birch' }, { id:'c6', full_name:'Rashad Rahman' },
+    ];
+    function ContactPicker({ value, onChange }) {
+      const [q, setQ] = useState('');
+      const [results, setResults] = useState(null);
+      const [open, setOpen] = useState(false);
+      const [busy, setBusy] = useState(false);
+      const tRef = useRef(null);
+
+      function search(text) {
+        setQ(text); setOpen(true);
+        if (tRef.current) clearTimeout(tRef.current);
+        if (text.trim().length < 2) { setResults(null); return; }
+        tRef.current = setTimeout(async () => {
+          setBusy(true);
+          if (isDev()) {
+            await new Promise(r => setTimeout(r, 220));
+            const t = text.toLowerCase();
+            setResults(DEV_CONTACTS.filter(c => c.full_name.toLowerCase().includes(t)));
+            setBusy(false); return;
+          }
+          const { ok, data } = await callZoho({ action:'search_contacts', query:text.trim() });
+          setResults(ok ? (data.contacts || []) : []);
+          setBusy(false);
+        }, 300);
+      }
+
+      if (value && value.name) {
+        return (
+          <div style={{ display:'flex', alignItems:'center', gap:8, padding:'9px 12px', border:'1px solid '+C.border, borderRadius:9, background:C.surfaceAlt }}>
+            <i className="ti ti-user" style={{ fontSize:15, color:C.gold }} />
+            <span style={{ flex:1, fontSize:'0.84rem', color:C.navy }}>{value.name}</span>
+            <button onClick={() => { onChange(null); setQ(''); setResults(null); }} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:15 }} /></button>
+          </div>
+        );
+      }
+      return (
+        <div style={{ position:'relative' }}>
+          <input value={q} onChange={e => search(e.target.value)} onFocus={() => setOpen(true)} placeholder="Search a contact…"
+            style={{ width:'100%', fontFamily:C.fontSans, fontSize:'0.84rem', padding:'9px 12px', border:'1px solid '+C.border, borderRadius:9, background:C.surface, color:C.textPrimary, outline:'none' }} />
+          {open && q.trim().length >= 2 && (
+            <div style={{ position:'absolute', top:'calc(100% + 4px)', left:0, right:0, background:C.surface, border:'1px solid '+C.border, borderRadius:10, boxShadow:'0 12px 30px rgba(0,26,74,.12)', zIndex:5, maxHeight:200, overflowY:'auto' }}>
+              {busy && <div style={{ padding:12, textAlign:'center' }}><Spinner size={15} /></div>}
+              {!busy && results && results.length === 0 && <div style={{ padding:'10px 12px', fontSize:'0.8rem', color:C.textMuted }}>No matches.</div>}
+              {!busy && results && results.map(c => (
+                <button key={c.id} onClick={() => { onChange({ id:c.id, name:c.full_name }); setOpen(false); }} style={{ display:'block', width:'100%', textAlign:'left', padding:'9px 12px', background:'transparent', border:'none', borderBottom:'1px solid '+C.border, cursor:'pointer', fontSize:'0.83rem', color:C.navy, fontFamily:C.fontSans }}>{c.full_name}</button>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ─── Form helpers ─────────────────────────────────────────────────
+    const inputStyle = { width:'100%', fontFamily:C.fontSans, fontSize:'0.84rem', padding:'9px 12px', border:'1px solid '+C.border, borderRadius:9, background:C.surface, color:C.textPrimary, outline:'none' };
+    function Field({ label, children, req }) {
+      return (
+        <div style={{ marginBottom:15 }}>
+          <label style={{ display:'block', fontSize:'0.66rem', fontWeight:600, letterSpacing:'.1em', textTransform:'uppercase', color:C.textMuted, marginBottom:6 }}>
+            {label}{req && <span style={{ color:C.red }}> *</span>}
+          </label>
+          {children}
+        </div>
+      );
+    }
+
+    // ─── Task editor drawer (create / edit / complete / delete) ───────
+    //  Writes go through the parent's onWrite/onDelete. Delete uses a
+    //  two-step confirm; a save/create is the user's explicit confirm.
+    function TaskDrawer({ mode, task, meta, colMap, onClose, onWrite, onDelete }) {
+      const isEdit = mode === 'edit';
+      const [subject, setSubject] = useState(task?.Subject || '');
+      const [type, setType] = useState(task?.[colMap.type] || '');
+      const [status, setStatus] = useState(task?.Status || meta.statusOptions[0] || 'Not Started');
+      const [due, setDue] = useState((task?.Due_Date || '').slice(0, 10));
+      const [desc, setDesc] = useState(task?.Description || '');
+      const [contact, setContact] = useState(task?.Who_Id?.name ? { id: task.Who_Id.id || '', name: task.Who_Id.name } : null);
+      const [saving, setSaving] = useState(false);
+      const [err, setErr] = useState('');
+      const [confirmDel, setConfirmDel] = useState(false);
+
+      function buildRecord() {
+        const rec = { Subject: subject.trim(), Status: status, Description: desc.trim() || null };
+        if (type) rec[colMap.type] = type;
+        if (due) rec.Due_Date = due;
+        if (contact && contact.id) rec.Who_Id = contact.id;
+        return rec;
+      }
+      function buildPatch(overrideStatus) {
+        const st = overrideStatus || status;
+        const p = { Subject: subject.trim(), Status: st, Due_Date: due || null, Description: desc.trim() || null };
+        p[colMap.type] = type || null;
+        p.Who_Id = contact ? { id: contact.id, name: contact.name } : null;
+        if ((st || '').toLowerCase().includes('complete')) p.Closed_Time = task?.Closed_Time || new Date().toISOString();
+        return p;
+      }
+      async function run(fn) { setSaving(true); setErr(''); const res = await fn(); setSaving(false); if (res && res.ok) onClose(); else setErr((res && res.error) || 'Something went wrong.'); }
+
+      function save() {
+        if (!subject.trim()) { setErr('Subject is required.'); return; }
+        run(() => onWrite({ mode, id: task?.id, record: buildRecord(), patch: buildPatch() }));
+      }
+      function markComplete() { run(() => onWrite({ mode:'edit', id: task?.id, record:{ Status:'Completed' }, patch: buildPatch('Completed') })); }
+      function del() { run(() => onDelete(task?.id)); }
+
+      const btnPrimary = { display:'inline-flex', alignItems:'center', justifyContent:'center', gap:7, fontFamily:C.fontSans, fontSize:'0.84rem', fontWeight:600, color:'#fff', background:C.navy, border:'none', borderRadius:10, padding:'11px 18px', cursor:'pointer' };
+      const btnGhost = { ...btnPrimary, color:C.textSecondary, background:'transparent', border:'1px solid '+C.border };
+      const completed = (status || '').toLowerCase().includes('complete');
+
       return (
         <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:40, display:'flex', justifyContent:'flex-end' }}>
-          <div onClick={e => e.stopPropagation()} style={{ width:'min(420px, 92vw)', height:'100%', background:C.surface, borderLeft:'1px solid '+C.border, boxShadow:'-20px 0 50px rgba(0,26,74,.18)', padding:'26px 24px', animation:'tmg-fade .18s ease', overflowY:'auto' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width:'min(440px,94vw)', height:'100%', background:C.surface, borderLeft:'1px solid '+C.border, boxShadow:'-20px 0 50px rgba(0,26,74,.18)', display:'flex', flexDirection:'column', animation:'tmg-fade .18s ease' }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'22px 24px 16px', borderBottom:'1px solid '+C.border }}>
+              <div style={{ display:'flex', alignItems:'center', gap:9 }}>
+                <i className={'ti ' + (isEdit ? 'ti-edit' : 'ti-plus')} style={{ fontSize:18, color:C.gold }} />
+                <span style={{ fontFamily:C.fontDisplay, fontSize:'1.5rem', fontWeight:600, color:C.navy }}>{isEdit ? 'Edit Task' : 'New Task'}</span>
+              </div>
+              <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
+            </div>
+
+            <div style={{ flex:1, overflowY:'auto', padding:'18px 24px' }}>
+              <Field label="Subject" req>
+                <input value={subject} onChange={e => setSubject(e.target.value)} style={inputStyle} placeholder="e.g. A Touch Call: Jane Doe" />
+              </Field>
+              <div style={{ display:'flex', gap:12 }}>
+                <div style={{ flex:1 }}>
+                  <Field label="Task Type">
+                    <select value={type} onChange={e => setType(e.target.value)} style={inputStyle}>
+                      <option value="">—</option>
+                      {meta.typeOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  </Field>
+                </div>
+                <div style={{ flex:1 }}>
+                  <Field label="Status">
+                    <select value={status} onChange={e => setStatus(e.target.value)} style={inputStyle}>
+                      {meta.statusOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  </Field>
+                </div>
+              </div>
+              <Field label="Due Date"><input type="date" value={due} onChange={e => setDue(e.target.value)} style={inputStyle} /></Field>
+              <Field label="Contact"><ContactPicker value={contact} onChange={setContact} /></Field>
+              <Field label="Description"><textarea value={desc} onChange={e => setDesc(e.target.value)} rows={3} style={{ ...inputStyle, resize:'vertical', lineHeight:1.5 }} placeholder="Notes…" /></Field>
+              {err && <div style={{ marginTop:4, padding:'10px 12px', background:C.red+'0d', border:'1px solid '+C.red+'33', borderRadius:9, color:C.red, fontSize:'0.8rem' }}>{err}</div>}
+            </div>
+
+            <div style={{ borderTop:'1px solid '+C.border, padding:'14px 24px', display:'flex', flexDirection:'column', gap:12 }}>
+              {isEdit && confirmDel ? (
+                <div style={{ display:'flex', alignItems:'center', gap:10, background:C.red+'0d', border:'1px solid '+C.red+'33', borderRadius:10, padding:'10px 12px' }}>
+                  <span style={{ flex:1, fontSize:'0.8rem', color:C.red }}>Delete this task from Zoho?</span>
+                  <button disabled={saving} onClick={del} style={{ ...btnPrimary, background:C.red, padding:'7px 14px', fontSize:'0.78rem' }}>{saving ? '…' : 'Delete'}</button>
+                  <button onClick={() => setConfirmDel(false)} style={{ ...btnGhost, padding:'7px 12px', fontSize:'0.78rem' }}>Cancel</button>
+                </div>
+              ) : (
+                <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+                  <button disabled={saving} onClick={save} style={{ ...btnPrimary, flex:1, opacity:saving?0.6:1 }}>{saving ? <Spinner size={16} color="#fff" /> : (isEdit ? 'Save changes' : 'Create task')}</button>
+                  {isEdit && !completed && <button disabled={saving} onClick={markComplete} title="Mark complete" style={{ ...btnGhost, color:C.green, borderColor:C.green+'55' }}><i className="ti ti-circle-check" style={{ fontSize:16 }} /> Complete</button>}
+                </div>
+              )}
+              {isEdit && !confirmDel && (
+                <button onClick={() => setConfirmDel(true)} style={{ background:'transparent', border:'none', color:C.red, fontSize:'0.78rem', fontFamily:C.fontSans, cursor:'pointer', alignSelf:'flex-start', display:'inline-flex', alignItems:'center', gap:6 }}><i className="ti ti-trash" style={{ fontSize:14 }} /> Delete task</button>
+              )}
+              <div style={{ fontSize:'0.68rem', color:C.textMuted, lineHeight:1.4 }}>{isDev() ? 'Dev preview — changes are simulated locally.' : 'Saves directly to Zoho CRM.'}</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── AI companion drawer (Phase 3 foreshadow) ─────────────────────
+    function AIDrawer({ onClose }) {
+      return (
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:40, display:'flex', justifyContent:'flex-end' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width:'min(420px,92vw)', height:'100%', background:C.surface, borderLeft:'1px solid '+C.border, boxShadow:'-20px 0 50px rgba(0,26,74,.18)', padding:'26px 24px', animation:'tmg-fade .18s ease', overflowY:'auto' }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18 }}>
               <div style={{ display:'flex', alignItems:'center', gap:9 }}>
-                <i className={'ti ' + (isAI ? 'ti-sparkles' : 'ti-plus')} style={{ fontSize:19, color:C.gold }} />
-                <span style={{ fontFamily:C.fontDisplay, fontSize:'1.5rem', fontWeight:600, color:C.navy }}>{isAI ? 'Tasks AI Companion' : 'Create Task'}</span>
+                <i className="ti ti-sparkles" style={{ fontSize:19, color:C.gold }} />
+                <span style={{ fontFamily:C.fontDisplay, fontSize:'1.5rem', fontWeight:600, color:C.navy }}>Tasks AI Companion</span>
               </div>
               <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
             </div>
             <div style={{ fontSize:'0.6rem', fontWeight:600, letterSpacing:'.16em', textTransform:'uppercase', color:C.gold, background:C.surfaceHover, display:'inline-block', padding:'4px 10px', borderRadius:20, marginBottom:16 }}>Next update</div>
-            {isAI ? (
-              <div style={{ fontSize:'0.9rem', lineHeight:1.7, color:C.textSecondary }}>
-                <p style={{ marginBottom:12 }}>This companion will <b style={{ color:C.navy }}>read every task in view</b> and act on your words:</p>
-                <ul style={{ paddingLeft:18, marginBottom:14, display:'flex', flexDirection:'column', gap:7 }}>
-                  <li>"How many of Tarek's calls are overdue?"</li>
-                  <li>"Mark the James Gill pop-by complete."</li>
-                  <li>"Create a C-touch call for Molly Kinney next Friday."</li>
-                  <li>"Reschedule all of this week's notes to Monday."</li>
-                </ul>
-                <p style={{ fontSize:'0.82rem', color:C.textMuted }}>Every change is previewed for your confirmation before it touches Zoho — nothing is written silently.</p>
-              </div>
-            ) : (
-              <div style={{ fontSize:'0.9rem', lineHeight:1.7, color:C.textSecondary }}>
-                <p>Creating, editing, completing and deleting tasks lands in the next update — wired to Zoho through the same secure proxy, with a confirm step before any write.</p>
-              </div>
-            )}
+            <div style={{ fontSize:'0.9rem', lineHeight:1.7, color:C.textSecondary }}>
+              <p style={{ marginBottom:12 }}>This companion will <b style={{ color:C.navy }}>read every task in view</b> and act on your words:</p>
+              <ul style={{ paddingLeft:18, marginBottom:14, display:'flex', flexDirection:'column', gap:7 }}>
+                <li>"How many of Tarek's calls are overdue?"</li>
+                <li>"Mark the James Gill pop-by complete."</li>
+                <li>"Create a C-touch call for Molly Kinney next Friday."</li>
+                <li>"Reschedule all of this week's notes to Monday."</li>
+              </ul>
+              <p style={{ fontSize:'0.82rem', color:C.textMuted }}>Every change is previewed for your confirmation before it touches Zoho — nothing is written silently.</p>
+            </div>
           </div>
         </div>
       );
@@ -333,12 +500,13 @@
       const [err, setErr] = useState('');
       const [needsDeploy, setNeedsDeploy] = useState(false);
       const [colMap, setColMap] = useState({ type:'Task_Type', trigger:'Trigger' });
+      const [meta, setMeta] = useState({ statusOptions:['Not Started','Deferred','In Progress','Completed','Waiting on someone else'], typeOptions:['Call','Note','Pop-by','Lunch','Email','Meeting'] });
       const [q, setQ] = useState('');
       const [sel, setSel] = useState({});            // filters
       const [showFilter, setShowFilter] = useState(false);
       const [sortKey, setSortKey] = useState('due');
       const [sortDir, setSortDir] = useState('desc');
-      const [drawer, setDrawer] = useState(null);    // 'ai' | 'create' | null
+      const [drawer, setDrawer] = useState(null);    // { mode:'ai'|'create'|'edit', task? } | null
 
       async function load() {
         setTasks(null); setErr(''); setNeedsDeploy(false);
@@ -353,9 +521,16 @@
         const fres = await callZoho({ action:'get_fields', module:'Tasks' });
         if (fres.ok) {
           const fields = fres.data.fields || [];
-          const find = (re) => (fields.find(f => re.test(f.field_label || '')) || {}).api_name;
-          type = find(/task\s*type/i) || type;
-          trigger = find(/^trigger/i) || trigger;
+          const findF = (re) => fields.find(f => re.test(f.field_label || ''));
+          const typeF = findF(/task\s*type/i);
+          const trigF = findF(/^trigger/i);
+          const statusF = fields.find(f => f.api_name === 'Status') || findF(/^status$/i);
+          type = typeF?.api_name || type;
+          trigger = trigF?.api_name || trigger;
+          setMeta(m => ({
+            statusOptions: (statusF?.picklist_values && statusF.picklist_values.length) ? statusF.picklist_values : m.statusOptions,
+            typeOptions: (typeF?.picklist_values && typeF.picklist_values.length) ? typeF.picklist_values : m.typeOptions,
+          }));
         }
         setColMap({ type, trigger });
         // Pull the tasks.
@@ -367,6 +542,35 @@
         setTasks(res.data.tasks || []);
       }
       useEffect(() => { load(); }, []);
+
+      // Write handlers — propose→confirm: a save/create is the user's explicit
+      // confirm; delete uses a two-step confirm in the drawer. Dev simulates.
+      async function writeTask({ mode, id, record, patch }) {
+        if (isDev()) {
+          await new Promise(r => setTimeout(r, 320));
+          if (mode === 'create') {
+            const nt = { id:'dev-' + (Date.now() % 100000), Owner:{ name:'Tarek Morshed' }, Closed_Time:null, Trigger:null, ...patch };
+            setTasks(p => [nt, ...(p || [])]);
+          } else {
+            setTasks(p => (p || []).map(t => t.id === id ? { ...t, ...patch } : t));
+          }
+          return { ok:true };
+        }
+        const action = mode === 'create' ? 'create_record' : 'update_record';
+        const res = await callZoho({ action, module:'Tasks', id, record });
+        if (res.ok) await load();
+        return { ok:res.ok, error: res.data?.error };
+      }
+      async function removeTask(id) {
+        if (isDev()) {
+          await new Promise(r => setTimeout(r, 260));
+          setTasks(p => (p || []).filter(t => t.id !== id));
+          return { ok:true };
+        }
+        const res = await callZoho({ action:'delete_record', module:'Tasks', id });
+        if (res.ok) await load();
+        return { ok:res.ok, error: res.data?.error };
+      }
 
       function clickSort(key) {
         if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -433,10 +637,10 @@
                 <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{tasks ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` : 'Loading…'}</div>
               </div>
               <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-                <button onClick={() => setDrawer('ai')} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background:C.gold+'0f', fontWeight:600 }}>
+                <button onClick={() => setDrawer({ mode:'ai' })} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background:C.gold+'0f', fontWeight:600 }}>
                   <i className="ti ti-sparkles" style={{ fontSize:15 }} /> Ask AI
                 </button>
-                <button onClick={() => setDrawer('create')} style={{ ...iconBtn, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
+                <button onClick={() => setDrawer({ mode:'create' })} style={{ ...iconBtn, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
                   <i className="ti ti-plus" style={{ fontSize:15 }} /> Create Task
                 </button>
               </div>
@@ -500,7 +704,8 @@
                 </thead>
                 <tbody>
                   {view.map(row => (
-                    <tr key={row.id} style={{ borderBottom:'1px solid '+C.border }}
+                    <tr key={row.id} onClick={() => setDrawer({ mode:'edit', task:row })}
+                        style={{ borderBottom:'1px solid '+C.border, cursor:'pointer' }}
                         onMouseEnter={e => e.currentTarget.style.background=C.surfaceAlt}
                         onMouseLeave={e => e.currentTarget.style.background='transparent'}>
                       {COLUMNS.map(col => {
@@ -526,7 +731,11 @@
             )}
           </main>
 
-          {drawer && <ComingDrawer kind={drawer} onClose={() => setDrawer(null)} />}
+          {drawer?.mode === 'ai' && <AIDrawer onClose={() => setDrawer(null)} />}
+          {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
+            <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}
+              onClose={() => setDrawer(null)} onWrite={writeTask} onDelete={removeTask} />
+          )}
         </div>
       );
     }

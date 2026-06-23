@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<meta name="description" content="How to use the TMG App AI Chat — Work Mode & AI Mode, pill shortcuts, chat history, and projects.">
+<title>TMG App — AI Chat Guide</title>
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600&family=Cormorant+Garamond:ital,wght@0,400;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#fff; --ink-soft:rgba(255,255,255,.62); --ink-faint:rgba(255,255,255,.42);
+  --gold:#C9A45A; --line:rgba(201,164,90,.2); --note-bg:rgba(201,164,90,.08);
+  --card:rgba(255,255,255,.04); --card-bord:rgba(255,255,255,.1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Jost',sans-serif;background:#001A4A;color:var(--ink);-webkit-font-smoothing:antialiased}
+
+/* Cover */
+.cover{text-align:center;padding:46px 28px 38px;position:relative;overflow:hidden;border-bottom:1px solid rgba(201,164,90,.15)}
+.cover-ring{position:absolute;border:1px solid rgba(201,164,90,.07);border-radius:50%;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
+.cover-glow{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:300px;height:300px;border-radius:50%;background:radial-gradient(circle,rgba(201,164,90,.10) 0%,transparent 66%);pointer-events:none}
+.cover-icon{width:56px;height:56px;margin:0 auto 16px;border-radius:16px;background:rgba(201,164,90,.12);border:1px solid rgba(201,164,90,.35);display:flex;align-items:center;justify-content:center;position:relative}
+.cover-tag{font-size:9px;letter-spacing:.28em;font-weight:600;color:rgba(201,164,90,.6);text-transform:uppercase;margin-bottom:14px;position:relative}
+.cover-title{font-family:'Cormorant Garamond',serif;font-style:italic;font-size:42px;font-weight:400;color:#fff;line-height:1.15;margin-bottom:10px;position:relative}
+.cover-desc{font-size:13px;color:rgba(255,255,255,.55);line-height:1.7;max-width:360px;margin:0 auto 22px;position:relative}
+.cover-vals{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:0;position:relative}
+.cv{font-size:8.5px;letter-spacing:.12em;color:rgba(255,255,255,.4);text-transform:uppercase}
+.cs{color:rgba(201,164,90,.5);margin:0 7px;font-size:8px}
+
+/* Content + sections */
+.content{max-width:560px;margin:0 auto;padding:0 20px 64px}
+.section-hd{display:flex;align-items:center;gap:10px;padding:34px 0 16px}
+.sh-num{width:30px;height:30px;border-radius:50%;background:rgba(201,164,90,.15);border:1.5px solid var(--gold);color:var(--gold);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:'Jost',sans-serif}
+.sh-label{font-size:9px;letter-spacing:.22em;font-weight:600;text-transform:uppercase;color:var(--gold)}
+.sh-line{flex:1;height:1px;background:var(--line)}
+.step-title{font-family:'Cormorant Garamond',serif;font-style:italic;font-size:24px;color:var(--ink);margin-bottom:8px}
+.step-desc{font-size:13px;color:var(--ink-soft);line-height:1.7;margin-bottom:14px}
+.step-desc b{color:var(--ink);font-weight:500}
+.note{background:var(--note-bg);border-left:3px solid #AD832F;border-radius:0 10px 10px 0;padding:11px 15px;font-size:12px;color:var(--ink-soft);line-height:1.7;margin:0 0 12px}
+.note b{color:var(--ink)}
+.note .ng{color:var(--gold);font-weight:600}
+.subnote{font-size:11px;color:var(--ink-faint);line-height:1.6;margin:0 0 14px;padding-left:2px}
+.subnote b{color:var(--gold);font-weight:600}
+
+/* Inline UI references */
+.chip{display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.07);border:.5px solid rgba(255,255,255,.14);border-radius:6px;padding:1px 7px;font-size:11px;font-weight:500;color:#fff;white-space:nowrap;vertical-align:middle}
+.chip svg{flex-shrink:0}
+.chip.gold{color:#E7C98C;border-color:rgba(201,164,90,.4);background:rgba(201,164,90,.12)}
+
+/* Mock UI cards (mimic the real, light app UI — same on either background) */
+.mock{background:#FAF7F1;border:1px solid #EDE7DC;border-radius:16px;padding:16px;margin:0 0 16px}
+.mock-cap{font-size:10px;color:rgba(255,255,255,.45);text-align:center;margin:-6px 0 16px;line-height:1.6}
+html.gs-embed .mock-cap{color:#8A8A8A}
+
+/* the bottom input bar mock */
+.barmock{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #E8E0D2;border-radius:18px;padding:7px 12px}
+.barmock .ham{color:#7A7468;font-size:17px;display:flex}
+.barmock .modetag{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:600;letter-spacing:.12em;color:#AD832F}
+.barmock .modetag.ai{color:#185FA5}
+.barmock .vline{width:1px;height:20px;background:#E8E0D2}
+.barmock .ph{flex:1;font-size:11px;color:#B8B2A6}
+
+/* pill row mock */
+.pillrow{display:flex;flex-wrap:wrap;gap:7px}
+.pill{display:inline-flex;align-items:center;gap:5px;border-radius:16px;padding:6px 12px;font-size:11px;font-weight:500;border:1px solid #E8D9BC;background:#FDF8F0;color:#7A5B1E}
+.pill .pi{color:#AD832F;display:flex}
+.pill.ai{border-color:#C8D0F0;background:#F0F4FF;color:#2A4FA4}
+.pill.ai .pi{color:#4A6FD4}
+
+/* sidebar mock */
+.sb{background:#F5F0E8;border:1px solid #E8E0D2;border-radius:12px;overflow:hidden}
+.sb-hd{display:flex;align-items:center;gap:6px;padding:10px 12px;border-bottom:.5px solid #E4DCCB}
+.sb-hd .t{font-size:13px;font-weight:600;color:#001A4A;flex:1}
+.sb-ic{width:24px;height:24px;border-radius:6px;border:.5px solid #E4DFD4;background:#FCFBF8;display:flex;align-items:center;justify-content:center;color:#6B6B6B}
+.sb-ic.gold{border-color:#E8D9BC;background:#F3EBDA;color:#AD832F}
+.sb-lbl{font-size:10px;font-weight:600;color:#9A958A;padding:9px 12px 3px}
+.sb-row{padding:8px 12px;border-radius:8px;margin:1px 6px}
+.sb-row.on{background:#E8E3DB}
+.sb-row .rt{font-size:12.5px;color:#001A4A}
+.sb-row .rm{display:flex;align-items:center;gap:3px;font-size:8.5px;color:#B4B2A9;margin-top:2px}
+.sb-row .rm.work{color:#C9A45A}.sb-row .rm.ai{color:#8A9CC0}
+.sb-proj{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;margin:1px 6px}
+.sb-proj .pn{flex:1;font-size:12.5px;color:#001A4A}
+.sb-proj .pc{font-size:10px;color:#C4BFBA}
+
+/* small menu mock */
+.menu{background:#fff;border:1px solid #EAE3D6;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.12);padding:5px;max-width:180px;margin:12px auto 0}
+.menu .mi{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:7px;font-size:11px;color:#001A4A}
+.menu .mi.danger{color:#C0392B}
+.menu .mi svg{color:#7A7468}
+.menu .mi.danger svg{color:#C0392B}
+
+.foot{text-align:center;font-size:10px;letter-spacing:.04em;color:rgba(255,255,255,.28);padding:20px 0 0}
+html.gs-embed .foot{color:#C4BFBA}
+
+/* ── Embedded light mode (?embed=1) — recolor onto the white in-app pane ── */
+html.gs-embed{background:transparent;--ink:#001A4A;--ink-soft:#6B6B6B;--ink-faint:#8A8A8A;--gold:#AD832F;--line:rgba(173,131,47,.22);--note-bg:rgba(173,131,47,.08)}
+html.gs-embed body{background:transparent}
+html.gs-embed .cover{display:none}
+html.gs-embed .content{padding-top:4px;max-width:600px}
+html.gs-embed .section-hd:first-child{padding-top:12px}
+html.gs-embed .chip{color:#001A4A;background:#F1ECE3;border-color:#E4DCCB}
+html.gs-embed .chip.gold{color:#AD832F;background:#F6EEDD;border-color:#E8D9BC}
+html.gs-embed .step-desc b{color:#001A4A}
+</style>
+<script>
+  // Light "embed" mode for the in-app Guide pane: ?embed=1 strips the dark
+  // background/cover and recolors text. Set the class before first paint.
+  try { if (/[?&]embed=1\b/.test(location.search)) document.documentElement.classList.add('gs-embed'); } catch (e) {}
+</script>
+</head>
+<body>
+
+<!-- COVER -->
+<div class="cover">
+  <div class="cover-ring" style="width:480px;height:480px"></div>
+  <div class="cover-ring" style="width:330px;height:330px"></div>
+  <div class="cover-glow"></div>
+  <div class="cover-tag">App Guide</div>
+  <div class="cover-icon">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#C9A45A" stroke-width="1.6"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"/><circle cx="18.5" cy="17.5" r="2.2"/><circle cx="6" cy="16" r="1.5"/></svg>
+  </div>
+  <div class="cover-title">AI Chat</div>
+  <div class="cover-desc">Your TMG assistant — switch modes, fire shortcuts, and keep your work organized in projects.</div>
+  <div class="cover-vals">
+    <span class="cv">Be Irreplaceable</span><span class="cs">·</span>
+    <span class="cv">Accountability</span><span class="cs">·</span>
+    <span class="cv">Growth Mindset</span><span class="cs">·</span>
+    <span class="cv">Servant Leaders</span><span class="cs">·</span>
+    <span class="cv">Teamwork</span>
+  </div>
+</div>
+
+<div class="content">
+
+  <!-- 1 · MODES -->
+  <div class="section-hd"><div class="sh-num">1</div><div class="sh-label">The two modes</div><div class="sh-line"></div></div>
+  <div class="step-title">Work Mode &amp; AI Mode</div>
+  <div class="step-desc">The assistant has two modes. Tap the <b>mode tag</b> just left of the message box to switch between them — the icon and label tell you which one you're in.</div>
+
+  <div class="mock">
+    <div class="barmock">
+      <span class="ham"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/></svg></span>
+      <span class="modetag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>WORK MODE</span>
+      <span class="vline"></span>
+      <span class="ph">Message TMG assistant…</span>
+    </div>
+  </div>
+  <div class="mock-cap">Tap the tag and it flips to <b>AI MODE</b> (a sparkles icon).</div>
+
+  <div class="note"><b><span class="ng">AI Mode</span></b> — a general assistant, like ChatGPT or Claude. Ask anything: draft an email, summarize, brainstorm, explain. Greets you with "How can I help you today?"</div>
+  <div class="note"><b><span class="ng">Work Mode</span></b> — guided TMG shortcuts for logging your work. Greets you with "What would you like to do?" and shows action pills (next section).</div>
+
+  <!-- 2 · PILLS -->
+  <div class="section-hd"><div class="sh-num">2</div><div class="sh-label">Pill shortcuts</div><div class="sh-line"></div></div>
+  <div class="step-title">Tap a pill to start fast</div>
+  <div class="step-desc">Pills are the rounded shortcuts above the message box. Tap one and the assistant walks you through it — no need to type the whole request.</div>
+
+  <div class="mock">
+    <div class="pillrow">
+      <span class="pill"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 9h8M8 13h5"/><path d="M21 12a9 9 0 1 1-3.5-7.1"/><path d="M16 4l2 2 4-4"/></svg></span>New Chat</span>
+      <span class="pill"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3.5 5.5l1.5 1.5 2.5-3M3.5 12l1.5 1.5 2.5-3M3.5 18.5L5 20l2.5-3M11 6h10M11 12h10M11 18h10"/></svg></span>Add To Do</span>
+      <span class="pill"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="9"/></svg></span>Add KPIs</span>
+    </div>
+  </div>
+  <div class="mock-cap">Pills take the current mode's color — gold in Work Mode, blue in AI Mode.</div>
+
+  <div class="note"><b><span class="ng">New Chat</span></b> — always the first pill, in both modes. Starts a fresh conversation so a new topic doesn't get mixed into the old one.</div>
+  <div class="note"><b><span class="ng">Add To Do</span></b> — quickly capture a task. The assistant turns what you type into a to-do for you.</div>
+  <div class="note"><b><span class="ng">Add KPIs</span></b> — log your weekly numbers (calls, pop-bys, notes…). The assistant collects them step by step and files them.</div>
+  <div class="subnote"><b>Note:</b> Work Mode is where the action pills live. AI Mode shows New Chat (and any extra AI shortcuts an admin has added).</div>
+
+  <!-- 3 · CHAT HISTORY -->
+  <div class="section-hd"><div class="sh-num">3</div><div class="sh-label">Chat history</div><div class="sh-line"></div></div>
+  <div class="step-title">Find and manage past chats</div>
+  <div class="step-desc">Tap the <b>☰ menu</b> on the left of the message box to open the <b>AI Chat</b> panel. (On a wide screen it's always docked on the left.) Tap any chat to reopen it.</div>
+
+  <div class="mock">
+    <div class="sb">
+      <div class="sb-hd">
+        <span class="t">AI Chat</span>
+        <span class="sb-ic" title="Assistant memory"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.4 1a7 7 0 0 0-1.7-1L16.5 2h-4l-.3 2.5a7 7 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.5 2.4-1a7 7 0 0 0 1.7 1l.3 2.5h4l.3-2.5a7 7 0 0 0 1.7-1l2.4 1 2-3.5-2-1.5a7 7 0 0 0 .1-1z"/></svg></span>
+        <span class="sb-ic gold" title="Sort &amp; filter"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="4" y1="7" x2="14" y2="7"/><circle cx="17" cy="7" r="2"/><line x1="4" y1="17" x2="10" y2="17"/><circle cx="13" cy="17" r="2"/></svg></span>
+        <span class="sb-ic gold" title="New chat"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></span>
+      </div>
+      <div class="sb-lbl">PROJECTS</div>
+      <div class="sb-proj"><span class="pn">123 Main St Listing</span><span class="pc">4</span></div>
+      <div class="sb-lbl">TODAY</div>
+      <div class="sb-row on"><div class="rt">Buyer follow-up email</div><div class="rm ai">✦ AI Mode</div></div>
+      <div class="sb-row"><div class="rt">Weekly KPIs</div><div class="rm work">▮ Work Mode</div></div>
+    </div>
+  </div>
+  <div class="mock-cap">Header icons: <b>⚙ memory</b> · <b>sort &amp; filter</b> · <b>✎ new chat</b>.</div>
+
+  <div class="note">Chats group automatically into <b>Pinned</b>, then <b>Today</b> / <b>This week</b> / <b>Earlier</b>, and each row is tagged <span class="ng">Work Mode</span> or <span class="ng">AI Mode</span>.</div>
+  <div class="note"><b>Sort &amp; filter</b> (the slider icon): show only Work Mode or AI Mode chats, and sort by <b>Most recent</b> or <b>Alphabetical</b>.</div>
+
+  <div class="step-desc" style="margin-top:6px">Tap the <b>⋯</b> on a chat (or press-and-hold the row) for its menu:</div>
+  <div class="menu">
+    <div class="mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 17v5M5 9l7-7 7 7-2 1-5 2-5-2z"/></svg>Pin</div>
+    <div class="mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>Rename</div>
+    <div class="mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H3z"/></svg>Move to project</div>
+    <div class="mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/></svg>Share</div>
+    <div class="mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>Archive</div>
+    <div class="mi danger"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>Delete</div>
+  </div>
+  <div class="subnote" style="margin-top:12px"><b>Archive</b> hides a chat without deleting it. <b>Delete</b> removes it for good — that one can't be undone.</div>
+
+  <!-- 4 · PROJECTS -->
+  <div class="section-hd"><div class="sh-num">4</div><div class="sh-label">Projects</div><div class="sh-line"></div></div>
+  <div class="step-title">Group chats into Projects</div>
+  <div class="step-desc">A project keeps all the chats for one deal or topic together — with its own <b>instructions</b>, <b>memory</b>, and <b>files</b> the assistant uses every time you chat inside it. Like a Claude Project.</div>
+
+  <div class="mock">
+    <div class="sb">
+      <div class="sb-lbl" style="display:flex;align-items:center"><span style="flex:1">PROJECTS</span><span style="color:#C4BFBA;font-size:14px;font-weight:400">＋</span></div>
+      <div class="sb-proj"><span class="pn">123 Main St Listing</span><span class="pc">4</span><span style="color:#D4D0CC">⋯</span></div>
+      <div class="sb-proj"><span class="pn">Buyer — the Reyes family</span><span class="pc">2</span><span style="color:#D4D0CC">⋯</span></div>
+    </div>
+  </div>
+  <div class="mock-cap">Tap <b>＋</b> to create · tap a name to filter the list to it · <b>⋯ → Open / edit</b> for its settings.</div>
+
+  <div class="note"><b>Create one:</b> tap <b>＋</b> next to "Projects", give it a name (and optional instructions), then <b>Create</b>.</div>
+  <div class="note"><b>Open / edit</b> (the project's <b>⋯</b>) gives you:
+    <br>· <b class="ng">Instructions</b> — how the assistant should behave here ("You're helping with 123 Main St. Always reference the seller's priorities.")
+    <br>· <b class="ng">Project memory</b> — facts to remember (people, addresses, numbers, decisions).
+    <br>· <b class="ng">Files</b> — text knowledge (txt, csv, md, json — up to 2 MB each) the assistant can draw on.</div>
+  <div class="note"><b>New chats inside a project</b> automatically use its instructions, memory, and files. A 📁 tag shows at the top of those chats.</div>
+  <div class="subnote"><b>Delete a project:</b> open it and tap the <b>🗑 trash</b> in the top-right. The project is removed and its chats are unlinked (the chats themselves stay).</div>
+
+  <!-- 5 · MEMORY -->
+  <div class="section-hd"><div class="sh-num">5</div><div class="sh-label">Assistant memory</div><div class="sh-line"></div></div>
+  <div class="step-title">Teach it once, for every chat</div>
+  <div class="step-desc">Tap the <b>⚙ gear</b> at the top of the AI Chat panel to set <b>Assistant memory</b> — notes the assistant keeps in mind across <b>every</b> AI chat (not just one project).</div>
+  <div class="note">Good things to put here: your role, who you work with, how you like replies (short vs detailed), recurring context. It's personal to you.</div>
+
+  <!-- GOOD TO KNOW -->
+  <div class="section-hd"><div class="sh-num" style="background:rgba(201,164,90,.1)">★</div><div class="sh-label">Good to know</div><div class="sh-line"></div></div>
+  <div class="note"><b>Start fresh often.</b> New topic? Hit <span class="ng">New Chat</span> so context stays clean and answers stay sharp.</div>
+  <div class="note"><b>Pick the right mode.</b> Logging work → <span class="ng">Work Mode</span>. Thinking, writing, asking → <span class="ng">AI Mode</span>.</div>
+  <div class="note"><b>Attach files</b> to a single message with the 📎 clip in the message bar — images, PDFs, and text. For knowledge the assistant should always have, add it to a <span class="ng">Project</span> instead.</div>
+
+  <div class="foot">THE MORSHED GROUP · CHRISTIE'S INTERNATIONAL REAL ESTATE</div>
+</div>
+
+<script>
+  // Report content height to the parent app so the in-app Guide iframe sizes to
+  // fit (no inner scrollbar). Only runs when embedded (?embed=1).
+  (function () {
+    if (!/[?&]embed=1\b/.test(location.search)) return;
+    function postHeight() {
+      var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+      try { parent.postMessage({ type: 'tmg-gs-embed-height', height: h }, '*'); } catch (e) {}
+    }
+    window.addEventListener('load', postHeight);
+    window.addEventListener('resize', postHeight);
+    document.addEventListener('DOMContentLoaded', postHeight);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(postHeight);
+    if (window.ResizeObserver) { try { new ResizeObserver(postHeight).observe(document.body); } catch (e) {} }
+    [200, 600, 1400].forEach(function (ms) { setTimeout(postHeight, ms); });
+  })();
+</script>
+</body>
+</html>

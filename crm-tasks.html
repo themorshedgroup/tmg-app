@@ -1090,7 +1090,7 @@
 
       // Write handlers — propose→confirm: a save/create is the user's explicit
       // confirm; delete uses a two-step confirm in the drawer. Dev simulates.
-      async function writeTask({ mode, id, record, patch }) {
+      async function writeTask({ mode, id, record, patch, skipReload }) {
         if (isDev()) {
           await new Promise(r => setTimeout(r, 320));
           if (mode === 'create') {
@@ -1103,17 +1103,17 @@
         }
         const action = mode === 'create' ? 'create_record' : 'update_record';
         const res = await callZoho({ action, module:'Tasks', id, record });
-        if (res.ok) await load();
+        if (res.ok && !skipReload) await load();
         return { ok:res.ok, error: res.data?.error };
       }
-      async function removeTask(id) {
+      async function removeTask(id, skipReload) {
         if (isDev()) {
           await new Promise(r => setTimeout(r, 260));
           setTasks(p => (p || []).filter(t => t.id !== id));
           return { ok:true };
         }
         const res = await callZoho({ action:'delete_record', module:'Tasks', id });
-        if (res.ok) await load();
+        if (res.ok && !skipReload) await load();
         return { ok:res.ok, error: res.data?.error };
       }
 
@@ -1411,16 +1411,38 @@
           if (!r.ok) return r;
           return { ok:true, summary:'Deleted task', records:[ttl], ai:`Deleted "${ttl}"` };
         }
+        // Bulk ops run in small PARALLEL batches and reload the table only ONCE
+        // at the end — never per item. (Per-item load() re-fetches all ~900 tasks
+        // and blanks the table each time, which turned a 100+ batch into a
+        // multi-minute hang.) BATCH caps concurrency so Zoho isn't flooded.
+        const BATCH = 5;
+        async function runBatched(ids, fn) {
+          let okN = 0, errN = 0;
+          for (let i = 0; i < ids.length; i += BATCH) {
+            const rs = await Promise.all(ids.slice(i, i + BATCH).map(fn));
+            rs.forEach(r => (r && r.ok) ? okN++ : errN++);
+          }
+          if (okN && !isDev()) await load(); // single refresh after the batch (dev already updated optimistically)
+          return { okN, errN };
+        }
         if (name === 'bulk_update_tasks') {
           const ids = input.ids || [];
           if (!ids.length) return { ok:false, error:'No tasks specified.' };
-          const changes = {};
-          if (input.status != null) changes.status = input.status;
-          if (input.due_date != null) changes.due_date = input.due_date;
-          if (input.task_type != null) changes.task_type = input.task_type;
+          const record = {};
+          if (input.status != null) record.Status = input.status;
+          if (input.due_date != null) record.Due_Date = input.due_date;
+          if (input.task_type != null) record[colMap.type] = input.task_type;
+          if (!Object.keys(record).length) return { ok:false, error:'No fields to update.' };
           const names = ids.map(taskTitle);
-          let okN = 0, errN = 0;
-          for (const id of ids) { const r = await applyAiWrite('update_task', { id, ...changes }); if (r && r.ok) okN++; else errN++; }
+          const { okN, errN } = await runBatched(ids, (id) => {
+            const existing = (tasks || []).find(t => t.id === id) || {};
+            const patch = { ...existing };
+            if (input.status != null) patch.Status = input.status;
+            if (input.due_date != null) patch.Due_Date = input.due_date;
+            if (input.task_type != null) patch[colMap.type] = input.task_type;
+            if ((patch.Status || '').toLowerCase().includes('complete') && !existing.Closed_Time) patch.Closed_Time = new Date().toISOString();
+            return writeTask({ mode:'edit', id, record, patch, skipReload:true });
+          });
           const cw = changeWords(input);
           return { ok: errN === 0, count: okN, summary: `Updated ${okN} task${okN === 1 ? '' : 's'}` + (cw ? ' · ' + cw : ''), records: names, ai: `Updated ${okN} tasks${cw ? ' (' + cw + ')' : ''}: ${names.join(', ')}`, error: errN ? `${errN} failed` : undefined };
         }
@@ -1428,8 +1450,7 @@
           const ids = input.ids || [];
           if (!ids.length) return { ok:false, error:'No tasks specified.' };
           const names = ids.map(taskTitle);
-          let okN = 0, errN = 0;
-          for (const id of ids) { const r = await removeTask(id); if (r && r.ok) okN++; else errN++; }
+          const { okN, errN } = await runBatched(ids, (id) => removeTask(id, true));
           return { ok: errN === 0, count: okN, summary: `Deleted ${okN} task${okN === 1 ? '' : 's'}`, records: names, ai: `Deleted ${okN} tasks: ${names.join(', ')}`, error: errN ? `${errN} failed` : undefined };
         }
         return { ok:false, error:'Unknown action.' };

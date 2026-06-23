@@ -806,6 +806,13 @@
       }
       function decide(cid, d) { const r = resolvers.current[cid]; if (r) { delete resolvers.current[cid]; r(d); } }
 
+      // True while a write is waiting on the user's Confirm/Cancel. We must NOT
+      // let a free-text message be sent in this state: it would land right after
+      // the assistant's tool_use with no tool_result between them, which the API
+      // rejects ("tool_use without tool_result"). So the input locks until the
+      // confirm card is resolved.
+      const pendingConfirm = log.some(it => it.type === 'confirm' && it.status === 'pending');
+
       async function step(depth) {
         if (depth > 6) { push({ type:'note', text:'(stopped — too many steps)' }); return; }
         setBusy(true);
@@ -845,7 +852,7 @@
 
       async function send(text) {
         const msg = (text != null ? text : input).trim();
-        if (!msg || busy) return;
+        if (!msg || busy || pendingConfirm) return;
         setInput('');
         push({ type:'user', text: msg });
         claudeRef.current.push({ role:'user', content: msg });
@@ -953,15 +960,15 @@
               )}
               <div style={{ display:'flex', alignItems:'flex-end', gap:9 }}>
                 <button onClick={() => setShowSaved(s => !s)} title="Saved prompts" style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'1px solid '+(showSaved ? C.gold : C.border), background: showSaved ? C.gold+'14' : C.surface, color: showSaved ? C.gold : C.navy, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center' }}><i className="ti ti-bookmark" style={{ fontSize:17 }} /></button>
-                <textarea value={input} onChange={e => setInput(e.target.value)} rows={1}
+                <textarea value={input} onChange={e => setInput(e.target.value)} rows={1} disabled={pendingConfirm}
                   onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                  placeholder="Ask or tell me what to do…"
-                  style={{ flex:1, resize:'none', fontFamily:C.fontSans, fontSize:'0.86rem', padding:'10px 12px', border:'1px solid '+C.border, borderRadius:11, background:C.bg, color:C.textPrimary, outline:'none', maxHeight:120 }} />
-                <button onClick={() => send()} disabled={busy || !input.trim()} style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'none', cursor: busy || !input.trim() ? 'default' : 'pointer', background: busy || !input.trim() ? C.border : C.navy, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                  placeholder={pendingConfirm ? 'Confirm or cancel the action above first…' : 'Ask or tell me what to do…'}
+                  style={{ flex:1, resize:'none', fontFamily:C.fontSans, fontSize:'0.86rem', padding:'10px 12px', border:'1px solid '+C.border, borderRadius:11, background: pendingConfirm ? C.border+'33' : C.bg, color:C.textPrimary, outline:'none', maxHeight:120, cursor: pendingConfirm ? 'not-allowed' : 'text' }} />
+                <button onClick={() => send()} disabled={busy || pendingConfirm || !input.trim()} style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'none', cursor: (busy || pendingConfirm || !input.trim()) ? 'default' : 'pointer', background: (busy || pendingConfirm || !input.trim()) ? C.border : C.navy, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center' }}>
                   <i className="ti ti-arrow-up" style={{ fontSize:18 }} />
                 </button>
               </div>
-              <div style={{ fontSize:'0.66rem', color:C.textMuted, marginTop:7, textAlign:'center' }}>Changes are previewed for your confirmation — nothing writes to Zoho silently.</div>
+              <div style={{ fontSize:'0.66rem', color: pendingConfirm ? C.gold : C.textMuted, marginTop:7, textAlign:'center', fontWeight: pendingConfirm ? 600 : 400 }}>{pendingConfirm ? '↑ Use the Confirm or Cancel buttons above to continue.' : 'Changes are previewed for your confirmation — nothing writes to Zoho silently.'}</div>
             </div>
           </div>
       );

@@ -4688,7 +4688,7 @@ Rules:
                     </div>
                   )}
               </div>
-              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 16px 18px', background: '#fff' }}>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: (!editing && sel.slug === 'get-started') ? 0 : '14px 16px 18px', background: '#fff' }}>
                 {editing
                   ? <div ref={edRef} className="nc-body nc-edit" contentEditable suppressContentEditableWarning data-ph="Start writing…" style={{ outline: 'none', minHeight: 200, fontFamily: C.fontSans, fontSize: 12, color: '#3A3A3A', lineHeight: 1.75 }} />
                   : (sel.slug === 'get-started'

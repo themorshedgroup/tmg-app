@@ -733,7 +733,7 @@
         res = await fetch(TASKS_AI_ENDPOINT, {
           method:'POST',
           headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + authToken(), 'apikey':SUPABASE_ANON },
-          body: JSON.stringify({ system, messages, tools: AI_TOOLS, max_tokens: 2048 }),
+          body: JSON.stringify({ system, messages, tools: AI_TOOLS, max_tokens: 4096 }),
           signal: ctrl.signal,
         });
       } catch (e) {

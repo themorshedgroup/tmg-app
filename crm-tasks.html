@@ -517,9 +517,11 @@
         input_schema:{ type:'object', properties:{ ids:{ type:'array', items:{type:'string'} }, status:{type:'string'}, due_date:{type:'string', description:'YYYY-MM-DD'}, task_type:{type:'string'} }, required:['ids'] } },
       { name:'bulk_delete_tasks', description:'Delete many tasks at once with a single confirmation.',
         input_schema:{ type:'object', properties:{ ids:{ type:'array', items:{type:'string'} } }, required:['ids'] } },
+      { name:'bulk_set_due_dates', description:'Set DIFFERENT due dates on many tasks at once with a single confirmation. Use this for a cadence fix, where each task needs its OWN expected date (bulk_update_tasks can only apply one shared date). Pass items = array of { id, due_date } (due_date YYYY-MM-DD).',
+        input_schema:{ type:'object', properties:{ items:{ type:'array', items:{ type:'object', properties:{ id:{type:'string'}, due_date:{type:'string', description:'YYYY-MM-DD'} }, required:['id','due_date'] } } }, required:['items'] } },
       { name:'audit_spouse_dates', description:'Check the tasks in view for married couples (via the contact Spouse lookup) whose tasks have DIFFERENT due dates. Returns each couple with both partners’ tasks (including task ids and due dates) and whether they are aligned. Use when the user asks about spouses / couples sharing a due date. After reporting any mismatches, offer to align a couple by setting both partners’ task(s) to the same due_date — ask which date first, then use bulk_update_tasks with those task ids.',
         input_schema:{ type:'object', properties:{} } },
-      { name:'check_call_due_dates', description:'For the Not-Started Call tasks in view, check each due date against the contact’s last completed Call plus the touch cadence: if the CONTACT owner is Tarek → A=45, B=90, C=120 days; otherwise → A=30, B=60, C=90 days (touch class A/B/C read from the subject). Returns tasks whose due date is wrong (with expected vs actual), tasks with no prior completed call, and the aligned count. Use when the user asks whether call due dates are correct / on cadence. After reporting, offer to fix a task by setting its due_date to the expected date via update_task or bulk_update_tasks.',
+      { name:'check_call_due_dates', description:'For the Not-Started Call tasks in view, check each due date against the contact’s last completed Call plus the touch cadence: if the owner is Tarek → A=45, B=90, C=120 days; otherwise → A=30, B=60, C=90 days (touch class A/B/C read from the subject). The last-completed-call baseline is computed from ALL loaded tasks (every completed call in the dataset, no per-contact cap and unaffected by the current filter), so its results are reliable — trust the expected_due it returns. Each mismatch includes task_id and expected_due. Returns tasks whose due date is wrong (expected vs actual), tasks with genuinely no prior completed call, the aligned count, and baseline_tasks (how many tasks the baseline was built from). Use when the user asks whether call due dates are correct / on cadence. After reporting, to FIX the mismatches call bulk_set_due_dates with items=[{id:task_id, due_date:expected_due}] (one confirm for the whole batch) — do NOT use bulk_update_tasks for this (it would force one shared date).',
         input_schema:{ type:'object', properties:{} } },
       { name:'check_couple_cadence', description:'For contacts in view who have a Spouse (lookup), check BOTH conditions for the couple: (1) each partner’s Not-Started call is on the touch cadence (contact’s last completed call + interval by contact owner & class — Tarek: A45/B90/C120, else A30/B60/C90), AND (2) both partners’ calls share the SAME due date. Each couple is returned with both partners’ call due/expected dates, on_cadence + aligned flags, a needs_fix flag, fix_ids (the task ids to change), and target_date — the ONE date both calls should be set to, already computed by the HIGHER-TOUCH-WINS rule (the partner on the more frequent class A>B>C sets the date; same class → the sooner cadence date; if that date is in the past it is clamped to today). Use when the user wants spouses’ calls correct AND aligned. After reporting, for EACH couple where needs_fix is true, PROPOSE the fix: bulk_update_tasks with ids=fix_ids and due_date=target_date. Do NOT ask the user which date — target_date already encodes the rule. The user still confirms the write.',
         input_schema:{ type:'object', properties:{} } },
@@ -579,7 +581,7 @@
         "To change MANY tasks at once, use bulk_update_tasks or bulk_delete_tasks (one confirmation for the whole batch) instead of repeating single-task calls. Gather the ids first (from the JSON or search_tasks).",
         "Use get_contact for a contact's details; combine it with search_tasks to answer history questions.",
         "To check married couples, call audit_spouse_dates — it follows the contact Spouse link among the tasks in view and reports couples whose tasks have different due dates. After reporting mismatches, offer to align each couple by setting both partners' task(s) to one due_date (ask which date), via bulk_update_tasks with the task ids it returned.",
-        "To check whether Not-Started call due dates follow the touch cadence, call check_call_due_dates — it compares each to the contact's last completed call + the interval (Tarek-owned: A45/B90/C120; otherwise A30/B60/C90). After reporting wrong ones, offer to fix each by setting due_date to the expected date via update_task / bulk_update_tasks.",
+        "To check whether Not-Started call due dates follow the touch cadence, call check_call_due_dates — its last-completed-call baseline comes from ALL loaded tasks (reliable; no 60-contact cap, not limited by the filter), so trust its expected_due values. To FIX the mismatches it returns, call bulk_set_due_dates with items=[{id:task_id, due_date:expected_due}] — ONE confirm applies every task to its own expected date. Do NOT use bulk_update_tasks for cadence fixes (it can only set one shared date for all). Tasks in the no_prior list have no completed call to measure from — leave them unless the user says otherwise.",
         "To check couples together — each spouse's call on cadence AND both sharing one due date — call check_couple_cadence. For every couple it returns with needs_fix=true, PROPOSE setting both partners' calls to that couple's target_date (already computed: the higher-touch partner's cadence date; same class → the sooner date; overdue → today) via bulk_update_tasks (ids=fix_ids, due_date=target_date). Don't ask which date — the rule decides; the user still confirms the write. Briefly say WHY (e.g. 'matched to Morgan's A-touch cadence, the higher-touch spouse').",
         "When a task should be linked to a contact, call find_contact first to resolve the name to an id, then pass contact_id and contact_name.",
         "For update_task / delete_task, use the exact task id from the JSON. Valid statuses: " + (meta.statusOptions || []).join(", ") + ".",
@@ -627,6 +629,10 @@
         const ids = inp.ids || [];
         return { verb:'Delete ' + ids.length + ' task' + (ids.length === 1 ? '' : 's'), title:'Removes them from Zoho', detail:'', items: ids.map(label), danger:true };
       }
+      if (tool.name === 'bulk_set_due_dates') {
+        const items = inp.items || [];
+        return { verb:'Set due dates on ' + items.length + ' task' + (items.length === 1 ? '' : 's'), title:'Cadence fix — each to its own date', detail:'', items: items.map(it => label(it.id) + ' → ' + (fmtDate(it.due_date) || it.due_date)), danger:false };
+      }
       return { verb: tool.name, title:'', detail: JSON.stringify(inp), danger:true };
     }
 
@@ -665,7 +671,8 @@
           const mm = parsed.mismatches;
           if (!mm.length) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`Checked ${parsed.checked} not-started call(s) — all due dates match the cadence. [dev preview]` }] };
           const lines = mm.slice(0, 6).map(m => `• ${m.subject}: due ${fmtDate(m.actual_due) || '—'}, should be ${fmtDate(m.expected_due) || '—'} (${m.class}-touch, +${m.interval_days}d from last call ${fmtDate(m.last_call) || '?'})`).join('\n');
-          return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${mm.length} of ${parsed.checked} not-started call(s) are off cadence:\n${lines}\n\nWant me to fix them to the expected dates? [dev preview]` }] };
+          const items = mm.filter(m => m.task_id && m.expected_due).map(m => ({ id: m.task_id, due_date: m.expected_due }));
+          return { ok:true, stop_reason:'tool_use', content:[{ type:'text', text:`${mm.length} of ${parsed.checked} not-started call(s) are off cadence:\n${lines}\n\nI'll set each to its expected date — confirm below. [dev preview]` }, { type:'tool_use', id:'dev-setdates', name:'bulk_set_due_dates', input:{ items } }] };
         }
         const declined = /declined|error/i.test(raw);
         return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text: declined ? "Okay, I left it unchanged." : "Done — that's updated in your tasks. Anything else?" }] };
@@ -765,6 +772,7 @@
     const ACTIVITY_LABELS = { find_contact:'Looking up a contact', search_tasks:'Searching all tasks', get_contact:'Reading contact details', audit_spouse_dates:'Checking spouse dates', check_call_due_dates:'Checking call cadence', check_couple_cadence:'Checking couples', find_duplicate_calls:'Finding duplicate calls', create_task:'Creating a task', update_task:'Updating a task', delete_task:'Deleting a task' };
     function activityLabel(name, input) {
       if (name === 'bulk_update_tasks' || name === 'bulk_delete_tasks') { const n = input && input.ids ? input.ids.length : 0; return (name === 'bulk_delete_tasks' ? 'Deleting ' : 'Updating ') + n + ' task' + (n === 1 ? '' : 's'); }
+      if (name === 'bulk_set_due_dates') { const n = input && input.items ? input.items.length : 0; return 'Setting dates on ' + n + ' task' + (n === 1 ? '' : 's'); }
       return ACTIVITY_LABELS[name] || name;
     }
     function activityDetail(r) {
@@ -1264,21 +1272,25 @@
       // contact's last completed call + the touch cadence (by contact owner).
       async function execCheckCallDates() {
         const rows = view || [];
+        const all = tasks || [];   // FULL loaded set — the reliable cadence baseline
         const typeKey = colMap.type;
         const isCall = (x) => ((x[typeKey] || x.Task_Type || '') + '').toLowerCase() === 'call' || /touch call/i.test(x.Subject || '');
         const ns = rows.filter(t => (t.Status || '') === 'Not Started' && isCall(t));
         if (!ns.length) return { checked: 0, mismatches: [], no_prior: [], note: 'No Not-Started call tasks in the current view.' };
 
-        const contactIds = [...new Set(ns.map(t => t.Who_Id?.id || t.Who_Id?.name).filter(Boolean))];
-        let tasksByContact = {}, ownerByContact = {};
-        if (isDev()) {
-          tasksByContact = devTasksForContacts(contactIds);
-          contactIds.forEach(c => { ownerByContact[c] = 'Tarek Morshed'; });
-        } else {
-          const { ok, data } = await callZoho({ action:'tasks_for_contacts', contact_ids: contactIds.slice(0, 60), type_field: colMap.type });
-          if (!ok) return { checked: 0, mismatches: [], no_prior: [], error: data?.error || 'Could not read contact history.' };
-          tasksByContact = data.tasks_by_contact || {};
-          ownerByContact = data.owner_by_contact || {};
+        // Build each contact's LAST completed call from ALL loaded tasks — NOT a
+        // per-contact network fetch (that was capped at 60 contacts, so everyone
+        // past #60 was wrongly reported "no prior call") and NOT the filtered view
+        // (a Not-Started filter hides the completed calls). Owner is taken from the
+        // completed call itself (a reliable proxy for the contact owner).
+        const lastByContact = {}, ownerByContact = {};
+        for (const t of all) {
+          if (!isCall(t) || !/complete/i.test(t.Status || '')) continue;
+          const cid = t.Who_Id?.id || t.Who_Id?.name;
+          if (!cid) continue;
+          const prev = lastByContact[cid];
+          if (!prev || String(t.Closed_Time || t.Due_Date || '').localeCompare(String(prev.Closed_Time || prev.Due_Date || '')) > 0) lastByContact[cid] = t;
+          if (t.Owner?.name) ownerByContact[cid] = t.Owner.name;
         }
 
         const mismatches = [], noPrior = [];
@@ -1287,10 +1299,7 @@
           const cid = t.Who_Id?.id || t.Who_Id?.name;
           const cls = parseTouchClass(t.Subject);
           if (!cls) continue;
-          const hist = tasksByContact[cid] || [];
-          const calls = hist.filter(h => /complete/i.test(h.Status || '') && ((((h[typeKey] || h.Task_Type || '') + '').toLowerCase() === 'call') || /call/i.test(h.Subject || '')));
-          calls.sort((a, b) => String(b.Closed_Time || b.Due_Date || '').localeCompare(String(a.Closed_Time || a.Due_Date || '')));
-          const last = calls[0];
+          const last = lastByContact[cid];
           const ownerName = ownerByContact[cid] || t.Owner?.name || '';
           const bucket = /tarek/i.test(ownerName) ? 'tarek' : 'other';
           const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls];
@@ -1301,7 +1310,7 @@
           const rec = { task_id: t.id, subject: t.Subject, contact: t.Who_Id?.name || null, class: cls, owner: ownerName || null, interval_days: interval, last_call: lastDate, expected_due: expected, actual_due: actual };
           if (expected && actual === expected) aligned++; else mismatches.push(rec);
         }
-        return { checked: ns.length, mismatches, no_prior: noPrior, aligned_count: aligned };
+        return { checked: ns.length, mismatches, no_prior: noPrior, aligned_count: aligned, baseline_tasks: all.length };
       }
       // Pairs up married contacts (via the Spouse lookup) among the tasks in
       // view and flags couples whose tasks have different due dates.
@@ -1452,6 +1461,17 @@
           const names = ids.map(taskTitle);
           const { okN, errN } = await runBatched(ids, (id) => removeTask(id, true));
           return { ok: errN === 0, count: okN, summary: `Deleted ${okN} task${okN === 1 ? '' : 's'}`, records: names, ai: `Deleted ${okN} tasks: ${names.join(', ')}`, error: errN ? `${errN} failed` : undefined };
+        }
+        if (name === 'bulk_set_due_dates') {
+          const items = Array.isArray(input.items) ? input.items.filter(it => it && it.id && it.due_date) : [];
+          if (!items.length) return { ok:false, error:'No tasks specified.' };
+          const names = items.map(it => taskTitle(it.id));
+          const { okN, errN } = await runBatched(items, (it) => {
+            const existing = (tasks || []).find(t => t.id === it.id) || {};
+            const patch = { ...existing, Due_Date: it.due_date };
+            return writeTask({ mode:'edit', id: it.id, record: { Due_Date: it.due_date }, patch, skipReload:true });
+          });
+          return { ok: errN === 0, count: okN, summary: `Set due dates on ${okN} task${okN === 1 ? '' : 's'}`, records: names, ai: `Set due dates on ${okN} tasks`, error: errN ? `${errN} failed` : undefined };
         }
         return { ok:false, error:'Unknown action.' };
       }

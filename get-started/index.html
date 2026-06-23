@@ -646,12 +646,17 @@ function switchPath(p) {
 // font settle, tab switch (Safari/Chrome), and any resize.
 (function () {
   if (!/[?&]embed=1\b/.test(location.search)) return;
+  var lastH = 0;
   function postHeight() {
-    var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+    // BODY content height only — documentElement.scrollHeight is bounded by the
+    // iframe's own (parent-set) height and would feed a runaway grow loop. Post
+    // only on a real change. The ResizeObserver below catches genuine reflows.
+    var h = document.body.scrollHeight;
+    if (Math.abs(h - lastH) <= 1) return;
+    lastH = h;
     try { parent.postMessage({ type: 'tmg-gs-embed-height', height: h }, '*'); } catch (e) {}
   }
   window.addEventListener('load', postHeight);
-  window.addEventListener('resize', postHeight);
   document.addEventListener('DOMContentLoaded', postHeight);
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(postHeight);
   if (window.ResizeObserver) { try { new ResizeObserver(postHeight).observe(document.body); } catch (e) {} }

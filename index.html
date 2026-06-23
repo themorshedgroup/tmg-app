@@ -4272,7 +4272,9 @@ Rules:
           if (e.origin !== window.location.origin) return;
           const d = e.data;
           if (d && d.type === 'tmg-gs-embed-height' && typeof d.height === 'number') {
-            setH(Math.max(320, Math.min(Math.round(d.height) + 8, 24000)));
+            const next = Math.max(320, Math.min(Math.round(d.height) + 8, 24000));
+            // Dead-band: ignore tiny deltas so height can't oscillate/creep.
+            setH(prev => Math.abs(next - prev) <= 2 ? prev : next);
           }
         }
         window.addEventListener('message', onMsg);

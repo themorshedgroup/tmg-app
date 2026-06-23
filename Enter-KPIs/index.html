@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<meta name="description" content="How to enter your KPIs in the TMG App — fill out a form or paste a note.">
+<title>TMG App — Enter KPIs Guide</title>
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600&family=Cormorant+Garamond:ital,wght@0,400;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#fff; --ink-soft:rgba(255,255,255,.62); --ink-faint:rgba(255,255,255,.42);
+  --gold:#C9A45A; --line:rgba(201,164,90,.2); --note-bg:rgba(201,164,90,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Jost',sans-serif;background:#001A4A;color:var(--ink);-webkit-font-smoothing:antialiased}
+
+/* Cover */
+.cover{text-align:center;padding:46px 28px 38px;position:relative;overflow:hidden;border-bottom:1px solid rgba(201,164,90,.15)}
+.cover-ring{position:absolute;border:1px solid rgba(201,164,90,.07);border-radius:50%;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
+.cover-glow{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:300px;height:300px;border-radius:50%;background:radial-gradient(circle,rgba(201,164,90,.10) 0%,transparent 66%);pointer-events:none}
+.cover-icon{width:56px;height:56px;margin:0 auto 16px;border-radius:16px;background:rgba(201,164,90,.12);border:1px solid rgba(201,164,90,.35);display:flex;align-items:center;justify-content:center;position:relative}
+.cover-tag{font-size:9px;letter-spacing:.28em;font-weight:600;color:rgba(201,164,90,.6);text-transform:uppercase;margin-bottom:14px;position:relative}
+.cover-title{font-family:'Cormorant Garamond',serif;font-style:italic;font-size:42px;font-weight:400;color:#fff;line-height:1.15;margin-bottom:10px;position:relative}
+.cover-desc{font-size:13px;color:rgba(255,255,255,.55);line-height:1.7;max-width:380px;margin:0 auto 22px;position:relative}
+.cover-vals{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:0;position:relative}
+.cv{font-size:8.5px;letter-spacing:.12em;color:rgba(255,255,255,.4);text-transform:uppercase}
+.cs{color:rgba(201,164,90,.5);margin:0 7px;font-size:8px}
+
+/* Content + sections */
+.content{max-width:560px;margin:0 auto;padding:0 20px 64px}
+.section-hd{display:flex;align-items:center;gap:10px;padding:34px 0 16px}
+.sh-num{width:30px;height:30px;border-radius:50%;background:rgba(201,164,90,.15);border:1.5px solid var(--gold);color:var(--gold);font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:'Jost',sans-serif}
+.sh-label{font-size:9px;letter-spacing:.22em;font-weight:600;text-transform:uppercase;color:var(--gold)}
+.sh-line{flex:1;height:1px;background:var(--line)}
+.step-title{font-family:'Cormorant Garamond',serif;font-style:italic;font-size:24px;color:var(--ink);margin-bottom:8px}
+.step-desc{font-size:13px;color:var(--ink-soft);line-height:1.7;margin-bottom:14px}
+.step-desc b{color:var(--ink);font-weight:500}
+.note{background:var(--note-bg);border-left:3px solid #AD832F;border-radius:0 10px 10px 0;padding:11px 15px;font-size:12px;color:var(--ink-soft);line-height:1.7;margin:0 0 12px}
+.note b{color:var(--ink)}
+.note .ng{color:var(--gold);font-weight:600}
+.subnote{font-size:11px;color:var(--ink-faint);line-height:1.6;margin:0 0 14px;padding-left:2px}
+.subnote b{color:var(--gold);font-weight:600}
+.kbd{font-family:'Jost',sans-serif;font-weight:700;color:#fff;background:#AD832F;border-radius:5px;padding:0 6px;font-size:12px;letter-spacing:.02em}
+html.gs-embed .kbd{color:#fff;background:#AD832F}
+
+/* Mock UI cards (mimic the real light app UI) */
+.mock{background:#FAF7F1;border:1px solid #EDE7DC;border-radius:16px;padding:16px;margin:0 0 16px}
+.mock-cap{font-size:10px;color:rgba(255,255,255,.45);text-align:center;margin:-6px 0 16px;line-height:1.6}
+html.gs-embed .mock-cap{color:#8A8A8A}
+
+/* Enter KPI choice card */
+.kcard{background:#fff;border:1px solid #E8E0D2;border-radius:14px;padding:14px}
+.kcard-hd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.kcard-hd .ic{color:#AD832F;display:flex}
+.kcard-hd .t{flex:1;font-size:13px;font-weight:600;color:#001A4A}
+.kcard-hd .x{color:#B8B2A6}
+.kcard-q{font-size:12px;color:#6B6B6B;margin-bottom:10px}
+.kbtn{display:flex;align-items:center;gap:9px;width:100%;padding:11px 13px;border-radius:11px;font-size:12.5px;font-weight:600;margin-top:8px}
+.kbtn.fill{background:#001A4A;color:#fff}
+.kbtn.out{background:#fff;color:#001A4A;border:1px solid #E4DCCB}
+.kbtn svg{flex-shrink:0}
+
+/* form mock */
+.kfield{margin-bottom:10px}
+.kfield .fl{font-size:8px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#9A958A;margin-bottom:4px}
+.kinput{background:#F7F3EC;border:1px solid #E4DCCB;border-radius:9px;padding:8px 11px;font-size:12px;color:#001A4A}
+.kpcard{border:1px solid #E4DCCB;border-radius:11px;padding:11px;margin-top:4px}
+.kp-lbl{font-size:8px;font-weight:700;letter-spacing:.05em;color:#9A958A;margin-bottom:7px}
+.kchips{display:flex;flex-wrap:wrap;gap:6px}
+.kchip{display:inline-flex;align-items:center;gap:4px;border-radius:16px;padding:5px 10px;font-size:11px;font-weight:600;border:1px solid #E4DCCB;background:#fff;color:#001A4A}
+.kchip.on{background:#001A4A;color:#fff;border-color:#001A4A}
+.kghost{display:inline-flex;align-items:center;gap:5px;border:1px dashed #D9C9A8;border-radius:9px;padding:7px 11px;color:#AD832F;font-size:11px;font-weight:600}
+.kreview{display:flex;align-items:center;justify-content:center;gap:6px;background:#001A4A;color:#fff;border-radius:10px;padding:10px;font-size:12.5px;font-weight:600;margin-top:11px}
+
+/* paste-note mock */
+.notebox{background:#fff;border:1px solid #E8E0D2;border-radius:14px;padding:11px 13px;font-size:12.5px;color:#001A4A;line-height:1.7}
+.slash{color:#fff;background:#AD832F;border-radius:4px;padding:0 4px;font-weight:700;margin:0 1px}
+.notebox .dt{color:#185FA5;font-weight:600}
+/* divider breakdown */
+.bd{display:flex;flex-direction:column;gap:7px}
+.bd-row{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid #EDE7DC;border-radius:10px;padding:8px 11px}
+.bd-pill{flex-shrink:0;font-size:8px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#AD832F;background:#F6EEDD;border-radius:5px;padding:2px 7px}
+.bd-row .who{font-size:12px;font-weight:600;color:#001A4A;flex-shrink:0}
+.bd-row .acts{font-size:11px;color:#6B6B6B}
+.bd-row .acts b{color:#001A4A}
+
+.foot{text-align:center;font-size:10px;letter-spacing:.04em;color:rgba(255,255,255,.28);padding:20px 0 0}
+html.gs-embed .foot{color:#C4BFBA}
+
+/* ── Embedded light mode (?embed=1) ── */
+html.gs-embed{background:transparent;--ink:#001A4A;--ink-soft:#6B6B6B;--ink-faint:#8A8A8A;--gold:#AD832F;--line:rgba(173,131,47,.22);--note-bg:rgba(173,131,47,.08)}
+html.gs-embed body{background:transparent}
+html.gs-embed .cover{display:none}
+html.gs-embed .content{padding-top:4px;max-width:600px}
+html.gs-embed .section-hd:first-child{padding-top:12px}
+html.gs-embed .step-desc b{color:#001A4A}
+</style>
+<script>
+  try { if (/[?&]embed=1\b/.test(location.search)) document.documentElement.classList.add('gs-embed'); } catch (e) {}
+</script>
+</head>
+<body>
+
+<!-- COVER -->
+<div class="cover">
+  <div class="cover-ring" style="width:480px;height:480px"></div>
+  <div class="cover-ring" style="width:330px;height:330px"></div>
+  <div class="cover-glow"></div>
+  <div class="cover-tag">App Guide</div>
+  <div class="cover-icon">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#C9A45A" stroke-width="1.7"><line x1="6" y1="20" x2="6" y2="11"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="8"/></svg>
+  </div>
+  <div class="cover-title">Enter KPIs</div>
+  <div class="cover-desc">Log your weekly prospecting two ways — fill out a quick form, or just paste your notes.</div>
+  <div class="cover-vals">
+    <span class="cv">Be Irreplaceable</span><span class="cs">·</span>
+    <span class="cv">Accountability</span><span class="cs">·</span>
+    <span class="cv">Growth Mindset</span><span class="cs">·</span>
+    <span class="cv">Servant Leaders</span><span class="cs">·</span>
+    <span class="cv">Teamwork</span>
+  </div>
+</div>
+
+<div class="content">
+
+  <!-- 1 · START -->
+  <div class="section-hd"><div class="sh-num">1</div><div class="sh-label">Get started</div><div class="sh-line"></div></div>
+  <div class="step-title">Tap "Add KPIs" — then pick a way</div>
+  <div class="step-desc">In <b>Work Mode</b>, tap the <b>Add KPIs</b> pill. An <b>Enter KPI</b> card opens right in the chat and asks how you'd like to log them.</div>
+
+  <div class="mock">
+    <div class="kcard">
+      <div class="kcard-hd">
+        <span class="ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="9"/></svg></span>
+        <span class="t">Enter KPI</span><span class="x">✕</span>
+      </div>
+      <div class="kcard-q">Would you like to fill out a form, or paste your notes?</div>
+      <div class="kbtn fill"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="12" y2="16"/></svg>Fill out a form</div>
+      <div class="kbtn out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16M4 12h16M4 19h10"/></svg>Paste your notes</div>
+    </div>
+  </div>
+  <div class="mock-cap">Two ways, same result — pick whichever's faster for you.</div>
+
+  <!-- 2 · FORM -->
+  <div class="section-hd"><div class="sh-num">2</div><div class="sh-label">Way 1</div><div class="sh-line"></div></div>
+  <div class="step-title">Fill out a form</div>
+  <div class="step-desc">Pick the <b>KPI date</b>, type a <b>contact's name</b>, then tap the <b>KPI chips</b> that apply to them. One person can have several.</div>
+
+  <div class="mock">
+    <div class="kfield"><div class="fl">KPI Date</div><div class="kinput">Jun 18, 2026</div></div>
+    <div class="kpcard">
+      <div class="kp-lbl">PERSON 1</div>
+      <div class="kinput" style="margin-bottom:9px;color:#6B6B6B">Sam Smith</div>
+      <div class="kp-lbl">APPLICABLE KPIs</div>
+      <div class="kchips">
+        <span class="kchip on">✓ Touch Call</span>
+        <span class="kchip">Follow Up Call</span>
+        <span class="kchip">Notes</span>
+        <span class="kchip">Hotzone Action/s</span>
+        <span class="kchip">Pop-by</span>
+        <span class="kchip on">✓ Lunch</span>
+      </div>
+    </div>
+    <div style="display:flex;gap:7px;margin-top:11px"><span class="kghost">＋ Add another KPI</span><span class="kghost">＋ Add other KPIs</span></div>
+    <div class="kreview">Review &amp; Confirm →</div>
+  </div>
+  <div class="mock-cap">Tap a chip to select it (it turns navy). Tap again to remove.</div>
+
+  <div class="note">The six KPI types: <span class="ng">Touch Call</span>, <span class="ng">Follow Up Call</span>, <span class="ng">Notes</span>, <span class="ng">Hotzone Action/s</span>, <span class="ng">Pop-by</span>, <span class="ng">Lunch</span>.</div>
+  <div class="note"><b>Add another KPI</b> adds another person card (log a whole day at once). Pick <span class="ng">Hotzone Action/s</span> and a "number of hotzone actions" box appears.</div>
+  <div class="subnote"><b>Also on the form:</b> a <b>CTC Hours</b> field, and <b>Add other KPIs</b> for items like Open House or Agent Training (with a count).</div>
+
+  <!-- 3 · PASTE -->
+  <div class="section-hd"><div class="sh-num">3</div><div class="sh-label">Way 2</div><div class="sh-line"></div></div>
+  <div class="step-title">Paste your notes</div>
+  <div class="step-desc">Prefer to type it fast? Choose <b>Paste your notes</b> and write one line. The assistant reads it and fills the form for you. Start with the <b>date</b>, then list each person.</div>
+
+  <div class="mock">
+    <div class="notebox">6/18 <span class="slash">//</span> Sam Smith lunch call <span class="slash">//</span> John Doe hotzone <span class="slash">//</span> Jane Cruz pop-by notes</div>
+  </div>
+  <div class="mock-cap">One line. Date first, then each person.</div>
+
+  <div class="note"><b>"call"</b> → Touch Call · <b>"note"</b> → Notes · <b>"popped by / drop by"</b> → Pop-by · <b>"lunch"</b> → Lunch · <b>"hotzone / door-knock"</b> → Hotzone Action/s. Say <b>"follow-up"</b> for a Follow Up Call.</div>
+
+  <!-- 4 · THE // DIVIDER -->
+  <div class="section-hd"><div class="sh-num">4</div><div class="sh-label">The key trick</div><div class="sh-line"></div></div>
+  <div class="step-title">The <span style="font-style:normal">//</span> divider</div>
+  <div class="step-desc">The double slash <span class="kbd">//</span> is how you separate <b>people</b>. Everything between two <span class="kbd">//</span> belongs to <b>one person</b> — their name plus whatever they did, in any order.</div>
+
+  <div class="mock">
+    <div class="bd">
+      <div class="bd-row"><span class="bd-pill">Date</span><span class="acts"><b>6/18</b> → June 18, 2026</span></div>
+      <div class="bd-row"><span class="bd-pill">Person</span><span class="who">Sam Smith</span><span class="acts">lunch call → <b>Lunch</b>, <b>Touch Call</b></span></div>
+      <div class="bd-row"><span class="bd-pill">Person</span><span class="who">John Doe</span><span class="acts">hotzone → <b>Hotzone Action/s</b></span></div>
+      <div class="bd-row"><span class="bd-pill">Person</span><span class="who">Jane Cruz</span><span class="acts">pop-by notes → <b>Pop-by</b>, <b>Notes</b></span></div>
+    </div>
+  </div>
+  <div class="mock-cap">How <b>6/18 // Sam Smith lunch call // John Doe hotzone // Jane Cruz pop-by notes</b> is read.</div>
+
+  <div class="note"><b>Quick rule:</b> a <span class="kbd">//</span> before every person. The bit before the first <span class="kbd">//</span> is the date.</div>
+  <div class="subnote">No slashes? It'll still try its best to split people and activities — but <span class="ng">//</span> makes it exact.</div>
+
+  <!-- 5 · CONFIRM -->
+  <div class="section-hd"><div class="sh-num">5</div><div class="sh-label">Finish</div><div class="sh-line"></div></div>
+  <div class="step-title">Match &amp; confirm</div>
+  <div class="step-desc">Either way, you land on a <b>review</b> card. Each name is matched to a <b>contact</b> — pick the right one from the suggestions (or add a new contact). Once every person is linked, tap <b>Confirm &amp; send</b> and it's logged.</div>
+  <div class="note"><b>Why match?</b> Linking each name to the real contact is what files the KPI against the right person in the CRM.</div>
+
+  <!-- GOOD TO KNOW -->
+  <div class="section-hd"><div class="sh-num" style="background:rgba(201,164,90,.1)">★</div><div class="sh-label">Good to know</div><div class="sh-line"></div></div>
+  <div class="note"><b>One person, many KPIs.</b> Tap as many chips as apply (or write several activities after a name) — they all log together.</div>
+  <div class="note"><b>Whole day in one go.</b> Add a person per contact (form) or a <span class="kbd">//</span> per contact (note) and submit once.</div>
+  <div class="note"><b>Nothing logs until you confirm.</b> The review card is your last check — fix anything before tapping Confirm &amp; send.</div>
+
+  <div class="foot">THE MORSHED GROUP · CHRISTIE'S INTERNATIONAL REAL ESTATE</div>
+</div>
+
+<script>
+  // Report content height to the parent app so the in-app Guide iframe sizes to fit.
+  // Use document.body.scrollHeight (true content height) — NOT documentElement, which is
+  // bounded by the iframe's own height and would feed a runaway grow loop. Post on change only.
+  (function () {
+    if (!/[?&]embed=1\b/.test(location.search)) return;
+    var lastH = 0;
+    function postHeight() {
+      var h = document.body.scrollHeight;
+      if (Math.abs(h - lastH) <= 1) return;
+      lastH = h;
+      try { parent.postMessage({ type: 'tmg-gs-embed-height', height: h }, '*'); } catch (e) {}
+    }
+    window.addEventListener('load', postHeight);
+    document.addEventListener('DOMContentLoaded', postHeight);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(postHeight);
+    if (window.ResizeObserver) { try { new ResizeObserver(postHeight).observe(document.body); } catch (e) {} }
+    [200, 600, 1400].forEach(function (ms) { setTimeout(postHeight, ms); });
+  })();
+</script>
+</body>
+</html>

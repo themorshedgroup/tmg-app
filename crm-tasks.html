@@ -819,6 +819,7 @@
         const res = await callTasksAI({ system: aiSystem(tasks, colMap, meta), messages: claudeRef.current, tasks, colMap });
         setBusy(false);
         if (!res.ok) { push({ type:'note', text: res.error || 'Something went wrong.' }); return; }
+        if (res.stop_reason === 'max_tokens') { push({ type:'note', text: 'That response was too long to finish in one go — try a smaller batch (filter the view first), or ask me to do it in chunks.' }); }
         const content = res.content || [];
         const textOut = content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
         if (textOut) push({ type:'ai', text: textOut });
@@ -906,16 +907,23 @@
                   </div>
                 );
                 if (item.type === 'confirm') {
-                  const s = summarizeTool(item.tool, tasks, colMap);
-                  const accent = s.danger ? C.red : C.gold;
+                  // A confirm card gates a write — it must NEVER render blank, or
+                  // (with the input locked) the user would be stuck. So we shield
+                  // against any summarize error and always fall back to clear text.
+                  let s; try { s = summarizeTool(item.tool, tasks, colMap) || {}; } catch (e) { s = {}; }
+                  const toolName = (item.tool && item.tool.name) || '';
+                  const verb = s.verb || (/(delete|remove)/.test(toolName) ? 'Delete' : 'Confirm this action');
+                  const title = s.title || (toolName ? toolName.replace(/_/g, ' ') : 'Review and confirm');
+                  const danger = s.danger != null ? s.danger : /(delete|remove)/.test(toolName);
+                  const accent = danger ? C.red : C.gold;
                   return (
                     <div key={item.id} style={{ alignSelf:'stretch', background:C.surface, border:'1px solid '+accent+'55', borderRadius:14, overflow:'hidden' }}>
                       <div style={{ padding:'12px 14px', borderBottom:'1px solid '+C.border }}>
                         <div style={{ display:'flex', alignItems:'center', gap:7, marginBottom:5 }}>
-                          <i className={'ti ' + (s.danger ? 'ti-trash' : item.tool.name === 'create_task' ? 'ti-plus' : 'ti-edit')} style={{ fontSize:15, color:accent }} />
-                          <span style={{ fontSize:'0.68rem', fontWeight:600, letterSpacing:'.08em', textTransform:'uppercase', color:accent }}>{s.verb}</span>
+                          <i className={'ti ' + (danger ? 'ti-trash' : toolName === 'create_task' ? 'ti-plus' : 'ti-edit')} style={{ fontSize:15, color:accent }} />
+                          <span style={{ fontSize:'0.68rem', fontWeight:600, letterSpacing:'.08em', textTransform:'uppercase', color:accent }}>{verb}</span>
                         </div>
-                        <div style={{ fontSize:'0.9rem', fontWeight:600, color:C.navy }}>{s.title}</div>
+                        <div style={{ fontSize:'0.9rem', fontWeight:600, color:C.navy }}>{title}</div>
                         {s.detail && <div style={{ fontSize:'0.78rem', color:C.textSecondary, marginTop:3 }}>{s.detail}</div>}
                         {s.items && s.items.length > 0 && (
                           <div style={{ marginTop:7, fontSize:'0.76rem', color:C.textSecondary, lineHeight:1.6 }}>
@@ -926,7 +934,7 @@
                       </div>
                       <div style={{ padding:'9px 14px', display:'flex', alignItems:'center', gap:9, background:C.surfaceAlt }}>
                         {item.status === 'pending' ? (<>
-                          <button onClick={() => decide(item.id, true)} style={{ fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:600, color:'#fff', background: s.danger ? C.red : C.navy, border:'none', borderRadius:8, padding:'7px 16px', cursor:'pointer' }}>{s.danger ? 'Delete' : 'Confirm'}</button>
+                          <button onClick={() => decide(item.id, true)} style={{ fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:600, color:'#fff', background: danger ? C.red : C.navy, border:'none', borderRadius:8, padding:'7px 16px', cursor:'pointer' }}>{danger ? 'Delete' : 'Confirm'}</button>
                           <button onClick={() => decide(item.id, false)} style={{ fontFamily:C.fontSans, fontSize:'0.8rem', color:C.textSecondary, background:'transparent', border:'1px solid '+C.border, borderRadius:8, padding:'7px 14px', cursor:'pointer' }}>Cancel</button>
                         </>) : (
                           <span style={{ fontSize:'0.78rem', fontWeight:600, color: item.status === 'confirmed' ? C.green : C.textMuted, display:'inline-flex', alignItems:'center', gap:6 }}>

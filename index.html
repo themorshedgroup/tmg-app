@@ -126,48 +126,7 @@
       .deals-desktop-only { display: flex !important; }
     }
 
-    /* ─── Guide tab: macOS-Notes content typography (styles stored note HTML) ─── */
-    .nc-body { font-family: 'Jost', sans-serif; }
-    .nc-h1 { font-family: 'Cormorant Garamond', Georgia, serif; font-style: italic; font-size: 18px; color: #001A4A; line-height: 1.3; margin: 18px 0 10px; }
-    .nc-h2 { display: flex; align-items: center; gap: 7px; font-family: 'Jost', sans-serif; font-size: 9px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: #AD832F; margin: 18px 0 7px; }
-    .nc-h2::after { content: ''; flex: 1; height: 0.5px; background: #EDE7DC; }
-    .nc-p { font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 300; color: #3A3A3A; line-height: 1.75; margin: 0 0 10px; }
-    .nc-p b, .nc-step-desc b, .nc-p strong { font-weight: 600; color: #001A4A; }
-    .nc-step { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 9px; }
-    .nc-step-num { width: 20px; height: 20px; border-radius: 50%; background: #001A4A; color: #fff; font-family: 'Jost', sans-serif; font-size: 9px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
-    .nc-step-title { font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 600; color: #001A4A; margin-bottom: 2px; }
-    .nc-step-desc { font-family: 'Jost', sans-serif; font-size: 10px; color: #6B6B6B; line-height: 1.6; }
-    .nc-code { background: #F0EBE3; border: 0.5px solid #E4DFD4; border-radius: 6px; padding: 3px 8px; font-size: 10px; color: #001A4A; font-family: monospace; display: inline-block; }
-    .nc-tip { display: flex; gap: 8px; background: #FDF8F0; border: 0.5px solid #E8D9BC; border-left: 3px solid #AD832F; border-radius: 6px; padding: 9px 11px; margin-bottom: 10px; }
-    .nc-tip > i { color: #AD832F; font-size: 13px; flex-shrink: 0; margin-top: 1px; }
-    .nc-tip > div { font-family: 'Jost', sans-serif; font-size: 10px; color: #6B6B6B; line-height: 1.6; }
-    .nc-warn { display: flex; gap: 8px; background: #FEF2F2; border: 0.5px solid #FBBCBC; border-left: 3px solid #9B1C1C; border-radius: 6px; padding: 9px 11px; margin-bottom: 10px; }
-    .nc-warn > i { color: #9B1C1C; font-size: 13px; flex-shrink: 0; margin-top: 1px; }
-    .nc-warn > div { font-family: 'Jost', sans-serif; font-size: 10px; color: #6B6B6B; line-height: 1.6; }
-    .nc-check { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 6px; }
-    .nc-check > i { color: #0F6E56; font-size: 12px; flex-shrink: 0; margin-top: 1px; }
-    .nc-check > div { font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 300; color: #3A3A3A; line-height: 1.6; }
-    .nc-check.incomplete > i { color: #D4D0CC; }
-    .nc-check.incomplete > div { color: #9A958A; }
-    .nc-divider { height: 0.5px; background: #EDE7DC; margin: 14px 0; border: 0; }
-    .nc-tags { margin-bottom: 10px; }
-    .nc-tag { display: inline-flex; align-items: center; gap: 4px; background: #F3EBDA; border: 0.5px solid #E8D9BC; border-radius: 14px; padding: 2px 9px; font-family: 'Jost', sans-serif; font-size: 9px; font-weight: 600; color: #AD832F; margin: 2px 3px 2px 0; }
-    .nc-tag > i { font-size: 10px; color: #AD832F; }
-    .nc-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 10px; }
-    .nc-table th { text-align: left; padding: 6px 8px; font-family: 'Jost', sans-serif; font-size: 8px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #AD832F; border-bottom: 1px solid #EDE7DC; background: #F9F6F0; }
-    .nc-table td { padding: 7px 8px; border-bottom: 0.5px solid #F5F2EE; color: #3A3A3A; font-weight: 300; vertical-align: top; font-family: 'Jost', sans-serif; }
-    .nc-table td:first-child { font-weight: 500; color: #001A4A; white-space: nowrap; }
-    .nc-vals { text-align: center; font-family: 'Jost', sans-serif; font-size: 8.5px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #AD832F; margin: 2px 0 16px; line-height: 1.9; }
-    .nc-check.x > i { color: #9B1C1C; }
-    .nc-faq { display: flex; gap: 11px; align-items: flex-start; padding: 10px 0; border-bottom: 0.5px solid #F0EBE1; }
-    .nc-faq:last-child { border-bottom: 0; }
-    .nc-faq-i { font-size: 16px; line-height: 1.2; flex-shrink: 0; }
-    .nc-faq-t { font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 600; color: #001A4A; margin-bottom: 3px; }
-    .nc-faq-d { font-family: 'Jost', sans-serif; font-size: 10px; color: #6B6B6B; line-height: 1.6; }
-    .nc-faq-d b { font-weight: 600; color: #001A4A; }
-    .nc-edit:empty:before { content: attr(data-ph); color: #C4BFBA; }
     .guide-note-item:hover { background: #EDE7DC !important; }
-    .guide-tool:hover { background: #EDE7DC !important; }
     /* AI Chat history sidebar */
     .hp-row:hover { background: #EDE7DC; }
     .hp-dots { opacity: 0; transition: opacity 0.12s; }
@@ -1115,146 +1074,14 @@ Rules:
       },
     };
 
-    // ─── Guide notes (macOS-Notes-style internal docs) ────────────────
-    const GUIDE_SECTIONS = ['Pinned', 'App Guides', 'Reference'];
-
-    // The one fully-authored starter note. Other notes ship as empty shells.
-    const GUIDE_GETSTARTED_HTML = `<p class="nc-vals">Be Irreplaceable · Accountability · Growth Mindset · Servant Leaders · Teamwork</p>
-<section class="nc-h2">1 · Open the link</section>
-<div class="nc-h1">Tap this link on your iPhone</div>
-<p class="nc-p">Open it in <b>Safari</b> or <b>Chrome</b>. Make sure your TMG Gmail account is signed in on this device before continuing.</p>
-<div class="nc-tip"><i class="ti ti-link"></i><div>Open <a href="https://app.themorshedgroup.com" target="_blank" rel="noopener noreferrer">app.themorshedgroup.com</a> — tap to open in browser.</div></div>
-<p class="nc-p">The app opens in your browser — you'll see the TMG login screen.</p>
-<div class="nc-check"><i class="ti ti-check"></i><div>Address bar shows the URL</div></div>
-<div class="nc-check"><i class="ti ti-check"></i><div>TMG login screen loads</div></div>
-<div class="nc-divider"></div>
-<section class="nc-h2">2 · Sign in</section>
-<div class="nc-h1">Tap "Continue with TMG Gmail"</div>
-<p class="nc-p">Sign in with your <b>@themorshedgroup.com</b> account. Brand-new accounts first see a quick "account being set up" screen — you'll have full access within 24 hours.</p>
-<p class="nc-p">Tap the button and complete Google sign-in.</p>
-<div class="nc-check"><i class="ti ti-check"></i><div>Use @themorshedgroup.com</div></div>
-<div class="nc-check x"><i class="ti ti-x"></i><div>Other accounts = Access Denied</div></div>
-<div class="nc-divider"></div>
-<section class="nc-h2">3 · Add to Home Screen</section>
-<div class="nc-h1">Install it — choose your browser</div>
-<p class="nc-p">These screens show <b>iOS 26</b> (the current iPhone software). Older iPhones look slightly different — see the gold notes under each step.</p>
-<section class="nc-h2">Safari</section>
-<div class="nc-step"><div class="nc-step-num">a</div><div class="nc-step-body"><div class="nc-step-title">Tap the ☰ menu</div><div class="nc-step-desc">On iOS 26, Safari's bar floats at the bottom. Tap the <b>☰ menu</b> on the <b>left</b> of the address bar — just right of the Back arrow — to open the Share sheet.</div></div></div>
-<p class="nc-p">The <b>☰ menu</b> is on the left of the address bar, just right of the Back arrow.</p>
-<div class="nc-tip"><i class="ti ti-info-circle"></i><div><b>Older iPhone (iOS 18)?</b> The Share button (a box with an up-arrow) sits right in the bottom toolbar — tap it and skip to 3b.</div></div>
-<div class="nc-step"><div class="nc-step-num">b</div><div class="nc-step-body"><div class="nc-step-title">Tap "Add to Home Screen"</div><div class="nc-step-desc">Scroll down the Share sheet, then tap <b>Add to Home Screen</b>.</div></div></div>
-<p class="nc-p">Scroll the Share sheet — <b>Add to Home Screen</b> is a few rows down.</p>
-<div class="nc-tip"><i class="ti ti-info-circle"></i><div>Don't see it? You may be in an in-app browser. Open the link in <b>Safari</b> or <b>Chrome</b> directly.</div></div>
-<div class="nc-step"><div class="nc-step-num">c</div><div class="nc-step-body"><div class="nc-step-title">Keep "Open as Web App" on, tap Add</div><div class="nc-step-desc">The name pre-fills as "TMG App." Leave <b>Open as Web App</b> on (this is what makes it full-screen), then tap <b>Add</b> in the top-right.</div></div></div>
-<section class="nc-h2">Chrome</section>
-<div class="nc-step"><div class="nc-step-num">a</div><div class="nc-step-body"><div class="nc-step-title">Tap the Share icon</div><div class="nc-step-desc">Chrome installs it through the <b>same iOS Share sheet</b>. Tap the <b>Share icon</b> (a box with an up-arrow) on the <b>right</b> of the address bar — not the three-dot menu.</div></div></div>
-<p class="nc-p">The <b>Share icon</b> is on the right of the address bar (the box with an up-arrow).</p>
-<div class="nc-tip"><i class="ti ti-info-circle"></i><div>Signed into Chrome with your TMG Gmail account? Good — that keeps you logged in.</div></div>
-<div class="nc-step"><div class="nc-step-num">b</div><div class="nc-step-body"><div class="nc-step-title">Tap "Add to Home Screen"</div><div class="nc-step-desc">Scroll down the Share sheet and tap <b>Add to Home Screen</b> — it's near the bottom, below <b>Print</b>.</div></div></div>
-<p class="nc-p">Scroll the Share sheet — <b>Add to Home Screen</b> is below Print.</p>
-<div class="nc-tip"><i class="ti ti-info-circle"></i><div>No "Add to Home Screen"? Update Chrome in the App Store, or use <b>Safari</b> instead.</div></div>
-<div class="nc-step"><div class="nc-step-num">c</div><div class="nc-step-body"><div class="nc-step-title">Confirm and tap Add</div><div class="nc-step-desc">Leave the name as "TMG App" and tap <b>Add</b>.</div></div></div>
-<div class="nc-warn"><i class="ti ti-lock"></i><div><b>Important:</b> Always open the TMG App from the <b>home screen icon</b> — not from a browser bookmark or link. The icon gives you the full-screen experience and keeps you signed in.</div></div>
-<div class="nc-divider"></div>
-<section class="nc-h2">Troubleshooting</section>
-<div class="nc-faq"><div class="nc-faq-i">⏳</div><div><div class="nc-faq-t">Can't see the app after signing in?</div><div class="nc-faq-d">Your account is being set up — you'll have access within <b>24 hours</b> and receive an email notification once it's ready.</div></div></div>
-<div class="nc-faq"><div class="nc-faq-i">🌐</div><div><div class="nc-faq-t">"Add to Home Screen" isn't there</div><div class="nc-faq-d">You're probably in an <b>in-app browser</b> (the preview inside Instagram, Facebook, or Gmail). Those can't install apps — open the link in <b>Safari</b> or <b>Chrome</b> directly.</div></div></div>
-<div class="nc-faq"><div class="nc-faq-i">📵</div><div><div class="nc-faq-t">App opens in browser, not full-screen</div><div class="nc-faq-d">Tap the TMG App icon on your <b>home screen</b> — don't open it from a browser bookmark or link. On iOS 26, make sure <b>Open as Web App</b> was on when you added it.</div></div></div>
-<div class="nc-faq"><div class="nc-faq-i">🔍</div><div><div class="nc-faq-t">Can't find the icon after installing</div><div class="nc-faq-d">Swipe through all your home screen pages, or search <b>"TMG App"</b> using iPhone Spotlight (swipe down from the home screen).</div></div></div>
-<div class="nc-faq"><div class="nc-faq-i">💬</div><div><div class="nc-faq-t">Still stuck?</div><div class="nc-faq-d">Message Symon in the TMG App team chat, or email <a href="mailto:manager@themorshedgroup.com">manager@themorshedgroup.com</a> with a screenshot and your iOS version.</div></div></div>`;
-
-    // Convert any string into a URL-safe slug (lowercase, hyphenated).
-    function guideSlugify(s) {
-      return (s || '').toLowerCase().trim()
-        .replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-')
-        .replace(/^-+|-+$/g, '').slice(0, 60);
-    }
-
-    // Strip anything executable from stored note HTML before rendering (defense in depth;
-    // writes are admin-only via RLS, but never trust stored HTML blindly).
-    function guideSanitize(html) {
-      try {
-        const doc = new DOMParser().parseFromString('<div>' + (html || '') + '</div>', 'text/html');
-        const root = doc.body.firstChild;
-        const walk = (node) => {
-          Array.prototype.slice.call(node.children).forEach((el) => {
-            const tag = el.tagName.toLowerCase();
-            if (['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'form', 'input', 'button', 'svg'].includes(tag)) { el.remove(); return; }
-            Array.prototype.slice.call(el.attributes).forEach((a) => {
-              const n = a.name.toLowerCase();
-              if (n.startsWith('on')) el.removeAttribute(a.name);
-              if ((n === 'href' || n === 'src') && /^\s*(javascript|data):/i.test(a.value)) el.removeAttribute(a.name);
-            });
-            walk(el);
-          });
-        };
-        walk(root);
-        return root.innerHTML;
-      } catch (e) { return ''; }
-    }
-
-    // localhost has no Supabase _client, so drive the preview from an in-memory fixture.
-    let _guideDev = null;
-    function guideDevSeed() {
-      if (_guideDev) return _guideDev;
-      const now = new Date().toISOString();
-      const mk = (emoji, title, description, slug, section, pinned, sort, body) =>
-        ({ id: 'dev-' + slug, emoji, title, description, slug, section, pinned, sort, body_html: body || '', author_name: 'Symon Yongco', author_id: 'dev-user-id', created_at: now, updated_at: now });
-      _guideDev = [
-        mk('🚀', 'Get Started', 'Install the TMG App on your iPhone in under 60 seconds — no App Store needed.', 'get-started', 'Pinned', true, 0, GUIDE_GETSTARTED_HTML),
-        mk('📅', 'Calendar & Timezone', 'TX and PH time zones, day/week/month views.', 'calendar-timezone', 'App Guides', false, 0, ''),
-        mk('✅', 'Tasks & Decisions', 'How to create, assign, and track tasks.', 'tasks-decisions', 'App Guides', false, 1, ''),
-        mk('💰', 'Deals Pipeline', 'Stage overview, Kanban board, deal cards.', 'deals-pipeline', 'App Guides', false, 2, ''),
-        mk('📊', 'KPIs & Scorecard', 'Reading your weekly achievement chart.', 'kpis-scorecard', 'App Guides', false, 3, ''),
-        mk('🤖', 'AI Assistant', 'How to use Claude, Work Mode, prompts.', 'ai-assistant', 'App Guides', false, 4, ''),
-        mk('🔧', 'Troubleshooting', 'Access denied, sign-in, install issues.', 'troubleshooting', 'Reference', false, 0, ''),
-        mk('📋', 'App Roadmap', "What's live and what's coming in Q3 2026.", 'app-roadmap', 'Reference', false, 1, ''),
-        mk('🤝', 'Team Directory', 'Team members, roles, time zones.', 'team-directory', 'Reference', false, 2, ''),
-      ];
-      return _guideDev;
-    }
-
-    const GuideDB = {
-      client() { return window.SupabaseAuth?._client || null; },
-      uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
-      async loadAll() {
-        if (!this.client()) return guideDevSeed().slice();
-        const { data, error } = await this.client().from('guide_notes').select('*')
-          .order('sort', { ascending: true }).order('created_at', { ascending: true });
-        if (error) { console.error('[GuideDB] loadAll:', error.message); return []; }
-        return data || [];
-      },
-      async create(note) {
-        const row = {
-          emoji: note.emoji || '', title: note.title || 'Untitled', description: note.description || '',
-          slug: note.slug, body_html: note.body_html || '', section: note.section || 'App Guides',
-          pinned: !!note.pinned, sort: note.sort || 0, author_id: this.uid(), author_name: note.author_name || '',
-        };
-        if (!this.client()) {
-          const r = { ...row, id: 'dev-' + (row.slug || Math.random().toString(36).slice(2)), created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
-          guideDevSeed().push(r); return r;
-        }
-        const { data, error } = await this.client().from('guide_notes').insert(row).select().single();
-        if (error) { console.error('[GuideDB] create:', error.message); throw error; }
-        return data;
-      },
-      async update(id, patch) {
-        const p = { ...patch, updated_at: new Date().toISOString() };
-        if (!this.client()) {
-          const arr = guideDevSeed(); const i = arr.findIndex(n => n.id === id);
-          if (i >= 0) arr[i] = { ...arr[i], ...p };
-          return i >= 0 ? arr[i] : null;
-        }
-        const { data, error } = await this.client().from('guide_notes').update(p).eq('id', id).select().single();
-        if (error) { console.error('[GuideDB] update:', error.message); throw error; }
-        return data;
-      },
-      async remove(id) {
-        if (!this.client()) { _guideDev = guideDevSeed().filter(n => n.id !== id); return; }
-        const { error } = await this.client().from('guide_notes').delete().eq('id', id);
-        if (error) { console.error('[GuideDB] remove:', error.message); throw error; }
-      },
-    };
+    // ─── Guide registry (static; each guide is its own HTML file) ─────────
+    // The Guide tab is a read-only split view: left = this list, right = the
+    // selected guide's HTML page embedded (?embed=1). To add a guide: build its
+    // HTML page (with the embed light-mode) and add an entry here — no backend.
+    const GUIDE_SECTIONS = ['Getting Started', 'App Guides', 'Reference'];
+    const GUIDES = [
+      { slug: 'get-started', emoji: '🚀', title: 'Get Started', description: 'Install the TMG App on your iPhone in under 60 seconds — no App Store needed.', section: 'Getting Started', url: '/get-started/' },
+    ];
 
     // ─── Tasks ───────────────────────────────────────────────────────
     const TASK_STATUS = [
@@ -4460,148 +4287,52 @@ Rules:
       );
     }
 
-    // ─── Guide tab (macOS-Notes-style internal documentation) ─────────
-    // Light mode only for v1 (dark mode deferred per spec). Read = everyone;
-    // create / edit / delete affordances show for admins only (matches RLS).
+    // ─── Guide tab — read-only split view; the right pane embeds the selected
+    // guide's standalone HTML page (?embed=1 light mode). List is static (GUIDES);
+    // no Supabase, no in-app editor — guides are HTML files edited + pushed.
     function GuideTab({ dark, profile, isAdmin }) {
-      const [notes, setNotes] = useState([]);
-      const [loading, setLoading] = useState(true);
-      const [selectedId, setSelectedId] = useState(null);
+      const initSlug = () => {
+        try {
+          const pm = (location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i);
+          const hm = (location.hash || '').match(/guide\/([a-z0-9-]+)/i);
+          const sl = pm ? pm[1] : (hm ? hm[1] : null);
+          return (sl && GUIDES.find(g => g.slug === sl)) ? sl : null;
+        } catch (e) { return null; }
+      };
+      const [selectedSlug, setSelectedSlug] = useState(initSlug);
       const [search, setSearch] = useState('');
       const [searchFocus, setSearchFocus] = useState(false);
       const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
-      const [showNew, setShowNew] = useState(false);
-      const [nTitle, setNTitle] = useState(''); const [nDesc, setNDesc] = useState('');
-      const [nSlug, setNSlug] = useState(''); const [nSection, setNSection] = useState('App Guides');
-      const [nBody, setNBody] = useState('');
-      const [slugTouched, setSlugTouched] = useState(false);
-      const [editing, setEditing] = useState(false);
-      const [eTitle, setETitle] = useState(''); const [eDesc, setEDesc] = useState('');
-      const [busy, setBusy] = useState(false);
       const [copied, setCopied] = useState(false);
       const [dotsOpen, setDotsOpen] = useState(false);
-      const [showHtml, setShowHtml] = useState(false);
-      const [htmlDraft, setHtmlDraft] = useState('');
-      const edRef = useRef(null);
-      const savedRange = useRef(null);
 
-      const meName = (profile && ((profile.first_name || '') + ' ' + (profile.last_name || '')).trim()) || 'TMG Team';
-      const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); } catch (e) { return ''; } };
-
-      useEffect(() => {
-        let on = true; setLoading(true);
-        GuideDB.loadAll().then((d) => {
-          if (!on) return;
-          setNotes(d); setLoading(false);
-          try {
-            const pm = (location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i);
-            const hm = (location.hash || '').match(/guide\/([a-z0-9-]+)/i);
-            const sl = pm ? pm[1] : (hm ? hm[1] : null);
-            if (sl) { const f = d.find(n => n.slug === sl); if (f) setSelectedId(f.id); }
-          } catch (e) {}
-        });
-        return () => { on = false; };
-      }, []);
       useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
       useEffect(() => {
-        const onPop = () => {
-          try {
-            const pm = (location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i);
-            if (pm) { const f = notes.find(n => n.slug === pm[1]); setSelectedId(f ? f.id : null); }
-            else setSelectedId(null);
-          } catch (e) {}
-        };
+        const onPop = () => { try { const pm = (location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i); setSelectedSlug(pm && GUIDES.find(g => g.slug === pm[1]) ? pm[1] : null); } catch (e) {} };
         window.addEventListener('popstate', onPop);
         return () => window.removeEventListener('popstate', onPop);
-      }, [notes]);
-      useEffect(() => { if (editing && edRef.current) edRef.current.innerHTML = guideSanitize(sel ? sel.body_html : ''); }, [editing, selectedId]); // eslint-disable-line
+      }, []);
 
-      const sel = notes.find(n => n.id === selectedId) || null;
+      const sel = GUIDES.find(g => g.slug === selectedSlug) || null;
       const q = search.trim().toLowerCase();
-      const matches = (n) => !q || ((n.emoji || '') + ' ' + n.title + ' ' + n.description).toLowerCase().includes(q);
+      const matches = (g) => !q || ((g.emoji || '') + ' ' + g.title + ' ' + g.description).toLowerCase().includes(q);
       const groups = GUIDE_SECTIONS
-        .map(sec => ({ sec, items: notes.filter(n => (n.section || 'App Guides') === sec && matches(n)).sort((a, b) => (a.sort - b.sort) || a.title.localeCompare(b.title)) }))
+        .map(sec => ({ sec, items: GUIDES.filter(g => (g.section || 'App Guides') === sec && matches(g)) }))
         .filter(g => g.items.length);
 
-      const selectNote = (id) => {
-        setSelectedId(id); setEditing(false); setDotsOpen(false);
-        try {
-          const n = id ? notes.find(x => x.id === id) : null;
-          const url = (n && n.slug) ? ('/guide/' + n.slug) : '/guide';
-          if (id) history.pushState(null, '', url); else history.replaceState(null, '', url);
-        } catch (e) {}
+      const selectGuide = (slug) => {
+        setSelectedSlug(slug); setDotsOpen(false);
+        try { const url = slug ? ('/guide/' + slug) : '/guide'; if (slug) history.pushState(null, '', url); else history.replaceState(null, '', url); } catch (e) {}
       };
       const copyLink = (slug) => { try { navigator.clipboard.writeText('app.themorshedgroup.com/guide/' + slug); setCopied(true); setTimeout(() => setCopied(false), 1400); } catch (e) {} };
-
-      const openNew = () => { setNTitle(''); setNDesc(''); setNSlug(''); setNSection('App Guides'); setNBody(''); setSlugTouched(false); setShowNew(true); };
-      const textToHtml = (t) => (t || '').trim()
-        ? t.trim().split(/\n\s*\n+/).map(p => '<p class="nc-p">' + p.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br/>') + '</p>').join('\n')
-        : '';
-      const onNTitle = (v) => { setNTitle(v); if (!slugTouched) setNSlug(guideSlugify(v)); };
-      const createNote = async () => {
-        if (!nTitle.trim() || busy) return; setBusy(true);
-        try {
-          const slug = guideSlugify(nSlug || nTitle) || ('note-' + Date.now());
-          const created = await GuideDB.create({ title: nTitle.trim(), description: nDesc.trim(), slug, section: nSection, body_html: textToHtml(nBody), author_name: meName });
-          setNotes(ns => [...ns, created]); setShowNew(false); setSelectedId(created.id); setEditing(false);
-        } catch (e) { alert('Could not create note: ' + (e.message || e)); } finally { setBusy(false); }
-      };
-
-      const startEdit = () => { if (!sel) return; setETitle(sel.title); setEDesc(sel.description); setEditing(true); };
-      const cancelEdit = () => setEditing(false);
-      const saveEdit = async () => {
-        if (!sel || busy) return; setBusy(true);
-        try {
-          const html = guideSanitize(edRef.current ? edRef.current.innerHTML : sel.body_html);
-          const patch = { title: (eTitle.trim() || 'Untitled'), description: eDesc.trim(), body_html: html };
-          await GuideDB.update(sel.id, patch);
-          setNotes(ns => ns.map(n => n.id === sel.id ? { ...n, ...patch } : n));
-          setEditing(false);
-        } catch (e) { alert('Could not save: ' + (e.message || e)); } finally { setBusy(false); }
-      };
-      const delNote = async () => {
-        if (!sel) return;
-        if (!confirm('Delete "' + sel.title + '"? This cannot be undone.')) return;
-        const id = sel.id;
-        try { await GuideDB.remove(id); setNotes(ns => ns.filter(n => n.id !== id)); setSelectedId(null); setDotsOpen(false); }
-        catch (e) { alert('Could not delete: ' + (e.message || e)); }
-      };
-      const format = (cmd, val) => { try { document.execCommand(cmd, false, val || null); edRef.current && edRef.current.focus(); } catch (e) {} };
-      const insertHtml = (html) => { try { document.execCommand('insertHTML', false, html); edRef.current && edRef.current.focus(); } catch (e) {} };
-      // Insert raw HTML at the cursor. Remember the caret first (opening the modal
-      // moves focus away), then restore it and insert the sanitized markup.
-      const openHtmlModal = () => {
-        try { const s = window.getSelection(); savedRange.current = (s && s.rangeCount && edRef.current && edRef.current.contains(s.anchorNode)) ? s.getRangeAt(0).cloneRange() : null; }
-        catch (e) { savedRange.current = null; }
-        setHtmlDraft(''); setShowHtml(true);
-      };
-      const applyHtmlBlock = () => {
-        const clean = guideSanitize(htmlDraft);
-        if (!clean) { setShowHtml(false); return; }
-        try {
-          if (edRef.current) edRef.current.focus();
-          const s = window.getSelection();
-          if (savedRange.current && s) { s.removeAllRanges(); s.addRange(savedRange.current); }
-          document.execCommand('insertHTML', false, clean);
-        } catch (e) { try { if (edRef.current) edRef.current.innerHTML += clean; } catch (e2) {} }
-        setShowHtml(false); setHtmlDraft('');
-      };
-
-      const toolBtn = (icon, onClick, opts) => {
-        opts = opts || {};
-        return <button title={opts.title || ''} onMouseDown={e => e.preventDefault()} onClick={onClick} className="guide-tool" style={{ width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 7, border: 'none', background: 'transparent', cursor: 'pointer', color: opts.gold ? '#AD832F' : '#6B6B6B', fontSize: 13 }}><i className={'ti ' + icon} aria-hidden="true" /></button>;
-      };
-
+      const embedSrc = (u) => u + (u.indexOf('?') === -1 ? '?embed=1' : '&embed=1');
       const HAIR = '0.5px solid #EDE7DC';
 
-      // ── List / sidebar ──────────────────────────────────────────────
+      // ── List / sidebar ──
       const listPane = (
         <div style={{ width: wide ? 220 : '100%', flexShrink: 0, height: '100%', display: 'flex', flexDirection: 'column', background: '#F5F0E8', borderRight: wide ? HAIR : 'none' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px 8px', borderBottom: HAIR }}>
             <div style={{ fontFamily: C.fontSans, fontSize: wide ? 16 : 18, fontWeight: 600, color: '#001A4A' }}>Guide</div>
-            {isAdmin && (
-              <button onClick={openNew} title="New note" style={{ width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA', border: '0.5px solid #E8D9BC', borderRadius: 7, cursor: 'pointer', color: '#AD832F', fontSize: 14 }}><i className="ti ti-plus" aria-hidden="true" /></button>
-            )}
           </div>
           <div style={{ padding: '7px 10px', borderBottom: HAIR, background: '#F5F0E8' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: searchFocus ? '#fff' : '#EDE7DC', border: searchFocus ? '0.5px solid #E4DFD4' : '0.5px solid transparent', borderRadius: 8, padding: '5px 9px' }}>
@@ -4610,18 +4341,16 @@ Rules:
             </div>
           </div>
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#F5F0E8' }}>
-            {loading && <div style={{ padding: 16, fontFamily: C.fontSans, fontSize: 10, color: '#B4B2A9' }}>Loading…</div>}
-            {!loading && !groups.length && <div style={{ padding: 16, fontFamily: C.fontSans, fontSize: 10, color: '#B4B2A9' }}>No notes found.</div>}
+            {!groups.length && <div style={{ padding: 16, fontFamily: C.fontSans, fontSize: 10, color: '#B4B2A9' }}>No guides found.</div>}
             {groups.map(g => (
               <div key={g.sec}>
                 <div style={{ padding: '8px 12px 3px', fontFamily: C.fontSans, fontSize: 7, fontWeight: 700, letterSpacing: '0.18em', textTransform: 'uppercase', color: '#B4B2A9' }}>{g.sec}</div>
                 {g.items.map(n => {
-                  const on = n.id === selectedId;
+                  const on = n.slug === selectedSlug;
                   return (
-                    <div key={n.id} className="guide-note-item" onClick={() => selectNote(n.id)} style={{ padding: '9px 12px', borderBottom: HAIR, cursor: 'pointer', background: on ? '#fff' : 'transparent', borderRight: on ? '2.5px solid #AD832F' : '2.5px solid transparent' }}>
+                    <div key={n.slug} className="guide-note-item" onClick={() => selectGuide(n.slug)} style={{ padding: '9px 12px', borderBottom: HAIR, cursor: 'pointer', background: on ? '#fff' : 'transparent', borderRight: on ? '2.5px solid #AD832F' : '2.5px solid transparent' }}>
                       <div style={{ fontFamily: C.fontSans, fontSize: 12, fontWeight: 600, color: '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginBottom: 2 }}>{(n.emoji ? n.emoji + ' ' : '') + n.title}</div>
                       <div style={{ fontFamily: C.fontSans, fontSize: 9, color: '#9A958A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{n.description || '—'}</div>
-                      <div style={{ fontFamily: C.fontSans, fontSize: 8.5, color: '#B4B2A9', marginTop: 1 }}>{fmtDate(n.updated_at || n.created_at)}</div>
                     </div>
                   );
                 })}
@@ -4631,7 +4360,7 @@ Rules:
           {wide && (
             <div style={{ borderTop: HAIR, padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
               <i className="ti ti-notes" style={{ fontSize: 12, color: '#AD832F' }} aria-hidden="true" />
-              <span style={{ fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9' }}>{notes.length} note{notes.length === 1 ? '' : 's'}</span>
+              <span style={{ fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9' }}>{GUIDES.length} guide{GUIDES.length === 1 ? '' : 's'}</span>
             </div>
           )}
         </div>
@@ -4642,14 +4371,11 @@ Rules:
           <div onClick={() => setDotsOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 60 }} />
           <div style={{ position: 'absolute', top: 30, right: 0, zIndex: 61, background: '#fff', border: '0.5px solid #E4DFD4', borderRadius: 10, boxShadow: '0 8px 24px rgba(0,26,74,.14)', padding: 4, minWidth: 130 }}>
             <button onClick={() => { copyLink(sel.slug); setDotsOpen(false); }} style={dotsItem}>Copy link</button>
-            {isAdmin && <button onClick={() => { startEdit(); setDotsOpen(false); }} style={dotsItem}>Edit</button>}
-            {isAdmin && <button onClick={delNote} style={{ ...dotsItem, color: '#C0392B' }}>Delete</button>}
           </div>
         </React.Fragment>
       ) : null;
 
-      // ── Note body view ──────────────────────────────────────────────
-      const hasBody = sel && sel.body_html && guideSanitize(sel.body_html).trim();
+      // ── Right pane: embeds the guide's HTML page ──
       const notePane = (
         <div style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column', background: '#fff' }}>
           {!sel && wide && (
@@ -4662,7 +4388,7 @@ Rules:
             <React.Fragment>
               {!wide && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '9px 12px', borderBottom: HAIR, background: '#fff' }}>
-                  <button onClick={() => selectNote(null)} style={{ display: 'flex', alignItems: 'center', gap: 3, border: 'none', background: 'none', cursor: 'pointer', fontFamily: C.fontSans, fontSize: 11, fontWeight: 500, color: '#185FA5', padding: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 14 }} aria-hidden="true" />Guide</button>
+                  <button onClick={() => selectGuide(null)} style={{ display: 'flex', alignItems: 'center', gap: 3, border: 'none', background: 'none', cursor: 'pointer', fontFamily: C.fontSans, fontSize: 11, fontWeight: 500, color: '#185FA5', padding: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 14 }} aria-hidden="true" />Guide</button>
                   <div style={{ position: 'relative' }}>
                     <button onClick={() => setDotsOpen(o => !o)} style={{ width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA', border: '0.5px solid #E8D9BC', borderRadius: 7, cursor: 'pointer', color: '#AD832F', fontSize: 13 }}><i className="ti ti-dots" aria-hidden="true" /></button>
                     {dotsOpen && dotsMenu}
@@ -4670,59 +4396,22 @@ Rules:
                 </div>
               )}
               <div style={{ padding: '14px 16px 10px', borderBottom: HAIR, background: '#fff', flexShrink: 0 }}>
-                {editing
-                  ? <input value={eTitle} onChange={e => setETitle(e.target.value)} style={{ width: '100%', border: 'none', outline: 'none', fontFamily: C.fontSans, fontSize: 18, fontWeight: 600, color: '#001A4A', marginBottom: 4 }} />
-                  : <div style={{ fontFamily: C.fontSans, fontSize: 18, fontWeight: 600, color: '#001A4A', lineHeight: 1.2, marginBottom: 4 }}>{(sel.emoji ? sel.emoji + ' ' : '') + sel.title}</div>}
-                <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9' }}>
-                  <span>{fmtDate(sel.updated_at || sel.created_at)}</span>
-                  {sel.pinned && <React.Fragment><span style={{ width: 3, height: 3, borderRadius: '50%', background: '#D4D0CC' }} /><span>Pinned</span></React.Fragment>}
-                  {sel.author_name && <React.Fragment><span style={{ width: 3, height: 3, borderRadius: '50%', background: '#D4D0CC' }} /><span>{sel.author_name}</span></React.Fragment>}
-                  {wide && isAdmin && !editing && <React.Fragment><span style={{ width: 3, height: 3, borderRadius: '50%', background: '#D4D0CC' }} /><span onClick={delNote} style={{ cursor: 'pointer', color: '#C0392B' }}>Delete</span></React.Fragment>}
+                <div style={{ fontFamily: C.fontSans, fontSize: 18, fontWeight: 600, color: '#001A4A', lineHeight: 1.2, marginBottom: 4 }}>{(sel.emoji ? sel.emoji + ' ' : '') + sel.title}</div>
+                <div onClick={() => copyLink(sel.slug)} title="Copy link" style={{ display: 'flex', alignItems: 'center', gap: 4, fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9', cursor: 'pointer' }}>
+                  <i className="ti ti-link" style={{ fontSize: 10, color: '#AD832F' }} aria-hidden="true" />
+                  <span>{copied ? 'Copied to clipboard!' : 'app.themorshedgroup.com/guide/' + sel.slug}</span>
                 </div>
-                {editing
-                  ? <input value={eDesc} onChange={e => setEDesc(e.target.value)} placeholder="Short description for the list preview…" style={{ width: '100%', border: 'none', outline: 'none', fontFamily: C.fontSans, fontSize: 11, color: '#6B6B6B', marginTop: 5 }} />
+              </div>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: sel.url ? 0 : '14px 16px 18px', background: '#fff' }}>
+                {sel.url
+                  ? <GuideEmbed src={embedSrc(sel.url)} />
                   : (
-                    <div onClick={() => copyLink(sel.slug)} title="Copy link" style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 5, fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9', cursor: 'pointer' }}>
-                      <i className="ti ti-link" style={{ fontSize: 10, color: '#AD832F' }} aria-hidden="true" />
-                      <span>{copied ? 'Copied to clipboard!' : 'app.themorshedgroup.com/guide/' + sel.slug}</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 220, gap: 7 }}>
+                      <i className="ti ti-notes" style={{ fontSize: 32, color: '#E4DFD4' }} aria-hidden="true" />
+                      <div style={{ fontFamily: C.fontSans, fontSize: 12, fontStyle: 'italic', color: '#C4BFBA' }}>This guide is coming soon.</div>
                     </div>
                   )}
               </div>
-              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: (!editing && sel.slug === 'get-started') ? 0 : '14px 16px 18px', background: '#fff' }}>
-                {editing
-                  ? <div ref={edRef} className="nc-body nc-edit" contentEditable suppressContentEditableWarning data-ph="Start writing…" style={{ outline: 'none', minHeight: 200, fontFamily: C.fontSans, fontSize: 12, color: '#3A3A3A', lineHeight: 1.75 }} />
-                  : (sel.slug === 'get-started'
-                    ? <GuideEmbed src="/get-started/?embed=1" />
-                    : (hasBody
-                    ? <div className="nc-body" dangerouslySetInnerHTML={{ __html: guideSanitize(sel.body_html) }} />
-                    : (
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 220, gap: 7 }}>
-                        <i className="ti ti-notes" style={{ fontSize: 32, color: '#E4DFD4' }} aria-hidden="true" />
-                        <div style={{ fontFamily: C.fontSans, fontSize: 12, fontStyle: 'italic', color: '#C4BFBA' }}>This guide is coming soon.</div>
-                        {isAdmin && <div style={{ fontFamily: C.fontSans, fontSize: 10, color: '#D4D0CC' }}>Tap the pencil to start writing.</div>}
-                      </div>
-                    )))}
-              </div>
-              {isAdmin && (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 14px', borderTop: HAIR, background: '#F5F0E8', flexShrink: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    {editing && toolBtn('ti-bold', () => format('bold'), { title: 'Bold' })}
-                    {editing && toolBtn('ti-italic', () => format('italic'), { title: 'Italic' })}
-                    {editing && toolBtn('ti-list', () => format('insertUnorderedList'), { title: 'Bullet list' })}
-                    {editing && toolBtn('ti-checklist', () => insertHtml('<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>To do</div></div>'), { title: 'Checklist item' })}
-                    {editing && toolBtn('ti-link', () => { const u = prompt('Link URL (https://…)'); if (u) format('createLink', u); }, { title: 'Link' })}
-                    {editing && toolBtn('ti-code', openHtmlModal, { title: 'Insert HTML' })}
-                    {!editing && <span style={{ fontFamily: C.fontSans, fontSize: 9, color: '#B4B2A9' }}>Tap the pencil to edit</span>}
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    {editing && toolBtn('ti-photo', () => { const u = prompt('Image URL'); if (u) insertHtml('<img src="' + u + '" style="max-width:100%;border-radius:8px;margin:6px 0;" />'); }, { title: 'Insert image' })}
-                    {!editing && toolBtn('ti-share', () => copyLink(sel.slug), { title: 'Copy link' })}
-                    {editing
-                      ? <React.Fragment>{toolBtn('ti-x', cancelEdit, { title: 'Cancel' })}{toolBtn('ti-check', saveEdit, { gold: true, title: 'Save' })}</React.Fragment>
-                      : toolBtn('ti-pencil', startEdit, { gold: true, title: 'Edit' })}
-                  </div>
-                </div>
-              )}
             </React.Fragment>
           )}
         </div>
@@ -4732,41 +4421,6 @@ Rules:
         <div style={{ height: '100%', display: 'flex', flexDirection: 'row', background: '#F5F0E8', fontFamily: C.fontSans }}>
           {(wide || !sel) && listPane}
           {(wide || sel) && notePane}
-          {showNew && (
-            <div onClick={() => setShowNew(false)} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,26,74,.28)', display: 'flex', alignItems: wide ? 'center' : 'flex-end', justifyContent: 'center', padding: wide ? 20 : 0 }}>
-              <div onClick={e => e.stopPropagation()} style={{ width: wide ? 'min(560px, 94vw)' : '100%', maxHeight: '88vh', overflowY: 'auto', background: '#fff', borderRadius: wide ? 14 : '14px 14px 0 0', padding: '20px 18px', boxShadow: '0 8px 32px rgba(0,26,74,.16)', display: 'flex', flexDirection: 'column' }}>
-                <input autoFocus value={nTitle} onChange={e => onNTitle(e.target.value)} placeholder="Note title…" style={{ border: 'none', borderBottom: HAIR, outline: 'none', padding: '8px 0', fontFamily: C.fontSans, fontSize: 18, fontWeight: 600, color: '#001A4A' }} />
-                <input value={nDesc} onChange={e => setNDesc(e.target.value)} placeholder="Short description for the list preview…" style={{ border: 'none', borderBottom: HAIR, outline: 'none', padding: '7px 0', fontFamily: C.fontSans, fontSize: 12, color: '#6B6B6B' }} />
-                <div style={{ display: 'flex', alignItems: 'center', borderBottom: HAIR, padding: '7px 0' }}>
-                  <span style={{ fontFamily: C.fontSans, fontSize: 10, color: '#B4B2A9' }}>app.themorshedgroup.com/guide/</span>
-                  <input value={nSlug} onChange={e => { setSlugTouched(true); setNSlug(guideSlugify(e.target.value)); }} placeholder="slug-here" style={{ flex: 1, border: 'none', outline: 'none', fontFamily: C.fontSans, fontSize: 10, fontWeight: 500, color: '#001A4A' }} />
-                </div>
-                <div style={{ display: 'flex', gap: 6, padding: '10px 0 4px' }}>
-                  {GUIDE_SECTIONS.map(s => (
-                    <button key={s} onClick={() => setNSection(s)} style={{ padding: '4px 10px', borderRadius: 14, border: '0.5px solid ' + (nSection === s ? '#001A4A' : '#E4DFD4'), background: nSection === s ? '#001A4A' : '#FCFBF8', color: nSection === s ? '#fff' : '#6B6B6B', fontFamily: C.fontSans, fontSize: 9, fontWeight: 600, cursor: 'pointer' }}>{s}</button>
-                  ))}
-                </div>
-                <textarea value={nBody} onChange={e => setNBody(e.target.value)} placeholder="Start writing…" style={{ border: 'none', outline: 'none', resize: 'none', minHeight: 160, padding: '8px 0', fontFamily: C.fontSans, fontSize: 12, color: '#3A3A3A', lineHeight: 1.75, background: 'transparent' }} />
-                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
-                  <button onClick={() => setShowNew(false)} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 500, color: '#6B6B6B', background: '#FCFBF8', border: '0.5px solid #E4DFD4', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}>Cancel</button>
-                  <button onClick={createNote} disabled={!nTitle.trim() || busy} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 600, color: '#fff', background: '#001A4A', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', opacity: (!nTitle.trim() || busy) ? 0.5 : 1 }}>{busy ? 'Creating…' : 'Create Note'}</button>
-                </div>
-              </div>
-            </div>
-          )}
-          {showHtml && (
-            <div onClick={() => setShowHtml(false)} style={{ position: 'fixed', inset: 0, zIndex: 72, background: 'rgba(0,26,74,.28)', display: 'flex', alignItems: wide ? 'center' : 'flex-end', justifyContent: 'center', padding: wide ? 20 : 0 }}>
-              <div onClick={e => e.stopPropagation()} style={{ width: wide ? 'min(640px, 95vw)' : '100%', maxHeight: '88vh', overflowY: 'auto', background: '#fff', borderRadius: wide ? 14 : '14px 14px 0 0', padding: '18px', boxShadow: '0 8px 32px rgba(0,26,74,.16)', display: 'flex', flexDirection: 'column' }}>
-                <div style={{ fontFamily: C.fontSans, fontSize: 14, fontWeight: 600, color: '#001A4A', marginBottom: 4 }}>Insert HTML</div>
-                <div style={{ fontFamily: C.fontSans, fontSize: 10, color: '#9A958A', marginBottom: 10 }}>Pasted at the cursor. Scripts and unsafe attributes are stripped automatically. You can use the guide classes (nc-h1, nc-h2, nc-p, nc-step, nc-tip, nc-warn, nc-table, nc-tag…).</div>
-                <textarea autoFocus value={htmlDraft} onChange={e => setHtmlDraft(e.target.value)} placeholder={'<p class="nc-p">Your HTML…</p>'} spellCheck={false} style={{ width: '100%', minHeight: 220, resize: 'vertical', border: '0.5px solid #E4DFD4', borderRadius: 8, padding: '10px 12px', fontFamily: 'monospace', fontSize: 12, color: '#3A3A3A', lineHeight: 1.6, outline: 'none', background: '#FCFBF8' }} />
-                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-                  <button onClick={() => setShowHtml(false)} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 500, color: '#6B6B6B', background: '#FCFBF8', border: '0.5px solid #E4DFD4', borderRadius: 8, padding: '8px 16px', cursor: 'pointer' }}>Cancel</button>
-                  <button onClick={applyHtmlBlock} disabled={!htmlDraft.trim()} style={{ fontFamily: C.fontSans, fontSize: 11, fontWeight: 600, color: '#fff', background: '#001A4A', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', opacity: htmlDraft.trim() ? 1 : 0.5 }}>Insert</button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       );
     }

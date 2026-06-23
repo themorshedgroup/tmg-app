@@ -51,6 +51,17 @@ html.gs-embed .kbd{color:#fff;background:#AD832F}
 .mock-cap{font-size:10px;color:rgba(255,255,255,.45);text-align:center;margin:-6px 0 16px;line-height:1.6}
 html.gs-embed .mock-cap{color:#8A8A8A}
 
+/* Work Mode pill row + input bar mock */
+.pillrow{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:11px}
+.pill{display:inline-flex;align-items:center;gap:5px;border-radius:16px;padding:6px 12px;font-size:11px;font-weight:500;border:1px solid #E8D9BC;background:#FDF8F0;color:#7A5B1E}
+.pill .pi{color:#AD832F;display:flex}
+.pill.hot{border-color:#AD832F;background:#F6EAD2;box-shadow:0 0 0 2px rgba(173,131,47,.35)}
+.barmock{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #E8E0D2;border-radius:18px;padding:7px 12px}
+.barmock .ham{color:#7A7468;font-size:17px;display:flex}
+.barmock .modetag{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:600;letter-spacing:.12em;color:#AD832F}
+.barmock .vline{width:1px;height:20px;background:#E8E0D2}
+.barmock .ph{flex:1;font-size:11px;color:#B8B2A6}
+
 /* Enter KPI choice card */
 .kcard{background:#fff;border:1px solid #E8E0D2;border-radius:14px;padding:14px}
 .kcard-hd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
@@ -128,8 +139,25 @@ html.gs-embed .step-desc b{color:#001A4A}
 
   <!-- 1 · START -->
   <div class="section-hd"><div class="sh-num">1</div><div class="sh-label">Get started</div><div class="sh-line"></div></div>
-  <div class="step-title">Tap "Add KPIs" — then pick a way</div>
-  <div class="step-desc">In <b>Work Mode</b>, tap the <b>Add KPIs</b> pill. An <b>Enter KPI</b> card opens right in the chat and asks how you'd like to log them.</div>
+  <div class="step-title">Tap "Add KPIs" in Work Mode</div>
+  <div class="step-desc">KPIs live in <b>Work Mode</b>. Tap the <b>mode tag</b> just left of the message box until it reads <b>Work Mode</b> — then the <b>Add KPIs</b> pill appears in the row above the box.</div>
+
+  <div class="mock">
+    <div class="pillrow">
+      <span class="pill"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 9h8M8 13h5"/><path d="M21 12a9 9 0 1 1-3.5-7.1"/><path d="M16 4l2 2 4-4"/></svg></span>New Chat</span>
+      <span class="pill"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3.5 5.5l1.5 1.5 2.5-3M3.5 12l1.5 1.5 2.5-3M3.5 18.5L5 20l2.5-3M11 6h10M11 12h10M11 18h10"/></svg></span>Add To Do</span>
+      <span class="pill hot"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="9"/></svg></span>Add KPIs</span>
+    </div>
+    <div class="barmock">
+      <span class="ham"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/></svg></span>
+      <span class="modetag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>WORK MODE</span>
+      <span class="vline"></span>
+      <span class="ph">Message TMG assistant…</span>
+    </div>
+  </div>
+  <div class="mock-cap">In <b>Work Mode</b>, tap <b>Add KPIs</b> (the highlighted gold pill).</div>
+
+  <div class="step-desc">That opens the <b>Enter KPI</b> card right in the chat, asking how you'd like to log them:</div>
 
   <div class="mock">
     <div class="kcard">

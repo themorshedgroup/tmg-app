@@ -811,7 +811,9 @@
       // the assistant's tool_use with no tool_result between them, which the API
       // rejects ("tool_use without tool_result"). So the input locks until the
       // confirm card is resolved.
-      const pendingConfirm = log.some(it => it.type === 'confirm' && it.status === 'pending');
+      const pendingItem = log.find(it => it.type === 'confirm' && it.status === 'pending');
+      const pendingConfirm = !!pendingItem;
+      const pendingDanger = !!(pendingItem && /(delete|remove)/.test((pendingItem.tool && pendingItem.tool.name) || ''));
 
       async function step(depth) {
         if (depth > 6) { push({ type:'note', text:'(stopped — too many steps)' }); return; }
@@ -966,17 +968,24 @@
                   ))}
                 </div>
               )}
-              <div style={{ display:'flex', alignItems:'flex-end', gap:9 }}>
-                <button onClick={() => setShowSaved(s => !s)} title="Saved prompts" style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'1px solid '+(showSaved ? C.gold : C.border), background: showSaved ? C.gold+'14' : C.surface, color: showSaved ? C.gold : C.navy, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center' }}><i className="ti ti-bookmark" style={{ fontSize:17 }} /></button>
-                <textarea value={input} onChange={e => setInput(e.target.value)} rows={1} disabled={pendingConfirm}
-                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                  placeholder={pendingConfirm ? 'Confirm or cancel the action above first…' : 'Ask or tell me what to do…'}
-                  style={{ flex:1, resize:'none', fontFamily:C.fontSans, fontSize:'0.86rem', padding:'10px 12px', border:'1px solid '+C.border, borderRadius:11, background: pendingConfirm ? C.border+'33' : C.bg, color:C.textPrimary, outline:'none', maxHeight:120, cursor: pendingConfirm ? 'not-allowed' : 'text' }} />
-                <button onClick={() => send()} disabled={busy || pendingConfirm || !input.trim()} style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'none', cursor: (busy || pendingConfirm || !input.trim()) ? 'default' : 'pointer', background: (busy || pendingConfirm || !input.trim()) ? C.border : C.navy, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center' }}>
-                  <i className="ti ti-arrow-up" style={{ fontSize:18 }} />
-                </button>
-              </div>
-              <div style={{ fontSize:'0.66rem', color: pendingConfirm ? C.gold : C.textMuted, marginTop:7, textAlign:'center', fontWeight: pendingConfirm ? 600 : 400 }}>{pendingConfirm ? '↑ Use the Confirm or Cancel buttons above to continue.' : 'Changes are previewed for your confirmation — nothing writes to Zoho silently.'}</div>
+              {pendingConfirm ? (
+                <div style={{ display:'flex', alignItems:'center', gap:9 }}>
+                  <button onClick={() => pendingItem && decide(pendingItem.id, false)} style={{ flexShrink:0, fontFamily:C.fontSans, fontSize:'0.85rem', color:C.textSecondary, background:'transparent', border:'1px solid '+C.border, borderRadius:11, padding:'11px 18px', cursor:'pointer' }}>Cancel</button>
+                  <button onClick={() => pendingItem && decide(pendingItem.id, true)} style={{ flex:1, fontFamily:C.fontSans, fontSize:'0.9rem', fontWeight:600, color:'#fff', background: pendingDanger ? C.red : C.navy, border:'none', borderRadius:11, padding:'11px 18px', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:7 }}><i className={'ti ' + (pendingDanger ? 'ti-trash' : 'ti-check')} style={{ fontSize:16 }} />{pendingDanger ? 'Delete' : 'Confirm'}</button>
+                </div>
+              ) : (
+                <div style={{ display:'flex', alignItems:'flex-end', gap:9 }}>
+                  <button onClick={() => setShowSaved(s => !s)} title="Saved prompts" style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'1px solid '+(showSaved ? C.gold : C.border), background: showSaved ? C.gold+'14' : C.surface, color: showSaved ? C.gold : C.navy, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center' }}><i className="ti ti-bookmark" style={{ fontSize:17 }} /></button>
+                  <textarea value={input} onChange={e => setInput(e.target.value)} rows={1}
+                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+                    placeholder="Ask or tell me what to do…"
+                    style={{ flex:1, resize:'none', fontFamily:C.fontSans, fontSize:'0.86rem', padding:'10px 12px', border:'1px solid '+C.border, borderRadius:11, background:C.bg, color:C.textPrimary, outline:'none', maxHeight:120 }} />
+                  <button onClick={() => send()} disabled={busy || !input.trim()} style={{ flexShrink:0, width:40, height:40, borderRadius:11, border:'none', cursor: (busy || !input.trim()) ? 'default' : 'pointer', background: (busy || !input.trim()) ? C.border : C.navy, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                    <i className="ti ti-arrow-up" style={{ fontSize:18 }} />
+                  </button>
+                </div>
+              )}
+              <div style={{ fontSize:'0.66rem', color: pendingConfirm ? C.gold : C.textMuted, marginTop:7, textAlign:'center', fontWeight: pendingConfirm ? 600 : 400 }}>{pendingConfirm ? 'Review the change above, then Confirm or Cancel.' : 'Changes are previewed for your confirmation — nothing writes to Zoho silently.'}</div>
             </div>
           </div>
       );

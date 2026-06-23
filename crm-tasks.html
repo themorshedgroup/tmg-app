@@ -199,6 +199,7 @@
       { id:'11', Owner:O, Subject:'Note : Jeremy Bell', Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-15', Who_Id:{ name:'Jeremy Bell' }, Closed_Time:'2026-06-22T07:08:00-05:00', Trigger:null },
       { id:'12', Owner:O, Subject:'Note : Neil Patel', Task_Type:'Note', Description:null, Status:'Completed', Due_Date:'2026-06-15', Who_Id:{ name:'Neil Patel' }, Closed_Time:'2026-06-22T07:08:00-05:00', Trigger:null },
       { id:'13', Owner:O, Subject:'A Touch Call: Molly Kinney', Task_Type:'Call', Description:null, Status:'Completed', Due_Date:'2026-06-01', Who_Id:{ name:'Molly Kinney' }, Closed_Time:'2026-06-01T09:00:00-05:00', Trigger:null },
+      { id:'15', Owner:O, Subject:'A Touch Call: Morgan Birch', Task_Type:'Call', Description:null, Status:'Completed', Due_Date:'2026-06-10', Who_Id:{ name:'Morgan Birch' }, Closed_Time:'2026-06-10T09:00:00-05:00', Trigger:null },
       { id:'14', Owner:O, Subject:'A Touch Call: Neil Patel', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-20', Who_Id:{ name:'Neil Patel' }, Closed_Time:null, Trigger:null },
     ];
 
@@ -520,7 +521,7 @@
         input_schema:{ type:'object', properties:{} } },
       { name:'check_call_due_dates', description:'For the Not-Started Call tasks in view, check each due date against the contact’s last completed Call plus the touch cadence: if the CONTACT owner is Tarek → A=45, B=90, C=120 days; otherwise → A=30, B=60, C=90 days (touch class A/B/C read from the subject). Returns tasks whose due date is wrong (with expected vs actual), tasks with no prior completed call, and the aligned count. Use when the user asks whether call due dates are correct / on cadence. After reporting, offer to fix a task by setting its due_date to the expected date via update_task or bulk_update_tasks.',
         input_schema:{ type:'object', properties:{} } },
-      { name:'check_couple_cadence', description:'For contacts in view who have a Spouse (lookup), check BOTH conditions for the couple: (1) each partner’s Not-Started call is on the touch cadence (contact’s last completed call + interval by contact owner & class — Tarek: A45/B90/C120, else A30/B60/C90), AND (2) both partners’ calls share the SAME due date. Returns each couple with both partners’ call due/expected dates, on-cadence flags, and aligned flag. Use when the user wants to verify spouses’ calls are correct AND aligned. After reporting, offer to set both partners’ calls to one due_date (ask which) via bulk_update_tasks with the returned task ids.',
+      { name:'check_couple_cadence', description:'For contacts in view who have a Spouse (lookup), check BOTH conditions for the couple: (1) each partner’s Not-Started call is on the touch cadence (contact’s last completed call + interval by contact owner & class — Tarek: A45/B90/C120, else A30/B60/C90), AND (2) both partners’ calls share the SAME due date. Each couple is returned with both partners’ call due/expected dates, on_cadence + aligned flags, a needs_fix flag, fix_ids (the task ids to change), and target_date — the ONE date both calls should be set to, already computed by the HIGHER-TOUCH-WINS rule (the partner on the more frequent class A>B>C sets the date; same class → the sooner cadence date; if that date is in the past it is clamped to today). Use when the user wants spouses’ calls correct AND aligned. After reporting, for EACH couple where needs_fix is true, PROPOSE the fix: bulk_update_tasks with ids=fix_ids and due_date=target_date. Do NOT ask the user which date — target_date already encodes the rule. The user still confirms the write.',
         input_schema:{ type:'object', properties:{} } },
       { name:'find_duplicate_calls', description:'Find contacts in view who have MORE THAN ONE Not-Started call task (duplicates). Runs over ALL tasks in view. Returns each such contact with the call to keep (earliest-due) and the extra task ids to remove. Use when asked to clean up / dedupe duplicate calls so each contact has only one. After reporting, offer to delete the extras via bulk_delete_tasks with the returned ids.',
         input_schema:{ type:'object', properties:{} } },
@@ -535,6 +536,33 @@
     function parseTouchClass(subject) { const m = /(?:^|\b)([ABC])\s*touch/i.exec(subject || ''); return m ? m[1].toUpperCase() : null; }
     function dateOnly(s) { const m = /^(\d{4}-\d{2}-\d{2})/.exec(s || ''); return m ? m[1] : null; }
     function addDaysISO(iso, days) { const base = dateOnly(iso); if (!base) return null; const p = base.split('-').map(Number); const d = new Date(Date.UTC(p[0], p[1] - 1, p[2])); if (isNaN(d)) return null; d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); }
+
+    // Touch-class priority for "higher-touch wins": A (most frequent) beats B beats C.
+    function touchRank(cls) { return cls === 'A' ? 1 : cls === 'B' ? 2 : cls === 'C' ? 3 : 99; }
+    // Resolve the ONE due date a couple's calls should share.
+    // Rule (chosen by Symon): HIGHER-TOUCH WINS — the partner on the more frequent
+    // touch class sets the date (= their cadence date). Same class → the sooner
+    // cadence date. If the driving partner has no completed call to compute from,
+    // fall back to the partner we can; if neither, the sooner existing due date.
+    // Finally, if the result is already in the past, clamp it to today.
+    function resolveCoupleTarget(A, B) {
+      const ea = A.expected_due, eb = B.expected_due;
+      const ra = touchRank(A.class), rb = touchRank(B.class);
+      let target = null;
+      if (A.class && B.class && ra !== rb) {
+        const driver = ra < rb ? A : B, other = ra < rb ? B : A;
+        target = driver.expected_due || other.expected_due;            // higher touch drives (fall back if it has no baseline)
+      } else if (A.class && !B.class) { target = ea || eb; }
+      else if (B.class && !A.class) { target = eb || ea; }
+      else { target = (ea && eb) ? (ea < eb ? ea : eb) : (ea || eb); } // same/unknown class → sooner cadence date
+      if (!target) {                                                    // no cadence baseline at all → sooner existing due
+        const da = A.due, db = B.due;
+        target = (da && db) ? (da < db ? da : db) : (da || db || null);
+      }
+      const today = todayISO();
+      if (target && target < today) target = today;                    // overdue → today
+      return target;
+    }
 
     const AI_CONTEXT_CAP = 200; // max tasks fed into the AI prompt; tools cover the rest
     function aiSystem(tasks, colMap, meta) {
@@ -552,7 +580,7 @@
         "Use get_contact for a contact's details; combine it with search_tasks to answer history questions.",
         "To check married couples, call audit_spouse_dates — it follows the contact Spouse link among the tasks in view and reports couples whose tasks have different due dates. After reporting mismatches, offer to align each couple by setting both partners' task(s) to one due_date (ask which date), via bulk_update_tasks with the task ids it returned.",
         "To check whether Not-Started call due dates follow the touch cadence, call check_call_due_dates — it compares each to the contact's last completed call + the interval (Tarek-owned: A45/B90/C120; otherwise A30/B60/C90). After reporting wrong ones, offer to fix each by setting due_date to the expected date via update_task / bulk_update_tasks.",
-        "To check couples together — that each spouse's call is on cadence AND both share the same due date — call check_couple_cadence. After reporting, offer to set both partners' calls to one due_date (ask which) via bulk_update_tasks.",
+        "To check couples together — each spouse's call on cadence AND both sharing one due date — call check_couple_cadence. For every couple it returns with needs_fix=true, PROPOSE setting both partners' calls to that couple's target_date (already computed: the higher-touch partner's cadence date; same class → the sooner date; overdue → today) via bulk_update_tasks (ids=fix_ids, due_date=target_date). Don't ask which date — the rule decides; the user still confirms the write. Briefly say WHY (e.g. 'matched to Morgan's A-touch cadence, the higher-touch spouse').",
         "When a task should be linked to a contact, call find_contact first to resolve the name to an id, then pass contact_id and contact_name.",
         "For update_task / delete_task, use the exact task id from the JSON. Valid statuses: " + (meta.statusOptions || []).join(", ") + ".",
         "To clean up duplicate calls (a contact with more than one Not-Started call), call find_duplicate_calls — it returns each such contact with the call to keep and the extras to remove; then offer to delete the extras via bulk_delete_tasks.",
@@ -618,11 +646,11 @@
         }
         if (parsed && Array.isArray(parsed.couples) && ('flagged' in parsed)) {
           if (!parsed.couples.length) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text: (parsed.note || 'No couples with calls to check in view.') + ' [dev preview]' }] };
-          const bad = parsed.couples.filter(c => !c.ok);
+          const bad = parsed.couples.filter(c => c.needs_fix);
           if (!bad.length) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`All ${parsed.couples.length} couple(s) are on cadence and aligned. [dev preview]` }] };
-          const fmtP = (x) => { if (!x.has_call) return `${x.name} (no call)`; let s = `${x.name}: due ${fmtDate(x.due) || '—'}`; if (x.no_prior) s += ' (no prior call)'; else if (!x.on_cadence) s += ` (should be ${fmtDate(x.expected_due) || '?'})`; return s; };
-          const lines = bad.map(c => { const iss = []; if (!c.aligned) iss.push('not aligned'); if (!c.cadence_ok) iss.push('off cadence'); return `• ${fmtP(c.a)}  +  ${fmtP(c.b)} — ${iss.join(' & ')}`; }).join('\n');
-          return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${bad.length} of ${parsed.couples.length} couple(s) need attention:\n${lines}\n\nWant me to set each couple's calls to the same date? [dev preview]` }] };
+          const fmtP = (x) => { if (!x.has_call) return `${x.name} (no call)`; let s = `${x.name}: ${x.class || '?'}-touch, due ${fmtDate(x.due) || '—'}`; if (x.no_prior) s += ' (no prior call)'; else if (!x.on_cadence) s += ` (should be ${fmtDate(x.expected_due) || '?'})`; return s; };
+          const lines = bad.map(c => { const iss = []; if (!c.aligned) iss.push('not aligned'); if (!c.cadence_ok) iss.push('off cadence'); return `• ${fmtP(c.a)}  +  ${fmtP(c.b)} — ${iss.join(' & ')} → set BOTH to ${fmtDate(c.target_date) || '?'}`; }).join('\n');
+          return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text:`${bad.length} of ${parsed.couples.length} couple(s) need attention:\n${lines}\n\nThe target date follows higher-touch-wins. Want me to set each couple's calls to it? [dev preview]` }] };
         }
         if (parsed && Array.isArray(parsed.couples)) {
           if (!parsed.couples.length) return { ok:true, stop_reason:'end_turn', content:[{ type:'text', text: (parsed.note || 'No couples found among the tasks in view.') + ' [dev preview]' }] };
@@ -1201,9 +1229,12 @@
           if (!A.has_call && !B.has_call) continue;
           const aligned = !!(A.due && B.due && A.due === B.due);
           const cadence_ok = (!A.has_call || A.on_cadence) && (!B.has_call || B.on_cadence);
-          couples.push({ a: A, b: B, aligned, cadence_ok, ok: aligned && cadence_ok });
+          const target_date = resolveCoupleTarget(A, B);              // higher-touch-wins shared date
+          const fix_ids = [A.task_id, B.task_id].filter(Boolean);
+          const needs_fix = !!(target_date && fix_ids.length && !(A.due === target_date && B.due === target_date));
+          couples.push({ a: A, b: B, aligned, cadence_ok, ok: aligned && cadence_ok, target_date, fix_ids, needs_fix });
         }
-        return { couples, flagged: couples.filter(c => !c.ok).length, ok_count: couples.filter(c => c.ok).length };
+        return { couples, flagged: couples.filter(c => c.needs_fix).length, ok_count: couples.filter(c => !c.needs_fix).length };
       }
       // For Not-Started call tasks in view, compares each due date to the
       // contact's last completed call + the touch cadence (by contact owner).

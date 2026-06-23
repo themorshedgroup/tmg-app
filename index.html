@@ -157,6 +157,14 @@
     .nc-table th { text-align: left; padding: 6px 8px; font-family: 'Jost', sans-serif; font-size: 8px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #AD832F; border-bottom: 1px solid #EDE7DC; background: #F9F6F0; }
     .nc-table td { padding: 7px 8px; border-bottom: 0.5px solid #F5F2EE; color: #3A3A3A; font-weight: 300; vertical-align: top; font-family: 'Jost', sans-serif; }
     .nc-table td:first-child { font-weight: 500; color: #001A4A; white-space: nowrap; }
+    .nc-vals { text-align: center; font-family: 'Jost', sans-serif; font-size: 8.5px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #AD832F; margin: 2px 0 16px; line-height: 1.9; }
+    .nc-check.x > i { color: #9B1C1C; }
+    .nc-faq { display: flex; gap: 11px; align-items: flex-start; padding: 10px 0; border-bottom: 0.5px solid #F0EBE1; }
+    .nc-faq:last-child { border-bottom: 0; }
+    .nc-faq-i { font-size: 16px; line-height: 1.2; flex-shrink: 0; }
+    .nc-faq-t { font-family: 'Jost', sans-serif; font-size: 11px; font-weight: 600; color: #001A4A; margin-bottom: 3px; }
+    .nc-faq-d { font-family: 'Jost', sans-serif; font-size: 10px; color: #6B6B6B; line-height: 1.6; }
+    .nc-faq-d b { font-weight: 600; color: #001A4A; }
     .nc-edit:empty:before { content: attr(data-ph); color: #C4BFBA; }
     .guide-note-item:hover { background: #EDE7DC !important; }
     .guide-tool:hover { background: #EDE7DC !important; }
@@ -1111,51 +1119,49 @@ Rules:
     const GUIDE_SECTIONS = ['Pinned', 'App Guides', 'Reference'];
 
     // The one fully-authored starter note. Other notes ship as empty shells.
-    const GUIDE_GETSTARTED_HTML = `<section class="nc-h2">1 · Open the link</section>
+    const GUIDE_GETSTARTED_HTML = `<p class="nc-vals">Be Irreplaceable · Accountability · Growth Mindset · Servant Leaders · Teamwork</p>
+<section class="nc-h2">1 · Open the link</section>
 <div class="nc-h1">Tap this link on your iPhone</div>
 <p class="nc-p">Open it in <b>Safari</b> or <b>Chrome</b>. Make sure your TMG Gmail account is signed in on this device before continuing.</p>
-<div class="nc-tip"><i class="ti ti-link"></i><div>Open <a href="https://app.themorshedgroup.com" target="_blank" rel="noopener noreferrer">app.themorshedgroup.com</a> in your browser.</div></div>
+<div class="nc-tip"><i class="ti ti-link"></i><div>Open <a href="https://app.themorshedgroup.com" target="_blank" rel="noopener noreferrer">app.themorshedgroup.com</a> — tap to open in browser.</div></div>
+<p class="nc-p">The app opens in your browser — you'll see the TMG login screen.</p>
+<div class="nc-check"><i class="ti ti-check"></i><div>Address bar shows the URL</div></div>
+<div class="nc-check"><i class="ti ti-check"></i><div>TMG login screen loads</div></div>
 <div class="nc-divider"></div>
 <section class="nc-h2">2 · Sign in</section>
 <div class="nc-h1">Tap "Continue with TMG Gmail"</div>
 <p class="nc-p">Sign in with your <b>@themorshedgroup.com</b> account. Brand-new accounts first see a quick "account being set up" screen — you'll have full access within 24 hours.</p>
+<p class="nc-p">Tap the button and complete Google sign-in.</p>
+<div class="nc-check"><i class="ti ti-check"></i><div>Use @themorshedgroup.com</div></div>
+<div class="nc-check x"><i class="ti ti-x"></i><div>Other accounts = Access Denied</div></div>
 <div class="nc-divider"></div>
 <section class="nc-h2">3 · Add to Home Screen</section>
 <div class="nc-h1">Install it — choose your browser</div>
 <p class="nc-p">These screens show <b>iOS 26</b> (the current iPhone software). Older iPhones look slightly different — see the gold notes under each step.</p>
 <section class="nc-h2">Safari</section>
 <div class="nc-step"><div class="nc-step-num">a</div><div class="nc-step-body"><div class="nc-step-title">Tap the ☰ menu</div><div class="nc-step-desc">On iOS 26, Safari's bar floats at the bottom. Tap the <b>☰ menu</b> on the <b>left</b> of the address bar — just right of the Back arrow — to open the Share sheet.</div></div></div>
-<div class="nc-tip"><i class="ti ti-info-circle"></i><div><b>Older iPhone (iOS 18)?</b> The Share button (a box with an up-arrow) sits right in the bottom toolbar — tap it and skip to step b.</div></div>
+<p class="nc-p">The <b>☰ menu</b> is on the left of the address bar, just right of the Back arrow.</p>
+<div class="nc-tip"><i class="ti ti-info-circle"></i><div><b>Older iPhone (iOS 18)?</b> The Share button (a box with an up-arrow) sits right in the bottom toolbar — tap it and skip to 3b.</div></div>
 <div class="nc-step"><div class="nc-step-num">b</div><div class="nc-step-body"><div class="nc-step-title">Tap "Add to Home Screen"</div><div class="nc-step-desc">Scroll down the Share sheet, then tap <b>Add to Home Screen</b>.</div></div></div>
+<p class="nc-p">Scroll the Share sheet — <b>Add to Home Screen</b> is a few rows down.</p>
 <div class="nc-tip"><i class="ti ti-info-circle"></i><div>Don't see it? You may be in an in-app browser. Open the link in <b>Safari</b> or <b>Chrome</b> directly.</div></div>
 <div class="nc-step"><div class="nc-step-num">c</div><div class="nc-step-body"><div class="nc-step-title">Keep "Open as Web App" on, tap Add</div><div class="nc-step-desc">The name pre-fills as "TMG App." Leave <b>Open as Web App</b> on (this is what makes it full-screen), then tap <b>Add</b> in the top-right.</div></div></div>
 <section class="nc-h2">Chrome</section>
 <div class="nc-step"><div class="nc-step-num">a</div><div class="nc-step-body"><div class="nc-step-title">Tap the Share icon</div><div class="nc-step-desc">Chrome installs it through the <b>same iOS Share sheet</b>. Tap the <b>Share icon</b> (a box with an up-arrow) on the <b>right</b> of the address bar — not the three-dot menu.</div></div></div>
+<p class="nc-p">The <b>Share icon</b> is on the right of the address bar (the box with an up-arrow).</p>
 <div class="nc-tip"><i class="ti ti-info-circle"></i><div>Signed into Chrome with your TMG Gmail account? Good — that keeps you logged in.</div></div>
 <div class="nc-step"><div class="nc-step-num">b</div><div class="nc-step-body"><div class="nc-step-title">Tap "Add to Home Screen"</div><div class="nc-step-desc">Scroll down the Share sheet and tap <b>Add to Home Screen</b> — it's near the bottom, below <b>Print</b>.</div></div></div>
+<p class="nc-p">Scroll the Share sheet — <b>Add to Home Screen</b> is below Print.</p>
 <div class="nc-tip"><i class="ti ti-info-circle"></i><div>No "Add to Home Screen"? Update Chrome in the App Store, or use <b>Safari</b> instead.</div></div>
 <div class="nc-step"><div class="nc-step-num">c</div><div class="nc-step-body"><div class="nc-step-title">Confirm and tap Add</div><div class="nc-step-desc">Leave the name as "TMG App" and tap <b>Add</b>.</div></div></div>
 <div class="nc-warn"><i class="ti ti-lock"></i><div><b>Important:</b> Always open the TMG App from the <b>home screen icon</b> — not from a browser bookmark or link. The icon gives you the full-screen experience and keeps you signed in.</div></div>
 <div class="nc-divider"></div>
 <section class="nc-h2">Troubleshooting</section>
-<table class="nc-table"><thead><tr><th>Issue</th><th>What to do</th></tr></thead><tbody>
-<tr><td>Can't see the app after signing in?</td><td>Your account is being set up — you'll have access within 24 hours and receive an email notification once it's ready.</td></tr>
-<tr><td>App opens in browser, not full-screen</td><td>Tap the TMG App icon on your home screen — don't open it from a browser bookmark or link. On iOS 26, make sure Open as Web App was on when you added it.</td></tr>
-<tr><td>Can't find the icon after installing</td><td>Swipe through all your home screen pages, or search "TMG App" using iPhone Spotlight (swipe down from the home screen).</td></tr>
-<tr><td>Still stuck?</td><td>Message Symon in the TMG App team chat, or email manager@themorshedgroup.com with a screenshot and your iOS version.</td></tr>
-</tbody></table>
-<div class="nc-divider"></div>
-<section class="nc-h2">What's Available Now</section>
-<div class="nc-tags"><span class="nc-tag"><i class="ti ti-sparkles"></i>AI Chat</span><span class="nc-tag"><i class="ti ti-chart-bar"></i>KPI Entries</span><span class="nc-tag"><i class="ti ti-message"></i>Showings Feedback</span></div>
-<p class="nc-p">Three features are live in beta. Claude AI Chat supports projects and file uploads. KPI Entries lets agents submit scores via form or plain text. Showings Feedback Automation is managed by Alexa — end-to-end SMS follow-up.</p>
-<div class="nc-divider"></div>
-<section class="nc-h2">Coming Soon — Q3 2026</section>
-<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Team Chat</div></div>
-<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>CRM Integration</div></div>
-<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Task Management (full)</div></div>
-<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Gmail Integration</div></div>
-<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Google Calendar Sync</div></div>
-<div class="nc-check incomplete"><i class="ti ti-circle-check"></i><div>Scorecard (full)</div></div>`;
+<div class="nc-faq"><div class="nc-faq-i">⏳</div><div><div class="nc-faq-t">Can't see the app after signing in?</div><div class="nc-faq-d">Your account is being set up — you'll have access within <b>24 hours</b> and receive an email notification once it's ready.</div></div></div>
+<div class="nc-faq"><div class="nc-faq-i">🌐</div><div><div class="nc-faq-t">"Add to Home Screen" isn't there</div><div class="nc-faq-d">You're probably in an <b>in-app browser</b> (the preview inside Instagram, Facebook, or Gmail). Those can't install apps — open the link in <b>Safari</b> or <b>Chrome</b> directly.</div></div></div>
+<div class="nc-faq"><div class="nc-faq-i">📵</div><div><div class="nc-faq-t">App opens in browser, not full-screen</div><div class="nc-faq-d">Tap the TMG App icon on your <b>home screen</b> — don't open it from a browser bookmark or link. On iOS 26, make sure <b>Open as Web App</b> was on when you added it.</div></div></div>
+<div class="nc-faq"><div class="nc-faq-i">🔍</div><div><div class="nc-faq-t">Can't find the icon after installing</div><div class="nc-faq-d">Swipe through all your home screen pages, or search <b>"TMG App"</b> using iPhone Spotlight (swipe down from the home screen).</div></div></div>
+<div class="nc-faq"><div class="nc-faq-i">💬</div><div><div class="nc-faq-t">Still stuck?</div><div class="nc-faq-d">Message Symon in the TMG App team chat, or email <a href="mailto:manager@themorshedgroup.com">manager@themorshedgroup.com</a> with a screenshot and your iOS version.</div></div></div>`;
 
     // Convert any string into a URL-safe slug (lowercase, hyphenated).
     function guideSlugify(s) {

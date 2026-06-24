@@ -328,14 +328,28 @@ Continue with TMG Gmail
     function connectGoogleCalendar(refreshToken) {
       callCalendar({ action: 'connect', refresh_token: refreshToken }).catch(() => {});
     }
+    // Create (mode 'create') or update (mode 'edit') an event; returns the new id.
+    async function saveGoogleEvent({ mode, calendarId, eventId, event }) {
+      const { ok, data } = await callCalendar({ action: mode === 'edit' ? 'update' : 'create', calendarId, eventId, event });
+      if (!ok) { const err = new Error(data.error || 'save_failed'); err.code = data.error; throw err; }
+      return data.id || null;
+    }
+    async function deleteGoogleEvent(calendarId, eventId) {
+      const { ok, data } = await callCalendar({ action: 'delete', calendarId, eventId });
+      if (!ok) { const err = new Error(data.error || 'delete_failed'); err.code = data.error; throw err; }
+      return true;
+    }
     // Mock Google Calendar responses for localhost/preview only.
     function devCalendarMock(payload) {
       if (payload.action === 'connect') return { ok: true };
+      if (payload.action === 'create') return { ok: true, id: 'dev-' + Math.random().toString(36).slice(2) };
+      if (payload.action === 'update') return { ok: true, id: payload.eventId };
+      if (payload.action === 'delete') return { ok: true };
       if (payload.action === 'calendars') return { calendars: [
-        { id: 'primary', summary: 'Hidenori Symon', primary: true, color: '#D50000' },
-        { id: 'tmg@group.calendar.google.com', summary: 'TMG', color: '#F6BF26' },
-        { id: 'ph#holiday@group.v.calendar.google.com', summary: 'Holidays in Philippines', color: '#3F51B5' },
-        { id: 'us#holiday@group.v.calendar.google.com', summary: 'Holidays in United States', color: '#0B8043' },
+        { id: 'primary', summary: 'Hidenori Symon', primary: true, color: '#D50000', accessRole: 'owner', canWrite: true },
+        { id: 'tmg@group.calendar.google.com', summary: 'TMG', color: '#F6BF26', accessRole: 'writer', canWrite: true },
+        { id: 'ph#holiday@group.v.calendar.google.com', summary: 'Holidays in Philippines', color: '#3F51B5', accessRole: 'reader', canWrite: false },
+        { id: 'us#holiday@group.v.calendar.google.com', summary: 'Holidays in United States', color: '#0B8043', accessRole: 'reader', canWrite: false },
       ] };
       if (payload.action === 'list') {
         const ids = Array.isArray(payload.calendarIds) && payload.calendarIds.length ? payload.calendarIds : ['primary'];
@@ -2886,6 +2900,21 @@ Rules:
       // Load the connected account's calendar list once (empty until the edge fn supports it / connected).
       useEffect(() => { let c = false; fetchCalendarList().then(list => { if (!c) setCalList(list || []); }).catch(() => {}); return () => { c = true; }; }, []);
 
+      // ── Event create / edit / delete ──
+      const [editing, setEditing] = useState(null);        // null | { mode:'create'|'edit', ...form }
+      const [savingEvent, setSavingEvent] = useState(false);
+      const [eventErr, setEventErr] = useState('');
+      const [confirmDel, setConfirmDel] = useState(false);
+      const [reloadKey, setReloadKey] = useState(0);
+      // Calendars the user can write to (owner/writer). If the edge fn didn't report accessRole, fall back to all.
+      const writableCals = (() => {
+        const flagged = calList.filter(c => c.canWrite === true);
+        if (flagged.length) return flagged;
+        if (calList.some(c => typeof c.canWrite === 'boolean')) return calList.filter(c => c.primary && c.canWrite === true);
+        return calList;
+      })();
+      const isWritable = (id) => writableCals.some(c => c.id === id);
+
       const K = dark ? {
         pop: '#070F1E', bd: '#152545', bd2: '#0D1E3A', shadow: '0 6px 22px rgba(0,0,0,.5)', navBg: '#040C1C',
         date: '#fff', tBtnTx: '#5AA0E6', tBtnBg: '#0C1830', tBtnBd: '#22324A',
@@ -2929,7 +2958,7 @@ Rules:
           .then(list => { if (!cancelled) { setGevents(list || []); setGcal('ready'); } })
           .catch(err => { if (!cancelled) setGcal(err && err.code === 'needs_connect' ? 'needs_connect' : 'error'); });
         return () => { cancelled = true; };
-      }, [view, anchor, calList]);
+      }, [view, anchor, calList, reloadKey]);
       useEffect(() => { let c = false;
         TaskDB.loadAll().then(d => { if (!c && d) { setTasks(d.tasks || []); setPeopleByTask(d.peopleByTask || {}); } }).catch(() => {});
         ProfileDB.loadAll().then(ps => { if (!c && ps) {
@@ -2951,6 +2980,97 @@ Rules:
       const fmtClock = (inst, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true }).format(inst);
       // Wall-clock hour (as a float, e.g. 9.5) of `inst` in zone `tz` — used to position events.
       const tzFloat = (inst, tz) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }); const m = {}; f.formatToParts(inst).forEach(p => m[p.type] = p.value); return ((+m.hour) % 24) + (+m.minute) / 60; };
+      // 'YYYY-MM-DD' / 'HH:mm' of an instant as read in zone `tz` (for prefilling the event form's date/time inputs).
+      const dateInTz = (inst, tz) => { const m = {}; new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(inst).forEach(p => m[p.type] = p.value); return m.year + '-' + m.month + '-' + m.day; };
+      const timeInTz = (inst, tz) => { const m = {}; new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(inst).forEach(p => m[p.type] = p.value); return (m.hour === '24' ? '00' : m.hour) + ':' + m.minute; };
+      const rruleToSimple = (rec) => { const r = (rec || []).find(x => /^RRULE:/.test(x)) || ''; if (/FREQ=DAILY/.test(r)) return 'daily'; if (/FREQ=WEEKLY/.test(r)) return 'weekly'; if (/FREQ=MONTHLY/.test(r)) return 'monthly'; return 'none'; };
+
+      const setF = (patch) => setEditing(prev => ({ ...prev, ...patch }));
+      // Open the form to create a new event (defaults: the focused day, next round hour).
+      const openCreate = (day) => {
+        const d = day || anchor;
+        let h = sameDay(d, todayD) ? Math.floor(tzFloat(new Date(), primaryTz)) + 1 : 9; if (h > 22 || h < 6) h = 9;
+        const hh = String(h).padStart(2, '0'); const eh = String((h + 1) % 24).padStart(2, '0');
+        setEventErr(''); setConfirmDel(false);
+        setEditing({ mode: 'create', eventId: null, calendarId: (writableCals[0] || {}).id || 'primary',
+          title: '', allDay: false, date: isoOf(d), endDate: isoOf(d), start: hh + ':00', end: eh + ':00',
+          location: '', notes: '', guests: '', repeat: 'none', readOnly: false, recurring: false });
+      };
+      // Open the form to edit/delete an existing event (the raw gevents object).
+      const openEdit = (ev) => {
+        if (!ev) return;
+        const s = ev.start ? new Date(ev.start) : new Date();
+        const e = ev.end ? new Date(ev.end) : s;
+        const allDay = !!ev.allDay;
+        const writable = ev.calendarId ? isWritable(ev.calendarId) : true;
+        setEventErr(''); setConfirmDel(false);
+        setEditing({ mode: 'edit', eventId: ev.id, calendarId: ev.calendarId || 'primary',
+          title: ev.title === '(no title)' ? '' : (ev.title || ''),
+          allDay,
+          date: allDay ? (ev.start || '').slice(0, 10) : dateInTz(s, primaryTz),
+          // Google all-day end is exclusive → show the inclusive last day.
+          endDate: allDay ? isoOf(addDays(new Date((ev.end || ev.start || '').slice(0, 10) + 'T00:00:00'), -1)) : dateInTz(e, primaryTz),
+          start: allDay ? '09:00' : timeInTz(s, primaryTz),
+          end: allDay ? '10:00' : timeInTz(e, primaryTz),
+          location: ev.location || '', notes: ev.description || '',
+          guests: (ev.attendees || []).join(', '),
+          repeat: rruleToSimple(ev.recurrence), recurring: !!(ev.recurrence || ev.recurringEventId),
+          readOnly: !writable });
+      };
+      // Build the Google event resource from the form. Times are sent with the primary zone so Google reads them right.
+      const buildEventBody = (f) => {
+        const edit = f.mode === 'edit';
+        const ev = { summary: (f.title || '').trim() || '(no title)' };
+        // On edit, send '' / [] to actively CLEAR — a PATCH leaves omitted keys unchanged. On create, omit empties.
+        const loc = (f.location || '').trim(); const desc = (f.notes || '').trim();
+        if (loc || edit) ev.location = loc;
+        if (desc || edit) ev.description = desc;
+        if (f.allDay) {
+          const endIncl = (f.endDate && f.endDate >= f.date) ? f.endDate : f.date;
+          ev.start = { date: f.date };
+          ev.end = { date: isoOf(addDays(new Date(endIncl + 'T00:00:00'), 1)) };  // end date is exclusive
+        } else {
+          const endDate = (f.endDate && f.endDate >= f.date) ? f.endDate : f.date;
+          ev.start = { dateTime: f.date + 'T' + f.start + ':00', timeZone: primaryTz };
+          ev.end = { dateTime: endDate + 'T' + f.end + ':00', timeZone: primaryTz };
+        }
+        const guests = (f.guests || '').split(/[,;\s]+/).map(s => s.replace(/[<>]/g, '').trim()).filter(s => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
+        if (guests.length || edit) ev.attendees = guests.map(email => ({ email }));  // [] removes all guests on edit
+        // Only manage recurrence for non-recurring events. (Changing an existing series' rule is done in Google.)
+        if (!f.recurring) {
+          if (f.repeat && f.repeat !== 'none') ev.recurrence = ['RRULE:FREQ=' + (f.repeat === 'daily' ? 'DAILY' : f.repeat === 'weekly' ? 'WEEKLY' : 'MONTHLY')];
+          else if (edit) ev.recurrence = [];
+        }
+        return ev;
+      };
+      const submitEvent = async () => {
+        const f = editing; if (!f || f.readOnly) return;
+        if (!f.allDay) {
+          if (!/^\d{2}:\d{2}$/.test(f.start || '') || !/^\d{2}:\d{2}$/.test(f.end || '')) { setEventErr('Please set a start and end time.'); return; }
+          const effEnd = (f.endDate && f.endDate >= f.date) ? f.endDate : f.date;  // matches buildEventBody's clamp
+          if (effEnd === f.date) {
+            const sMin = (+f.start.slice(0, 2)) * 60 + (+f.start.slice(3, 5));
+            const eMin = (+f.end.slice(0, 2)) * 60 + (+f.end.slice(3, 5));
+            if (eMin <= sMin) { setEventErr('End time must be after the start time.'); return; }
+          }
+        }
+        setSavingEvent(true); setEventErr('');
+        try {
+          await saveGoogleEvent({ mode: f.mode, calendarId: f.calendarId, eventId: f.eventId, event: buildEventBody(f) });
+          setEditing(null); setReloadKey(k => k + 1);
+        } catch (err) {
+          const code = err && err.code, msg = err && err.message;
+          setEventErr(code === 'needs_connect' ? 'Reconnect your Google account in Settings, then try again.'
+            : (msg && msg !== 'save_failed' ? msg : 'Could not save — please try again.'));
+        } finally { setSavingEvent(false); }
+      };
+      const removeEvent = async () => {
+        const f = editing; if (!f || f.mode !== 'edit') return;
+        setSavingEvent(true); setEventErr('');
+        try { await deleteGoogleEvent(f.calendarId, f.eventId); setEditing(null); setConfirmDel(false); setReloadKey(k => k + 1); }
+        catch (err) { setEventErr('Could not delete — please try again.'); setConfirmDel(false); }
+        finally { setSavingEvent(false); }
+      };
 
       // ── task + event helpers ──
       const dueMs = (t) => t.due_at ? new Date(t.due_at).getTime() : Infinity;
@@ -2973,7 +3093,7 @@ Rules:
       const evBg = (e) => (e.color && e.color[0] === '#' && e.color.length === 7) ? (e.color + (dark ? '2E' : '1A')) : (e.gold ? K.evGoldBg : K.evNavyBg);
       const evBd = (e) => (e.color && e.color[0] === '#') ? e.color : (e.gold ? K.evGoldBd : K.evNavyBd);
       const visEvents = () => (gevents || []).filter(e => !e.calendarId || !isHidden(e.calendarId));
-      const dayEvents = (day) => visEvents().filter(e => e.start && !e.allDay && sameDay(new Date(e.start), day)).map(e => ({ title: e.title || '(busy)', start: new Date(e.start), end: e.end ? new Date(e.end) : null, color: e.color || calColor(e.calendarId), gold: (e.colorId === '5' || e.colorId === '6') }));
+      const dayEvents = (day) => visEvents().filter(e => e.start && !e.allDay && sameDay(new Date(e.start), day)).map(e => ({ title: e.title || '(busy)', start: new Date(e.start), end: e.end ? new Date(e.end) : null, color: e.color || calColor(e.calendarId), gold: (e.colorId === '5' || e.colorId === '6'), raw: e }));
       const hasEvents = (day) => visEvents().some(e => e.start && (e.allDay ? (e.start || '').slice(0, 10) === isoOf(day) : sameDay(new Date(e.start), day)));
       const monthHasEvent = (day) => hasEvents(day);
       const monthHasTask = (day) => (tasks || []).some(t => t.due_at && sameDay(new Date(t.due_at), day));
@@ -3043,7 +3163,7 @@ Rules:
           {sep}
           {navChip('ti-search', false, () => {})}
           {navChip('ti-settings-2', true, () => setShowSettings(true))}
-          {navChip('ti-plus', true, () => {})}
+          {navChip('ti-plus', true, () => openCreate())}
           <div style={{ display: 'flex', background: K.segBg, borderRadius: 6, padding: 2, gap: 1, flexShrink: 0 }}>
             {['day', 'week', 'month'].map(v => (
               <button key={v} onClick={() => setView(v)} style={{ fontFamily: J, fontSize: 7.5, fontWeight: 600, padding: '3px 6px', borderRadius: 4, border: 'none', cursor: 'pointer', textTransform: 'capitalize', background: v === view ? K.segABg : 'transparent', color: v === view ? K.segATx : K.segTx }}>{v}</button>
@@ -3197,7 +3317,7 @@ Rules:
               <div style={{ flex: 1, position: 'relative' }}>
                 {HOURS.map(h => <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.gline}` }} />)}
                 {dayEvents(anchor).map((e, i) => { const top = tzFloat(e.start, primaryTz) * 48; const dur = e.end ? Math.max((e.end - e.start) / 3600000, 0.5) : 0.75; return (
-                  <div key={i} style={{ position: 'absolute', top: top + 1, left: 4, right: 4, height: Math.max(dur * 48 - 2, 16), background: evBg(e), borderLeft: `3px solid ${evBd(e)}`, borderRadius: 5, padding: '4px 7px', overflow: 'hidden' }}>
+                  <div key={i} onClick={() => openEdit(e.raw)} style={{ position: 'absolute', top: top + 1, left: 4, right: 4, height: Math.max(dur * 48 - 2, 16), background: evBg(e), borderLeft: `3px solid ${evBd(e)}`, borderRadius: 5, padding: '4px 7px', overflow: 'hidden', cursor: 'pointer' }}>
                     <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
                     <div style={{ fontFamily: J, fontSize: 7.5, color: K.evTime, marginTop: 1 }}>{fmtClock(e.start, primaryTz)}</div>
                   </div>
@@ -3222,7 +3342,7 @@ Rules:
                 {stripDays.map((d, di) => { const isTod = sameDay(d, todayD), wknd = di >= 5; const evs = dayEvents(d).filter(e => Math.floor(tzFloat(e.start, primaryTz)) === h); return (
                   <div key={di} style={{ flex: 1, minWidth: 0, height: 38, borderBottom: `0.5px solid ${K.gline}`, borderRight: `0.5px solid ${K.gline}`, background: isTod ? K.weekTodayCol : (wknd ? K.weekendCell : 'transparent'), padding: '1px 2px', overflow: 'hidden' }}>
                     {evs.map((e, ei) => (
-                      <div key={ei} style={{ fontFamily: J, fontSize: 6.5, fontWeight: 500, padding: '2px 4px', borderRadius: 3, marginBottom: 1, background: evBg(e), borderLeft: `2px solid ${evBd(e)}`, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
+                      <div key={ei} onClick={() => openEdit(e.raw)} style={{ fontFamily: J, fontSize: 6.5, fontWeight: 500, padding: '2px 4px', borderRadius: 3, marginBottom: 1, background: evBg(e), borderLeft: `2px solid ${evBd(e)}`, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'pointer' }}>{e.title}</div>
                     ))}
                   </div>
                 ); })}
@@ -3283,7 +3403,7 @@ Rules:
         </select>
       );
       const settingsPanel = (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 30, background: K.pop, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 10000, background: K.pop, display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 15px', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0, background: K.navBg }}>
             <span style={{ width: 48 }} />
             <span style={{ fontFamily: J, fontSize: 13, fontWeight: 700, color: K.date }}>Calendar Settings</span>
@@ -3325,6 +3445,99 @@ Rules:
         </div>
       );
 
+      // ── Event create / edit / delete form ──
+      const fld = { width: '100%', boxSizing: 'border-box', fontFamily: J, fontSize: 13, color: K.date, background: dark ? '#06101F' : '#FCFBF8', border: `1px solid ${K.cellBd}`, borderRadius: 9, padding: '10px 12px', outline: 'none' };
+      const fldLbl = { fontFamily: J, fontSize: 8.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: K.muted, margin: '0 0 5px 2px', display: 'block' };
+      const fldWrap = { padding: '12px 16px 0' };
+      const eventForm = editing ? (() => {
+        const ed = editing; const ro = !!ed.readOnly;
+        const calOf = calList.find(c => c.id === ed.calendarId) || {};
+        return (
+          <div style={{ position: 'fixed', inset: 0, zIndex: 10001, background: K.pop, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 15px', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0, background: K.navBg }}>
+              <button onClick={() => setEditing(null)} style={{ fontFamily: J, fontSize: 12, color: K.tBtnTx, background: 'none', border: 'none', cursor: 'pointer', width: 60, textAlign: 'left' }}>Cancel</button>
+              <span style={{ fontFamily: J, fontSize: 13, fontWeight: 700, color: K.date }}>{ed.mode === 'create' ? 'New event' : (ro ? 'Event' : 'Edit event')}</span>
+              <button onClick={submitEvent} disabled={savingEvent || ro} style={{ fontFamily: J, fontSize: 12, fontWeight: 700, color: ro ? K.muted : K.gold, background: 'none', border: 'none', cursor: ro ? 'default' : 'pointer', width: 60, textAlign: 'right', opacity: savingEvent ? 0.5 : 1 }}>{savingEvent ? '…' : 'Save'}</button>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 'calc(28px + env(safe-area-inset-bottom))' }}>
+              {ro && <div style={{ margin: '12px 16px 0', padding: '9px 12px', borderRadius: 9, background: dark ? '#2A1F0A' : '#FDF8F0', border: `1px solid ${K.evGoldBd}`, fontFamily: J, fontSize: 10.5, color: K.date }}>This calendar is read-only — you can view this event but not change it.</div>}
+              {eventErr && <div style={{ margin: '12px 16px 0', padding: '9px 12px', borderRadius: 9, background: dark ? '#2A0F0F' : '#FDEDED', border: '1px solid #E07A7A', fontFamily: J, fontSize: 10.5, color: dark ? '#E89A9A' : '#9B1C1C' }}>{eventErr}</div>}
+              {ed.recurring && <div style={{ margin: '12px 16px 0', fontFamily: J, fontSize: 10, color: K.muted, lineHeight: 1.5, padding: '0 2px' }}>This is a repeating event — changes apply to this occurrence.</div>}
+
+              <div style={fldWrap}><label style={fldLbl}>Title</label>
+                <input value={ed.title} disabled={ro} onChange={e => setF({ title: e.target.value })} placeholder="Add a title" autoFocus={ed.mode === 'create'} style={{ ...fld, fontWeight: 600 }} />
+              </div>
+
+              <div style={fldWrap}><label style={fldLbl}>Calendar</label>
+                {ed.mode === 'create'
+                  ? <select value={ed.calendarId} onChange={e => setF({ calendarId: e.target.value })} style={fld}>
+                      {writableCals.map(c => <option key={c.id} value={c.id}>{c.summary}{c.primary ? ' · primary' : ''}</option>)}
+                      {!writableCals.length && <option value="primary">Primary</option>}
+                    </select>
+                  : <div style={{ ...fld, display: 'flex', alignItems: 'center', gap: 9 }}>
+                      <span style={{ width: 13, height: 13, borderRadius: 4, background: calColor(ed.calendarId) || K.muted, flexShrink: 0 }} />
+                      <span>{calOf.summary || 'Calendar'}</span>
+                    </div>}
+              </div>
+
+              <div style={{ ...fldWrap, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontFamily: J, fontSize: 12.5, color: K.date }}>All day</span>
+                {toggle(ed.allDay, () => { if (!ro) setF({ allDay: !ed.allDay }); })}
+              </div>
+
+              <div style={fldWrap}><label style={fldLbl}>Starts</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input type="date" value={ed.date} disabled={ro} onChange={e => setF({ date: e.target.value, endDate: (ed.endDate < e.target.value ? e.target.value : ed.endDate) })} style={{ ...fld, flex: 1 }} />
+                  {!ed.allDay && <input type="time" value={ed.start} disabled={ro} onChange={e => setF({ start: e.target.value })} style={{ ...fld, width: 120 }} />}
+                </div>
+              </div>
+              <div style={fldWrap}><label style={fldLbl}>Ends</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input type="date" value={ed.endDate} disabled={ro} min={ed.date} onChange={e => setF({ endDate: e.target.value })} style={{ ...fld, flex: 1 }} />
+                  {!ed.allDay && <input type="time" value={ed.end} disabled={ro} onChange={e => setF({ end: e.target.value })} style={{ ...fld, width: 120 }} />}
+                </div>
+              </div>
+              {!ed.allDay && <div style={{ padding: '6px 18px 0', fontFamily: J, fontSize: 10, color: K.muted }}>Times are in {tzShort(primaryTz)} ({tzLabel(primaryTz)}).</div>}
+
+              <div style={fldWrap}><label style={fldLbl}>Location</label>
+                <input value={ed.location} disabled={ro} onChange={e => setF({ location: e.target.value })} placeholder="Add a location" style={fld} />
+              </div>
+              <div style={fldWrap}><label style={fldLbl}>Notes</label>
+                <textarea value={ed.notes} disabled={ro} onChange={e => setF({ notes: e.target.value })} placeholder="Add notes" style={{ ...fld, minHeight: 70, resize: 'vertical' }} />
+              </div>
+              <div style={fldWrap}><label style={fldLbl}>Guests (emails)</label>
+                <input value={ed.guests} disabled={ro} onChange={e => setF({ guests: e.target.value })} placeholder="name@email.com, another@email.com" style={fld} />
+                <div style={{ fontFamily: J, fontSize: 9.5, color: K.muted, margin: '5px 0 0 2px' }}>Separate with commas. Google emails them an invite.</div>
+              </div>
+              <div style={fldWrap}><label style={fldLbl}>Repeat</label>
+                {(ed.mode === 'edit' && ed.recurring)
+                  ? <div style={{ ...fld, color: K.muted }}>Repeating event — manage the series in Google Calendar.</div>
+                  : <select value={ed.repeat} disabled={ro} onChange={e => setF({ repeat: e.target.value })} style={fld}>
+                      <option value="none">Does not repeat</option>
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                    </select>}
+              </div>
+
+              {ed.mode === 'edit' && !ro && (
+                <div style={{ padding: '20px 16px 0' }}>
+                  {confirmDel ? (
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <span style={{ flex: 1, fontFamily: J, fontSize: 11.5, color: K.date }}>Delete this event?</span>
+                      <button onClick={() => setConfirmDel(false)} disabled={savingEvent} style={{ fontFamily: J, fontSize: 11, fontWeight: 600, padding: '8px 14px', borderRadius: 9, border: `0.5px solid ${K.chipBd}`, background: K.chipBg, color: K.date, cursor: 'pointer' }}>Keep</button>
+                      <button onClick={removeEvent} disabled={savingEvent} style={{ fontFamily: J, fontSize: 11, fontWeight: 700, padding: '8px 16px', borderRadius: 9, border: 'none', background: '#C0392B', color: '#fff', cursor: 'pointer' }}>{savingEvent ? '…' : 'Delete'}</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmDel(true)} style={{ width: '100%', fontFamily: J, fontSize: 12, fontWeight: 600, padding: '11px', borderRadius: 10, border: `1px solid ${dark ? '#5A2A2A' : '#E8C9C9'}`, background: 'none', color: dark ? '#E07A7A' : '#9B1C1C', cursor: 'pointer' }}>Delete event</button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })() : null;
+
       const calStyle = TASKS_EMBED
         ? { position: 'fixed', inset: 0, zIndex: 10, background: K.pop, opacity: vis ? 1 : 0, transition: 'opacity 150ms ease', display: 'flex', flexDirection: 'column', overflow: 'hidden' }
         : {
@@ -3344,6 +3557,7 @@ Rules:
             {view === 'week' && weekGrid}
             {view === 'month' && monthGrid}
             {showSettings && settingsPanel}
+            {eventForm}
           </div>
         </React.Fragment>
       );

@@ -296,7 +296,11 @@ Continue with TMG Gmail
 
     // ─── Google Calendar (read-only) via edge function ──────────────
     const CAL_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-calendar';
+    const CAL_IS_DEV = (typeof window !== 'undefined') && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:');
     async function callCalendar(payload) {
+      // Preview/localhost has no real Google connection — serve mock data so the
+      // calendar and its settings can be verified visually.
+      if (CAL_IS_DEV) return { ok: true, status: 200, data: devCalendarMock(payload) };
       const res = await fetch(CAL_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
@@ -305,13 +309,49 @@ Continue with TMG Gmail
       const data = await res.json().catch(() => ({}));
       return { ok: res.ok, status: res.status, data };
     }
-    async function fetchGoogleEvents(timeMin, timeMax) {
-      const { ok, data } = await callCalendar({ action: 'list', timeMin, timeMax });
+    // List events. Pass calendarIds to pull from several calendars at once; omit for the
+    // primary calendar only (back-compatible with the pre-multi-calendar edge function).
+    async function fetchGoogleEvents(timeMin, timeMax, calendarIds) {
+      const payload = { action: 'list', timeMin, timeMax };
+      if (Array.isArray(calendarIds) && calendarIds.length) payload.calendarIds = calendarIds;
+      const { ok, data } = await callCalendar(payload);
       if (!ok) { const err = new Error(data.error || 'calendar_error'); err.code = data.error; err.detail = data.detail || ''; throw err; }
       return data.events || [];
     }
+    // Lists the calendars on the connected Google account ({ id, summary, color, primary }).
+    // Returns [] if the account isn't connected or the edge function predates this action.
+    async function fetchCalendarList() {
+      const { ok, data } = await callCalendar({ action: 'calendars' });
+      if (!ok) return [];
+      return Array.isArray(data.calendars) ? data.calendars : [];
+    }
     function connectGoogleCalendar(refreshToken) {
       callCalendar({ action: 'connect', refresh_token: refreshToken }).catch(() => {});
+    }
+    // Mock Google Calendar responses for localhost/preview only.
+    function devCalendarMock(payload) {
+      if (payload.action === 'connect') return { ok: true };
+      if (payload.action === 'calendars') return { calendars: [
+        { id: 'primary', summary: 'Hidenori Symon', primary: true, color: '#D50000' },
+        { id: 'tmg@group.calendar.google.com', summary: 'TMG', color: '#F6BF26' },
+        { id: 'ph#holiday@group.v.calendar.google.com', summary: 'Holidays in Philippines', color: '#3F51B5' },
+        { id: 'us#holiday@group.v.calendar.google.com', summary: 'Holidays in United States', color: '#0B8043' },
+      ] };
+      if (payload.action === 'list') {
+        const ids = Array.isArray(payload.calendarIds) && payload.calendarIds.length ? payload.calendarIds : ['primary'];
+        const colorOf = { 'primary': '#D50000', 'tmg@group.calendar.google.com': '#F6BF26', 'ph#holiday@group.v.calendar.google.com': '#3F51B5', 'us#holiday@group.v.calendar.google.com': '#0B8043' };
+        const base = payload.timeMin ? new Date(payload.timeMin) : new Date();
+        const day0 = new Date(base); day0.setHours(0, 0, 0, 0);
+        const iso = (d, h, m) => { const x = new Date(d); x.setHours(h, m || 0, 0, 0); return x.toISOString(); };
+        const evs = [];
+        for (let i = 0; i < 14; i++) {
+          const d = new Date(day0); d.setDate(d.getDate() + i);
+          if (ids.includes('primary') && i % 2 === 0) evs.push({ id: 'p' + i, title: 'Buyer call', start: iso(d, 9), end: iso(d, 9, 30), allDay: false, calendarId: 'primary', color: colorOf['primary'], colorId: null });
+          if (ids.includes('tmg@group.calendar.google.com') && i % 3 === 0) evs.push({ id: 't' + i, title: 'TMG standup', start: iso(d, 14), end: iso(d, 15), allDay: false, calendarId: 'tmg@group.calendar.google.com', color: colorOf['tmg@group.calendar.google.com'], colorId: '5' });
+        }
+        return { events: evs };
+      }
+      return { error: 'Unknown action.' };
     }
 
     function greeting() {
@@ -535,6 +575,14 @@ Continue with TMG Gmail
         if (!this.client()) return;
         const { error } = await this.client().from('profiles').update(fields).eq('id', this.uid());
         if (error) console.error('[ProfileDB] setPresence:', error.message);
+      },
+
+      // Per-user calendar display prefs (calendars shown + rail timezones). Syncs across the user's
+      // devices. Requires the profiles.calendar_prefs jsonb column (calendar-prefs.sql).
+      async setCalendarPrefs(prefs) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('profiles').update({ calendar_prefs: prefs }).eq('id', this.uid());
+        if (error) console.error('[ProfileDB] setCalendarPrefs:', error.message);
       },
 
       async adminUpdate(id, fields) {
@@ -818,6 +866,22 @@ Rules:
     const COUNTRIES = [{"c":"AF","n":"Afghanistan"},{"c":"AX","n":"Åland Islands"},{"c":"AL","n":"Albania"},{"c":"DZ","n":"Algeria"},{"c":"AS","n":"American Samoa"},{"c":"AD","n":"Andorra"},{"c":"AO","n":"Angola"},{"c":"AI","n":"Anguilla"},{"c":"AQ","n":"Antarctica"},{"c":"AG","n":"Antigua and Barbuda"},{"c":"AR","n":"Argentina"},{"c":"AM","n":"Armenia"},{"c":"AW","n":"Aruba"},{"c":"AU","n":"Australia"},{"c":"AT","n":"Austria"},{"c":"AZ","n":"Azerbaijan"},{"c":"BS","n":"Bahamas"},{"c":"BH","n":"Bahrain"},{"c":"BD","n":"Bangladesh"},{"c":"BB","n":"Barbados"},{"c":"BY","n":"Belarus"},{"c":"BE","n":"Belgium"},{"c":"BZ","n":"Belize"},{"c":"BJ","n":"Benin"},{"c":"BM","n":"Bermuda"},{"c":"BT","n":"Bhutan"},{"c":"BO","n":"Bolivia"},{"c":"BA","n":"Bosnia and Herzegovina"},{"c":"BW","n":"Botswana"},{"c":"BR","n":"Brazil"},{"c":"IO","n":"British Indian Ocean Territory"},{"c":"BN","n":"Brunei"},{"c":"BG","n":"Bulgaria"},{"c":"BF","n":"Burkina Faso"},{"c":"BI","n":"Burundi"},{"c":"CV","n":"Cabo Verde"},{"c":"KH","n":"Cambodia"},{"c":"CM","n":"Cameroon"},{"c":"CA","n":"Canada"},{"c":"BQ","n":"Caribbean Netherlands"},{"c":"KY","n":"Cayman Islands"},{"c":"CF","n":"Central African Republic"},{"c":"TD","n":"Chad"},{"c":"CL","n":"Chile"},{"c":"CN","n":"China"},{"c":"CX","n":"Christmas Island"},{"c":"CC","n":"Cocos Islands"},{"c":"CO","n":"Colombia"},{"c":"KM","n":"Comoros"},{"c":"CK","n":"Cook Islands"},{"c":"CR","n":"Costa Rica"},{"c":"HR","n":"Croatia"},{"c":"CU","n":"Cuba"},{"c":"CW","n":"Curaçao"},{"c":"CY","n":"Cyprus"},{"c":"CZ","n":"Czechia"},{"c":"CD","n":"Democratic Republic of the Congo"},{"c":"DK","n":"Denmark"},{"c":"DJ","n":"Djibouti"},{"c":"DM","n":"Dominica"},{"c":"DO","n":"Dominican Republic"},{"c":"EC","n":"Ecuador"},{"c":"EG","n":"Egypt"},{"c":"SV","n":"El Salvador"},{"c":"GQ","n":"Equatorial Guinea"},{"c":"ER","n":"Eritrea"},{"c":"EE","n":"Estonia"},{"c":"SZ","n":"Eswatini"},{"c":"ET","n":"Ethiopia"},{"c":"FK","n":"Falkland Islands"},{"c":"FO","n":"Faroe Islands"},{"c":"FJ","n":"Fiji"},{"c":"FI","n":"Finland"},{"c":"FR","n":"France"},{"c":"GF","n":"French Guiana"},{"c":"PF","n":"French Polynesia"},{"c":"TF","n":"French Southern Territories"},{"c":"GA","n":"Gabon"},{"c":"GM","n":"Gambia"},{"c":"GE","n":"Georgia"},{"c":"DE","n":"Germany"},{"c":"GH","n":"Ghana"},{"c":"GI","n":"Gibraltar"},{"c":"GR","n":"Greece"},{"c":"GL","n":"Greenland"},{"c":"GD","n":"Grenada"},{"c":"GP","n":"Guadeloupe"},{"c":"GU","n":"Guam"},{"c":"GT","n":"Guatemala"},{"c":"GG","n":"Guernsey"},{"c":"GN","n":"Guinea"},{"c":"GW","n":"Guinea-Bissau"},{"c":"GY","n":"Guyana"},{"c":"HT","n":"Haiti"},{"c":"VA","n":"Holy See"},{"c":"HN","n":"Honduras"},{"c":"HK","n":"Hong Kong"},{"c":"HU","n":"Hungary"},{"c":"IS","n":"Iceland"},{"c":"IN","n":"India"},{"c":"ID","n":"Indonesia"},{"c":"IR","n":"Iran"},{"c":"IQ","n":"Iraq"},{"c":"IE","n":"Ireland"},{"c":"IM","n":"Isle of Man"},{"c":"IL","n":"Israel"},{"c":"IT","n":"Italy"},{"c":"CI","n":"Ivory Coast"},{"c":"JM","n":"Jamaica"},{"c":"JP","n":"Japan"},{"c":"JE","n":"Jersey"},{"c":"JO","n":"Jordan"},{"c":"KZ","n":"Kazakhstan"},{"c":"KE","n":"Kenya"},{"c":"KI","n":"Kiribati"},{"c":"KW","n":"Kuwait"},{"c":"KG","n":"Kyrgyzstan"},{"c":"LA","n":"Laos"},{"c":"LV","n":"Latvia"},{"c":"LB","n":"Lebanon"},{"c":"LS","n":"Lesotho"},{"c":"LR","n":"Liberia"},{"c":"LY","n":"Libya"},{"c":"LI","n":"Liechtenstein"},{"c":"LT","n":"Lithuania"},{"c":"LU","n":"Luxembourg"},{"c":"MO","n":"Macao"},{"c":"MG","n":"Madagascar"},{"c":"MW","n":"Malawi"},{"c":"MY","n":"Malaysia"},{"c":"MV","n":"Maldives"},{"c":"ML","n":"Mali"},{"c":"MT","n":"Malta"},{"c":"MH","n":"Marshall Islands"},{"c":"MQ","n":"Martinique"},{"c":"MR","n":"Mauritania"},{"c":"MU","n":"Mauritius"},{"c":"YT","n":"Mayotte"},{"c":"MX","n":"Mexico"},{"c":"FM","n":"Micronesia"},{"c":"MD","n":"Moldova"},{"c":"MC","n":"Monaco"},{"c":"MN","n":"Mongolia"},{"c":"ME","n":"Montenegro"},{"c":"MS","n":"Montserrat"},{"c":"MA","n":"Morocco"},{"c":"MZ","n":"Mozambique"},{"c":"MM","n":"Myanmar"},{"c":"NA","n":"Namibia"},{"c":"NR","n":"Nauru"},{"c":"NP","n":"Nepal"},{"c":"NL","n":"Netherlands"},{"c":"NC","n":"New Caledonia"},{"c":"NZ","n":"New Zealand"},{"c":"NI","n":"Nicaragua"},{"c":"NE","n":"Niger"},{"c":"NG","n":"Nigeria"},{"c":"NU","n":"Niue"},{"c":"NF","n":"Norfolk Island"},{"c":"KP","n":"North Korea"},{"c":"MK","n":"North Macedonia"},{"c":"MP","n":"Northern Mariana Islands"},{"c":"NO","n":"Norway"},{"c":"OM","n":"Oman"},{"c":"PK","n":"Pakistan"},{"c":"PW","n":"Palau"},{"c":"PS","n":"Palestine"},{"c":"PA","n":"Panama"},{"c":"PG","n":"Papua New Guinea"},{"c":"PY","n":"Paraguay"},{"c":"PE","n":"Peru"},{"c":"PH","n":"Philippines"},{"c":"PN","n":"Pitcairn"},{"c":"PL","n":"Poland"},{"c":"PT","n":"Portugal"},{"c":"PR","n":"Puerto Rico"},{"c":"QA","n":"Qatar"},{"c":"CG","n":"Republic of the Congo"},{"c":"RE","n":"Réunion"},{"c":"RO","n":"Romania"},{"c":"RU","n":"Russia"},{"c":"RW","n":"Rwanda"},{"c":"BL","n":"Saint Barthélemy"},{"c":"SH","n":"Saint Helena, Ascension and Tristan da Cunha"},{"c":"KN","n":"Saint Kitts and Nevis"},{"c":"LC","n":"Saint Lucia"},{"c":"MF","n":"Saint Martin"},{"c":"PM","n":"Saint Pierre and Miquelon"},{"c":"VC","n":"Saint Vincent and the Grenadines"},{"c":"WS","n":"Samoa"},{"c":"SM","n":"San Marino"},{"c":"ST","n":"Sao Tome and Principe"},{"c":"SA","n":"Saudi Arabia"},{"c":"SN","n":"Senegal"},{"c":"RS","n":"Serbia"},{"c":"SC","n":"Seychelles"},{"c":"SL","n":"Sierra Leone"},{"c":"SG","n":"Singapore"},{"c":"SX","n":"Sint Maarten"},{"c":"SK","n":"Slovakia"},{"c":"SI","n":"Slovenia"},{"c":"SB","n":"Solomon Islands"},{"c":"SO","n":"Somalia"},{"c":"ZA","n":"South Africa"},{"c":"GS","n":"South Georgia and the South Sandwich Islands"},{"c":"KR","n":"South Korea"},{"c":"SS","n":"South Sudan"},{"c":"ES","n":"Spain"},{"c":"LK","n":"Sri Lanka"},{"c":"SD","n":"Sudan"},{"c":"SR","n":"Suriname"},{"c":"SJ","n":"Svalbard and Jan Mayen"},{"c":"SE","n":"Sweden"},{"c":"CH","n":"Switzerland"},{"c":"SY","n":"Syria"},{"c":"TW","n":"Taiwan"},{"c":"TJ","n":"Tajikistan"},{"c":"TZ","n":"Tanzania"},{"c":"TH","n":"Thailand"},{"c":"TL","n":"Timor-Leste"},{"c":"TG","n":"Togo"},{"c":"TK","n":"Tokelau"},{"c":"TO","n":"Tonga"},{"c":"TT","n":"Trinidad and Tobago"},{"c":"TN","n":"Tunisia"},{"c":"TR","n":"Türkiye"},{"c":"TM","n":"Turkmenistan"},{"c":"TC","n":"Turks and Caicos Islands"},{"c":"TV","n":"Tuvalu"},{"c":"UG","n":"Uganda"},{"c":"UA","n":"Ukraine"},{"c":"AE","n":"United Arab Emirates"},{"c":"GB","n":"United Kingdom"},{"c":"UM","n":"United States Minor Outlying Islands"},{"c":"US","n":"United States of America"},{"c":"UY","n":"Uruguay"},{"c":"UZ","n":"Uzbekistan"},{"c":"VU","n":"Vanuatu"},{"c":"VE","n":"Venezuela"},{"c":"VN","n":"Vietnam"},{"c":"VG","n":"Virgin Islands (UK)"},{"c":"VI","n":"Virgin Islands (US)"},{"c":"WF","n":"Wallis and Futuna"},{"c":"EH","n":"Western Sahara"},{"c":"YE","n":"Yemen"},{"c":"ZM","n":"Zambia"},{"c":"ZW","n":"Zimbabwe"}];
     const COUNTRY_TZ = {"AD":["Europe/Andorra"],"AE":["Asia/Dubai"],"AF":["Asia/Kabul"],"AG":["America/Puerto_Rico"],"AI":["America/Puerto_Rico"],"AL":["Europe/Tirane"],"AM":["Asia/Yerevan"],"AO":["Africa/Lagos"],"AQ":["Antarctica/Casey","Antarctica/Davis","Antarctica/Mawson","Antarctica/Palmer","Antarctica/Rothera","Antarctica/Troll","Antarctica/Vostok","Asia/Riyadh","Asia/Singapore","Pacific/Auckland","Pacific/Port_Moresby"],"AR":["America/Argentina/Buenos_Aires","America/Argentina/Catamarca","America/Argentina/Cordoba","America/Argentina/Jujuy","America/Argentina/La_Rioja","America/Argentina/Mendoza","America/Argentina/Rio_Gallegos","America/Argentina/Salta","America/Argentina/San_Juan","America/Argentina/San_Luis","America/Argentina/Tucuman","America/Argentina/Ushuaia"],"AS":["Pacific/Pago_Pago"],"AT":["Europe/Vienna"],"AU":["Antarctica/Macquarie","Asia/Tokyo","Australia/Adelaide","Australia/Brisbane","Australia/Broken_Hill","Australia/Darwin","Australia/Eucla","Australia/Hobart","Australia/Lindeman","Australia/Lord_Howe","Australia/Melbourne","Australia/Perth","Australia/Sydney"],"AW":["America/Puerto_Rico"],"AX":["Europe/Helsinki"],"AZ":["Asia/Baku"],"BA":["Europe/Belgrade"],"BB":["America/Barbados"],"BD":["Asia/Dhaka"],"BE":["Europe/Brussels"],"BF":["Africa/Abidjan"],"BG":["Europe/Sofia"],"BH":["Asia/Qatar"],"BI":["Africa/Maputo"],"BJ":["Africa/Lagos"],"BL":["America/Puerto_Rico"],"BM":["Atlantic/Bermuda"],"BN":["Asia/Kuching"],"BO":["America/La_Paz"],"BQ":["America/Puerto_Rico"],"BR":["America/Araguaina","America/Bahia","America/Belem","America/Boa_Vista","America/Campo_Grande","America/Cuiaba","America/Eirunepe","America/Fortaleza","America/Maceio","America/Manaus","America/Noronha","America/Porto_Velho","America/Recife","America/Rio_Branco","America/Santarem","America/Sao_Paulo"],"BS":["America/Toronto"],"BT":["Asia/Thimphu"],"BW":["Africa/Maputo"],"BY":["Europe/Minsk"],"BZ":["America/Belize"],"CA":["America/Cambridge_Bay","America/Dawson","America/Dawson_Creek","America/Edmonton","America/Fort_Nelson","America/Glace_Bay","America/Goose_Bay","America/Halifax","America/Inuvik","America/Iqaluit","America/Moncton","America/Panama","America/Phoenix","America/Puerto_Rico","America/Rankin_Inlet","America/Regina","America/Resolute","America/St_Johns","America/Swift_Current","America/Toronto","America/Vancouver","America/Whitehorse","America/Winnipeg"],"CC":["Asia/Yangon"],"CD":["Africa/Lagos","Africa/Maputo"],"CF":["Africa/Lagos"],"CG":["Africa/Lagos"],"CH":["Europe/Zurich"],"CI":["Africa/Abidjan"],"CK":["Pacific/Rarotonga"],"CL":["America/Coyhaique","America/Punta_Arenas","America/Santiago","Pacific/Easter"],"CM":["Africa/Lagos"],"CN":["Asia/Shanghai","Asia/Urumqi"],"CO":["America/Bogota"],"CR":["America/Costa_Rica"],"CU":["America/Havana"],"CV":["Atlantic/Cape_Verde"],"CW":["America/Puerto_Rico"],"CX":["Asia/Bangkok"],"CY":["Asia/Famagusta","Asia/Nicosia"],"CZ":["Europe/Prague"],"DE":["Europe/Berlin","Europe/Zurich"],"DJ":["Africa/Nairobi"],"DK":["Europe/Berlin"],"DM":["America/Puerto_Rico"],"DO":["America/Santo_Domingo"],"DZ":["Africa/Algiers"],"EC":["America/Guayaquil","Pacific/Galapagos"],"EE":["Europe/Tallinn"],"EG":["Africa/Cairo"],"EH":["Africa/El_Aaiun"],"ER":["Africa/Nairobi"],"ES":["Africa/Ceuta","Atlantic/Canary","Europe/Madrid"],"ET":["Africa/Nairobi"],"FI":["Europe/Helsinki"],"FJ":["Pacific/Fiji"],"FK":["Atlantic/Stanley"],"FM":["Pacific/Guadalcanal","Pacific/Kosrae","Pacific/Port_Moresby"],"FO":["Atlantic/Faroe"],"FR":["Europe/Paris"],"GA":["Africa/Lagos"],"GB":["Europe/London"],"GD":["America/Puerto_Rico"],"GE":["Asia/Tbilisi"],"GF":["America/Cayenne"],"GG":["Europe/London"],"GH":["Africa/Abidjan"],"GI":["Europe/Gibraltar"],"GL":["America/Danmarkshavn","America/Nuuk","America/Scoresbysund","America/Thule"],"GM":["Africa/Abidjan"],"GN":["Africa/Abidjan"],"GP":["America/Puerto_Rico"],"GQ":["Africa/Lagos"],"GR":["Europe/Athens"],"GS":["Atlantic/South_Georgia"],"GT":["America/Guatemala"],"GU":["Pacific/Guam"],"GW":["Africa/Bissau"],"GY":["America/Guyana"],"HK":["Asia/Hong_Kong"],"HN":["America/Tegucigalpa"],"HR":["Europe/Belgrade"],"HT":["America/Port-au-Prince"],"HU":["Europe/Budapest"],"ID":["Asia/Jakarta","Asia/Jayapura","Asia/Makassar","Asia/Pontianak"],"IE":["Europe/Dublin"],"IL":["Asia/Jerusalem"],"IM":["Europe/London"],"IN":["Asia/Kolkata"],"IO":["Indian/Chagos"],"IQ":["Asia/Baghdad"],"IR":["Asia/Tehran"],"IS":["Africa/Abidjan"],"IT":["Europe/Rome"],"JE":["Europe/London"],"JM":["America/Jamaica"],"JO":["Asia/Amman"],"JP":["Asia/Tokyo"],"KE":["Africa/Nairobi"],"KG":["Asia/Bishkek"],"KH":["Asia/Bangkok"],"KI":["Pacific/Kanton","Pacific/Kiritimati","Pacific/Tarawa"],"KM":["Africa/Nairobi"],"KN":["America/Puerto_Rico"],"KP":["Asia/Pyongyang"],"KR":["Asia/Seoul"],"KW":["Asia/Riyadh"],"KY":["America/Panama"],"KZ":["Asia/Almaty","Asia/Aqtau","Asia/Aqtobe","Asia/Atyrau","Asia/Oral","Asia/Qostanay","Asia/Qyzylorda"],"LA":["Asia/Bangkok"],"LB":["Asia/Beirut"],"LC":["America/Puerto_Rico"],"LI":["Europe/Zurich"],"LK":["Asia/Colombo"],"LR":["Africa/Monrovia"],"LS":["Africa/Johannesburg"],"LT":["Europe/Vilnius"],"LU":["Europe/Brussels"],"LV":["Europe/Riga"],"LY":["Africa/Tripoli"],"MA":["Africa/Casablanca"],"MC":["Europe/Paris"],"MD":["Europe/Chisinau"],"ME":["Europe/Belgrade"],"MF":["America/Puerto_Rico"],"MG":["Africa/Nairobi"],"MH":["Pacific/Kwajalein","Pacific/Tarawa"],"MK":["Europe/Belgrade"],"ML":["Africa/Abidjan"],"MM":["Asia/Yangon"],"MN":["Asia/Hovd","Asia/Ulaanbaatar"],"MO":["Asia/Macau"],"MP":["Pacific/Guam"],"MQ":["America/Martinique"],"MR":["Africa/Abidjan"],"MS":["America/Puerto_Rico"],"MT":["Europe/Malta"],"MU":["Indian/Mauritius"],"MV":["Indian/Maldives"],"MW":["Africa/Maputo"],"MX":["America/Bahia_Banderas","America/Cancun","America/Chihuahua","America/Ciudad_Juarez","America/Hermosillo","America/Matamoros","America/Mazatlan","America/Merida","America/Mexico_City","America/Monterrey","America/Ojinaga","America/Tijuana"],"MY":["Asia/Kuching","Asia/Singapore"],"MZ":["Africa/Maputo"],"NA":["Africa/Windhoek"],"NC":["Pacific/Noumea"],"NE":["Africa/Lagos"],"NF":["Pacific/Norfolk"],"NG":["Africa/Lagos"],"NI":["America/Managua"],"NL":["Europe/Brussels"],"NO":["Europe/Berlin"],"NP":["Asia/Kathmandu"],"NR":["Pacific/Nauru"],"NU":["Pacific/Niue"],"NZ":["Pacific/Auckland","Pacific/Chatham"],"OM":["Asia/Dubai"],"PA":["America/Panama"],"PE":["America/Lima"],"PF":["Pacific/Gambier","Pacific/Marquesas","Pacific/Tahiti"],"PG":["Pacific/Bougainville","Pacific/Port_Moresby"],"PH":["Asia/Manila"],"PK":["Asia/Karachi"],"PL":["Europe/Warsaw"],"PM":["America/Miquelon"],"PN":["Pacific/Pitcairn"],"PR":["America/Puerto_Rico"],"PS":["Asia/Gaza","Asia/Hebron"],"PT":["Atlantic/Azores","Atlantic/Madeira","Europe/Lisbon"],"PW":["Pacific/Palau"],"PY":["America/Asuncion"],"QA":["Asia/Qatar"],"RE":["Asia/Dubai"],"RO":["Europe/Bucharest"],"RS":["Europe/Belgrade"],"RU":["Asia/Anadyr","Asia/Barnaul","Asia/Chita","Asia/Irkutsk","Asia/Kamchatka","Asia/Khandyga","Asia/Krasnoyarsk","Asia/Magadan","Asia/Novokuznetsk","Asia/Novosibirsk","Asia/Omsk","Asia/Sakhalin","Asia/Srednekolymsk","Asia/Tomsk","Asia/Ust-Nera","Asia/Vladivostok","Asia/Yakutsk","Asia/Yekaterinburg","Europe/Astrakhan","Europe/Kaliningrad","Europe/Kirov","Europe/Moscow","Europe/Samara","Europe/Saratov","Europe/Simferopol","Europe/Ulyanovsk","Europe/Volgograd"],"RW":["Africa/Maputo"],"SA":["Asia/Riyadh"],"SB":["Pacific/Guadalcanal"],"SC":["Asia/Dubai"],"SD":["Africa/Khartoum"],"SE":["Europe/Berlin"],"SG":["Asia/Singapore"],"SH":["Africa/Abidjan"],"SI":["Europe/Belgrade"],"SJ":["Europe/Berlin"],"SK":["Europe/Prague"],"SL":["Africa/Abidjan"],"SM":["Europe/Rome"],"SN":["Africa/Abidjan"],"SO":["Africa/Nairobi"],"SR":["America/Paramaribo"],"SS":["Africa/Juba"],"ST":["Africa/Sao_Tome"],"SV":["America/El_Salvador"],"SX":["America/Puerto_Rico"],"SY":["Asia/Damascus"],"SZ":["Africa/Johannesburg"],"TC":["America/Grand_Turk"],"TD":["Africa/Ndjamena"],"TF":["Asia/Dubai","Indian/Maldives"],"TG":["Africa/Abidjan"],"TH":["Asia/Bangkok"],"TJ":["Asia/Dushanbe"],"TK":["Pacific/Fakaofo"],"TL":["Asia/Dili"],"TM":["Asia/Ashgabat"],"TN":["Africa/Tunis"],"TO":["Pacific/Tongatapu"],"TR":["Europe/Istanbul"],"TT":["America/Puerto_Rico"],"TV":["Pacific/Tarawa"],"TW":["Asia/Taipei"],"TZ":["Africa/Nairobi"],"UA":["Europe/Kyiv","Europe/Simferopol"],"UG":["Africa/Nairobi"],"UM":["Pacific/Pago_Pago","Pacific/Tarawa"],"US":["America/Adak","America/Anchorage","America/Boise","America/Chicago","America/Denver","America/Detroit","America/Indiana/Indianapolis","America/Indiana/Knox","America/Indiana/Marengo","America/Indiana/Petersburg","America/Indiana/Tell_City","America/Indiana/Vevay","America/Indiana/Vincennes","America/Indiana/Winamac","America/Juneau","America/Kentucky/Louisville","America/Kentucky/Monticello","America/Los_Angeles","America/Menominee","America/Metlakatla","America/New_York","America/Nome","America/North_Dakota/Beulah","America/North_Dakota/Center","America/North_Dakota/New_Salem","America/Phoenix","America/Sitka","America/Yakutat","Pacific/Honolulu"],"UY":["America/Montevideo"],"UZ":["Asia/Samarkand","Asia/Tashkent"],"VA":["Europe/Rome"],"VC":["America/Puerto_Rico"],"VE":["America/Caracas"],"VG":["America/Puerto_Rico"],"VI":["America/Puerto_Rico"],"VN":["Asia/Bangkok","Asia/Ho_Chi_Minh"],"VU":["Pacific/Efate"],"WF":["Pacific/Tarawa"],"WS":["Pacific/Apia"],"YE":["Asia/Riyadh"],"YT":["Africa/Nairobi"],"ZA":["Africa/Johannesburg"],"ZM":["Africa/Maputo"],"ZW":["Africa/Maputo"]};
     const tzCity = (z) => (z || '').split('/').pop().replace(/_/g, ' ');
+    // Curated zones for the calendar's dual-zone time rail (label · IANA tz).
+    const CAL_TZ_OPTIONS = [
+      { label: 'PH — Manila', tz: 'Asia/Manila' },
+      { label: 'TX — Texas · Central', tz: 'America/Chicago' },
+      { label: 'CA — Pacific', tz: 'America/Los_Angeles' },
+      { label: 'CO — Mountain', tz: 'America/Denver' },
+      { label: 'NY — Eastern', tz: 'America/New_York' },
+      { label: 'UK — London', tz: 'Europe/London' },
+      { label: 'UAE — Dubai', tz: 'Asia/Dubai' },
+      { label: 'IN — Kolkata', tz: 'Asia/Kolkata' },
+      { label: 'SG — Singapore', tz: 'Asia/Singapore' },
+      { label: 'JP — Tokyo', tz: 'Asia/Tokyo' },
+      { label: 'AU — Sydney', tz: 'Australia/Sydney' },
+    ];
+    const tzLabel = (tz) => { const o = CAL_TZ_OPTIONS.find(x => x.tz === tz); return o ? o.label : tzCity(tz); };
+    const tzShort = (tz) => tzLabel(tz).split(' — ')[0];
     const localTimeIn = (z) => { try { return new Date().toLocaleTimeString('en-US', { timeZone: z, hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } };
     const PETS = [
       { k: 'dog', label: 'Dog', e: '🐶' }, { k: 'cat', label: 'Cat', e: '🐱' }, { k: 'bird', label: 'Bird', e: '🐦' },
@@ -2805,6 +2869,23 @@ Rules:
       const user = (window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user) || null;
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
 
+      // ── Display settings (per-user, this device): which calendars show + the two rail zones ──
+      const [showSettings, setShowSettings] = useState(false);
+      const [calList, setCalList] = useState([]);          // [{ id, summary, color, primary }]
+      const CAL_PREFS_DEFAULT = { primaryTz: 'America/Chicago', secondaryTz: 'Asia/Manila', hidden: [] };
+      const calPrefsKey = 'tmg-cal-prefs' + (user ? '-' + user.id : '');
+      const [calPrefs, setCalPrefs] = useState(() => {
+        try { const raw = localStorage.getItem(calPrefsKey); if (raw) return { ...CAL_PREFS_DEFAULT, ...JSON.parse(raw) }; } catch (e) {}
+        return { ...CAL_PREFS_DEFAULT };
+      });
+      // Persist: state + localStorage (instant, this device) + Supabase profiles.calendar_prefs (syncs across devices).
+      const savePrefs = (patch) => { const next = { ...calPrefs, ...patch }; setCalPrefs(next); try { localStorage.setItem(calPrefsKey, JSON.stringify(next)); } catch (e) {} ProfileDB.setCalendarPrefs(next); };
+      const primaryTz = calPrefs.primaryTz || 'America/Chicago';
+      const secondaryTz = calPrefs.secondaryTz || 'Asia/Manila';
+      const isHidden = (id) => (calPrefs.hidden || []).includes(id);
+      // Load the connected account's calendar list once (empty until the edge fn supports it / connected).
+      useEffect(() => { let c = false; fetchCalendarList().then(list => { if (!c) setCalList(list || []); }).catch(() => {}); return () => { c = true; }; }, []);
+
       const K = dark ? {
         pop: '#070F1E', bd: '#152545', bd2: '#0D1E3A', shadow: '0 6px 22px rgba(0,0,0,.5)', navBg: '#040C1C',
         date: '#fff', tBtnTx: '#5AA0E6', tBtnBg: '#0C1830', tBtnBd: '#22324A',
@@ -2844,22 +2925,32 @@ Rules:
         if (view === 'month') { tMin = mondayOf(new Date(anchor.getFullYear(), anchor.getMonth(), 1)); tMax = addDays(tMin, 42); }
         else if (view === 'week') { tMin = mondayOf(anchor); tMax = addDays(tMin, 7); }
         else { tMin = new Date(anchor); tMin.setHours(0, 0, 0, 0); tMax = addDays(tMin, 1); }
-        fetchGoogleEvents(tMin.toISOString(), tMax.toISOString())
+        fetchGoogleEvents(tMin.toISOString(), tMax.toISOString(), calList.map(c => c.id))
           .then(list => { if (!cancelled) { setGevents(list || []); setGcal('ready'); } })
           .catch(err => { if (!cancelled) setGcal(err && err.code === 'needs_connect' ? 'needs_connect' : 'error'); });
         return () => { cancelled = true; };
-      }, [view, anchor]);
+      }, [view, anchor, calList]);
       useEffect(() => { let c = false;
         TaskDB.loadAll().then(d => { if (!c && d) { setTasks(d.tasks || []); setPeopleByTask(d.peopleByTask || {}); } }).catch(() => {});
-        ProfileDB.loadAll().then(ps => { if (!c && ps) { const m = {}; ps.forEach(p => { m[p.id] = (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User'; }); setRoster(m); } }).catch(() => {});
+        ProfileDB.loadAll().then(ps => { if (!c && ps) {
+          const m = {}; ps.forEach(p => { m[p.id] = (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User'; }); setRoster(m);
+          // Adopt this user's synced calendar prefs (cross-device) over the local cache, if present.
+          const mine = user && ps.find(p => p.id === user.id);
+          if (mine && mine.calendar_prefs && typeof mine.calendar_prefs === 'object') {
+            const cp = { ...CAL_PREFS_DEFAULT, ...mine.calendar_prefs };
+            setCalPrefs(cp); try { localStorage.setItem(calPrefsKey, JSON.stringify(cp)); } catch (e) {}
+          }
+        } }).catch(() => {});
         return () => { c = true; }; }, []);
 
       // ── timezone helpers (TX=Austin/America-Chicago, PH=Manila/Asia-Manila, live) ──
       const tzOffMin = (date, tz) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }); const m = {}; f.formatToParts(date).forEach(p => m[p.type] = p.value); return (Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour, +m.minute, +m.second) - date.getTime()) / 60000; };
-      const austinInstant = (d, h) => { const off = tzOffMin(new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h)), 'America/Chicago'); return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h) - off * 60000); };
+      // The instant at wall-clock hour `h` on date `d` in zone `tz` (rail anchors to the PRIMARY zone).
+      const tzInstant = (d, h, tz) => { const off = tzOffMin(new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h)), tz); return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h) - off * 60000); };
       const fmtHour = (inst, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', hour12: true }).format(inst);
       const fmtClock = (inst, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true }).format(inst);
-      const austinFloat = (inst) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: '2-digit', minute: '2-digit', hour12: false }); const m = {}; f.formatToParts(inst).forEach(p => m[p.type] = p.value); return (+m.hour) + (+m.minute) / 60; };
+      // Wall-clock hour (as a float, e.g. 9.5) of `inst` in zone `tz` — used to position events.
+      const tzFloat = (inst, tz) => { const f = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }); const m = {}; f.formatToParts(inst).forEach(p => m[p.type] = p.value); return ((+m.hour) % 24) + (+m.minute) / 60; };
 
       // ── task + event helpers ──
       const dueMs = (t) => t.due_at ? new Date(t.due_at).getTime() : Infinity;
@@ -2877,8 +2968,13 @@ Rules:
         if (d0 < t0) return { label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), color: K.dueOver };
         return { label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), color: K.dueUp };
       };
-      const dayEvents = (day) => (gevents || []).filter(e => e.start && !e.allDay && sameDay(new Date(e.start), day)).map(e => ({ title: e.title || '(busy)', start: new Date(e.start), end: e.end ? new Date(e.end) : null, gold: (e.colorId === '5' || e.colorId === '6') }));
-      const hasEvents = (day) => (gevents || []).some(e => e.start && (e.allDay ? (e.start || '').slice(0, 10) === isoOf(day) : sameDay(new Date(e.start), day)));
+      const calColor = (id) => { const c = calList.find(x => x.id === id); return (c && c.color) || null; };
+      // Event block fill/border — tinted from the calendar's own color when known, else the gold/navy default.
+      const evBg = (e) => (e.color && e.color[0] === '#' && e.color.length === 7) ? (e.color + (dark ? '2E' : '1A')) : (e.gold ? K.evGoldBg : K.evNavyBg);
+      const evBd = (e) => (e.color && e.color[0] === '#') ? e.color : (e.gold ? K.evGoldBd : K.evNavyBd);
+      const visEvents = () => (gevents || []).filter(e => !e.calendarId || !isHidden(e.calendarId));
+      const dayEvents = (day) => visEvents().filter(e => e.start && !e.allDay && sameDay(new Date(e.start), day)).map(e => ({ title: e.title || '(busy)', start: new Date(e.start), end: e.end ? new Date(e.end) : null, color: e.color || calColor(e.calendarId), gold: (e.colorId === '5' || e.colorId === '6') }));
+      const hasEvents = (day) => visEvents().some(e => e.start && (e.allDay ? (e.start || '').slice(0, 10) === isoOf(day) : sameDay(new Date(e.start), day)));
       const monthHasEvent = (day) => hasEvents(day);
       const monthHasTask = (day) => (tasks || []).some(t => t.due_at && sameDay(new Date(t.due_at), day));
 
@@ -2946,7 +3042,7 @@ Rules:
           <span onClick={goToday} style={{ flexShrink: 0, fontFamily: J, fontSize: 11, fontWeight: 600, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap' }}>{dateLabel()}</span>
           {sep}
           {navChip('ti-search', false, () => {})}
-          {navChip('ti-settings-2', true, () => {})}
+          {navChip('ti-settings-2', true, () => setShowSettings(true))}
           {navChip('ti-plus', true, () => {})}
           <div style={{ display: 'flex', background: K.segBg, borderRadius: 6, padding: 2, gap: 1, flexShrink: 0 }}>
             {['day', 'week', 'month'].map(v => (
@@ -3091,19 +3187,19 @@ Rules:
           <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             <div style={{ display: 'flex', position: 'relative' }}>
               <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}` }}>
-                {HOURS.map(h => { const inst = austinInstant(anchor, h); const hot = dayEvents(anchor).some(e => Math.floor(austinFloat(e.start)) === h); return (
+                {HOURS.map(h => { const inst = tzInstant(anchor, h, primaryTz); const hot = dayEvents(anchor).some(e => Math.floor(tzFloat(e.start, primaryTz)) === h); return (
                   <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.slot}`, padding: '5px 6px 0' }}>
-                    <div style={{ fontFamily: J, fontSize: 11, fontWeight: hot ? 700 : 600, color: hot ? K.gold : K.tx }}>{fmtHour(inst, 'America/Chicago')}</div>
-                    <div style={{ fontFamily: J, fontSize: 9, fontWeight: hot ? 600 : 400, color: K.ph, opacity: hot ? 1 : 0.85 }}>{fmtHour(inst, 'Asia/Manila')}</div>
+                    <div style={{ fontFamily: J, fontSize: 11, fontWeight: hot ? 700 : 600, color: hot ? K.gold : K.tx }}>{fmtHour(inst, primaryTz)}</div>
+                    <div style={{ fontFamily: J, fontSize: 9, fontWeight: hot ? 600 : 400, color: K.ph, opacity: hot ? 1 : 0.85 }}>{fmtHour(inst, secondaryTz)}</div>
                   </div>
                 ); })}
               </div>
               <div style={{ flex: 1, position: 'relative' }}>
                 {HOURS.map(h => <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.gline}` }} />)}
-                {dayEvents(anchor).map((e, i) => { const top = austinFloat(e.start) * 48; const dur = e.end ? Math.max((e.end - e.start) / 3600000, 0.5) : 0.75; return (
-                  <div key={i} style={{ position: 'absolute', top: top + 1, left: 4, right: 4, height: Math.max(dur * 48 - 2, 16), background: e.gold ? K.evGoldBg : K.evNavyBg, borderLeft: `3px solid ${e.gold ? K.evGoldBd : K.evNavyBd}`, borderRadius: 5, padding: '4px 7px', overflow: 'hidden' }}>
+                {dayEvents(anchor).map((e, i) => { const top = tzFloat(e.start, primaryTz) * 48; const dur = e.end ? Math.max((e.end - e.start) / 3600000, 0.5) : 0.75; return (
+                  <div key={i} style={{ position: 'absolute', top: top + 1, left: 4, right: 4, height: Math.max(dur * 48 - 2, 16), background: evBg(e), borderLeft: `3px solid ${evBd(e)}`, borderRadius: 5, padding: '4px 7px', overflow: 'hidden' }}>
                     <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
-                    <div style={{ fontFamily: J, fontSize: 7.5, color: K.evTime, marginTop: 1 }}>{fmtClock(e.start, 'America/Chicago')}</div>
+                    <div style={{ fontFamily: J, fontSize: 7.5, color: K.evTime, marginTop: 1 }}>{fmtClock(e.start, primaryTz)}</div>
                   </div>
                 ); })}
               </div>
@@ -3117,16 +3213,16 @@ Rules:
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {gcal === 'needs_connect' && connectBar}
           <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-            {HOURS.map(h => { const inst = austinInstant(mondayOf(anchor), h); return (
+            {HOURS.map(h => { const inst = tzInstant(mondayOf(anchor), h, primaryTz); return (
               <div key={h} style={{ display: 'flex' }}>
                 <div style={{ width: 56, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, padding: '4px 6px 0' }}>
-                  <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.tx }}>{fmtHour(inst, 'America/Chicago')}</div>
-                  <div style={{ fontFamily: J, fontSize: 8, fontWeight: 400, color: K.ph, opacity: 0.85 }}>{fmtHour(inst, 'Asia/Manila')}</div>
+                  <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.tx }}>{fmtHour(inst, primaryTz)}</div>
+                  <div style={{ fontFamily: J, fontSize: 8, fontWeight: 400, color: K.ph, opacity: 0.85 }}>{fmtHour(inst, secondaryTz)}</div>
                 </div>
-                {stripDays.map((d, di) => { const isTod = sameDay(d, todayD), wknd = di >= 5; const evs = dayEvents(d).filter(e => Math.floor(austinFloat(e.start)) === h); return (
+                {stripDays.map((d, di) => { const isTod = sameDay(d, todayD), wknd = di >= 5; const evs = dayEvents(d).filter(e => Math.floor(tzFloat(e.start, primaryTz)) === h); return (
                   <div key={di} style={{ flex: 1, minWidth: 0, height: 38, borderBottom: `0.5px solid ${K.gline}`, borderRight: `0.5px solid ${K.gline}`, background: isTod ? K.weekTodayCol : (wknd ? K.weekendCell : 'transparent'), padding: '1px 2px', overflow: 'hidden' }}>
                     {evs.map((e, ei) => (
-                      <div key={ei} style={{ fontFamily: J, fontSize: 6.5, fontWeight: 500, padding: '2px 4px', borderRadius: 3, marginBottom: 1, background: e.gold ? K.evGoldBg : K.evNavyBg, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
+                      <div key={ei} style={{ fontFamily: J, fontSize: 6.5, fontWeight: 500, padding: '2px 4px', borderRadius: 3, marginBottom: 1, background: evBg(e), borderLeft: `2px solid ${evBd(e)}`, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
                     ))}
                   </div>
                 ); })}
@@ -3170,6 +3266,65 @@ Rules:
       // grows DOWNWARD. Day/Week fill to the input bar (bottom = input-bar height); Month is auto.
       // Embedded (inside the app's iframe popout) → fill edge-to-edge like Tasks/Decisions;
       // standalone → the narrow top-right floating panel.
+      // ── Calendar Settings sheet (gear button) ──
+      const settHead = (t) => <div style={{ fontFamily: J, fontSize: 8.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: K.muted, padding: '16px 18px 7px' }}>{t}</div>;
+      const settCard = { background: dark ? '#0A1730' : '#fff', border: `0.5px solid ${K.bd2}`, borderRadius: 12, margin: '0 14px', overflow: 'hidden' };
+      const settRow = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '13px 15px' };
+      const settPill = { fontFamily: J, fontSize: 10, fontWeight: 600, padding: '6px 14px', borderRadius: 8, border: `0.5px solid ${K.chipBd}`, background: K.chipBg, color: K.tBtnTx, cursor: 'pointer', flexShrink: 0 };
+      const toggle = (on, onClick) => (
+        <button onClick={onClick} style={{ width: 42, height: 25, borderRadius: 13, border: 'none', cursor: 'pointer', background: on ? '#34C759' : (dark ? '#39393D' : '#E4DFD4'), position: 'relative', flexShrink: 0, transition: 'background 150ms', padding: 0 }}>
+          <span style={{ position: 'absolute', top: 2, left: on ? 19 : 2, width: 21, height: 21, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,.3)', transition: 'left 150ms' }} />
+        </button>
+      );
+      const tzSelect = (val, onChange) => (
+        <select value={val} onChange={e => onChange(e.target.value)} style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: K.date, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'right', maxWidth: 190, outline: 'none' }}>
+          {!CAL_TZ_OPTIONS.some(o => o.tz === val) && <option value={val}>{tzLabel(val)}</option>}
+          {CAL_TZ_OPTIONS.map(o => <option key={o.tz} value={o.tz}>{o.label}</option>)}
+        </select>
+      );
+      const settingsPanel = (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 30, background: K.pop, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 15px', borderBottom: `0.5px solid ${K.bd2}`, flexShrink: 0, background: K.navBg }}>
+            <span style={{ width: 48 }} />
+            <span style={{ fontFamily: J, fontSize: 13, fontWeight: 700, color: K.date }}>Calendar Settings</span>
+            <button onClick={() => setShowSettings(false)} style={{ fontFamily: J, fontSize: 12, fontWeight: 700, color: K.gold, background: 'none', border: 'none', cursor: 'pointer', width: 48, textAlign: 'right' }}>Done</button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingBottom: 'calc(24px + env(safe-area-inset-bottom))' }}>
+            {settHead('Google Calendar')}
+            <div style={settCard}>
+              <div style={settRow}>
+                <span style={{ fontFamily: J, fontSize: 12, color: K.date }}>{gcal === 'needs_connect' ? 'Not connected' : 'Connected'}</span>
+                <button onClick={() => { try { window.SupabaseAuth.connectCalendar(); } catch (e) {} }} style={settPill}>{gcal === 'needs_connect' ? 'Connect' : 'Reconnect'}</button>
+              </div>
+            </div>
+
+            {settHead('Calendars to Show')}
+            <div style={settCard}>
+              {calList.length === 0 ? (
+                <div style={{ padding: '14px 15px', fontFamily: J, fontSize: 11, color: K.muted, lineHeight: 1.55 }}>
+                  {gcal === 'needs_connect' ? 'Connect your Google account to choose which calendars appear.' : 'No calendars to choose yet. If you just connected, give it a moment, or tap Reconnect above.'}
+                </div>
+              ) : calList.map((c, i) => { const on = !isHidden(c.id); return (
+                <div key={c.id} style={{ ...settRow, borderTop: i ? `0.5px solid ${K.rowBd}` : 'none' }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }}>
+                    <span style={{ width: 15, height: 15, borderRadius: 4, background: c.color || K.muted, flexShrink: 0 }} />
+                    <span style={{ fontFamily: J, fontSize: 12, color: K.date, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.summary}{c.primary ? ' · primary' : ''}</span>
+                  </span>
+                  {toggle(on, () => { const set = new Set(calPrefs.hidden || []); on ? set.add(c.id) : set.delete(c.id); savePrefs({ hidden: Array.from(set) }); })}
+                </div>
+              ); })}
+            </div>
+
+            {settHead('Primary Timezone (shown on top)')}
+            <div style={settCard}><div style={settRow}><span style={{ fontFamily: J, fontSize: 12, color: K.date }}>Primary</span>{tzSelect(primaryTz, v => savePrefs({ primaryTz: v }))}</div></div>
+
+            {settHead('Secondary Timezone (shown below)')}
+            <div style={settCard}><div style={settRow}><span style={{ fontFamily: J, fontSize: 12, color: K.date }}>Secondary</span>{tzSelect(secondaryTz, v => savePrefs({ secondaryTz: v }))}</div></div>
+            <div style={{ padding: '11px 18px 0', fontFamily: J, fontSize: 10.5, color: K.muted, lineHeight: 1.5 }}>The calendar shows {tzShort(primaryTz)} over {tzShort(secondaryTz)} on the time rail.</div>
+          </div>
+        </div>
+      );
+
       const calStyle = TASKS_EMBED
         ? { position: 'fixed', inset: 0, zIndex: 10, background: K.pop, opacity: vis ? 1 : 0, transition: 'opacity 150ms ease', display: 'flex', flexDirection: 'column', overflow: 'hidden' }
         : {
@@ -3188,6 +3343,7 @@ Rules:
             {view === 'day' && dayGrid}
             {view === 'week' && weekGrid}
             {view === 'month' && monthGrid}
+            {showSettings && settingsPanel}
           </div>
         </React.Fragment>
       );

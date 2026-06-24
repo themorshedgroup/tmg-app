@@ -650,7 +650,7 @@ Continue with TMG Gmail
       async adminUpdate(id, fields) {
         if (!this.client()) return;
         const mapped = {};
-        ['employee_id', 'title', 'reports_to', 'assigned_tc', 'access', 'status', 'hire_date'].forEach(k => { if (fields[k] !== undefined) mapped[k] = fields[k] || null; });
+        ['employee_id', 'title', 'reports_to', 'assigned_tc', 'access', 'status', 'hire_date', 'time_off_days'].forEach(k => { if (fields[k] !== undefined) mapped[k] = fields[k] || null; });
         const { error } = await this.client().from('profiles').update(mapped).eq('id', id);
         if (error) { console.error('[ProfileDB] adminUpdate:', error.message); throw error; }
       },
@@ -1477,6 +1477,7 @@ Rules:
       const [title, setTitle] = useState(u.title || '');
       const [reports, setReports] = useState(u.reports_to || '');
       const [assignedTc, setAssignedTc] = useState(u.assigned_tc || '');
+      const [timeOffDays, setTimeOffDays] = useState(u.time_off_days != null ? String(u.time_off_days) : '');
       const [roles, setRoles] = useState(toRoles(u.access));
       const [status, setStatus] = useState(u.status || 'pending');
       const [saving, setSaving] = useState(false);
@@ -1488,7 +1489,7 @@ Rules:
         // Open the tab synchronously (inside the click) so it isn't popup-blocked; fill it after the save succeeds.
         const mailTab = justApproved ? window.open('', '_blank') : null;
         try {
-          await ProfileDB.adminUpdate(u.id, { employee_id: emp, hire_date: hireDate || null, title, reports_to: reports || null, assigned_tc: isAgent ? (assignedTc || null) : null, access: roles, status });
+          await ProfileDB.adminUpdate(u.id, { employee_id: emp, hire_date: hireDate || null, title, reports_to: reports || null, assigned_tc: isAgent ? (assignedTc || null) : null, access: roles, status, time_off_days: timeOffDays === '' ? null : Math.max(0, Math.round(Number(timeOffDays) || 0)) });
           await refresh(); setOpenId(null);
           if (mailTab) mailTab.location.href = gmailComposeUrl(u);
         }
@@ -1500,6 +1501,8 @@ Rules:
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <div><div style={lbl}>Employee ID</div><input value={emp} onChange={e => setEmp(e.target.value)} style={inp} /></div>
             <div><div style={lbl}>Hire date</div><input type="date" value={hireDate} onChange={e => setHireDate(e.target.value)} style={inp} /></div>
+            <div><div style={lbl}>Time off (days/yr)</div><input type="number" min="0" value={timeOffDays} onChange={e => setTimeOffDays(e.target.value)} style={inp} /></div>
+            <div style={{ display: 'flex', alignItems: 'flex-end' }}><div style={{ fontSize: '0.66rem', color: C.textMuted, fontFamily: C.fontSans, paddingBottom: 9, lineHeight: 1.3 }}>Blank = not tracked (files for visibility only)</div></div>
             <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Title</div><input value={title} onChange={e => setTitle(e.target.value)} style={inp} /></div>
             <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Access <span style={{ textTransform: 'none', fontWeight: 400 }}>(one or more)</span></div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{['admin', 'operations', 'agent', 'tc'].map(a => { const on = roles.includes(a); return <button key={a} type="button" onClick={() => setRoles(on ? roles.filter(r => r !== a) : [...roles, a])} style={{ padding: '6px 10px', borderRadius: 8, border: `1px solid ${on ? C.navy : C.border}`, background: on ? C.navy : C.surface, color: on ? '#fff' : C.textSecondary, fontSize: '0.74rem', fontWeight: on ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans }}>{ACCESS_LABEL[a]}</button>; })}</div></div>
             <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Status</div><select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{['active', 'pending', 'disabled'].map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select></div>
@@ -3377,6 +3380,23 @@ Rules:
             {actBtn('toggle-settings', 'ti-settings', 'Settings')}
           </div>
           <iframe ref={frameRef} src={src} title="SFFU" style={{ flex: 1, width: '100%', border: 'none', display: 'block' }} />
+        </div>
+      );
+    }
+
+    // Time Off lives in its own /timeoff.html; the More item embeds it in an iframe inside
+    // the app frame (top bar + bottom nav stay). Bump TIMEOFF_VERSION when timeoff.html changes.
+    const TIMEOFF_VERSION = '20260625b';
+    function TimeOffFrame({ dark, onBack }) {
+      const ink = dark ? '#fff' : '#001A4A';
+      const src = 'timeoff.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + TIMEOFF_VERSION;
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: dark ? '#000D26' : '#FCFBF8' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px 7px 10px', borderBottom: `1px solid ${dark ? '#0D1E3A' : '#E4DFD4'}`, flexShrink: 0 }}>
+            <button onClick={onBack} aria-label="Back" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', color: dark ? '#C9A45A' : '#AD832F' }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} /></button>
+            <span style={{ flex: 1, minWidth: 0, fontFamily: "'Jost', sans-serif", fontSize: 13, fontWeight: 600, letterSpacing: '0.02em', color: ink }}>Time Off</span>
+          </div>
+          <iframe src={src} title="Time Off" style={{ flex: 1, width: '100%', border: 'none', display: 'block' }} />
         </div>
       );
     }
@@ -5354,7 +5374,7 @@ Rules:
     // (hash only, no server config). Overlays (calendar/tasks/profile) close on
     // Back but aren't deep-linked yet. parseRoute maps a hash → {tab, view}.
     const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
-    const ROUTE_MORE = ['guide', 'drives', 'directory', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
+    const ROUTE_MORE = ['guide', 'drives', 'directory', 'timeoff', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
@@ -5612,7 +5632,7 @@ Rules:
         .concat([{ id: 'guide', label: 'Guide', icon: 'ti-book' }])
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
-        .concat([{ id: 'timeoff', label: 'Time Off', icon: 'ti-calendar-off', href: 'timeoff.html' }])
+        .concat([{ id: 'timeoff', label: 'Time Off', icon: 'ti-calendar-off' }])
         .concat([{ id: 'tasks', label: 'Tasks', icon: 'ti-checklist', href: 'tasks.html' }])
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', img: 'sffu-icon.png' }] : [])
@@ -6157,6 +6177,7 @@ Rules:
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'expsurvey' ? <ExpSurvey dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
+              : moreView === 'timeoff' ? <TimeOffFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}
             {!['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />

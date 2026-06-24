@@ -97,28 +97,12 @@
     };
 
     // ─── Time Off: policy config (admins write, everyone reads) ───────
-    const TIMEOFF_ROLES = [
-      { id: 'operations', label: 'Operations' },
-      { id: 'admin', label: 'Admin' },
-      { id: 'agent', label: 'Sales Agent' },
-      { id: 'tc', label: 'Transaction Coordinator' },
-    ];
-    const TIMEOFF_DEFAULT = {
-      version: 2, year_basis: 'calendar', hours_per_workday: 8,
-      roles: { operations: { days_per_year: 14, tracked: true }, admin: { days_per_year: 14, tracked: true }, agent: { tracked: false }, tc: { tracked: false } },
-    };
+    // Global setting only (hours per workday); allotment is now per-person on profiles.
+    const TIMEOFF_DEFAULT = { hours_per_workday: 8, year_basis: 'calendar' };
     function normalizeTimeoffPolicy(cfg) {
       const base = (cfg && typeof cfg === 'object') ? cfg : {};
-      const roles = (base.roles && typeof base.roles === 'object') ? base.roles : {};
       const hpw = Number(base.hours_per_workday);
-      const out = { version: 2, year_basis: base.year_basis === 'anniversary' ? 'anniversary' : 'calendar', hours_per_workday: hpw > 0 ? hpw : 8, roles: {} };
-      TIMEOFF_ROLES.forEach(r => { const p = roles[r.id] || {}; out.roles[r.id] = { tracked: !!p.tracked, days_per_year: Math.max(0, Number(p.days_per_year) || 0) }; });
-      return out;
-    }
-    function timeoffAllotmentHours(cfg, roleId) {
-      const p = cfg && cfg.roles && cfg.roles[roleId];
-      if (!p || !p.tracked) return 0;
-      return (Number(p.days_per_year) || 0) * (Number(cfg.hours_per_workday) || 8);
+      return { hours_per_workday: hpw > 0 ? hpw : 8, year_basis: base.year_basis === 'anniversary' ? 'anniversary' : 'calendar' };
     }
     const PolicyDB = {
       client() { return window.SupabaseAuth?._client || null; },
@@ -185,9 +169,11 @@
       }
       return Math.max(0, Math.round(((e - s) / 3600000) * 100) / 100);
     }
-    function timeoffBalance(cfg, accessRoles, rows) {
-      const roles = toRoles(accessRoles);
-      const allot = Math.max(0, ...TIMEOFF_ROLES.map(r => roles.indexOf(r.id) !== -1 ? timeoffAllotmentHours(cfg, r.id) : 0));
+    // Per-person: allotment hours = the person's profile.time_off_days × hours-per-workday.
+    function timeoffBalance(cfg, profile, rows) {
+      const days = Math.max(0, Number(profile && profile.time_off_days) || 0);
+      const hpw = (cfg && Number(cfg.hours_per_workday)) || 8;
+      const allot = days * hpw;
       const tracked = allot > 0;
       const year = new Date().getFullYear();
       let used = 0, pending = 0;
@@ -254,7 +240,7 @@
       };
       const pill = (s) => { const p = PILL[s] || PILL.pending; return <span style={{ display: 'inline-flex', alignItems: 'center', padding: '3px 9px', borderRadius: 20, background: p.bg, color: p.fg, fontSize: '0.68rem', fontWeight: 700, fontFamily: C.fontSans, letterSpacing: '0.02em' }}>{p.label}</span>; };
 
-      const bal = policy ? timeoffBalance(policy, profile && profile.access, mine) : null;
+      const bal = policy ? timeoffBalance(policy, profile, mine) : null;
       const hpw = policy ? policy.hours_per_workday : 8;
       const daysEq = (h) => Math.round((h / (hpw || 8)) * 10) / 10;
       const toReview = pending.filter(r => r.user_id !== uid && (isAdmin || r.manager_id === uid));
@@ -399,120 +385,57 @@
       );
     }
 
-    function TimeOffPolicies() {
-      const [cfg, setCfg] = useState(null);
-      const [saving, setSaving] = useState(false);
-      const [saved, setSaved] = useState(false);
-      useEffect(() => { PolicyDB.load().then(c => setCfg(normalizeTimeoffPolicy(c || TIMEOFF_DEFAULT))); }, []);
-
-      const patch = (fn) => { setSaved(false); setCfg(prev => { const next = JSON.parse(JSON.stringify(prev)); fn(next); return next; }); };
-      const setTracked = (id, on) => patch(n => { n.roles[id].tracked = on; if (on && !(n.roles[id].days_per_year > 0)) n.roles[id].days_per_year = 14; });
-      const setDays = (id, v) => patch(n => { n.roles[id].days_per_year = Math.max(0, Math.round(Number(v) || 0)); });
-      const setHpw = (v) => patch(n => { const x = Number(v); if (x > 0 && x <= 24) n.hours_per_workday = x; });
-
-      const save = async () => {
-        setSaving(true);
-        try { await PolicyDB.save(normalizeTimeoffPolicy(cfg)); setSaved(true); }
-        catch (e) { alert('Could not save: ' + (e.message || e)); }
-        finally { setSaving(false); }
-      };
-
-      const CARD = { background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginBottom: 14 };
-      const numInput = { width: 54, padding: '7px 8px', borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.surface, color: C.navy, fontSize: '0.84rem', fontWeight: 600, fontFamily: C.fontSans, textAlign: 'center' };
-
-      return (
-        <div style={{ padding: '4px 16px 100px' }}>
-          <div style={CARD}>
-            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 3 }}>Time-Off Policies</div>
-            <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 4, lineHeight: 1.5 }}>Set who accrues time off and how much. Resets each calendar year (Jan 1) · no carryover.</div>
-            {!cfg ? (
-              <div style={{ fontSize: '0.78rem', color: C.textMuted, padding: '12px 2px', fontFamily: C.fontSans }}>Loading…</div>
-            ) : (
-              <React.Fragment>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 2px 4px' }}>
-                  <span style={{ flex: 1, fontSize: '0.84rem', fontWeight: 500, color: C.navy, fontFamily: C.fontSans }}>Hours per workday</span>
-                  <input type="number" min="1" max="24" step="0.5" value={cfg.hours_per_workday} onChange={e => setHpw(e.target.value)} style={numInput} />
-                  <span style={{ fontSize: '0.74rem', color: C.textSecondary, fontFamily: C.fontSans }}>hrs</span>
-                </div>
-                {TIMEOFF_ROLES.map(r => {
-                  const p = cfg.roles[r.id];
-                  return (
-                    <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 2px', borderTop: `1px solid ${C.border}` }}>
-                      <span style={{ flex: 1, fontSize: '0.84rem', fontWeight: 500, color: C.navy, fontFamily: C.fontSans }}>{r.label}</span>
-                      <button onClick={() => setTracked(r.id, !p.tracked)} style={{ padding: '6px 11px', borderRadius: 8, border: `1px solid ${p.tracked ? C.navy : C.border}`, background: p.tracked ? C.navy : C.surface, color: p.tracked ? '#fff' : C.textSecondary, fontSize: '0.74rem', fontWeight: p.tracked ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans, whiteSpace: 'nowrap' }}>{p.tracked ? 'Tracked' : 'Off'}</button>
-                      {p.tracked ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <input type="number" min="0" max="365" value={p.days_per_year} onChange={e => setDays(r.id, e.target.value)} style={numInput} />
-                          <span style={{ fontSize: '0.74rem', color: C.textSecondary, fontFamily: C.fontSans }}>days/yr</span>
-                        </div>
-                      ) : (
-                        <span style={{ fontSize: '0.74rem', color: C.textMuted, fontFamily: C.fontSans, fontStyle: 'italic', minWidth: 92, textAlign: 'right' }}>visibility only</span>
-                      )}
-                    </div>
-                  );
-                })}
-                <button onClick={save} disabled={saving} style={{ width: '100%', padding: 12, marginTop: 14, background: saved ? C.green : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, transition: 'background 200ms ease' }}>{saving ? 'Saving…' : saved ? 'Saved ✓' : 'Save changes'}</button>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 10 }}>
-                  <i className="ti ti-info-circle" style={{ fontSize: 12, color: C.gold, marginTop: 2 }} />
-                  <span style={{ fontSize: '0.68rem', color: C.textMuted, fontFamily: C.fontSans, lineHeight: 1.45 }}>Changing hours-per-workday isn't retroactive — past requests keep their filed hours. "Off" roles can still file for visibility, just with no balance.</span>
-                </div>
-              </React.Fragment>
-            )}
-          </div>
-        </div>
-      );
-    }
-
     function Root() {
-      const [phase, setPhase] = useState('loading'); // loading | ready
+      const params = new URLSearchParams(location.search);
+      const EMBED = params.get('embed') === '1' || window.self !== window.top;
+      const dark = params.get('theme') === 'dark';
+      const [phase, setPhase] = useState('loading'); // loading | ready | blocked
       const [profile, setProfile] = useState(null);
-      const [view, setView] = useState('me'); // me | policies
 
       useEffect(() => {
-        let on = true, handled = false;
+        let on = true, done = false;
+        const hideSplash = () => { const sp = document.getElementById('splash'); if (sp) sp.style.display = 'none'; };
+        // Standalone redirects to the app's sign-in; embedded shows a note (parent app is already authed).
+        const bail = () => { if (!EMBED) window.location.replace('index.html'); else { setPhase('blocked'); hideSplash(); } };
         const handle = async (session) => {
-          if (handled) return;
-          if (!session) { window.location.replace('index.html'); return; }
-          handled = true;
+          if (done) return;
+          if (!session) { bail(); return; }                 // don't latch — a later session can still proceed
           const local = (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.protocol === 'file:');
           const p = local
-            ? { id: 'dev-user-id', email: 'symon@morshedgroup.com', first_name: 'Symon', last_name: 'Yongco', title: 'Operations Manager', access: 'admin', status: 'active' }
+            ? { id: 'dev-user-id', email: 'symon@morshedgroup.com', first_name: 'Symon', last_name: 'Yongco', title: 'Operations Manager', access: 'admin', status: 'active', time_off_days: 14 }
             : await ProfileDB.ensureProfile(session.user);
           if (!on) return;
-          if (!p || (p.status && p.status !== 'active')) { window.location.replace('index.html'); return; }
-          setProfile(p); setPhase('ready');
-          const sp = document.getElementById('splash'); if (sp) sp.style.display = 'none';
+          if (!p || (p.status && p.status !== 'active')) { bail(); return; }   // don't latch — retry on next callback
+          done = true;
+          setProfile(p); setPhase('ready'); hideSplash();
         };
         const go = () => {
           const sa = window.SupabaseAuth;
           if (!sa) { setTimeout(go, 150); return; }
           if (sa._state && sa._state.ready) handle(sa._state.session);
-          else if (sa.onAuthStateChange) sa.onAuthStateChange(({ session }) => handle(session));
+          else if (sa.onAuthStateChange) sa.onAuthStateChange(({ session }) => { if (!session && !(sa._state && sa._state.ready)) return; handle(session); });
           else setTimeout(go, 150);
         };
         go();
         return () => { on = false; };
       }, []);
 
+      if (phase === 'blocked') return <div style={{ padding: 40, textAlign: 'center', fontFamily: C.fontSans, color: dark ? '#A9B2C4' : C.textSecondary, fontSize: '0.9rem', lineHeight: 1.6 }}>Please sign in to the TMG app to use Time Off.</div>;
       if (phase !== 'ready' || !profile) return null;
-      const isAdmin = hasAdmin(profile.access);
-      const backToApp = () => { window.location.href = 'index.html'; };
 
+      const bg = dark ? '#0B1830' : C.bg;
+      const backToApp = () => { window.location.href = 'index.html'; };
       return (
-        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: C.bg }}>
-          <div style={{ flexShrink: 0, background: C.navy, color: '#fff', padding: 'max(10px, env(safe-area-inset-top)) 14px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <button onClick={view === 'policies' ? () => setView('me') : backToApp} style={{ background: 'none', border: 'none', color: '#fff', display: 'flex', alignItems: 'center', cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.82rem', fontWeight: 500, padding: 0 }}>
-              <i className="ti ti-chevron-left" style={{ fontSize: 20, color: C.goldSoft }} />{view === 'policies' ? 'Time Off' : 'App'}
-            </button>
-            <span style={{ flex: 1, textAlign: 'center', fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.15rem', fontWeight: 500 }}>{view === 'policies' ? 'Policies' : 'Time Off'}</span>
-            {isAdmin && view !== 'policies'
-              ? <button onClick={() => setView('policies')} title="Time-off policies" style={{ background: 'none', border: 'none', color: C.goldSoft, cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}><i className="ti ti-settings" style={{ fontSize: 20 }} /></button>
-              : <span style={{ width: 20 }} />}
-          </div>
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: bg }}>
+          {!EMBED ? (
+            <div style={{ flexShrink: 0, background: C.navy, color: '#fff', padding: 'max(10px, env(safe-area-inset-top)) 14px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button onClick={backToApp} style={{ background: 'none', border: 'none', color: '#fff', display: 'flex', alignItems: 'center', cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.82rem', fontWeight: 500, padding: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 20, color: C.goldSoft }} />App</button>
+              <span style={{ flex: 1, textAlign: 'center', fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.15rem', fontWeight: 500 }}>Time Off</span>
+              <span style={{ width: 20 }} />
+            </div>
+          ) : null}
           <div style={{ flex: 1, overflowY: 'auto' }}>
-            {view === 'policies' && isAdmin
-              ? <TimeOffPolicies />
-              : <TimeOffTab dark={false} profile={profile} isAdmin={isAdmin} onBack={backToApp} hideHeader />}
+            <TimeOffTab dark={dark} profile={profile} isAdmin={hasAdmin(profile.access)} onBack={backToApp} hideHeader />
           </div>
         </div>
       );

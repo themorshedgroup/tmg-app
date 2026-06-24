@@ -396,30 +396,34 @@
       const [profile, setProfile] = useState(null);
 
       useEffect(() => {
-        let on = true, done = false;
+        let on = true, settled = false;
         const hideSplash = () => { const sp = document.getElementById('splash'); if (sp) sp.style.display = 'none'; };
         // Standalone redirects to the app's sign-in; embedded shows a note (parent app is already authed).
         const bail = () => { if (!EMBED) window.location.replace('index.html'); else { setPhase('blocked'); hideSplash(); } };
-        const handle = async (session) => {
-          if (done) return;
-          if (!session) { bail(); return; }                 // don't latch — a later session can still proceed
+        const resolve = async (session) => {
+          if (!on || settled) return;
+          if (!session) { bail(); return; }   // not settled — a later (truthy) session can still resolve
           const local = (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.protocol === 'file:');
-          const p = local
-            ? { id: 'dev-user-id', email: 'symon@morshedgroup.com', first_name: 'Symon', last_name: 'Yongco', title: 'Operations Manager', access: 'admin', status: 'active', time_off_days: 14 }
-            : await ProfileDB.ensureProfile(session.user);
-          if (!on) return;
-          if (!p || (p.status && p.status !== 'active')) { bail(); return; }   // don't latch — retry on next callback
-          done = true;
+          let p;
+          try {
+            p = local
+              ? { id: 'dev-user-id', email: 'symon@morshedgroup.com', first_name: 'Symon', last_name: 'Yongco', title: 'Operations Manager', access: 'admin', status: 'active', time_off_days: 14 }
+              : await ProfileDB.ensureProfile(session.user);
+          } catch (e) { p = null; }
+          if (!on || settled) return;
+          if (!p || (p.status && p.status !== 'active')) { bail(); return; }
+          settled = true;
           setProfile(p); setPhase('ready'); hideSplash();
         };
-        const go = () => {
+        const start = () => {
           const sa = window.SupabaseAuth;
-          if (!sa) { setTimeout(go, 150); return; }
-          if (sa._state && sa._state.ready) handle(sa._state.session);
-          else if (sa.onAuthStateChange) sa.onAuthStateChange(({ session }) => { if (!session && !(sa._state && sa._state.ready)) return; handle(session); });
-          else setTimeout(go, 150);
+          if (!sa || !sa.getSession) { setTimeout(start, 100); return; }
+          // Primary: resolve the session DIRECTLY so the gate never hangs on notify/init timing.
+          sa.getSession().then(resolve).catch(() => bail());
+          // Secondary: catch a sign-in that lands after mount (truthy-only, to avoid a 'blocked' flash).
+          if (sa.onAuthStateChange) sa.onAuthStateChange(({ session }) => { if (session) resolve(session); });
         };
-        go();
+        start();
         return () => { on = false; };
       }, []);
 

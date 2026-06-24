@@ -131,11 +131,11 @@
 
     // ─── Sample Data ─────────────────────────────────────────────────
     const PROPERTIES = [
-      { id: 'p1', address: '1808 Forest Hill Dr',   city: 'Austin, TX 78745',          mls: '5129346', agent: 'Tarek Morshed', price: '$775,000',    beds: 4, baths: 2,   sqft: '1,832' },
-      { id: 'p2', address: '3707 Laurel Ledge Ln',  city: 'Austin, TX 78731',          mls: '7341028', agent: 'Tarek Morshed', price: '$1,695,000',  beds: 5, baths: 3.5, sqft: '3,750' },
-      { id: 'p3', address: '4602 Jinx Ave',          city: 'Austin, TX 78745',          mls: '6204571', agent: 'Tarek Morshed', price: '$1,550,000',  beds: 5, baths: 4.5, sqft: '2,850' },
-      { id: 'p4', address: '10621 W Cave Loop',      city: 'Dripping Springs, TX 78620', mls: '8819234', agent: 'Tarek Morshed', price: '$705,000',   beds: 4, baths: 3,   sqft: '2,417' },
-      { id: 'p5', address: '12313 Indian Mound Dr',  city: 'Austin, TX 78758',          mls: '9023165', agent: 'Tarek Morshed', price: '$630,000',    beds: 4, baths: 3,   sqft: '2,081' },
+      { id: 'p1', address: '1808 Forest Hill Dr',   city: 'Austin, TX 78745',          zillowUrl: 'https://www.zillow.com/homedetails/1808-Forest-Hill-Dr',   agent: 'Tarek Morshed', price: '$775,000',    beds: 4, baths: 2,   sqft: '1,832' },
+      { id: 'p2', address: '3707 Laurel Ledge Ln',  city: 'Austin, TX 78731',          zillowUrl: 'https://www.zillow.com/homedetails/3707-Laurel-Ledge-Ln',  agent: 'Tarek Morshed', price: '$1,695,000',  beds: 5, baths: 3.5, sqft: '3,750' },
+      { id: 'p3', address: '4602 Jinx Ave',          city: 'Austin, TX 78745',          zillowUrl: 'https://www.zillow.com/homedetails/4602-Jinx-Ave',         agent: 'Tarek Morshed', price: '$1,550,000',  beds: 5, baths: 4.5, sqft: '2,850' },
+      { id: 'p4', address: '10621 W Cave Loop',      city: 'Dripping Springs, TX 78620', zillowUrl: 'https://www.zillow.com/homedetails/10621-W-Cave-Loop',     agent: 'Tarek Morshed', price: '$705,000',   beds: 4, baths: 3,   sqft: '2,417' },
+      { id: 'p5', address: '12313 Indian Mound Dr',  city: 'Austin, TX 78758',          zillowUrl: 'https://www.zillow.com/homedetails/12313-Indian-Mound-Dr', agent: 'Tarek Morshed', price: '$630,000',    beds: 4, baths: 3,   sqft: '2,081' },
     ];
 
     const SHOWINGS = [
@@ -251,7 +251,7 @@
         const { data, error } = await this.client().from('showings').insert({
           property_address: property.address,
           property_city: property.city,
-          property_mls: property.mls,
+          property_mls: property.zillowUrl || null,
           property_price: property.price,
           property_beds: String(property.beds),
           property_baths: String(property.baths),
@@ -347,7 +347,7 @@
         if (!data || data.length === 0) return PROPERTIES;
         return data.map(row => ({
           id: row.id, address: row.address, city: '',
-          mls: row.mls || '', agent: row.listing_agent || '',
+          zillowUrl: row.zillow_url || '', agent: row.listing_agent || '',
           price: '', beds: '', baths: '', sqft: '',
         }));
       },
@@ -361,7 +361,7 @@
         if (error) { console.error('[DB] loadArchivedProperties:', error.message); return []; }
         return (data || []).map(row => ({
           id: row.id, address: row.address, city: '',
-          mls: row.mls || '', agent: row.listing_agent || '',
+          zillowUrl: row.zillow_url || '', agent: row.listing_agent || '',
           price: '', beds: '', baths: '', sqft: '',
         }));
       },
@@ -388,7 +388,7 @@
         if (!this.client()) return;
         const mapped = {};
         if (fields.address !== undefined) mapped.address        = fields.address;
-        if (fields.mls     !== undefined) mapped.mls            = fields.mls;
+        if (fields.zillowUrl !== undefined) mapped.zillow_url    = fields.zillowUrl;
         if (fields.agent   !== undefined) mapped.listing_agent  = fields.agent;
         const { error } = await this.client().from('properties').update(mapped).eq('id', id);
         if (error) console.error('[DB] updateProperty:', error.message);
@@ -447,14 +447,14 @@
           return {
             id: 'p' + Date.now(),
             address: formData.address,
-            city: '', mls: formData.mls || '',
+            city: '', zillowUrl: formData.zillowUrl || '',
             agent: formData.agent || '',
             price: '', beds: '', baths: '', sqft: '',
           };
         }
         const { data, error } = await this.client().from('properties').insert({
           address: formData.address,
-          mls: formData.mls || null,
+          zillow_url: formData.zillowUrl || null,
           listing_agent: formData.agent || null,
           added_by_name: user?.user_metadata?.full_name || user?.email || null,
         }).select().single();
@@ -462,10 +462,26 @@
         return {
           id: data.id,
           address: data.address,
-          city: '', mls: data.mls || '',
+          city: '', zillowUrl: data.zillow_url || '',
           agent: data.listing_agent || '',
           price: '', beds: '', baths: '', sqft: '',
         };
+      },
+
+      // Active sales agents (profiles with the 'agent' access role) → sorted,
+      // de-duplicated display names. Powers the Listing Agent picker on properties.
+      async loadAgents() {
+        if (!this.client()) return ['Tarek Morshed', 'Jane Smith', 'Carlos Reyes']; // localhost mock
+        const { data, error } = await this.client()
+          .from('profiles')
+          .select('first_name, last_name, access, status')
+          .eq('status', 'active')
+          .contains('access', ['agent']);
+        if (error) { console.error('[DB] loadAgents:', error.message); return []; }
+        const names = (data || [])
+          .map(p => ((p.first_name || '') + ' ' + (p.last_name || '')).trim())
+          .filter(Boolean);
+        return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
       },
     };
 
@@ -578,17 +594,37 @@
       );
     }
 
+    // ─── Listing Agent picker ─────────────────────────────────────────
+    // A dropdown of active sales agents. Falls back to a free-text input if the
+    // agent list hasn't loaded yet (e.g. offline / dev). Preserves a current
+    // value that's no longer in the active list so a save never drops it.
+    function AgentSelect({ value, onChange, agents, style }) {
+      if (!agents || agents.length === 0) {
+        return <input value={value || ''} onChange={e => onChange(e.target.value)} placeholder="e.g. Tarek Morshed" style={style} />;
+      }
+      const options = (value && !agents.includes(value)) ? [value, ...agents] : agents;
+      return (
+        <select value={value || ''} onChange={e => onChange(e.target.value)} style={{ ...style, appearance: 'none', WebkitAppearance: 'none' }}>
+          <option value="">— Select sales agent —</option>
+          {options.map(name => <option key={name} value={name}>{name}</option>)}
+        </select>
+      );
+    }
+
     // ─── Property Card (Overview) ─────────────────────────────────────
     function PropertyCard({ property, allShowings, user, onArchive }) {
       const [expanded,      setExpanded]      = useState(false);
       const [openShowingId, setOpenShowingId] = useState(null);
       const [editing,       setEditing]       = useState(false);
-      const [editAddr,  setEditAddr]  = useState(property.address);
-      const [editMls,   setEditMls]   = useState(property.mls);
-      const [editAgent, setEditAgent] = useState(property.agent);
-      const [dispAddr,  setDispAddr]  = useState(property.address);
-      const [dispMls,   setDispMls]   = useState(property.mls);
-      const [dispAgent, setDispAgent] = useState(property.agent);
+      const [editAddr,   setEditAddr]   = useState(property.address);
+      const [editZillow, setEditZillow] = useState(property.zillowUrl || '');
+      const [editAgent,  setEditAgent]  = useState(property.agent || '');
+      const [dispAddr,   setDispAddr]   = useState(property.address);
+      const [dispZillow, setDispZillow] = useState(property.zillowUrl || '');
+      const [dispAgent,  setDispAgent]  = useState(property.agent || '');
+      const [agents,     setAgents]     = useState([]);
+      // Load the active-agent list lazily, the first time this card enters edit mode.
+      useEffect(() => { if (editing && agents.length === 0) DB.loadAgents().then(setAgents); }, [editing]);
 
       const showings = allShowings.filter(s => s.propertyAddress === dispAddr);
       const active   = showings.filter(s => s.status === 'in_progress').length;
@@ -599,12 +635,12 @@
       }).length;
 
       async function handleSaveEdit() {
-        setDispAddr(editAddr); setDispMls(editMls); setDispAgent(editAgent);
+        setDispAddr(editAddr); setDispZillow(editZillow); setDispAgent(editAgent);
         setEditing(false);
-        await DB.updateProperty(property.id, { address: editAddr, mls: editMls, agent: editAgent });
+        await DB.updateProperty(property.id, { address: editAddr, zillowUrl: editZillow, agent: editAgent });
       }
       function handleCancelEdit() {
-        setEditAddr(dispAddr); setEditMls(dispMls); setEditAgent(dispAgent);
+        setEditAddr(dispAddr); setEditZillow(dispZillow); setEditAgent(dispAgent);
         setEditing(false);
       }
 
@@ -682,15 +718,18 @@
               <div onClick={e => e.stopPropagation()}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
                   {[
-                    { label: 'Property Address', val: editAddr,  set: setEditAddr  },
-                    { label: 'MLS Number',        val: editMls,   set: setEditMls   },
-                    { label: 'Listing Agent',     val: editAgent, set: setEditAgent },
-                  ].map(({ label, val, set }) => (
+                    { label: 'Property Address', val: editAddr,   set: setEditAddr   },
+                    { label: 'Zillow URL',        val: editZillow, set: setEditZillow, placeholder: 'https://www.zillow.com/homedetails/…' },
+                  ].map(({ label, val, set, placeholder }) => (
                     <div key={label}>
                       <div style={{ fontSize: '0.65rem', color: C.textSecondary, marginBottom: 3, fontFamily: C.fontSans }}>{label}</div>
-                      <input value={val} onChange={e => set(e.target.value)} style={inputStyle} />
+                      <input value={val} onChange={e => set(e.target.value)} placeholder={placeholder} style={inputStyle} />
                     </div>
                   ))}
+                  <div>
+                    <div style={{ fontSize: '0.65rem', color: C.textSecondary, marginBottom: 3, fontFamily: C.fontSans }}>Listing Agent</div>
+                    <AgentSelect value={editAgent} onChange={setEditAgent} agents={agents} style={inputStyle} />
+                  </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                   <button onClick={handleSaveEdit}   style={{ flex: 1, padding: '9px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.82rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>Save</button>
@@ -711,10 +750,15 @@
               </div>
             ) : (
               <>
-                {/* Row 2: city · MLS */}
-                <div style={{ fontSize: '0.75rem', color: C.textSecondary, marginBottom: 2 }}>
-                  {dispMls ? `MLS# ${dispMls}` : ''}
-                </div>
+                {/* Row 2: Zillow link */}
+                {dispZillow ? (
+                  <div style={{ fontSize: '0.75rem', marginBottom: 2 }}>
+                    <a href={dispZillow} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+                       style={{ color: C.gold, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <i className="ti ti-external-link" style={{ fontSize: 12 }} />View on Zillow
+                    </a>
+                  </div>
+                ) : null}
                 {/* Row 3: listing agent */}
                 {dispAgent ? (
                   <div style={{ fontSize: '0.73rem', color: C.textMuted }}>{dispAgent}</div>
@@ -1075,8 +1119,15 @@
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: '0.9rem', fontWeight: 600, color: C.textPrimary }}>{prop.address}</div>
-                    <div style={{ fontSize: '0.72rem', color: C.textSecondary, marginTop: 1 }}>
-                      {[prop.mls ? `MLS# ${prop.mls}` : null, prop.agent || null].filter(Boolean).join(' · ')}
+                    <div style={{ fontSize: '0.72rem', color: C.textSecondary, marginTop: 1, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      {prop.zillowUrl ? (
+                        <a href={prop.zillowUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+                           style={{ color: C.gold, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                          <i className="ti ti-external-link" style={{ fontSize: 11 }} />Zillow
+                        </a>
+                      ) : null}
+                      {prop.zillowUrl && prop.agent ? <span>·</span> : null}
+                      {prop.agent ? <span>{prop.agent}</span> : null}
                     </div>
                   </div>
                   <Icon.Chevron size={13} color={C.textSecondary} down={isOpen} />
@@ -1139,11 +1190,13 @@
       const streetAddr   = property?.address     || showing?.property_address || '{{address}}';
       const senderFirst  = ((user?.user_metadata?.full_name || '')).split(' ')[0] || '{{my_name}}';
       const listingAgent = property?.agent       || '{{listing_agent}}';
+      const zillowUrl    = property?.zillowUrl    || '{{zillow_url}}';
       return body
         .replace(/\{\{agent_first_name\}\}/g, agentFirst)
         .replace(/\{\{address\}\}/g,          streetAddr)
         .replace(/\{\{my_name\}\}/g,          senderFirst)
-        .replace(/\{\{listing_agent\}\}/g,    listingAgent);
+        .replace(/\{\{listing_agent\}\}/g,    listingAgent)
+        .replace(/\{\{zillow_url\}\}/g,       zillowUrl);
     }
 
     // Fixed Twilio sending number (A2P 10DLC registration pending).
@@ -1217,7 +1270,8 @@
               <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{agent_first_name}}'}</span>{' · '}
               <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{address}}'}</span>{' · '}
               <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{my_name}}'}</span>{' · '}
-              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{listing_agent}}'}</span>
+              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{listing_agent}}'}</span>{' · '}
+              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{zillow_url}}'}</span>
             </div>
             {SMS_TEMPLATE_DEFAULTS.map((t, i) => (
               <div key={t.touch} style={{ marginBottom: i < 2 ? 14 : 0 }}>
@@ -1331,9 +1385,11 @@
 
     // ─── Add Property Modal ───────────────────────────────────────────
     function AddPropertyModal({ onClose, onAdd, user }) {
-      const [address, setAddress] = useState('');
-      const [mls,     setMls]     = useState('');
-      const [agent,   setAgent]   = useState('');
+      const [address,   setAddress]   = useState('');
+      const [zillowUrl, setZillowUrl] = useState('');
+      const [agent,     setAgent]     = useState('');
+      const [agents,    setAgents]    = useState([]);
+      useEffect(() => { DB.loadAgents().then(setAgents); }, []);
 
       const inputStyle = {
         width: '100%', padding: '9px 12px',
@@ -1348,7 +1404,7 @@
 
       async function handleSubmit() {
         if (!address.trim()) return;
-        const formData = { address: address.trim(), mls: mls.trim(), agent: agent.trim() };
+        const formData = { address: address.trim(), zillowUrl: zillowUrl.trim(), agent: agent.trim() };
         try {
           const newProperty = await DB.insertProperty(formData, user);
           onAdd(newProperty);
@@ -1381,12 +1437,12 @@
                 <input value={address} onChange={e => setAddress(e.target.value)} placeholder="e.g. 1808 Forest Hill Dr, Austin TX" style={inputStyle} />
               </div>
               <div>
-                <div style={labelStyle}>MLS Number</div>
-                <input value={mls} onChange={e => setMls(e.target.value)} placeholder="e.g. 5129346" style={inputStyle} />
+                <div style={labelStyle}>Zillow URL</div>
+                <input value={zillowUrl} onChange={e => setZillowUrl(e.target.value)} placeholder="https://www.zillow.com/homedetails/…" style={inputStyle} />
               </div>
               <div>
                 <div style={labelStyle}>Listing Agent</div>
-                <input value={agent} onChange={e => setAgent(e.target.value)} placeholder="e.g. Tarek Morshed" style={inputStyle} />
+                <AgentSelect value={agent} onChange={setAgent} agents={agents} style={inputStyle} />
               </div>
             </div>
 

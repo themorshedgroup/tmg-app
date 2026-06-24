@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#001A4A" />
+  <title>Time Off — TMG App</title>
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <link rel="icon" type="image/png" href="icon-192.png" />
+  <meta name="apple-mobile-web-app-title" content="TMG App" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body, #root { height: 100%; width: 100%; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif; background: #FCFBF8; overscroll-behavior: none; color: #001A4A; }
+    #root { overflow: hidden; }
+    ::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+    #splash { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #FCFBF8; z-index: 10; }
+    #splash .spin { width: 26px; height: 26px; border-radius: 50%; border: 3px solid rgba(201,164,90,.22); border-top-color: #C9A45A; animation: sp .8s linear infinite; }
+    @keyframes sp { to { transform: rotate(360deg); } }
+    input[type=date], input[type=time], input[type=text], input[type=number] { font-family: inherit; }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
+  <script src="supabase.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+
+  <!-- ─── Dev localhost mock (overrides supabase.js on localhost only; inert in prod) ─── -->
+  <script>
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+    window.SupabaseAuth = {
+      _state: { session: { user: { id: 'dev-user-id', email: 'symon@morshedgroup.com', user_metadata: { full_name: 'Symon', avatar_url: '' } }, access_token: 'dev-token' } },
+      signInWithGoogle: function() {},
+      signOut: function() { location.reload(); },
+      getSession: function() { return Promise.resolve(window.SupabaseAuth._state.session); },
+      onAuthStateChange: function(cb) { setTimeout(function() { cb({ session: window.SupabaseAuth._state.session }); }, 50); }
+    };
+  }
+  </script>
+</head>
+<body>
+  <div id="splash"><div class="spin"></div></div>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // ─── Design tokens (TMG Brand) ───────────────────────────────────
+    const C = {
+      bg: '#FCFBF8', surface: '#FFFFFF', surfaceHover: '#F3EBDA', border: '#E4DFD4',
+      navy: '#001A4A', navyHover: '#0A2552', gold: '#AD832F', goldSoft: '#C9A45A',
+      textPrimary: '#001A4A', textSecondary: '#6B6B6B', textMuted: '#9B9380',
+      red: '#C0392B', green: '#1E6B40', amber: '#B07A00',
+      fontSans: "-apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif",
+      fontDisplay: "'Cormorant Garamond', Georgia, serif",
+    };
+
+    // ─── Roles (mirror index.html) ───────────────────────────────────
+    const ACCESS_LABEL = { admin: 'Admin', operations: 'Operations', agent: 'Sales Agent', tc: 'Transaction Coordinator', pending: 'Pending' };
+    const toRoles = (a) => (Array.isArray(a) ? a : (a ? [a] : [])).filter(r => r && r !== 'pending');
+    const hasAdmin = (a) => toRoles(a).some(r => r === 'admin' || r === 'operations');
+
+    // ─── Profiles ────────────────────────────────────────────────────
+    const ProfileDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+      async ensureProfile(user) {
+        if (!this.client()) return null;
+        try {
+          const { data, error } = await this.client().from('profiles').select('*').eq('id', user.id).maybeSingle();
+          if (error) { console.error('[ProfileDB] load:', error.message); return null; }
+          if (data) return data;
+          const full = (user.user_metadata?.full_name || '').trim();
+          const parts = full.split(' ');
+          const { data: ins, error: e2 } = await this.client().from('profiles').insert({
+            id: user.id, email: user.email, first_name: parts.shift() || null, last_name: parts.join(' ') || null,
+            avatar_url: user.user_metadata?.avatar_url || null,
+          }).select().single();
+          if (e2) { console.error('[ProfileDB] create:', e2.message); return null; }
+          return ins;
+        } catch (e) { console.error('[ProfileDB] ensure:', e); return null; }
+      },
+      async loadAll() {
+        if (!this.client()) return [];
+        const { data, error } = await this.client().from('profiles').select('*').order('created_at', { ascending: true });
+        if (error) { console.error('[ProfileDB] loadAll:', error.message); return []; }
+        return data || [];
+      },
+    };
+
+    // ─── Time Off: policy config (admins write, everyone reads) ───────
+    const TIMEOFF_ROLES = [
+      { id: 'operations', label: 'Operations' },
+      { id: 'admin', label: 'Admin' },
+      { id: 'agent', label: 'Sales Agent' },
+      { id: 'tc', label: 'Transaction Coordinator' },
+    ];
+    const TIMEOFF_DEFAULT = {
+      version: 2, year_basis: 'calendar', hours_per_workday: 8,
+      roles: { operations: { days_per_year: 14, tracked: true }, admin: { days_per_year: 14, tracked: true }, agent: { tracked: false }, tc: { tracked: false } },
+    };
+    function normalizeTimeoffPolicy(cfg) {
+      const base = (cfg && typeof cfg === 'object') ? cfg : {};
+      const roles = (base.roles && typeof base.roles === 'object') ? base.roles : {};
+      const hpw = Number(base.hours_per_workday);
+      const out = { version: 2, year_basis: base.year_basis === 'anniversary' ? 'anniversary' : 'calendar', hours_per_workday: hpw > 0 ? hpw : 8, roles: {} };
+      TIMEOFF_ROLES.forEach(r => { const p = roles[r.id] || {}; out.roles[r.id] = { tracked: !!p.tracked, days_per_year: Math.max(0, Number(p.days_per_year) || 0) }; });
+      return out;
+    }
+    function timeoffAllotmentHours(cfg, roleId) {
+      const p = cfg && cfg.roles && cfg.roles[roleId];
+      if (!p || !p.tracked) return 0;
+      return (Number(p.days_per_year) || 0) * (Number(cfg.hours_per_workday) || 8);
+    }
+    const PolicyDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      async load() {
+        if (!this.client()) return null;
+        const { data, error } = await this.client().from('time_off_policies').select('config').eq('id', 1).maybeSingle();
+        if (error) { console.error('[PolicyDB] load:', error.message); return null; }
+        return (data && data.config) || null;
+      },
+      async save(config) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('time_off_policies').upsert({ id: 1, config, updated_at: new Date().toISOString() });
+        if (error) { console.error('[PolicyDB] save:', error.message); throw error; }
+      },
+    };
+
+    // ─── Time Off: request data + balance math ───────────────────────
+    const TimeOffDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      uid() { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+      async listMine() {
+        if (!this.client()) return [];
+        const { data, error } = await this.client().from('time_off_requests').select('*').eq('user_id', this.uid()).order('start_at', { ascending: false });
+        if (error) { console.error('[TimeOffDB] listMine:', error.message); return []; }
+        return data || [];
+      },
+      async listPending() {
+        if (!this.client()) return [];
+        const { data, error } = await this.client().from('time_off_requests').select('*').eq('status', 'pending').order('start_at', { ascending: true });
+        if (error) { console.error('[TimeOffDB] listPending:', error.message); return []; }
+        return data || [];
+      },
+      async create(req) {
+        if (!this.client()) return null;
+        const { data, error } = await this.client().from('time_off_requests').insert({
+          user_id: this.uid(), start_at: req.start_at, end_at: req.end_at, full_day: !!req.full_day, reason: req.reason || null,
+        }).select().single();
+        if (error) { console.error('[TimeOffDB] create:', error.message); throw error; }
+        return data;
+      },
+      async decide(id, status, note) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('time_off_requests').update({ status, decision_note: note || null }).eq('id', id);
+        if (error) { console.error('[TimeOffDB] decide:', error.message); throw error; }
+      },
+      async cancel(id) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('time_off_requests').update({ status: 'cancelled' }).eq('id', id);
+        if (error) { console.error('[TimeOffDB] cancel:', error.message); throw error; }
+      },
+    };
+
+    const timeoffDate = (v) => new Date(String(v || '').replace(' ', 'T'));
+    const timeoffFmtHours = (h) => String(Math.round((Number(h) || 0) * 100) / 100);
+    function timeoffClientHours(startISO, endISO, fullDay, hpw) {
+      const s = timeoffDate(startISO), e = timeoffDate(endISO);
+      if (isNaN(s) || isNaN(e) || e < s) return 0;
+      if (fullDay) {
+        let d = new Date(s.getFullYear(), s.getMonth(), s.getDate());
+        const end = new Date(e.getFullYear(), e.getMonth(), e.getDate());
+        let n = 0;
+        while (d <= end) { const wd = d.getDay(); if (wd >= 1 && wd <= 5) n++; d.setDate(d.getDate() + 1); }
+        return n * (Number(hpw) || 8);
+      }
+      return Math.max(0, Math.round(((e - s) / 3600000) * 100) / 100);
+    }
+    function timeoffBalance(cfg, accessRoles, rows) {
+      const roles = toRoles(accessRoles);
+      const allot = Math.max(0, ...TIMEOFF_ROLES.map(r => roles.indexOf(r.id) !== -1 ? timeoffAllotmentHours(cfg, r.id) : 0));
+      const tracked = allot > 0;
+      const year = new Date().getFullYear();
+      let used = 0, pending = 0;
+      (rows || []).forEach(r => {
+        if (!r.tracked || timeoffDate(r.start_at).getFullYear() !== year) return;
+        const h = Number(r.total_hours) || 0;
+        if (r.status === 'approved') used += h; else if (r.status === 'pending') pending += h;
+      });
+      return { tracked, allot, used, pending, remaining: allot - used };
+    }
+    function timeoffWhen(r) {
+      const s = timeoffDate(r.start_at), e = timeoffDate(r.end_at);
+      const dOpt = { month: 'short', day: 'numeric' };
+      if (r.full_day) {
+        return s.toDateString() === e.toDateString() ? s.toLocaleDateString(undefined, dOpt) : s.toLocaleDateString(undefined, dOpt) + ' – ' + e.toLocaleDateString(undefined, dOpt);
+      }
+      const tOpt = { hour: 'numeric', minute: '2-digit' };
+      return s.toLocaleDateString(undefined, dOpt) + ', ' + s.toLocaleTimeString([], tOpt) + ' – ' + e.toLocaleTimeString([], tOpt);
+    }
+
+    function TimeOffTab({ dark, profile, isAdmin, onBack, hideHeader }) {
+      const uid = profile && profile.id;
+      const [policy, setPolicy] = useState(null);
+      const [mine, setMine] = useState([]);
+      const [pending, setPending] = useState([]);
+      const [people, setPeople] = useState({});
+      const [loading, setLoading] = useState(true);
+      const [view, setView] = useState('list');
+      const [busy, setBusy] = useState(false);
+      const [mode, setMode] = useState('fullday');
+      const today = new Date().toISOString().slice(0, 10);
+      const [startDate, setStartDate] = useState(today);
+      const [endDate, setEndDate] = useState(today);
+      const [startTime, setStartTime] = useState('09:00');
+      const [endTime, setEndTime] = useState('13:00');
+      const [reason, setReason] = useState('');
+
+      const reload = async () => {
+        const [m, p] = await Promise.all([TimeOffDB.listMine(), TimeOffDB.listPending()]);
+        setMine(m); setPending(p);
+      };
+      useEffect(() => {
+        let on = true;
+        (async () => {
+          const cfg = normalizeTimeoffPolicy((await PolicyDB.load()) || TIMEOFF_DEFAULT);
+          const ppl = await ProfileDB.loadAll();
+          const map = {}; ppl.forEach(u => { map[u.id] = (((u.first_name || '') + ' ' + (u.last_name || '')).trim()) || u.email || 'Someone'; });
+          const [m, p] = await Promise.all([TimeOffDB.listMine(), TimeOffDB.listPending()]);
+          if (!on) return;
+          setPolicy(cfg); setPeople(map); setMine(m); setPending(p); setLoading(false);
+        })();
+        return () => { on = false; };
+      }, []);
+
+      const t = dark
+        ? { bg: '#0B1830', surface: '#12203B', text: '#EDE6D6', sub: '#A9B2C4', muted: '#7E8AA0', border: '#24314F' }
+        : { bg: C.bg, surface: C.surface, text: C.navy, sub: C.textSecondary, muted: C.textMuted, border: C.border };
+      const PILL = {
+        pending: { bg: dark ? 'rgba(176,122,0,0.18)' : '#FBF1D9', fg: dark ? '#E0B65C' : C.amber, label: 'Pending' },
+        approved: { bg: dark ? 'rgba(30,107,64,0.20)' : '#E6F2EC', fg: dark ? '#7FCBA4' : C.green, label: 'Approved' },
+        denied: { bg: dark ? 'rgba(192,57,43,0.18)' : '#FDECEA', fg: dark ? '#E89B92' : C.red, label: 'Denied' },
+        cancelled: { bg: dark ? 'rgba(255,255,255,0.08)' : '#F0EEE8', fg: dark ? '#98A0AE' : C.textMuted, label: 'Cancelled' },
+        noted: { bg: dark ? 'rgba(173,131,47,0.16)' : '#F3EBDA', fg: dark ? '#C9A45A' : C.gold, label: 'Logged' },
+      };
+      const pill = (s) => { const p = PILL[s] || PILL.pending; return <span style={{ display: 'inline-flex', alignItems: 'center', padding: '3px 9px', borderRadius: 20, background: p.bg, color: p.fg, fontSize: '0.68rem', fontWeight: 700, fontFamily: C.fontSans, letterSpacing: '0.02em' }}>{p.label}</span>; };
+
+      const bal = policy ? timeoffBalance(policy, profile && profile.access, mine) : null;
+      const hpw = policy ? policy.hours_per_workday : 8;
+      const daysEq = (h) => Math.round((h / (hpw || 8)) * 10) / 10;
+      const toReview = pending.filter(r => r.user_id !== uid && (isAdmin || r.manager_id === uid));
+
+      const draftStart = mode === 'fullday' ? startDate + 'T00:00:00' : startDate + 'T' + startTime + ':00';
+      const draftEnd = mode === 'fullday' ? endDate + 'T00:00:00' : startDate + 'T' + endTime + ':00';
+      const draftFull = mode === 'fullday';
+      const draftHours = timeoffClientHours(draftStart, draftEnd, draftFull, hpw);
+      const draftValid = mode === 'fullday' ? !!(startDate && endDate && endDate >= startDate) : !!(startDate && endTime > startTime);
+
+      const submit = async () => {
+        if (!draftValid || busy) return;
+        setBusy(true);
+        try { await TimeOffDB.create({ start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason }); setReason(''); setMode('fullday'); setView('list'); await reload(); }
+        catch (e) { alert('Could not file: ' + (e.message || e)); }
+        finally { setBusy(false); }
+      };
+      const doCancel = async (r) => {
+        if (!window.confirm('Cancel this time-off request?')) return;
+        setBusy(true);
+        try { await TimeOffDB.cancel(r.id); await reload(); }
+        catch (e) { alert('Could not cancel: ' + (e.message || e)); }
+        finally { setBusy(false); }
+      };
+      const doDecide = async (r, status) => {
+        const note = status === 'denied' ? (window.prompt('Reason for denial (optional):') || null) : null;
+        setBusy(true);
+        try { await TimeOffDB.decide(r.id, status, note); await reload(); }
+        catch (e) { alert('Could not update: ' + (e.message || e)); }
+        finally { setBusy(false); }
+      };
+
+      const card = { background: t.surface, borderRadius: 14, padding: 16, marginBottom: 14, border: `1px solid ${t.border}`, boxShadow: dark ? 'none' : '0 2px 8px rgba(0,26,74,0.06)' };
+      const fld = { width: '100%', padding: '10px 12px', borderRadius: 10, border: `1.5px solid ${t.border}`, background: t.surface, color: t.text, fontSize: '0.9rem', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const lbl = { fontSize: '0.72rem', fontWeight: 600, color: t.sub, fontFamily: C.fontSans, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6, display: 'block' };
+      const primaryBtn = { width: '100%', padding: 13, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.92rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans };
+
+      const myRow = (r) => {
+        const canCancel = r.status === 'pending' || r.status === 'noted';
+        const who = r.decided_by && people[r.decided_by];
+        return (
+          <div key={r.id} style={{ ...card, marginBottom: 10, padding: 13 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ flex: 1, fontSize: '0.9rem', fontWeight: 600, color: t.text, fontFamily: C.fontSans }}>{timeoffWhen(r)}</span>
+              {pill(r.status)}
+            </div>
+            <div style={{ fontSize: '0.76rem', color: t.sub, fontFamily: C.fontSans, marginTop: 3 }}>
+              {timeoffFmtHours(r.total_hours)}h{r.tracked ? ' · ' + daysEq(r.total_hours) + ' day' + (daysEq(r.total_hours) === 1 ? '' : 's') : ' · visibility'}
+              {r.reason ? ' · ' + r.reason : ''}
+            </div>
+            {r.decision_note ? <div style={{ fontSize: '0.74rem', color: t.muted, fontFamily: C.fontSans, marginTop: 3, fontStyle: 'italic' }}>“{r.decision_note}”{who ? ' — ' + who : ''}</div> : null}
+            {canCancel ? <button onClick={() => doCancel(r)} disabled={busy} style={{ marginTop: 9, padding: '7px 12px', background: 'none', border: `1.5px solid ${t.border}`, borderRadius: 9, color: t.sub, fontSize: '0.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button> : null}
+          </div>
+        );
+      };
+      const reviewRow = (r) => (
+        <div key={r.id} style={{ ...card, marginBottom: 10, padding: 13 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ flex: 1, fontSize: '0.9rem', fontWeight: 700, color: t.text, fontFamily: C.fontSans }}>{people[r.user_id] || 'Someone'}</span>
+            <span style={{ fontSize: '0.76rem', color: t.sub, fontFamily: C.fontSans }}>{timeoffFmtHours(r.total_hours)}h</span>
+          </div>
+          <div style={{ fontSize: '0.8rem', color: t.sub, fontFamily: C.fontSans, marginTop: 3 }}>{timeoffWhen(r)}{r.reason ? ' · ' + r.reason : ''}</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button onClick={() => doDecide(r, 'approved')} disabled={busy} style={{ flex: 1, padding: '9px 0', background: C.green, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', fontFamily: C.fontSans }}>Approve</button>
+            <button onClick={() => doDecide(r, 'denied')} disabled={busy} style={{ flex: 1, padding: '9px 0', background: 'none', color: C.red, border: `1.5px solid ${dark ? 'rgba(192,57,43,0.5)' : '#F3C9C4'}`, borderRadius: 9, fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer', fontFamily: C.fontSans }}>Deny</button>
+          </div>
+        </div>
+      );
+
+      if (loading) return <div style={{ padding: '20px 16px', background: t.bg }}><div style={{ fontSize: '0.85rem', color: t.muted, fontFamily: C.fontSans }}>Loading…</div></div>;
+
+      if (view === 'new') {
+        return (
+          <div style={{ padding: '20px 16px 100px', background: t.bg, minHeight: '100%' }}>
+            <button onClick={() => setView('list')} style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: t.sub, fontSize: '0.86rem', fontWeight: 600, fontFamily: C.fontSans, marginBottom: 16 }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} />Back</button>
+            <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: t.text, marginBottom: 18, fontFamily: C.fontDisplay }}>{bal && bal.tracked ? 'Request time off' : 'Log time off'}</div>
+            <div style={card}>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                {[{ k: 'fullday', l: 'Full day(s)' }, { k: 'hours', l: 'Specific hours' }].map(o => (
+                  <button key={o.k} onClick={() => setMode(o.k)} style={{ flex: 1, padding: '9px 0', borderRadius: 9, border: `1.5px solid ${mode === o.k ? C.navy : t.border}`, background: mode === o.k ? C.navy : t.surface, color: mode === o.k ? '#fff' : t.sub, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{o.l}</button>
+                ))}
+              </div>
+              {mode === 'fullday' ? (
+                <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+                  <div style={{ flex: 1 }}><span style={lbl}>From</span><input type="date" value={startDate} onChange={e => { setStartDate(e.target.value); if (e.target.value > endDate) setEndDate(e.target.value); }} style={fld} /></div>
+                  <div style={{ flex: 1 }}><span style={lbl}>To</span><input type="date" min={startDate} value={endDate} onChange={e => setEndDate(e.target.value)} style={fld} /></div>
+                </div>
+              ) : (
+                <React.Fragment>
+                  <div style={{ marginBottom: 14 }}><span style={lbl}>Date</span><input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={fld} /></div>
+                  <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+                    <div style={{ flex: 1 }}><span style={lbl}>From</span><input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} style={fld} /></div>
+                    <div style={{ flex: 1 }}><span style={lbl}>To</span><input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} style={fld} /></div>
+                  </div>
+                </React.Fragment>
+              )}
+              <div style={{ marginBottom: 14 }}><span style={lbl}>Reason (optional)</span><input type="text" value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. family trip" style={fld} /></div>
+              <div style={{ fontSize: '0.82rem', color: t.sub, fontFamily: C.fontSans, marginBottom: 6 }}>
+                {draftValid ? <React.Fragment><strong style={{ color: t.text }}>= {timeoffFmtHours(draftHours)} hours</strong>{bal && bal.tracked ? ' (' + daysEq(draftHours) + ' day' + (daysEq(draftHours) === 1 ? '' : 's') + ')' : ''}</React.Fragment> : <span style={{ color: t.muted }}>Pick a valid date/time range.</span>}
+              </div>
+              {bal && bal.tracked && draftValid && draftHours > bal.remaining ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ This is more than your {timeoffFmtHours(bal.remaining)}h remaining.</div> : null}
+              <button onClick={submit} disabled={!draftValid || busy} style={{ ...primaryBtn, marginTop: 6, opacity: (!draftValid || busy) ? 0.5 : 1 }}>{busy ? 'Filing…' : (bal && bal.tracked ? 'Submit request' : 'Log it')}</button>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div style={{ padding: hideHeader ? '16px 16px 100px' : '20px 16px 100px', background: t.bg, minHeight: '100%' }}>
+          {!hideHeader ? <button onClick={onBack} style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: t.sub, fontSize: '0.86rem', fontWeight: 600, fontFamily: C.fontSans, marginBottom: 16 }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} />Back</button> : null}
+          {!hideHeader ? <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: t.text, marginBottom: 18, fontFamily: C.fontDisplay }}>Time Off</div> : null}
+
+          {bal && bal.tracked ? (
+            <div style={{ ...card, background: dark ? '#12203B' : C.navy }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.7)', letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Time off — {new Date().getFullYear()}</div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
+                <span style={{ fontSize: '2.2rem', fontWeight: 400, color: '#fff', fontFamily: C.fontDisplay, fontStyle: 'italic' }}>{timeoffFmtHours(bal.remaining)}h</span>
+                <span style={{ fontSize: '0.9rem', color: dark ? '#C9A45A' : C.goldSoft, fontFamily: C.fontSans }}>≈ {daysEq(bal.remaining)} days left</span>
+              </div>
+              <div style={{ fontSize: '0.78rem', color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.66)', fontFamily: C.fontSans, marginTop: 4 }}>{timeoffFmtHours(bal.used)}h used · {timeoffFmtHours(bal.pending)}h awaiting · of {timeoffFmtHours(bal.allot)}h ({daysEq(bal.allot)} days)</div>
+            </div>
+          ) : (
+            <div style={card}>
+              <div style={{ fontSize: '0.88rem', fontWeight: 600, color: t.text, fontFamily: C.fontSans }}>Time off isn’t tracked for your role</div>
+              <div style={{ fontSize: '0.8rem', color: t.sub, fontFamily: C.fontSans, marginTop: 4, lineHeight: 1.5 }}>You can still log it here so your manager and team can see it — there’s just no balance to track.</div>
+            </div>
+          )}
+
+          <button onClick={() => setView('new')} style={{ ...primaryBtn, marginBottom: 22 }}>{bal && bal.tracked ? 'Request time off' : 'Log time off'}</button>
+
+          {toReview.length ? (
+            <React.Fragment>
+              <div style={{ fontSize: '0.72rem', fontWeight: 700, color: C.gold, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>Requests to review ({toReview.length})</div>
+              {toReview.map(reviewRow)}
+              <div style={{ height: 14 }} />
+            </React.Fragment>
+          ) : null}
+
+          <div style={{ fontSize: '0.72rem', fontWeight: 700, color: t.sub, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>My requests</div>
+          {mine.length ? mine.map(myRow) : <div style={{ fontSize: '0.82rem', color: t.muted, fontFamily: C.fontSans, padding: '4px 2px' }}>Nothing yet — file your first request above.</div>}
+        </div>
+      );
+    }
+
+    function TimeOffPolicies() {
+      const [cfg, setCfg] = useState(null);
+      const [saving, setSaving] = useState(false);
+      const [saved, setSaved] = useState(false);
+      useEffect(() => { PolicyDB.load().then(c => setCfg(normalizeTimeoffPolicy(c || TIMEOFF_DEFAULT))); }, []);
+
+      const patch = (fn) => { setSaved(false); setCfg(prev => { const next = JSON.parse(JSON.stringify(prev)); fn(next); return next; }); };
+      const setTracked = (id, on) => patch(n => { n.roles[id].tracked = on; if (on && !(n.roles[id].days_per_year > 0)) n.roles[id].days_per_year = 14; });
+      const setDays = (id, v) => patch(n => { n.roles[id].days_per_year = Math.max(0, Math.round(Number(v) || 0)); });
+      const setHpw = (v) => patch(n => { const x = Number(v); if (x > 0 && x <= 24) n.hours_per_workday = x; });
+
+      const save = async () => {
+        setSaving(true);
+        try { await PolicyDB.save(normalizeTimeoffPolicy(cfg)); setSaved(true); }
+        catch (e) { alert('Could not save: ' + (e.message || e)); }
+        finally { setSaving(false); }
+      };
+
+      const CARD = { background: C.surface, boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginBottom: 14 };
+      const numInput = { width: 54, padding: '7px 8px', borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.surface, color: C.navy, fontSize: '0.84rem', fontWeight: 600, fontFamily: C.fontSans, textAlign: 'center' };
+
+      return (
+        <div style={{ padding: '4px 16px 100px' }}>
+          <div style={CARD}>
+            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 3 }}>Time-Off Policies</div>
+            <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 4, lineHeight: 1.5 }}>Set who accrues time off and how much. Resets each calendar year (Jan 1) · no carryover.</div>
+            {!cfg ? (
+              <div style={{ fontSize: '0.78rem', color: C.textMuted, padding: '12px 2px', fontFamily: C.fontSans }}>Loading…</div>
+            ) : (
+              <React.Fragment>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 2px 4px' }}>
+                  <span style={{ flex: 1, fontSize: '0.84rem', fontWeight: 500, color: C.navy, fontFamily: C.fontSans }}>Hours per workday</span>
+                  <input type="number" min="1" max="24" step="0.5" value={cfg.hours_per_workday} onChange={e => setHpw(e.target.value)} style={numInput} />
+                  <span style={{ fontSize: '0.74rem', color: C.textSecondary, fontFamily: C.fontSans }}>hrs</span>
+                </div>
+                {TIMEOFF_ROLES.map(r => {
+                  const p = cfg.roles[r.id];
+                  return (
+                    <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 2px', borderTop: `1px solid ${C.border}` }}>
+                      <span style={{ flex: 1, fontSize: '0.84rem', fontWeight: 500, color: C.navy, fontFamily: C.fontSans }}>{r.label}</span>
+                      <button onClick={() => setTracked(r.id, !p.tracked)} style={{ padding: '6px 11px', borderRadius: 8, border: `1px solid ${p.tracked ? C.navy : C.border}`, background: p.tracked ? C.navy : C.surface, color: p.tracked ? '#fff' : C.textSecondary, fontSize: '0.74rem', fontWeight: p.tracked ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans, whiteSpace: 'nowrap' }}>{p.tracked ? 'Tracked' : 'Off'}</button>
+                      {p.tracked ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <input type="number" min="0" max="365" value={p.days_per_year} onChange={e => setDays(r.id, e.target.value)} style={numInput} />
+                          <span style={{ fontSize: '0.74rem', color: C.textSecondary, fontFamily: C.fontSans }}>days/yr</span>
+                        </div>
+                      ) : (
+                        <span style={{ fontSize: '0.74rem', color: C.textMuted, fontFamily: C.fontSans, fontStyle: 'italic', minWidth: 92, textAlign: 'right' }}>visibility only</span>
+                      )}
+                    </div>
+                  );
+                })}
+                <button onClick={save} disabled={saving} style={{ width: '100%', padding: 12, marginTop: 14, background: saved ? C.green : C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, transition: 'background 200ms ease' }}>{saving ? 'Saving…' : saved ? 'Saved ✓' : 'Save changes'}</button>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 10 }}>
+                  <i className="ti ti-info-circle" style={{ fontSize: 12, color: C.gold, marginTop: 2 }} />
+                  <span style={{ fontSize: '0.68rem', color: C.textMuted, fontFamily: C.fontSans, lineHeight: 1.45 }}>Changing hours-per-workday isn't retroactive — past requests keep their filed hours. "Off" roles can still file for visibility, just with no balance.</span>
+                </div>
+              </React.Fragment>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function Root() {
+      const [phase, setPhase] = useState('loading'); // loading | ready
+      const [profile, setProfile] = useState(null);
+      const [view, setView] = useState('me'); // me | policies
+
+      useEffect(() => {
+        let on = true, handled = false;
+        const handle = async (session) => {
+          if (handled) return;
+          if (!session) { window.location.replace('index.html'); return; }
+          handled = true;
+          const local = (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.protocol === 'file:');
+          const p = local
+            ? { id: 'dev-user-id', email: 'symon@morshedgroup.com', first_name: 'Symon', last_name: 'Yongco', title: 'Operations Manager', access: 'admin', status: 'active' }
+            : await ProfileDB.ensureProfile(session.user);
+          if (!on) return;
+          if (!p || (p.status && p.status !== 'active')) { window.location.replace('index.html'); return; }
+          setProfile(p); setPhase('ready');
+          const sp = document.getElementById('splash'); if (sp) sp.style.display = 'none';
+        };
+        const go = () => {
+          const sa = window.SupabaseAuth;
+          if (!sa) { setTimeout(go, 150); return; }
+          if (sa._state && sa._state.ready) handle(sa._state.session);
+          else if (sa.onAuthStateChange) sa.onAuthStateChange(({ session }) => handle(session));
+          else setTimeout(go, 150);
+        };
+        go();
+        return () => { on = false; };
+      }, []);
+
+      if (phase !== 'ready' || !profile) return null;
+      const isAdmin = hasAdmin(profile.access);
+      const backToApp = () => { window.location.href = 'index.html'; };
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: C.bg }}>
+          <div style={{ flexShrink: 0, background: C.navy, color: '#fff', padding: 'max(10px, env(safe-area-inset-top)) 14px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button onClick={view === 'policies' ? () => setView('me') : backToApp} style={{ background: 'none', border: 'none', color: '#fff', display: 'flex', alignItems: 'center', cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.82rem', fontWeight: 500, padding: 0 }}>
+              <i className="ti ti-chevron-left" style={{ fontSize: 20, color: C.goldSoft }} />{view === 'policies' ? 'Time Off' : 'App'}
+            </button>
+            <span style={{ flex: 1, textAlign: 'center', fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.15rem', fontWeight: 500 }}>{view === 'policies' ? 'Policies' : 'Time Off'}</span>
+            {isAdmin && view !== 'policies'
+              ? <button onClick={() => setView('policies')} title="Time-off policies" style={{ background: 'none', border: 'none', color: C.goldSoft, cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}><i className="ti ti-settings" style={{ fontSize: 20 }} /></button>
+              : <span style={{ width: 20 }} />}
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            {view === 'policies' && isAdmin
+              ? <TimeOffPolicies />
+              : <TimeOffTab dark={false} profile={profile} isAdmin={isAdmin} onBack={backToApp} hideHeader />}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
+  </script>
+</body>
+</html>

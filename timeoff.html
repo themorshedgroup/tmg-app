@@ -243,7 +243,10 @@
       const bal = policy ? timeoffBalance(policy, profile, mine) : null;
       const hpw = policy ? policy.hours_per_workday : 8;
       const daysEq = (h) => Math.round((h / (hpw || 8)) * 10) / 10;
-      const toReview = pending.filter(r => r.user_id !== uid && (isAdmin || r.manager_id === uid));
+      // Approver sees: their reports' requests, or (admin/ops) everyone's. A TRUE admin
+      // (access has 'admin') may also approve their OWN — matches the DB self-approval carve-out.
+      const isSuper = toRoles(profile && profile.access).indexOf('admin') !== -1;
+      const toReview = pending.filter(r => (isAdmin || r.manager_id === uid) && (isSuper || r.user_id !== uid));
 
       const draftStart = mode === 'fullday' ? startDate + 'T00:00:00' : startDate + 'T' + startTime + ':00';
       const draftEnd = mode === 'fullday' ? endDate + 'T00:00:00' : startDate + 'T' + endTime + ':00';

@@ -277,7 +277,8 @@ Continue with TMG Gmail
     }
 
     // Sends the running conversation to the ai-chat Edge Function and returns the reply text.
-    async function callAI(messages, sysOverride) {
+    // `feature` tags the call for per-feature cost attribution (defaults to this tab).
+    async function callAI(messages, sysOverride, feature = 'tasks') {
       const res = await fetch(AI_ENDPOINT, {
         method: 'POST',
         headers: {
@@ -285,7 +286,7 @@ Continue with TMG Gmail
           'Authorization': 'Bearer ' + authToken(),
           'apikey': SUPABASE_ANON,
         },
-        body: JSON.stringify({ messages, system: sysOverride || SYSTEM_PROMPT, max_tokens: 4096 }),
+        body: JSON.stringify({ messages, system: sysOverride || SYSTEM_PROMPT, max_tokens: 4096, feature }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) {
@@ -386,6 +387,7 @@ Continue with TMG Gmail
             messages: [{ role: 'user', content: 'Conversation starts with: "' + firstUserText + '"\n\nReply with ONLY a 3-6 word title for it, no quotes, no punctuation at the end.' }],
             system: 'You write short, specific chat titles. Reply with only the title text.',
             max_tokens: 24,
+            feature: 'tasks',
           }),
         });
         const data = await res.json().catch(() => ({}));

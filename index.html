@@ -284,7 +284,8 @@ Continue with TMG Gmail
     }
 
     // Sends the running conversation to the ai-chat Edge Function and returns the reply text.
-    async function callAI(messages, sysOverride) {
+    // `feature` tags the call for per-feature cost attribution (defaults to this tab).
+    async function callAI(messages, sysOverride, feature = 'ai_chat') {
       const res = await fetch(AI_ENDPOINT, {
         method: 'POST',
         headers: {
@@ -292,7 +293,7 @@ Continue with TMG Gmail
           'Authorization': 'Bearer ' + authToken(),
           'apikey': SUPABASE_ANON,
         },
-        body: JSON.stringify({ messages, system: sysOverride || SYSTEM_PROMPT, max_tokens: 4096 }),
+        body: JSON.stringify({ messages, system: sysOverride || SYSTEM_PROMPT, max_tokens: 4096, feature }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) {
@@ -339,6 +340,7 @@ Continue with TMG Gmail
             messages: [{ role: 'user', content: 'Conversation starts with: "' + firstUserText + '"\n\nReply with ONLY a 3-6 word title for it, no quotes, no punctuation at the end.' }],
             system: 'You write short, specific chat titles. Reply with only the title text.',
             max_tokens: 24,
+            feature: 'ai_chat',
           }),
         });
         const data = await res.json().catch(() => ({}));
@@ -1574,11 +1576,17 @@ Rules:
     const fmtTok = (n) => { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n); };
     const fmtUsd = (n) => '$' + (Number(n) || 0).toFixed(2);
 
-    // Admin-only AI usage + estimated cost per user. Reads the usage_summary RPC.
+    // Friendly names for the feature tags written to usage_log by each surface.
+    const FEATURE_LABEL = { ai_chat: 'AI Chat', tasks: 'Tasks', crm_tasks: 'CRM Tasks', voice_transcribe: 'Voice Transcribe', chat_title: 'Chat Titles', other: 'Other / untagged' };
+    const featLabel = (f) => FEATURE_LABEL[f] || (f || 'Other');
+
+    // Admin-only AI usage + estimated cost, viewable per feature (tab) or per person.
     function AdminUsage() {
       const [rows, setRows] = useState(null); // null = loading
       const [users, setUsers] = useState([]);
       const [days, setDays] = useState(30);
+      const [view, setView] = useState('feature'); // 'feature' | 'user'
+      const [model, setModel] = useState('');       // active ai-chat model (ai_config row 1)
       useEffect(() => {
         const c = window.SupabaseAuth && window.SupabaseAuth._client;
         if (!c) { setRows([]); return; }
@@ -1588,20 +1596,22 @@ Rules:
           else setRows(res.data || []);
           setUsers(us || []);
         });
+        c.from('ai_config').select('model').eq('id', 1).single().then(({ data }) => { if (data && data.model) setModel(data.model); }).catch(() => {});
       }, [days]);
 
       const nameOf = (id) => { const u = users.find(x => x.id === id); return u ? ((((u.first_name || '') + ' ' + (u.last_name || '')).trim()) || u.email) : 'Unknown user'; };
 
-      const byUser = {};
+      const groups = {};
       (rows || []).forEach(r => {
-        const k = r.user_id || 'unknown';
-        if (!byUser[k]) byUser[k] = { inTok: 0, outTok: 0, calls: 0, cost: 0 };
-        byUser[k].inTok += Number(r.input_tokens) || 0;
-        byUser[k].outTok += Number(r.output_tokens) || 0;
-        byUser[k].calls += Number(r.calls) || 0;
-        byUser[k].cost += rowCost(r);
+        const k = view === 'user' ? (r.user_id || 'unknown') : (r.feature || 'other');
+        if (!groups[k]) groups[k] = { inTok: 0, outTok: 0, calls: 0, cost: 0 };
+        groups[k].inTok += Number(r.input_tokens) || 0;
+        groups[k].outTok += Number(r.output_tokens) || 0;
+        groups[k].calls += Number(r.calls) || 0;
+        groups[k].cost += rowCost(r);
       });
-      const list = Object.entries(byUser).map(([id, v]) => ({ id, ...v })).sort((a, b) => b.cost - a.cost);
+      const list = Object.entries(groups).map(([k, v]) => ({ k, ...v })).sort((a, b) => b.cost - a.cost);
+      const labelOf = (k) => view === 'user' ? nameOf(k) : featLabel(k);
       const total = list.reduce((s, u) => ({ inTok: s.inTok + u.inTok, outTok: s.outTok + u.outTok, calls: s.calls + u.calls, cost: s.cost + u.cost }), { inTok: 0, outTok: 0, calls: 0, cost: 0 });
 
       const pill = (d, label) => (
@@ -1613,7 +1623,13 @@ Rules:
           <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
             <i className="ti ti-coin" style={{ fontSize: 14 }} />AI Usage &amp; Cost
           </div>
-          <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 10, lineHeight: 1.5 }}>Estimated Claude spend per person. Approximate, based on public token prices.</div>
+          <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 8, lineHeight: 1.5 }}>Estimated Claude spend, approximate (public token prices). Excludes voice-note transcription minutes (billed by OpenAI Whisper).</div>
+          {model && <div style={{ fontSize: '0.68rem', color: C.textMuted, marginBottom: 10, fontFamily: C.fontSans }}>Active AI Chat model: <span style={{ color: C.navy, fontWeight: 600 }}>{model}</span></div>}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            {[['feature', 'By feature'], ['user', 'By person']].map(([v, l]) => (
+              <button key={v} onClick={() => setView(v)} style={{ padding: '5px 11px', borderRadius: 8, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.72rem', fontWeight: view === v ? 600 : 500, border: `1px solid ${view === v ? C.gold : C.border}`, background: view === v ? C.gold : 'none', color: view === v ? '#fff' : C.textSecondary }}>{l}</button>
+            ))}
+          </div>
           <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>{[[7, '7 days'], [30, '30 days'], [90, '90 days']].map(([d, l]) => pill(d, l))}</div>
           {rows === null ? (
             <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '14px 0' }}>Loading…</div>
@@ -1630,9 +1646,9 @@ Rules:
               </div>
               {list.length === 0 && <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '12px 0' }}>No AI usage in this period.</div>}
               {list.map(u => (
-                <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${C.border}` }}>
+                <div key={u.k} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${C.border}` }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '0.86rem', fontWeight: 600, color: C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{nameOf(u.id)}</div>
+                    <div style={{ fontSize: '0.86rem', fontWeight: 600, color: C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{labelOf(u.k)}</div>
                     <div style={{ fontSize: '0.68rem', color: C.textSecondary, marginTop: 1, fontFamily: C.fontSans }}>{fmtTok(u.inTok)} in · {fmtTok(u.outTok)} out · {u.calls} calls</div>
                   </div>
                   <div style={{ flexShrink: 0, fontSize: '0.92rem', fontWeight: 700, color: C.gold, fontFamily: C.fontSans }}>{fmtUsd(u.cost)}</div>

@@ -923,6 +923,131 @@ Rules:
     };
 
     // ─── AI Chat Tab ─────────────────────────────────────────────────
+    // ─── Calendar Brief inline card (native + interactive RSVP) ──────────
+    // Fetches today's (daily) or the next 7 days' (weekly) Google Calendar events
+    // and lets the user RSVP Yes/No per event — writes straight back via the
+    // google-calendar edge function. No AI call.
+    function CalendarBriefCard({ kind, dark, onCancel }) {
+      const isWeekly = kind === 'weekly';
+      const [st, setSt] = useState({ phase: 'loading', events: [], error: '' });
+      const [busy, setBusy] = useState({});
+      const GREEN = '#1E6B40', RED = '#C0392B';
+      const evKey = (e) => (e.calendarId || 'primary') + '|' + e.id;
+
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          const now = new Date();
+          const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          const end = new Date(start); end.setDate(end.getDate() + (isWeekly ? 7 : 1));
+          try {
+            const evs = await fetchGoogleEvents(start.toISOString(), end.toISOString());
+            if (!alive) return;
+            const sorted = (evs || []).filter(e => e.start).sort((a, b) => new Date(a.start) - new Date(b.start));
+            setSt({ phase: 'ready', events: sorted, error: '' });
+          } catch (e) {
+            if (!alive) return;
+            setSt({ phase: 'error', events: [], error: e.code === 'needs_connect' ? 'needs_connect' : (e.message || 'Could not load your calendar') });
+          }
+        })();
+        return () => { alive = false; };
+      }, [kind]);
+
+      async function rsvp(e, status) {
+        const k = evKey(e), prev = e.myResponse;
+        setBusy(b => ({ ...b, [k]: true }));
+        setSt(s => ({ ...s, events: s.events.map(x => evKey(x) === k ? { ...x, myResponse: status } : x) })); // optimistic
+        try {
+          const { ok, data } = await callCalendar({ action: 'rsvp', calendarId: e.calendarId, eventId: e.id, status });
+          if (!ok) throw new Error(data.error || 'RSVP failed');
+        } catch (err) {
+          setSt(s => ({ ...s, events: s.events.map(x => evKey(x) === k ? { ...x, myResponse: prev } : x) })); // revert
+          alert('Could not RSVP: ' + (err.message || err));
+        } finally {
+          setBusy(b => ({ ...b, [k]: false }));
+        }
+      }
+
+      const fmtTime = (iso) => new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      const fmtDay = (iso) => new Date(iso).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      const firstNames = (e) => (e.attendeesDetail || []).filter(a => !a.self && (a.name || a.email)).map(a => (a.name || a.email).split(/[ @]/)[0]).slice(0, 6);
+
+      const conflicts = [];
+      if (!isWeekly) {
+        const timed = st.events.filter(e => !e.allDay && e.start && e.end);
+        for (let i = 0; i < timed.length; i++) for (let j = i + 1; j < timed.length; j++)
+          if (new Date(timed[i].start) < new Date(timed[j].end) && new Date(timed[j].start) < new Date(timed[i].end)) conflicts.push([timed[i], timed[j]]);
+      }
+
+      const cd = dark ? '#0A1730' : '#FFFFFF', bd = dark ? '#152545' : C.border, tx = dark ? '#fff' : C.navy, sb = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+
+      function EventRow({ e }) {
+        const k = evKey(e);
+        const canRsvp = e.myResponse !== null && e.myResponse !== undefined;
+        const names = firstNames(e);
+        const btn = (label, status, active, color) => (
+          <button disabled={busy[k]} onClick={() => rsvp(e, status)} style={{ padding: '3px 11px', borderRadius: 14, cursor: busy[k] ? 'default' : 'pointer', fontFamily: C.fontSans, fontSize: '0.7rem', fontWeight: 600, opacity: busy[k] ? 0.5 : 1, border: `1px solid ${active ? color : bd}`, background: active ? color : 'transparent', color: active ? '#fff' : sb }}>{label}</button>
+        );
+        return (
+          <div style={{ padding: '8px 0', borderBottom: `1px solid ${bd}` }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: sb, fontFamily: C.fontSans, flexShrink: 0, width: 64 }}>{e.allDay ? 'All day' : fmtTime(e.start)}</div>
+              <div style={{ flex: 1, minWidth: 0, fontSize: '0.85rem' }}>
+                <div>{e.hangoutLink ? <a href={e.hangoutLink} target="_blank" rel="noopener noreferrer" style={{ color: '#1a73e8', textDecoration: 'none', fontWeight: 600 }}>{e.title}</a> : <span style={{ fontWeight: 600, color: tx }}>{e.title}</span>}</div>
+                {names.length > 0 && <div style={{ fontSize: '0.72rem', fontStyle: 'italic', color: sb, marginTop: 1 }}>({names.join(', ')})</div>}
+              </div>
+            </div>
+            {canRsvp && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, paddingLeft: 72 }}>
+                <span style={{ fontSize: '0.6rem', color: sb, fontFamily: C.fontSans, textTransform: 'uppercase', letterSpacing: '0.06em' }}>RSVP</span>
+                {btn('Yes', 'accepted', e.myResponse === 'accepted', GREEN)}
+                {btn('No', 'declined', e.myResponse === 'declined', RED)}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      const byDay = {};
+      if (isWeekly) st.events.forEach(e => { const d = (e.start || '').slice(0, 10); (byDay[d] = byDay[d] || []).push(e); });
+
+      return (
+        <div style={{ background: cd, border: `1px solid ${bd}`, borderRadius: 16, padding: 16, margin: '8px 0', maxWidth: 560 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <i className="ti ti-calendar-stats" style={{ fontSize: 18, color: dark ? C.gold : C.navy }} />
+            <div style={{ flex: 1, fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.15rem', color: tx }}>{isWeekly ? 'This Week' : "Today's Brief"}</div>
+            <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: sb, fontSize: 18, display: 'flex' }}><i className="ti ti-x" /></button>
+          </div>
+          {st.phase === 'loading' && <div style={{ textAlign: 'center', color: sb, fontSize: '0.82rem', padding: '18px 0' }}>Loading your calendar…</div>}
+          {st.phase === 'error' && (
+            <div style={{ fontSize: '0.82rem', color: sb, lineHeight: 1.6, padding: '8px 0' }}>
+              {st.error === 'needs_connect'
+                ? <span>Connect your Google Calendar first — open the calendar (top bar) and tap <b>Connect Calendar</b>, then try this pill again.</span>
+                : <span>Couldn’t load your calendar: {st.error}</span>}
+            </div>
+          )}
+          {st.phase === 'ready' && st.events.length === 0 && <div style={{ textAlign: 'center', color: sb, fontSize: '0.85rem', padding: '16px 0', fontStyle: 'italic' }}>Nothing scheduled {isWeekly ? 'this week' : 'today'}. 🎉</div>}
+          {st.phase === 'ready' && st.events.length > 0 && (
+            <div>
+              {conflicts.length > 0 && (
+                <div style={{ background: '#fff8e1', borderLeft: '3px solid #f5a623', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: '0.72rem', color: '#7a5b00', fontFamily: C.fontSans, lineHeight: 1.5 }}>
+                  ⚠️ <b>Overlap:</b> {conflicts.map(([a, b], i) => <span key={i}>{a.title} ({fmtTime(a.start)}) &amp; {b.title} ({fmtTime(b.start)}){i < conflicts.length - 1 ? '; ' : ''}</span>)}
+                </div>
+              )}
+              {isWeekly
+                ? Object.keys(byDay).sort().map(d => (
+                    <div key={d} style={{ marginBottom: 6 }}>
+                      <div style={{ fontSize: '0.66rem', fontWeight: 700, color: dark ? C.gold : C.navy, textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: C.fontSans, marginTop: 8, marginBottom: 2 }}>{fmtDay(d + 'T00:00:00')}</div>
+                      {byDay[d].map(e => <EventRow key={evKey(e)} e={e} />)}
+                    </div>
+                  ))
+                : st.events.map(e => <EventRow key={evKey(e)} e={e} />)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function AIChatTab({ user, messages, loading, mode, dark, pills, onPill, flowCard, flowKey, projectName }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
       const scrollRef = useRef(null);
@@ -1897,12 +2022,25 @@ Rules:
               <option value="task">Create a task (AI)</option>
               <option value="form">Open a form</option>
               <option value="steps">Guided questions</option>
+              <option value="calendar">Calendar brief (RSVP)</option>
             </select>
             <div style={{ marginTop: 14 }}>
               {type === 'prompt' && <PromptConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} />}
               {type === 'task' && <TaskConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} />}
               {type === 'form' && <FormConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} bord={bord} />}
               {type === 'steps' && <StepsConfigEditor config={config} setConfig={setConfig} inp={inp} lbl={lbl} sub={sub} bord={bord} />}
+              {type === 'calendar' && (
+                <div>
+                  <div style={lbl}>Range</div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {[{ v: 'daily', t: "Today's brief" }, { v: 'weekly', t: 'This week' }].map(o => {
+                      const on = (config.kind || 'daily') === o.v;
+                      return <button key={o.v} type="button" onClick={() => setConfig({ ...config, kind: o.v })} style={{ flex: 1, padding: '9px 10px', borderRadius: 9, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.8rem', fontWeight: on ? 600 : 500, border: `1px solid ${on ? (dark ? C.gold : C.navy) : bord}`, background: on ? (dark ? C.gold : C.navy) : 'transparent', color: on ? '#fff' : sub }}>{o.t}</button>;
+                    })}
+                  </div>
+                  <div style={{ fontSize: '0.7rem', color: sub, marginTop: 10, lineHeight: 1.5, fontFamily: C.fontSans }}>Pulls your Google Calendar and shows the schedule with tap-to-RSVP. No AI prompt needed. Tip: pick the calendar icon.</div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1927,6 +2065,8 @@ Rules:
         return { behavior: 'Logs KPIs (AI + CRM)', calls: AI + ', then the Zoho CRM API', reads: 'What you type + Zoho contacts (fuzzy match)', writes: 'Logs the KPI activity to Zoho CRM', cost: 'KPI Entry', output: 'A summary card to confirm before it logs' };
       if (t === 'prompt')
         return { behavior: 'Sends an AI prompt (instruction only)', calls: AI, reads: 'Only what you type', writes: 'Nothing', cost: 'AI Chat', output: "Claude's reply, shaped by the instruction", note: 'No app data is read or written — it just formats your input. To ground it in live data (e.g. the calendar), that data has to be wired in via code.' };
+      if (t === 'calendar')
+        return { behavior: 'Shows your ' + ((cfg.kind === 'weekly') ? "week's" : "day's") + ' schedule with tap-to-RSVP', calls: 'google-calendar edge function → Google Calendar API', reads: 'Your Google Calendar events (' + (cfg.kind === 'weekly' ? 'next 7 days' : 'today') + ')', writes: 'Your RSVP (Yes/No) back to the event — notifies the organizer', cost: 'None (native card, no AI)', output: 'An interactive schedule card' };
       if (t === 'form')
         return { behavior: 'Opens a structured form', calls: 'Nothing (saved directly)', reads: (cfg.fields || []).length + ' field(s) you fill in', writes: 'Saves the form submission', cost: 'None', output: 'A saved form record' };
       if (t === 'steps')
@@ -1939,7 +2079,7 @@ Rules:
       const bord = dark ? '#152545' : C.border;
       const txt = dark ? '#FFFFFF' : C.navy;
       const sub = dark ? 'rgba(255,255,255,0.5)' : C.textSecondary;
-      const typeLabel = { prompt: 'Prompt', task: 'Task', form: 'Form', steps: 'Steps' }[pill.type] || pill.type;
+      const typeLabel = { prompt: 'Prompt', task: 'Task', form: 'Form', steps: 'Steps', calendar: 'Calendar' }[pill.type] || pill.type;
       const [open, setOpen] = useState(false);
       const wiring = describePillWiring(pill);
       const arrow = (dir, disabled, fn) => <button onClick={fn} disabled={disabled} style={{ background: 'none', border: 'none', cursor: disabled ? 'default' : 'pointer', color: disabled ? (dark ? 'rgba(255,255,255,0.15)' : '#D8D2C6') : sub, fontSize: 15, padding: 0, display: 'flex' }}><i className={`ti ti-chevron-${dir}`} /></button>;
@@ -5802,6 +5942,7 @@ Rules:
       const [taskInstruction, setTaskInstruction] = useState(null); // armed by the Add To-Do pill → next send creates a task
       const [kpiInstruction, setKpiInstruction] = useState(null); // armed by Enter KPI "paste your notes" → next send parses a KPI note
       const [kpiFlow, setKpiFlow] = useState(null); // inline Enter KPI card: { step:'choice'|'form'|'summary', payload? }
+      const [calBrief, setCalBrief] = useState(null); // inline Calendar Brief card: { kind:'daily'|'weekly' }
 
       // "More" menu: which screen (settings | admin) + dropdown open state.
       const [moreView, setMoreView] = useState(() => _boot.view || 'directory');
@@ -6096,7 +6237,7 @@ Rules:
         setWorkRequest(null);
         setTaskInstruction(null);
         setKpiInstruction(null);
-        setKpiFlow(null);
+        setKpiFlow(null); setCalBrief(null);
         setActiveProjectId(projectId !== undefined ? (projectId || null) : null);
         setInput(localStorage.getItem('tmg-draft-new') || '');
       }
@@ -6112,7 +6253,7 @@ Rules:
         setCurrentConvId(id);
         setTaskInstruction(null);
         setKpiInstruction(null);
-        setKpiFlow(null);
+        setKpiFlow(null); setCalBrief(null);
         setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
         setActiveProjectId(conv?.projectId || null);
@@ -6124,7 +6265,7 @@ Rules:
 
       // Enter KPI — arm the paste-a-note parser (mirrors the task-pill arm), seeding the input.
       function startKpiNote() {
-        setKpiFlow(null);
+        setKpiFlow(null); setCalBrief(null);
         setTaskInstruction(null);
         setKpiInstruction(KPI_NOTE_INSTRUCTION);
         setInput('KPI: ');
@@ -6133,7 +6274,7 @@ Rules:
 
       // Confirm step → finalize. Phase A (KPI_LIVE=false): preview only, no network. Persists the preview message.
       async function submitKpi(payload) {
-        setKpiFlow(null);
+        setKpiFlow(null); setCalBrief(null);
         const preview = formatKpiPreview(payload);
         let content;
         if (KPI_LIVE) {
@@ -6161,9 +6302,14 @@ Rules:
           setKpiFlow({ step: 'choice' });
           return;
         }
+        if (pill.type === 'calendar' || (pill.config && pill.config.calendarBrief)) {
+          setKpiFlow(null); setTaskInstruction(null); setKpiInstruction(null);
+          setCalBrief({ kind: (pill.config && (pill.config.kind || pill.config.calendarBrief)) === 'weekly' ? 'weekly' : 'daily' });
+          return;
+        }
         if (pill.type === 'form') { setActivePill({ pill, kind: 'form' }); return; }
         if (pill.type === 'steps') { setActivePill({ pill, kind: 'steps' }); return; }
-        setKpiFlow(null); setKpiInstruction(null);
+        setKpiFlow(null); setCalBrief(null); setKpiInstruction(null);
         if (pill.type === 'task') {
           setTaskInstruction((pill.config && pill.config.instruction) || TASK_PILL_INSTRUCTION);
           let seed = pill.config && pill.config.seed;
@@ -6225,7 +6371,7 @@ Rules:
               const aiChat = (
                 <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={shownPills} onPill={dispatchPill}
                   projectName={activeProject ? activeProject.name : null}
-                  flowKey={kpiFlow ? kpiFlow.step : ''}
+                  flowKey={kpiFlow ? kpiFlow.step : calBrief ? ('cal-' + calBrief.kind) : ''}
                   flowCard={kpiFlow ? (
                     <KpiFlowCard
                       dark={dark}
@@ -6238,6 +6384,8 @@ Rules:
                       onConfirm={(resolvedPersons) => submitKpi({ ...kpiFlow.payload, persons: resolvedPersons || kpiFlow.payload.persons })}
                       onCancel={() => setKpiFlow(null)}
                     />
+                  ) : calBrief ? (
+                    <CalendarBriefCard dark={dark} kind={calBrief.kind} onCancel={() => setCalBrief(null)} />
                   ) : null}
                 />
               );

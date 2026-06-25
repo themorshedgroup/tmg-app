@@ -1577,7 +1577,7 @@ Rules:
     const fmtUsd = (n) => '$' + (Number(n) || 0).toFixed(2);
 
     // Friendly names for the feature tags written to usage_log by each surface.
-    const FEATURE_LABEL = { ai_chat: 'AI Chat', tasks: 'Tasks', crm_tasks: 'CRM Tasks', voice_transcribe: 'Voice Transcribe', chat_title: 'Chat Titles', other: 'Other / untagged' };
+    const FEATURE_LABEL = { ai_chat: 'AI Chat', kpi: 'KPI Entry', add_todo: 'Add To-Do', intake_form: 'Intake Forms', tasks: 'Tasks', crm_tasks: 'CRM Tasks', voice_transcribe: 'Voice Transcribe', chat_title: 'Chat Titles', other: 'Other / untagged' };
     const featLabel = (f) => FEATURE_LABEL[f] || (f || 'Other');
 
     // Admin-only AI usage + estimated cost, viewable per feature (tab) or per person.
@@ -1603,7 +1603,7 @@ Rules:
 
       const groups = {};
       (rows || []).forEach(r => {
-        const k = view === 'user' ? (r.user_id || 'unknown') : (r.feature || 'other');
+        const k = view === 'user' ? (r.user_id || 'unknown') : view === 'model' ? (r.model || 'unknown') : (r.feature || 'other');
         if (!groups[k]) groups[k] = { inTok: 0, outTok: 0, calls: 0, cost: 0 };
         groups[k].inTok += Number(r.input_tokens) || 0;
         groups[k].outTok += Number(r.output_tokens) || 0;
@@ -1611,7 +1611,7 @@ Rules:
         groups[k].cost += rowCost(r);
       });
       const list = Object.entries(groups).map(([k, v]) => ({ k, ...v })).sort((a, b) => b.cost - a.cost);
-      const labelOf = (k) => view === 'user' ? nameOf(k) : featLabel(k);
+      const labelOf = (k) => view === 'user' ? nameOf(k) : view === 'model' ? k : featLabel(k);
       const total = list.reduce((s, u) => ({ inTok: s.inTok + u.inTok, outTok: s.outTok + u.outTok, calls: s.calls + u.calls, cost: s.cost + u.cost }), { inTok: 0, outTok: 0, calls: 0, cost: 0 });
 
       const pill = (d, label) => (
@@ -1626,7 +1626,7 @@ Rules:
           <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 8, lineHeight: 1.5 }}>Estimated Claude spend, approximate (public token prices). Excludes voice-note transcription minutes (billed by OpenAI Whisper).</div>
           {model && <div style={{ fontSize: '0.68rem', color: C.textMuted, marginBottom: 10, fontFamily: C.fontSans }}>Active AI Chat model: <span style={{ color: C.navy, fontWeight: 600 }}>{model}</span></div>}
           <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-            {[['feature', 'By feature'], ['user', 'By person']].map(([v, l]) => (
+            {[['feature', 'By feature'], ['model', 'By model'], ['user', 'By person']].map(([v, l]) => (
               <button key={v} onClick={() => setView(v)} style={{ padding: '5px 11px', borderRadius: 8, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.72rem', fontWeight: view === v ? 600 : 500, border: `1px solid ${view === v ? C.gold : C.border}`, background: view === v ? C.gold : 'none', color: view === v ? '#fff' : C.textSecondary }}>{l}</button>
             ))}
           </div>
@@ -5954,7 +5954,7 @@ Rules:
           const apiMsgs = history.map(m => ({ role: m.role, content: toApiContent(m) }));
           const armed = taskInstruction || kpiInstruction;
           const sys = buildSystemPrompt(armed);
-          const reply = await callAI(apiMsgs, sys);
+          const reply = await callAI(apiMsgs, sys, kpiInstruction ? 'kpi' : (taskInstruction ? 'add_todo' : 'ai_chat'));
           // Add To-Do mode: the AI ends with an ACTION block — read it, create the task, hide the JSON.
           let display = reply;
           if (taskInstruction) {

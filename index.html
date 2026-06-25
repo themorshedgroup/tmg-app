@@ -3359,10 +3359,12 @@ Rules:
 
     // Embeds the standalone SFFU app (same origin + same Supabase login) as a TMG view.
     // The header row drives SFFU's actions via postMessage; SFFU keeps its own settings.
+    // Bump SFFU_VERSION when sffu/index.html changes to bust the iframe cache.
+    const SFFU_VERSION = '20260625a';
     function SffuFrame({ dark, onBack }) {
       const J = "'Jost', sans-serif";
       const frameRef = useRef(null);
-      const src = 'sffu/index.html?embed=1&theme=' + (dark ? 'dark' : 'light');
+      const src = 'sffu/index.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + SFFU_VERSION;
       const ink = dark ? '#fff' : '#001A4A';
       const send = (action) => { try { const w = frameRef.current && frameRef.current.contentWindow; if (w) w.postMessage({ tmg: 'sffu', action }, location.origin); } catch (e) {} };
       const actBtn = (action, icon, label) => (

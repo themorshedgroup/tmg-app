@@ -1579,14 +1579,16 @@ Rules:
     // Friendly names for the feature tags written to usage_log by each surface.
     const FEATURE_LABEL = { ai_chat: 'AI Chat', kpi: 'KPI Entry', add_todo: 'Add To-Do', intake_form: 'Intake Forms', tasks: 'Tasks', crm_tasks: 'CRM Tasks', voice_transcribe: 'Voice Transcribe', chat_title: 'Chat Titles', other: 'Other / untagged' };
     const featLabel = (f) => FEATURE_LABEL[f] || (f || 'Other');
+    const MONTHLY_CAP_USD = 20; // per-person estimated-spend cap (calendar month). Warn-only: over = flagged red, never blocked.
 
     // Admin-only AI usage + estimated cost, viewable per feature (tab) or per person.
     function AdminUsage() {
       const [rows, setRows] = useState(null); // null = loading
       const [users, setUsers] = useState([]);
       const [days, setDays] = useState(30);
-      const [view, setView] = useState('feature'); // 'feature' | 'user'
+      const [view, setView] = useState('feature'); // 'feature' | 'model' | 'user'
       const [model, setModel] = useState('');       // active ai-chat model (ai_config row 1)
+      const [monthByUser, setMonthByUser] = useState({}); // user_id → {inTok,outTok,calls,cost} this calendar month
       useEffect(() => {
         const c = window.SupabaseAuth && window.SupabaseAuth._client;
         if (!c) { setRows([]); return; }
@@ -1597,22 +1599,43 @@ Rules:
           setUsers(us || []);
         });
         c.from('ai_config').select('model').eq('id', 1).single().then(({ data }) => { if (data && data.model) setModel(data.model); }).catch(() => {});
+        c.rpc('usage_this_month').then(({ data }) => {
+          const m = {};
+          (data || []).forEach(r => {
+            if (!r.user_id) return; // never attribute system/null usage to a phantom person
+            const k = r.user_id;
+            if (!m[k]) m[k] = { inTok: 0, outTok: 0, calls: 0, cost: 0 };
+            m[k].inTok += Number(r.input_tokens) || 0;
+            m[k].outTok += Number(r.output_tokens) || 0;
+            m[k].calls += Number(r.calls) || 0;
+            m[k].cost += rowCost(r);
+          });
+          setMonthByUser(m);
+        }).catch(() => {});
       }, [days]);
 
       const nameOf = (id) => { const u = users.find(x => x.id === id); return u ? ((((u.first_name || '') + ' ' + (u.last_name || '')).trim()) || u.email) : 'Unknown user'; };
 
+      // By person => current calendar month (the cap basis, so the number shown IS the number that flags).
+      // By feature / model => the selected rolling window (usage_summary).
+      const isUserView = view === 'user';
       const groups = {};
-      (rows || []).forEach(r => {
-        const k = view === 'user' ? (r.user_id || 'unknown') : view === 'model' ? (r.model || 'unknown') : (r.feature || 'other');
-        if (!groups[k]) groups[k] = { inTok: 0, outTok: 0, calls: 0, cost: 0 };
-        groups[k].inTok += Number(r.input_tokens) || 0;
-        groups[k].outTok += Number(r.output_tokens) || 0;
-        groups[k].calls += Number(r.calls) || 0;
-        groups[k].cost += rowCost(r);
-      });
+      if (isUserView) {
+        Object.entries(monthByUser).forEach(([uid, v]) => { groups[uid] = { ...v }; });
+      } else {
+        (rows || []).forEach(r => {
+          const k = view === 'model' ? (r.model || 'unknown') : (r.feature || 'other');
+          if (!groups[k]) groups[k] = { inTok: 0, outTok: 0, calls: 0, cost: 0 };
+          groups[k].inTok += Number(r.input_tokens) || 0;
+          groups[k].outTok += Number(r.output_tokens) || 0;
+          groups[k].calls += Number(r.calls) || 0;
+          groups[k].cost += rowCost(r);
+        });
+      }
       const list = Object.entries(groups).map(([k, v]) => ({ k, ...v })).sort((a, b) => b.cost - a.cost);
-      const labelOf = (k) => view === 'user' ? nameOf(k) : view === 'model' ? k : featLabel(k);
+      const labelOf = (k) => isUserView ? nameOf(k) : view === 'model' ? k : featLabel(k);
       const total = list.reduce((s, u) => ({ inTok: s.inTok + u.inTok, outTok: s.outTok + u.outTok, calls: s.calls + u.calls, cost: s.cost + u.cost }), { inTok: 0, outTok: 0, calls: 0, cost: 0 });
+      const overCap = Object.entries(monthByUser).filter(([id, v]) => v.cost > MONTHLY_CAP_USD).map(([id, v]) => ({ id, cost: v.cost })).sort((a, b) => b.cost - a.cost);
 
       const pill = (d, label) => (
         <button key={d} onClick={() => setDays(d)} style={{ padding: '5px 11px', borderRadius: 8, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.72rem', fontWeight: days === d ? 600 : 500, border: `1px solid ${days === d ? C.navy : C.border}`, background: days === d ? C.navy : 'none', color: days === d ? '#fff' : C.textSecondary }}>{label}</button>
@@ -1625,19 +1648,29 @@ Rules:
           </div>
           <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 8, lineHeight: 1.5 }}>Estimated Claude spend, approximate (public token prices). Excludes voice-note transcription minutes (billed by OpenAI Whisper).</div>
           {model && <div style={{ fontSize: '0.68rem', color: C.textMuted, marginBottom: 10, fontFamily: C.fontSans }}>Active AI Chat model: <span style={{ color: C.navy, fontWeight: 600 }}>{model}</span></div>}
+          {overCap.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, background: '#FDECEA', border: `1px solid ${C.red}55`, borderRadius: 10, padding: '8px 12px', marginBottom: 10 }}>
+              <i className="ti ti-alert-triangle" style={{ fontSize: 14, color: C.red, marginTop: 1, flexShrink: 0 }} />
+              <div style={{ fontSize: '0.72rem', color: C.red, fontFamily: C.fontSans, lineHeight: 1.5 }}>
+                {overCap.length === 1
+                  ? <span><strong>{nameOf(overCap[0].id)}</strong> is over the ${MONTHLY_CAP_USD}/mo AI limit — {fmtUsd(overCap[0].cost)} this month.</span>
+                  : <span><strong>{overCap.length} people</strong> are over the ${MONTHLY_CAP_USD}/mo AI limit this month — switch to <strong>By person</strong> to see who.</span>}
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
             {[['feature', 'By feature'], ['model', 'By model'], ['user', 'By person']].map(([v, l]) => (
               <button key={v} onClick={() => setView(v)} style={{ padding: '5px 11px', borderRadius: 8, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.72rem', fontWeight: view === v ? 600 : 500, border: `1px solid ${view === v ? C.gold : C.border}`, background: view === v ? C.gold : 'none', color: view === v ? '#fff' : C.textSecondary }}>{l}</button>
             ))}
           </div>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>{[[7, '7 days'], [30, '30 days'], [90, '90 days']].map(([d, l]) => pill(d, l))}</div>
+          {!isUserView && <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>{[[7, '7 days'], [30, '30 days'], [90, '90 days']].map(([d, l]) => pill(d, l))}</div>}
           {rows === null ? (
             <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '14px 0' }}>Loading…</div>
           ) : (
             <React.Fragment>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: C.bg, borderRadius: 10, marginBottom: 10 }}>
                 <div>
-                  <div style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: C.textMuted, fontFamily: C.fontSans }}>Total · {days}d</div>
+                  <div style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: C.textMuted, fontFamily: C.fontSans }}>Total · {isUserView ? 'this month' : days + 'd'}</div>
                   <div style={{ fontSize: '1.15rem', fontWeight: 700, color: C.navy, fontFamily: C.fontSans }}>{fmtUsd(total.cost)}</div>
                 </div>
                 <div style={{ textAlign: 'right', fontSize: '0.7rem', color: C.textSecondary, fontFamily: C.fontSans, lineHeight: 1.5 }}>
@@ -1645,15 +1678,22 @@ Rules:
                 </div>
               </div>
               {list.length === 0 && <div style={{ textAlign: 'center', color: C.textMuted, fontSize: '0.8rem', padding: '12px 0' }}>No AI usage in this period.</div>}
-              {list.map(u => (
-                <div key={u.k} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${C.border}` }}>
+              {list.map(u => {
+                const over = isUserView && u.cost > MONTHLY_CAP_USD;
+                return (
+                <div key={u.k} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', margin: '0 -10px', borderBottom: `1px solid ${C.border}`, background: over ? '#FDECEA' : 'transparent', borderRadius: over ? 8 : 0 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: '0.86rem', fontWeight: 600, color: C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{labelOf(u.k)}</div>
-                    <div style={{ fontSize: '0.68rem', color: C.textSecondary, marginTop: 1, fontFamily: C.fontSans }}>{fmtTok(u.inTok)} in · {fmtTok(u.outTok)} out · {u.calls} calls</div>
+                    <div style={{ fontSize: '0.86rem', fontWeight: 600, color: over ? C.red : C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'flex', alignItems: 'center', gap: 5 }}>
+                      {over && <i className="ti ti-alert-triangle" style={{ fontSize: 12, color: C.red, flexShrink: 0 }} />}{labelOf(u.k)}
+                    </div>
+                    <div style={{ fontSize: '0.68rem', color: over ? C.red : C.textSecondary, marginTop: 1, fontFamily: C.fontSans }}>
+                      {`${fmtTok(u.inTok)} in · ${fmtTok(u.outTok)} out · ${u.calls} calls`}{isUserView ? ' · this month' : ''}{over ? ` · over $${MONTHLY_CAP_USD} cap` : ''}
+                    </div>
                   </div>
-                  <div style={{ flexShrink: 0, fontSize: '0.92rem', fontWeight: 700, color: C.gold, fontFamily: C.fontSans }}>{fmtUsd(u.cost)}</div>
+                  <div style={{ flexShrink: 0, fontSize: '0.92rem', fontWeight: 700, color: over ? C.red : C.gold, fontFamily: C.fontSans }}>{fmtUsd(u.cost)}</div>
                 </div>
-              ))}
+                );
+              })}
             </React.Fragment>
           )}
         </div>

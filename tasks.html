@@ -3097,6 +3097,24 @@ Rules:
       const visEvents = () => (gevents || []).filter(e => !e.calendarId || !isHidden(e.calendarId));
       const dayEvents = (day) => visEvents().filter(e => e.start && !e.allDay && sameDay(new Date(e.start), day)).map(e => ({ title: e.title || '(busy)', start: new Date(e.start), end: e.end ? new Date(e.end) : null, color: e.color || calColor(e.calendarId), gold: (e.colorId === '5' || e.colorId === '6'), raw: e }));
       const hasEvents = (day) => visEvents().some(e => e.start && (e.allDay ? (e.start || '').slice(0, 10) === isoOf(day) : sameDay(new Date(e.start), day)));
+      // Side-by-side column layout for time-overlapping events (incl. the same event from two
+      // calendars) so they sit next to each other instead of stacking on top of one another.
+      // Returns { [index]: { col, n } } — col = which column, n = columns in that overlap cluster.
+      const layoutDayEvents = (evs) => {
+        const endMs = (e) => e.end ? Math.max(e.end.getTime(), e.start.getTime() + 18e5) : e.start.getTime() + 27e5; // ≥30m, default 45m
+        const items = evs.map((e, i) => ({ i, s: e.start.getTime(), en: endMs(e) })).sort((a, b) => a.s - b.s || a.en - b.en);
+        const out = {}; let cluster = [], clusterEnd = -Infinity;
+        const flush = () => {
+          if (!cluster.length) return;
+          const cols = [];                                  // cols[c] = last end time placed in column c
+          cluster.forEach(it => { let c = 0; for (; c < cols.length; c++) { if (it.s >= cols[c]) break; } cols[c] = it.en; it.col = c; });
+          cluster.forEach(it => { out[it.i] = { col: it.col, n: cols.length }; });
+          cluster = []; clusterEnd = -Infinity;
+        };
+        items.forEach(it => { if (cluster.length && it.s >= clusterEnd) flush(); cluster.push(it); clusterEnd = Math.max(clusterEnd, it.en); });
+        flush();
+        return out;
+      };
       const monthHasEvent = (day) => hasEvents(day);
       const monthHasTask = (day) => (tasks || []).some(t => t.due_at && sameDay(new Date(t.due_at), day));
 
@@ -3318,12 +3336,12 @@ Rules:
               </div>
               <div style={{ flex: 1, position: 'relative' }}>
                 {HOURS.map(h => <div key={h} style={{ height: 48, borderBottom: `0.5px solid ${K.gline}` }} />)}
-                {dayEvents(anchor).map((e, i) => { const top = tzFloat(e.start, primaryTz) * 48; const dur = e.end ? Math.max((e.end - e.start) / 3600000, 0.5) : 0.75; return (
-                  <div key={i} onClick={() => openEdit(e.raw)} style={{ position: 'absolute', top: top + 1, left: 4, right: 4, height: Math.max(dur * 48 - 2, 16), background: evBg(e), borderLeft: `3px solid ${evBd(e)}`, borderRadius: 5, padding: '4px 7px', overflow: 'hidden', cursor: 'pointer' }}>
+                {(() => { const dEvs = dayEvents(anchor); const lay = layoutDayEvents(dEvs); return dEvs.map((e, i) => { const top = tzFloat(e.start, primaryTz) * 48; const dur = e.end ? Math.max((e.end - e.start) / 3600000, 0.5) : 0.75; const p = lay[i] || { col: 0, n: 1 }; return (
+                  <div key={i} onClick={() => openEdit(e.raw)} style={{ position: 'absolute', top: top + 1, left: `calc(4px + (100% - 8px) * ${p.col} / ${p.n})`, width: `calc((100% - 8px) / ${p.n} - 2px)`, height: Math.max(dur * 48 - 2, 16), background: evBg(e), borderLeft: `3px solid ${evBd(e)}`, borderRadius: 5, padding: '4px 7px', overflow: 'hidden', cursor: 'pointer', boxSizing: 'border-box' }}>
                     <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.title}</div>
                     <div style={{ fontFamily: J, fontSize: 7.5, color: K.evTime, marginTop: 1 }}>{fmtClock(e.start, primaryTz)}</div>
                   </div>
-                ); })}
+                ); }); })()}
               </div>
             </div>
           </div>

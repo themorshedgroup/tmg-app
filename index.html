@@ -1914,23 +1914,60 @@ Rules:
       );
     }
 
+    // Read-only description of a pill's BACKEND behaviour, derived from its
+    // type + config — so the "How it's wired" view is always accurate to the code.
+    function describePillWiring(pill) {
+      const t = pill.type, cfg = pill.config || {};
+      const AI = 'ai-chat edge function → Claude (model from ai_config)';
+      if (t === 'newchat')
+        return { behavior: 'Starts a fresh conversation', calls: 'Nothing', reads: 'Nothing', writes: 'Nothing', cost: 'None', output: 'A new, empty chat' };
+      if (t === 'task')
+        return { behavior: 'Turns your message into a to-do (AI)', calls: AI, reads: 'What you type', writes: 'Creates a task in the Tasks database', cost: 'Add To-Do', output: 'Confirms the task it created' };
+      if (t === 'prompt' && cfg.kpi)
+        return { behavior: 'Logs KPIs (AI + CRM)', calls: AI + ', then the Zoho CRM API', reads: 'What you type + Zoho contacts (fuzzy match)', writes: 'Logs the KPI activity to Zoho CRM', cost: 'KPI Entry', output: 'A summary card to confirm before it logs' };
+      if (t === 'prompt')
+        return { behavior: 'Sends an AI prompt (instruction only)', calls: AI, reads: 'Only what you type', writes: 'Nothing', cost: 'AI Chat', output: "Claude's reply, shaped by the instruction", note: 'No app data is read or written — it just formats your input. To ground it in live data (e.g. the calendar), that data has to be wired in via code.' };
+      if (t === 'form')
+        return { behavior: 'Opens a structured form', calls: 'Nothing (saved directly)', reads: (cfg.fields || []).length + ' field(s) you fill in', writes: 'Saves the form submission', cost: 'None', output: 'A saved form record' };
+      if (t === 'steps')
+        return { behavior: 'Asks guided questions one at a time', calls: 'Nothing (composed locally)', reads: (cfg.steps || []).length + ' answer(s)', writes: 'Composes your answers via the template', cost: 'None', output: 'A message built from your answers' };
+      return { behavior: pill.type || 'Unknown', calls: '—', reads: '—', writes: '—', cost: '—', output: '—' };
+    }
+
     function PillRow({ dark, pill, first, last, onEdit, onDelete, onUp, onDown }) {
       const cardBg = dark ? '#0A1730' : '#FFFFFF';
       const bord = dark ? '#152545' : C.border;
       const txt = dark ? '#FFFFFF' : C.navy;
       const sub = dark ? 'rgba(255,255,255,0.5)' : C.textSecondary;
       const typeLabel = { prompt: 'Prompt', task: 'Task', form: 'Form', steps: 'Steps' }[pill.type] || pill.type;
+      const [open, setOpen] = useState(false);
+      const wiring = describePillWiring(pill);
       const arrow = (dir, disabled, fn) => <button onClick={fn} disabled={disabled} style={{ background: 'none', border: 'none', cursor: disabled ? 'default' : 'pointer', color: disabled ? (dark ? 'rgba(255,255,255,0.15)' : '#D8D2C6') : sub, fontSize: 15, padding: 0, display: 'flex' }}><i className={`ti ti-chevron-${dir}`} /></button>;
       return (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: cardBg, border: `1px solid ${bord}`, borderRadius: 12, padding: '10px 12px', marginBottom: 8, opacity: pill.enabled === false ? 0.55 : 1 }}>
-          <div style={{ display: 'flex', flexDirection: 'column' }}>{arrow('up', first, onUp)}{arrow('down', last, onDown)}</div>
-          <div style={{ width: 30, height: 30, borderRadius: 7, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? 'rgba(255,255,255,0.06)' : '#F3EFE7' }}><i className={`ti ${pill.icon}`} style={{ fontSize: 16, color: dark ? pill.colorDark : pill.colorLight }} /></div>
-          <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={onEdit}>
-            <div style={{ fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 600, color: txt, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{pill.label}{pill.enabled === false && <span style={{ fontSize: '0.62rem', color: sub, fontWeight: 500 }}>  · off</span>}</div>
-            <div style={{ fontFamily: C.fontSans, fontSize: '0.62rem', color: sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: 1 }}>{typeLabel}</div>
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: cardBg, border: `1px solid ${bord}`, borderRadius: open ? '12px 12px 0 0' : 12, padding: '10px 12px', opacity: pill.enabled === false ? 0.55 : 1 }}>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>{arrow('up', first, onUp)}{arrow('down', last, onDown)}</div>
+            <div style={{ width: 30, height: 30, borderRadius: 7, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? 'rgba(255,255,255,0.06)' : '#F3EFE7' }}><i className={`ti ${pill.icon}`} style={{ fontSize: 16, color: dark ? pill.colorDark : pill.colorLight }} /></div>
+            <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={onEdit}>
+              <div style={{ fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 600, color: txt, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{pill.label}{pill.enabled === false && <span style={{ fontSize: '0.62rem', color: sub, fontWeight: 500 }}>  · off</span>}</div>
+              <div style={{ fontFamily: C.fontSans, fontSize: '0.62rem', color: sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: 1 }}>{typeLabel} · {pill.mode === 'ai' ? 'AI Mode' : 'Work Mode'}</div>
+            </div>
+            <button onClick={() => setOpen(o => !o)} title="How it's wired" style={{ background: 'none', border: 'none', cursor: 'pointer', color: open ? (dark ? C.gold : C.navy) : sub, fontSize: 17, padding: 3, display: 'flex' }}><i className={`ti ti-${open ? 'chevron-up' : 'info-circle'}`} /></button>
+            <button onClick={onEdit} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 17, padding: 3, display: 'flex' }}><i className="ti ti-pencil" /></button>
+            <button onClick={onDelete} title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 17, padding: 3, display: 'flex' }}><i className="ti ti-trash" /></button>
           </div>
-          <button onClick={onEdit} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 17, padding: 3, display: 'flex' }}><i className="ti ti-pencil" /></button>
-          <button onClick={onDelete} title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.red, fontSize: 17, padding: 3, display: 'flex' }}><i className="ti ti-trash" /></button>
+          {open && (
+            <div style={{ background: dark ? '#06101F' : C.surfaceHover, border: `1px solid ${bord}`, borderTop: 'none', borderRadius: '0 0 12px 12px', padding: '10px 14px 12px' }}>
+              <div style={{ fontSize: '0.58rem', color: sub, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginBottom: 8, fontFamily: C.fontSans }}>How it's wired</div>
+              {[['Behavior', wiring.behavior], ['Reads', wiring.reads], ['Writes', wiring.writes], ['Calls', wiring.calls], ['Cost bucket', wiring.cost], ['Output', wiring.output]].map(([k, v]) => (
+                <div key={k} style={{ display: 'flex', gap: 8, padding: '3px 0', fontFamily: C.fontSans }}>
+                  <div style={{ width: 86, flexShrink: 0, fontSize: '0.58rem', color: sub, textTransform: 'uppercase', letterSpacing: '0.05em', paddingTop: 2 }}>{k}</div>
+                  <div style={{ flex: 1, fontSize: '0.74rem', color: txt, lineHeight: 1.45 }}>{v}</div>
+                </div>
+              ))}
+              {wiring.note && <div style={{ marginTop: 8, fontSize: '0.68rem', color: sub, fontStyle: 'italic', lineHeight: 1.5, fontFamily: C.fontSans }}>{wiring.note}</div>}
+            </div>
+          )}
         </div>
       );
     }
@@ -5453,7 +5490,7 @@ Rules:
     // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
     // /tasks app. The top-bar icons open it in an iframe popout inside the content
     // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-    const TASKS_POPOUT_VERSION = '20260625b';  // bump when tasks.html changes to bust the iframe cache
+    const TASKS_POPOUT_VERSION = '20260625c';  // bump when tasks.html changes to bust the iframe cache
     function TaskFramePopover({ which, zoneH, onClose }) {
       const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
       useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);

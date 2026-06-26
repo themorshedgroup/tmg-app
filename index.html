@@ -935,10 +935,31 @@ Rules:
     // Fetches today's (daily) or the next 7 days' (weekly) Google Calendar events
     // and lets the user RSVP Yes/No per event — writes straight back via the
     // google-calendar edge function. No AI call.
+    // ── Business-timezone helpers (TMG = America/Chicago). The brief shows every
+    // user the same Central times, regardless of their device's own timezone. ──
+    const BIZ_TZ = 'America/Chicago';
+    function tzParts(date, tz) {
+      return new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        .formatToParts(date).reduce((a, x) => (a[x.type] = x.value, a), {});
+    }
+    // Offset (ms) between the tz's wall-clock and UTC for a given instant.
+    function tzOffsetMs(date, tz) {
+      const p = tzParts(date, tz);
+      const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, p.hour === '24' ? 0 : +p.hour, +p.minute, +p.second);
+      return asUTC - date.getTime();
+    }
+    // Absolute Date for a given Central wall time (handles DST + month overflow).
+    function bizWallToInstant(y, mo, d, h, mi) {
+      const guess = Date.UTC(y, mo - 1, d, h, mi, 0);
+      return new Date(guess - tzOffsetMs(new Date(guess), BIZ_TZ));
+    }
+    function bizYMD(date) { const p = tzParts(date, BIZ_TZ); return { y: +p.year, mo: +p.month, d: +p.day }; }
+    function bizDateKey(dval) { const { y, mo, d } = bizYMD(new Date(dval)); return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0'); }
+
     function CalendarBriefCard({ kind, dark, onCancel, userName }) {
       const isWeekly = kind === 'weekly';
       const [st, setSt] = useState({ phase: 'loading', events: [], error: '' });
-      const [brief, setBrief] = useState({ phase: 'idle', text: '' });
+      const [quote, setQuote] = useState({ phase: 'idle', text: '' });
       const [busy, setBusy] = useState({});
       const GREEN = '#1E6B40', RED = '#C0392B';
       const evKey = (e) => (e.calendarId || 'primary') + '|' + e.id;
@@ -946,9 +967,9 @@ Rules:
       useEffect(() => {
         let alive = true;
         (async () => {
-          const now = new Date();
-          const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-          const end = new Date(start); end.setDate(end.getDate() + (isWeekly ? 7 : 1));
+          const { y, mo, d } = bizYMD(new Date());
+          const start = bizWallToInstant(y, mo, d, 0, 0);
+          const end = bizWallToInstant(y, mo, d + (isWeekly ? 7 : 1), 0, 0);
           try {
             const evs = await fetchGoogleEvents(start.toISOString(), end.toISOString());
             if (!alive) return;
@@ -962,35 +983,25 @@ Rules:
         return () => { alive = false; };
       }, [kind]);
 
-      // Once events are in, have the AI write a short, warm brief (the narrative
-      // "here's your day" summary). Fails silently — the schedule still shows.
+      // Fresh, original "Quote of the Day" at the top of the brief (per the email
+      // design). The schedule itself is built natively below — the AI only writes
+      // the quote. Fails silently so the schedule always shows.
       useEffect(() => {
-        if (st.phase !== 'ready' || st.events.length === 0) { setBrief({ phase: 'idle', text: '' }); return; }
+        if (st.phase !== 'ready') return;
         let alive = true;
-        setBrief({ phase: 'loading', text: '' });
+        setQuote({ phase: 'loading', text: '' });
         (async () => {
           try {
-            const ft = (iso) => new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-            const fd = (iso) => new Date(iso).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-            const lines = st.events.map(e => {
-              const when = e.allDay ? 'All day' : ((isWeekly ? fd(e.start) + ' · ' : '') + ft(e.start) + (e.end ? '–' + ft(e.end) : ''));
-              const who = (e.attendeesDetail || []).filter(a => !a.self && (a.name || a.email)).map(a => a.name || a.email).slice(0, 8);
-              return '• ' + when + ' — ' + e.title + (e.location ? ' @ ' + e.location : '') + (who.length ? ' (with ' + who.join(', ') + ')' : '') + (e.hangoutLink ? ' [Google Meet]' : '');
-            }).join('\n');
-            const who = userName || 'the user';
-            const sys = isWeekly
-              ? `You are ${who}'s sharp, warm executive assistant writing their week-ahead brief. Open with a short greeting using their first name. Then in 3–5 short sentences, give them the shape of the week: how many meetings total, the busiest and lightest days, and the 2–3 meetings worth preparing for (mention who and when). Be concise, practical, and encouraging. Plain text only — no markdown headers, no sign-off, and do NOT list every event (the full schedule is shown separately right below your brief).`
-              : `You are ${who}'s sharp, warm executive assistant writing their morning brief for today. Open with a short greeting using their first name. Then in 2–4 short sentences (or a few tight bullets), give them the shape of the day: how many meetings, when the first and last are, any back-to-back stretches or notable open blocks, and a quick prep nudge for the 1–2 most important meetings (mention who they're with). Be concise, practical, and encouraging. Plain text only — no markdown headers, no sign-off, and do NOT restate every event time (the full schedule is shown separately right below your brief).`;
-            const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-            const userMsg = `Here is my calendar for ${isWeekly ? 'the next 7 days' : 'today'} (${todayStr}):\n\n${lines}\n\nWrite my brief.`;
-            const txt = await callAI([{ role: 'user', content: userMsg }], sys, 'ai_chat');
-            if (alive) setBrief({ phase: (txt || '').trim() ? 'ready' : 'idle', text: (txt || '').trim() });
+            const sys = `You write a single short, fresh, ORIGINAL motivational or thoughtful quote for the top of someone's daily briefing. Make it genuinely original — do NOT use a famous or pre-existing quotation. One sentence, at most ~20 words. Reply with ONLY the quote text: no author, no quotation marks, no label.`;
+            const txt = await callAI([{ role: 'user', content: 'Write the quote of the day.' }], sys, 'ai_chat');
+            const clean = (txt || '').replace(/^["'\s]+|["'\s]+$/g, '').trim();
+            if (alive) setQuote({ phase: clean ? 'ready' : 'idle', text: clean });
           } catch (e) {
-            if (alive) setBrief({ phase: 'idle', text: '' }); // brief is best-effort; never block the schedule
+            if (alive) setQuote({ phase: 'idle', text: '' });
           }
         })();
         return () => { alive = false; };
-      }, [st.phase, st.events.length, kind]);
+      }, [st.phase, kind]);
 
       async function rsvp(e, status) {
         const k = evKey(e), prev = e.myResponse;
@@ -1007,38 +1018,80 @@ Rules:
         }
       }
 
-      const fmtTime = (iso) => new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-      const fmtDay = (iso) => new Date(iso).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      const fmtTime = (d) => new Date(d).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: BIZ_TZ });
+      const fmtDayKey = (key) => new Date(key + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
       const firstNames = (e) => (e.attendeesDetail || []).filter(a => !a.self && (a.name || a.email)).map(a => (a.name || a.email).split(/[ @]/)[0]).slice(0, 6);
+      const hourLabel = (h) => { const ap = (h >= 12 && h < 24) ? 'PM' : 'AM'; const hh = (h % 12) || 12; return hh + ':00 ' + ap; };
 
+      // Group a list of events by their EXACT start time (all-day events bucketed separately).
+      const groupByExactTime = (list) => {
+        const allDay = list.filter(e => e.allDay);
+        const timed = list.filter(e => !e.allDay && e.start);
+        const map = new Map();
+        timed.forEach(e => { const k = new Date(e.start).getTime(); if (!map.has(k)) map.set(k, []); map.get(k).push(e); });
+        const groups = [...map.entries()].sort((a, b) => a[0] - b[0]).map(([t, evs]) => ({ kind: 'events', sort: t, time: t, events: evs }));
+        return { allDay, timed, groups };
+      };
+
+      // Whole hours 7AM–7PM with no timed event overlapping them, merged into ranges.
+      const emptyHourRows = (timed) => {
+        const { y, mo, d } = bizYMD(new Date());
+        const empties = [];
+        for (let h = 7; h <= 18; h++) {
+          const hs = bizWallToInstant(y, mo, d, h, 0), he = bizWallToInstant(y, mo, d, h + 1, 0);
+          const covered = timed.some(e => { const s = new Date(e.start), en = new Date(e.end || e.start); return s < he && en > hs; });
+          if (!covered) empties.push(h);
+        }
+        const rows = [];
+        for (let i = 0; i < empties.length;) {
+          let j = i; while (j + 1 < empties.length && empties[j + 1] === empties[j] + 1) j++;
+          const startH = empties[i], endH = empties[j] + 1;
+          const sort = bizWallToInstant(y, mo, d, startH, 0).getTime();
+          rows.push({ kind: 'empty', sort, label: i === j ? hourLabel(startH) : (hourLabel(startH) + ' – ' + hourLabel(endH)) });
+          i = j + 1;
+        }
+        return rows;
+      };
+
+      // Overlap detection (daily) for the Conflicts callout.
       const conflicts = [];
       if (!isWeekly) {
-        const timed = st.events.filter(e => !e.allDay && e.start && e.end);
-        for (let i = 0; i < timed.length; i++) for (let j = i + 1; j < timed.length; j++)
-          if (new Date(timed[i].start) < new Date(timed[j].end) && new Date(timed[j].start) < new Date(timed[i].end)) conflicts.push([timed[i], timed[j]]);
+        const t = st.events.filter(e => !e.allDay && e.start && e.end);
+        for (let i = 0; i < t.length; i++) for (let j = i + 1; j < t.length; j++)
+          if (new Date(t[i].start) < new Date(t[j].end) && new Date(t[j].start) < new Date(t[i].end)) conflicts.push([t[i], t[j]]);
       }
 
       const cd = dark ? '#0A1730' : '#FFFFFF', bd = dark ? '#152545' : C.border, tx = dark ? '#fff' : C.navy, sb = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const divider = dark ? bd : '#f0f0f0';
+      const quoteBg = dark ? 'rgba(255,255,255,0.06)' : '#f5f5f5';
+      const quoteTx = dark ? 'rgba(255,255,255,0.65)' : '#555';
+      const timeCol = dark ? sb : '#999';
+      const emptyCol = dark ? 'rgba(255,255,255,0.3)' : '#ccc';
+      const attCol = dark ? 'rgba(255,255,255,0.5)' : '#888';
+      const rowWrap = { padding: '6px 0', borderBottom: `1px solid ${divider}` };
+      const timeLbl = { fontSize: '0.72rem', color: timeCol, fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans };
 
-      function EventRow({ e }) {
+      // A single event line: ✅/⚠️ RSVP icon · title (Meet link blue) · attendee first names · tap RSVP.
+      function EventLine({ e }) {
         const k = evKey(e);
-        const canRsvp = e.myResponse !== null && e.myResponse !== undefined;
+        const invited = e.myResponse !== null && e.myResponse !== undefined;
+        const icon = invited ? (e.myResponse === 'accepted' ? '✅' : '⚠️') : null;
         const names = firstNames(e);
         const btn = (label, status, active, color) => (
-          <button disabled={busy[k]} onClick={() => rsvp(e, status)} style={{ padding: '3px 11px', borderRadius: 14, cursor: busy[k] ? 'default' : 'pointer', fontFamily: C.fontSans, fontSize: '0.7rem', fontWeight: 600, opacity: busy[k] ? 0.5 : 1, border: `1px solid ${active ? color : bd}`, background: active ? color : 'transparent', color: active ? '#fff' : sb }}>{label}</button>
+          <button disabled={busy[k]} onClick={() => rsvp(e, status)} style={{ padding: '2px 10px', borderRadius: 12, cursor: busy[k] ? 'default' : 'pointer', fontFamily: C.fontSans, fontSize: '0.68rem', fontWeight: 600, opacity: busy[k] ? 0.5 : 1, border: `1px solid ${active ? color : bd}`, background: active ? color : 'transparent', color: active ? '#fff' : sb }}>{label}</button>
         );
         return (
-          <div style={{ padding: '8px 0', borderBottom: `1px solid ${bd}` }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: sb, fontFamily: C.fontSans, flexShrink: 0, width: 64 }}>{e.allDay ? 'All day' : fmtTime(e.start)}</div>
-              <div style={{ flex: 1, minWidth: 0, fontSize: '0.85rem' }}>
-                <div>{e.hangoutLink ? <a href={e.hangoutLink} target="_blank" rel="noopener noreferrer" style={{ color: '#1a73e8', textDecoration: 'none', fontWeight: 600 }}>{e.title}</a> : <span style={{ fontWeight: 600, color: tx }}>{e.title}</span>}</div>
-                {names.length > 0 && <div style={{ fontSize: '0.72rem', fontStyle: 'italic', color: sb, marginTop: 1 }}>({names.join(', ')})</div>}
-              </div>
+          <div style={{ paddingLeft: 12, marginBottom: 3 }}>
+            <div style={{ fontSize: '0.88rem', lineHeight: 1.5 }}>
+              {icon && <span style={{ marginRight: 5 }}>{icon}</span>}
+              {e.hangoutLink
+                ? <a href={e.hangoutLink} target="_blank" rel="noopener noreferrer" style={{ color: '#1a73e8', textDecoration: 'none' }}>{e.title}</a>
+                : <span style={{ color: tx }}>{e.title}</span>}
+              {names.length > 0 && <span style={{ fontStyle: 'italic', fontSize: '0.78rem', color: attCol, marginLeft: 6 }}>({names.join(', ')})</span>}
             </div>
-            {canRsvp && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, paddingLeft: 72 }}>
-                <span style={{ fontSize: '0.6rem', color: sb, fontFamily: C.fontSans, textTransform: 'uppercase', letterSpacing: '0.06em' }}>RSVP</span>
+            {invited && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 5 }}>
+                <span style={{ fontSize: '0.58rem', color: sb, fontFamily: C.fontSans, textTransform: 'uppercase', letterSpacing: '0.06em' }}>RSVP</span>
                 {btn('Yes', 'accepted', e.myResponse === 'accepted', GREEN)}
                 {btn('No', 'declined', e.myResponse === 'declined', RED)}
               </div>
@@ -1047,11 +1100,57 @@ Rules:
         );
       }
 
-      const byDay = {};
-      if (isWeekly) st.events.forEach(e => { const d = (e.start || '').slice(0, 10); (byDay[d] = byDay[d] || []).push(e); });
+      const Group = ({ label, events }) => (
+        <div style={rowWrap}>
+          <div style={timeLbl}>{label}</div>
+          {events.map(e => <EventLine key={evKey(e)} e={e} />)}
+        </div>
+      );
+
+      // Daily: all-day group, then event-groups and empty-hour rows interleaved chronologically.
+      function DailySchedule() {
+        const { allDay, timed, groups } = groupByExactTime(st.events);
+        const rows = [...groups, ...emptyHourRows(timed)].sort((a, b) => a.sort - b.sort);
+        return (
+          <div>
+            {allDay.length > 0 && <Group label="All day" events={allDay} />}
+            {rows.map((row, i) => row.kind === 'empty' ? (
+              <div key={'em' + i} style={rowWrap}>
+                <div style={{ ...timeLbl, color: emptyCol }}>{row.label}</div>
+                <div style={{ paddingLeft: 12, color: emptyCol, fontStyle: 'italic', fontSize: '0.8rem' }}>No Schedule</div>
+              </div>
+            ) : (
+              <div key={'g' + i} style={rowWrap}>
+                <div style={timeLbl}>{fmtTime(row.time)}</div>
+                {row.events.map(e => <EventLine key={evKey(e)} e={e} />)}
+              </div>
+            ))}
+          </div>
+        );
+      }
+
+      // Weekly: group by day; within each day, all-day then event-groups by exact time.
+      function WeeklySchedule() {
+        const byDay = {};
+        st.events.forEach(e => { const key = e.allDay ? (e.start || '').slice(0, 10) : bizDateKey(e.start); (byDay[key] = byDay[key] || []).push(e); });
+        return (
+          <div>
+            {Object.keys(byDay).sort().map(key => {
+              const { allDay, groups } = groupByExactTime(byDay[key]);
+              return (
+                <div key={key} style={{ marginBottom: 4 }}>
+                  <div style={{ fontSize: '0.66rem', fontWeight: 700, color: dark ? C.gold : C.navy, textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: C.fontSans, marginTop: 10, marginBottom: 2 }}>{fmtDayKey(key)}</div>
+                  {allDay.length > 0 && <Group label="All day" events={allDay} />}
+                  {groups.map((g, i) => <Group key={i} label={fmtTime(g.time)} events={g.events} />)}
+                </div>
+              );
+            })}
+          </div>
+        );
+      }
 
       return (
-        <div style={{ background: cd, border: `1px solid ${bd}`, borderRadius: 16, padding: 16, margin: '8px 0', maxWidth: 560 }}>
+        <div style={{ background: cd, border: `1px solid ${bd}`, borderRadius: 16, padding: 16, margin: '8px 0', maxWidth: 600 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <i className="ti ti-calendar-stats" style={{ fontSize: 18, color: dark ? C.gold : C.navy }} />
             <div style={{ flex: 1, fontFamily: C.fontDisplay, fontStyle: 'italic', fontSize: '1.15rem', color: tx }}>{isWeekly ? 'This Week' : "Today's Brief"}</div>
@@ -1065,32 +1164,28 @@ Rules:
                 : <span>Couldn’t load your calendar: {st.error}</span>}
             </div>
           )}
-          {st.phase === 'ready' && st.events.length === 0 && <div style={{ textAlign: 'center', color: sb, fontSize: '0.85rem', padding: '16px 0', fontStyle: 'italic' }}>Nothing scheduled {isWeekly ? 'this week' : 'today'}. 🎉</div>}
-          {st.phase === 'ready' && st.events.length > 0 && (
+          {st.phase === 'ready' && (
             <div>
-              {brief.phase === 'loading' && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem', fontStyle: 'italic', color: sb, padding: '2px 0 12px' }}>
-                  <i className="ti ti-sparkles" style={{ color: dark ? C.gold : '#AD832F' }} /> Writing your brief…
+              {/* Quote of the Day */}
+              {(quote.phase === 'loading' || (quote.phase === 'ready' && quote.text)) && (
+                <div style={{ background: quoteBg, borderRadius: 6, padding: '14px 18px', marginBottom: 20 }}>
+                  <div style={{ fontSize: 11, letterSpacing: '0.08em', color: '#999', marginBottom: 6, textTransform: 'uppercase', fontFamily: C.fontSans }}>Quote of the Day</div>
+                  <div style={{ fontStyle: 'italic', fontSize: 14, color: quoteTx, opacity: quote.phase === 'loading' ? 0.5 : 1 }}>{quote.phase === 'loading' ? '…' : quote.text}</div>
                 </div>
               )}
-              {brief.phase === 'ready' && brief.text && (
-                <div style={{ background: dark ? 'rgba(173,131,47,0.10)' : '#FBF7EE', border: `1px solid ${dark ? 'rgba(173,131,47,0.25)' : '#EFE4CC'}`, borderRadius: 12, padding: '12px 14px', marginBottom: 12, fontSize: '0.86rem', lineHeight: 1.6, color: tx, whiteSpace: 'pre-wrap' }}>
-                  {brief.text}
-                </div>
-              )}
-              {conflicts.length > 0 && (
-                <div style={{ background: '#fff8e1', borderLeft: '3px solid #f5a623', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: '0.72rem', color: '#7a5b00', fontFamily: C.fontSans, lineHeight: 1.5 }}>
-                  ⚠️ <b>Overlap:</b> {conflicts.map(([a, b], i) => <span key={i}>{a.title} ({fmtTime(a.start)}) &amp; {b.title} ({fmtTime(b.start)}){i < conflicts.length - 1 ? '; ' : ''}</span>)}
-                </div>
-              )}
-              {isWeekly
-                ? Object.keys(byDay).sort().map(d => (
-                    <div key={d} style={{ marginBottom: 6 }}>
-                      <div style={{ fontSize: '0.66rem', fontWeight: 700, color: dark ? C.gold : C.navy, textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: C.fontSans, marginTop: 8, marginBottom: 2 }}>{fmtDay(d + 'T00:00:00')}</div>
-                      {byDay[d].map(e => <EventRow key={evKey(e)} e={e} />)}
+              {st.events.length === 0 ? (
+                <div style={{ textAlign: 'center', color: sb, fontSize: '0.85rem', padding: '16px 0', fontStyle: 'italic' }}>Nothing scheduled {isWeekly ? 'this week' : 'today'}. 🎉</div>
+              ) : (
+                <div>
+                  {isWeekly ? <WeeklySchedule /> : <DailySchedule />}
+                  {conflicts.length > 0 && (
+                    <div style={{ background: '#fff8e1', borderLeft: '4px solid #f5a623', borderRadius: 4, padding: '12px 16px', marginTop: 20, fontSize: '0.78rem', color: '#7a5b00', fontFamily: C.fontSans, lineHeight: 1.5 }}>
+                      ⚠️ <b>Conflicts</b> — {conflicts.map(([a, b], i) => <span key={i}>{a.title} ({fmtTime(a.start)}) &amp; {b.title} ({fmtTime(b.start)}){i < conflicts.length - 1 ? '; ' : ''}</span>)}
                     </div>
-                  ))
-                : st.events.map(e => <EventRow key={evKey(e)} e={e} />)}
+                  )}
+                  <div style={{ marginTop: 16, fontSize: '0.72rem', color: '#999', fontFamily: C.fontSans }}>Legend: ✅ Confirmed &nbsp;|&nbsp; ⚠️ No RSVP</div>
+                </div>
+              )}
             </div>
           )}
         </div>

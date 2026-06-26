@@ -851,6 +851,14 @@ Rules:
     // Built-in pill, always shown first in BOTH modes — starts a fresh chat.
     const NEW_CHAT_PILL = { id: 'new-chat', label: 'New Chat', icon: 'ti-message-plus', colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'newchat', config: {} };
 
+    // Built-in Calendar Brief pills — always shown in Work Mode (like New Chat).
+    // Hardcoded so they need no admin row or SQL; each opens the interactive
+    // CalendarBriefCard. dispatchPill handles type 'calendar'.
+    const CALENDAR_PILLS = [
+      { id: 'cal-daily',  label: "Today's Brief", icon: 'ti-calendar-stats', colorLight: '#5A3FA0', colorDark: '#B79CEB', type: 'calendar', mode: 'work', config: { kind: 'daily' },  enabled: true },
+      { id: 'cal-weekly', label: 'Weekly Brief',  icon: 'ti-calendar',       colorLight: '#5A3FA0', colorDark: '#B79CEB', type: 'calendar', mode: 'work', config: { kind: 'weekly' }, enabled: true },
+    ];
+
     // Curated icon set for the pill builder's icon picker (all verified Tabler names).
     const PILL_ICONS = ['ti-chart-bar', 'ti-presentation', 'ti-home', 'ti-currency-dollar', 'ti-users', 'ti-file-text', 'ti-calendar-stats', 'ti-sparkles', 'ti-clipboard', 'ti-clipboard-list', 'ti-mail', 'ti-phone', 'ti-map-pin', 'ti-building', 'ti-key', 'ti-calendar', 'ti-checklist', 'ti-notes', 'ti-report', 'ti-target', 'ti-trophy', 'ti-coin', 'ti-briefcase', 'ti-message'];
 
@@ -6072,7 +6080,9 @@ Rules:
       // Effective pills: DB pills when present, else the built-in fallback; only enabled ones show.
       const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false);
       // New Chat first, then the pills tagged for the current mode (legacy pills default to Work).
-      const shownPills = [NEW_CHAT_PILL].concat(effectivePills.filter(p => (p.mode || 'work') === mode));
+      const shownPills = [NEW_CHAT_PILL]
+        .concat(effectivePills.filter(p => (p.mode || 'work') === mode))
+        .concat(CALENDAR_PILLS.filter(p => p.mode === mode));
       useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
 
       // Per-conversation draft autosave (device-local). Key 'new' before a conversation exists.

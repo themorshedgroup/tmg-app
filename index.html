@@ -968,8 +968,11 @@ Rules:
         let alive = true;
         (async () => {
           const { y, mo, d } = bizYMD(new Date());
+          // Weekly = today through the end of THIS Mon–Sun week (e.g. Fri → Fri/Sat/Sun); daily = today only.
+          const dow = new Date(Date.UTC(y, mo - 1, d, 12)).getUTCDay(); // 0=Sun … 6=Sat
+          const span = isWeekly ? (dow === 0 ? 1 : 8 - dow) : 1;
           const start = bizWallToInstant(y, mo, d, 0, 0);
-          const end = bizWallToInstant(y, mo, d + (isWeekly ? 7 : 1), 0, 0);
+          const end = bizWallToInstant(y, mo, d + span, 0, 0);
           try {
             const evs = await fetchGoogleEvents(start.toISOString(), end.toISOString());
             if (!alive) return;
@@ -1135,11 +1138,11 @@ Rules:
         st.events.forEach(e => { const key = e.allDay ? (e.start || '').slice(0, 10) : bizDateKey(e.start); (byDay[key] = byDay[key] || []).push(e); });
         return (
           <div>
-            {Object.keys(byDay).sort().map(key => {
+            {Object.keys(byDay).sort().map((key, di) => {
               const { allDay, groups } = groupByExactTime(byDay[key]);
               return (
-                <div key={key} style={{ marginBottom: 4 }}>
-                  <div style={{ fontSize: '0.66rem', fontWeight: 700, color: dark ? C.gold : C.navy, textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: C.fontSans, marginTop: 10, marginBottom: 2 }}>{fmtDayKey(key)}</div>
+                <div key={key} style={{ marginTop: di === 0 ? 0 : 18, marginBottom: 6 }}>
+                  <div style={{ marginBottom: 8, paddingBottom: 5, borderBottom: `2px solid ${dark ? C.gold : C.navy}`, fontSize: '0.86rem', fontWeight: 800, color: dark ? C.gold : C.navy, textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: C.fontSans }}>{fmtDayKey(key)}</div>
                   {allDay.length > 0 && <Group label="All day" events={allDay} />}
                   {groups.map((g, i) => <Group key={i} label={fmtTime(g.time)} events={g.events} />)}
                 </div>

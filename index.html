@@ -935,9 +935,10 @@ Rules:
     // Fetches today's (daily) or the next 7 days' (weekly) Google Calendar events
     // and lets the user RSVP Yes/No per event — writes straight back via the
     // google-calendar edge function. No AI call.
-    function CalendarBriefCard({ kind, dark, onCancel }) {
+    function CalendarBriefCard({ kind, dark, onCancel, userName }) {
       const isWeekly = kind === 'weekly';
       const [st, setSt] = useState({ phase: 'loading', events: [], error: '' });
+      const [brief, setBrief] = useState({ phase: 'idle', text: '' });
       const [busy, setBusy] = useState({});
       const GREEN = '#1E6B40', RED = '#C0392B';
       const evKey = (e) => (e.calendarId || 'primary') + '|' + e.id;
@@ -960,6 +961,36 @@ Rules:
         })();
         return () => { alive = false; };
       }, [kind]);
+
+      // Once events are in, have the AI write a short, warm brief (the narrative
+      // "here's your day" summary). Fails silently — the schedule still shows.
+      useEffect(() => {
+        if (st.phase !== 'ready' || st.events.length === 0) { setBrief({ phase: 'idle', text: '' }); return; }
+        let alive = true;
+        setBrief({ phase: 'loading', text: '' });
+        (async () => {
+          try {
+            const ft = (iso) => new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+            const fd = (iso) => new Date(iso).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+            const lines = st.events.map(e => {
+              const when = e.allDay ? 'All day' : ((isWeekly ? fd(e.start) + ' · ' : '') + ft(e.start) + (e.end ? '–' + ft(e.end) : ''));
+              const who = (e.attendeesDetail || []).filter(a => !a.self && (a.name || a.email)).map(a => a.name || a.email).slice(0, 8);
+              return '• ' + when + ' — ' + e.title + (e.location ? ' @ ' + e.location : '') + (who.length ? ' (with ' + who.join(', ') + ')' : '') + (e.hangoutLink ? ' [Google Meet]' : '');
+            }).join('\n');
+            const who = userName || 'the user';
+            const sys = isWeekly
+              ? `You are ${who}'s sharp, warm executive assistant writing their week-ahead brief. Open with a short greeting using their first name. Then in 3–5 short sentences, give them the shape of the week: how many meetings total, the busiest and lightest days, and the 2–3 meetings worth preparing for (mention who and when). Be concise, practical, and encouraging. Plain text only — no markdown headers, no sign-off, and do NOT list every event (the full schedule is shown separately right below your brief).`
+              : `You are ${who}'s sharp, warm executive assistant writing their morning brief for today. Open with a short greeting using their first name. Then in 2–4 short sentences (or a few tight bullets), give them the shape of the day: how many meetings, when the first and last are, any back-to-back stretches or notable open blocks, and a quick prep nudge for the 1–2 most important meetings (mention who they're with). Be concise, practical, and encouraging. Plain text only — no markdown headers, no sign-off, and do NOT restate every event time (the full schedule is shown separately right below your brief).`;
+            const todayStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+            const userMsg = `Here is my calendar for ${isWeekly ? 'the next 7 days' : 'today'} (${todayStr}):\n\n${lines}\n\nWrite my brief.`;
+            const txt = await callAI([{ role: 'user', content: userMsg }], sys, 'ai_chat');
+            if (alive) setBrief({ phase: (txt || '').trim() ? 'ready' : 'idle', text: (txt || '').trim() });
+          } catch (e) {
+            if (alive) setBrief({ phase: 'idle', text: '' }); // brief is best-effort; never block the schedule
+          }
+        })();
+        return () => { alive = false; };
+      }, [st.phase, st.events.length, kind]);
 
       async function rsvp(e, status) {
         const k = evKey(e), prev = e.myResponse;
@@ -1037,6 +1068,16 @@ Rules:
           {st.phase === 'ready' && st.events.length === 0 && <div style={{ textAlign: 'center', color: sb, fontSize: '0.85rem', padding: '16px 0', fontStyle: 'italic' }}>Nothing scheduled {isWeekly ? 'this week' : 'today'}. 🎉</div>}
           {st.phase === 'ready' && st.events.length > 0 && (
             <div>
+              {brief.phase === 'loading' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem', fontStyle: 'italic', color: sb, padding: '2px 0 12px' }}>
+                  <i className="ti ti-sparkles" style={{ color: dark ? C.gold : '#AD832F' }} /> Writing your brief…
+                </div>
+              )}
+              {brief.phase === 'ready' && brief.text && (
+                <div style={{ background: dark ? 'rgba(173,131,47,0.10)' : '#FBF7EE', border: `1px solid ${dark ? 'rgba(173,131,47,0.25)' : '#EFE4CC'}`, borderRadius: 12, padding: '12px 14px', marginBottom: 12, fontSize: '0.86rem', lineHeight: 1.6, color: tx, whiteSpace: 'pre-wrap' }}>
+                  {brief.text}
+                </div>
+              )}
               {conflicts.length > 0 && (
                 <div style={{ background: '#fff8e1', borderLeft: '3px solid #f5a623', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: '0.72rem', color: '#7a5b00', fontFamily: C.fontSans, lineHeight: 1.5 }}>
                   ⚠️ <b>Overlap:</b> {conflicts.map(([a, b], i) => <span key={i}>{a.title} ({fmtTime(a.start)}) &amp; {b.title} ({fmtTime(b.start)}){i < conflicts.length - 1 ? '; ' : ''}</span>)}
@@ -6395,7 +6436,7 @@ Rules:
                       onCancel={() => setKpiFlow(null)}
                     />
                   ) : calBrief ? (
-                    <CalendarBriefCard dark={dark} kind={calBrief.kind} onCancel={() => setCalBrief(null)} />
+                    <CalendarBriefCard dark={dark} kind={calBrief.kind} userName={myName} onCancel={() => setCalBrief(null)} />
                   ) : null}
                 />
               );

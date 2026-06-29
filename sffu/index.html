@@ -420,13 +420,14 @@
       },
 
       async loadSettings() {
-        if (!this.client()) return { twilioPhone: '', sendTime: '' };
+        if (!this.client()) return { twilioPhone: '', sendTime: '', senderName: '' };
         const { data, error } = await this.client()
           .from('app_settings').select('*').eq('id', 1).single();
-        if (error || !data) return { twilioPhone: '', sendTime: '' };
+        if (error || !data) return { twilioPhone: '', sendTime: '', senderName: '' };
         return {
           twilioPhone: data.twilio_phone_number || '',
           sendTime:    data.send_time_local     || '',
+          senderName:  data.sender_name         || '',
         };
       },
 
@@ -436,6 +437,7 @@
           id: 1,
           twilio_phone_number: fields.twilioPhone || null,
           send_time_local:     fields.sendTime    || null,
+          sender_name:         fields.senderName  || null,
           updated_at:          new Date().toISOString(),
           updated_by_name:     user?.user_metadata?.full_name || user?.email || null,
         }, { onConflict: 'id' });
@@ -1310,6 +1312,7 @@
 
       const [templates,       setTemplates]       = useState(SMS_TEMPLATE_DEFAULTS.map(t => t.body));
       const [sendTime,        setSendTime]         = useState('');
+      const [senderName,      setSenderName]       = useState('');
       const [tmplSaving,      setTmplSaving]      = useState(false);
       const [tmplSaved,       setTmplSaved]       = useState(false);
       const [twilioSaving,    setTwilioSaving]    = useState(false);
@@ -1317,7 +1320,7 @@
 
       useEffect(() => {
         DB.loadTemplates().then(bodies => setTemplates(bodies));
-        DB.loadSettings().then(s => setSendTime(s.sendTime));
+        DB.loadSettings().then(s => { setSendTime(s.sendTime); setSenderName(s.senderName); });
       }, []);
 
       async function handleSaveTemplates() {
@@ -1333,7 +1336,7 @@
       async function handleSaveTwilio() {
         setTwilioSaving(true); setTwilioSaved(false);
         try {
-          await DB.saveSettings({ twilioPhone: TWILIO_PHONE, sendTime }, user);
+          await DB.saveSettings({ twilioPhone: TWILIO_PHONE, sendTime, senderName }, user);
           setTwilioSaved(true);
           setTimeout(() => setTwilioSaved(false), 3000);
         } catch(e) { console.error('[Settings] saveSettings:', e.message); }
@@ -1402,6 +1405,12 @@
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <SettingsField label="Twilio Phone Number" value={TWILIO_PHONE} readOnly badge="Pending" />
               <SettingsField label="Send Time (local)" placeholder="10:00 AM Central" value={sendTime} onChange={e => setSendTime(e.target.value)} />
+              <SettingsField
+                label="Sender Name ({{my_name}} in templates)"
+                placeholder="e.g. Alexa"
+                value={senderName}
+                onChange={e => setSenderName(e.target.value)}
+              />
             </div>
             <div style={{ marginTop: 14 }}>
               <ActionButton

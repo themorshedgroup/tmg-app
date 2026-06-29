@@ -1297,7 +1297,7 @@
     }
 
     // Fixed Twilio sending number (A2P 10DLC registration pending).
-    const TWILIO_PHONE = '(830) 283-6102';
+    const SMS_PHONE = '(512) 610-1095';
 
     const SMS_TEMPLATE_DEFAULTS = [
       { touch: 1, day: 1, body: "Hi {{agent_first_name}}! This is {{my_name}} with The Morshed Group, reaching out on behalf of our listing agent {{listing_agent}}. Just following up on your showing at {{address}} — did your clients enjoy the property? Any feedback would be greatly appreciated! 🏡" },
@@ -1310,18 +1310,11 @@
       const email    = user?.email || '';
       const initial  = fullName.charAt(0).toUpperCase();
 
-      const [templates,       setTemplates]       = useState(SMS_TEMPLATE_DEFAULTS.map(t => t.body));
-      const [sendTime,        setSendTime]         = useState('');
-      const [senderName,      setSenderName]       = useState('');
-      const [tmplSaving,      setTmplSaving]      = useState(false);
-      const [tmplSaved,       setTmplSaved]       = useState(false);
-      const [twilioSaving,    setTwilioSaving]    = useState(false);
-      const [twilioSaved,     setTwilioSaved]     = useState(false);
+      const [templates,   setTemplates]   = useState(SMS_TEMPLATE_DEFAULTS.map(t => t.body));
+      const [tmplSaving,  setTmplSaving]  = useState(false);
+      const [tmplSaved,   setTmplSaved]   = useState(false);
 
-      useEffect(() => {
-        DB.loadTemplates().then(bodies => setTemplates(bodies));
-        DB.loadSettings().then(s => { setSendTime(s.sendTime); setSenderName(s.senderName); });
-      }, []);
+      useEffect(() => { DB.loadTemplates().then(bodies => setTemplates(bodies)); }, []);
 
       async function handleSaveTemplates() {
         setTmplSaving(true); setTmplSaved(false);
@@ -1331,16 +1324,6 @@
           setTimeout(() => setTmplSaved(false), 3000);
         } catch(e) { console.error('[Settings] saveTemplates:', e.message); }
         finally { setTmplSaving(false); }
-      }
-
-      async function handleSaveTwilio() {
-        setTwilioSaving(true); setTwilioSaved(false);
-        try {
-          await DB.saveSettings({ twilioPhone: TWILIO_PHONE, sendTime, senderName }, user);
-          setTwilioSaved(true);
-          setTimeout(() => setTwilioSaved(false), 3000);
-        } catch(e) { console.error('[Settings] saveSettings:', e.message); }
-        finally { setTwilioSaving(false); }
       }
 
       return (
@@ -1397,27 +1380,9 @@
             </div>
           </SectionCard>
 
-          {/* Twilio */}
-          <SectionCard title="Twilio SMS" mb={14}>
-            <div style={{ fontSize: '0.83rem', color: C.textSecondary, lineHeight: 1.6, marginBottom: 14 }}>
-              SMS send configuration. Set up your Twilio account to activate automated follow-ups.
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <SettingsField label="Twilio Phone Number" value={TWILIO_PHONE} readOnly badge="Pending" />
-              <SettingsField label="Send Time (local)" placeholder="10:00 AM Central" value={sendTime} onChange={e => setSendTime(e.target.value)} />
-              <SettingsField
-                label="Sender Name ({{my_name}} in templates)"
-                placeholder="e.g. Alexa"
-                value={senderName}
-                onChange={e => setSenderName(e.target.value)}
-              />
-            </div>
-            <div style={{ marginTop: 14 }}>
-              <ActionButton
-                label={twilioSaving ? 'Saving…' : twilioSaved ? 'Saved ✓' : 'Save Twilio Config'}
-                onClick={handleSaveTwilio}
-              />
-            </div>
+          {/* SMS Configuration */}
+          <SectionCard title="SMS Configuration" mb={14}>
+            <SettingsField label="Phone Number" value={SMS_PHONE} readOnly />
           </SectionCard>
 
           {/* Archived Properties */}

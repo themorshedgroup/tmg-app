@@ -36,10 +36,10 @@ function serviceClient() {
 }
 
 // Fill the app's template placeholders, same as the app's renderTemplate().
-function fill(body: string, s: any, senderName: string): string {
+function fill(body: string, s: any): string {
   const agentFirst = (s.agent_name || "").split(" ")[0] || "there";
   const address = s.property_address || "";
-  const myName = senderName || (s.added_by_name || "").split(" ")[0] || "The Morshed Group";
+  const myName = (s.added_by_name || "").split(" ")[0] || "The Morshed Group";
   const listingAgent = s.listing_agent || "our team";
   return (body || "")
     .replace(/\{\{\s*agent_first_name\s*\}\}/g, agentFirst)
@@ -84,8 +84,6 @@ Deno.serve(async (req) => {
   const agentByAddr: Record<string, string> = {};
   (props || []).forEach((p: any) => { if (p.address) agentByAddr[p.address] = p.listing_agent; });
 
-  const { data: settings } = await sb.from("app_settings").select("sender_name").eq("id", 1).single();
-  const senderName: string = settings?.sender_name || "";
 
   let sent = 0;
   const errors: any[] = [];
@@ -94,7 +92,7 @@ Deno.serve(async (req) => {
     const body = tplByTouch[touch];
     if (!body) continue;
     (s as any).listing_agent = agentByAddr[s.property_address] || null;
-    const content = fill(body, s, senderName);
+    const content = fill(body, s);
 
     // 3) Send via Quo. (If you get 401, change the header to `Bearer ${QUO_KEY}`.)
     let quoId: string | null = null;

@@ -1104,7 +1104,7 @@
       const firstName = user?.user_metadata?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there';
 
       return (
-        <div style={{ padding: '20px 16px 100px' }}>
+        <div style={{ padding: '20px 16px 32px' }}>
           {/* Greeting — hidden when embedded in TMG (the app name lives in the TMG header row) */}
           {!EMBED && (
             <div style={{ marginBottom: 20 }}>
@@ -1305,7 +1305,7 @@
       { touch: 3, day: 3, body: "Hi {{agent_first_name}}, one last follow-up on {{address}}. Feel free to reach out anytime if your clients have questions for {{listing_agent}}. Thanks so much for showing the property!" },
     ];
 
-    function SettingsTab({ user }) {
+    function SettingsModal({ user, onClose }) {
       const fullName = user?.user_metadata?.full_name || 'User';
       const email    = user?.email || '';
       const initial  = fullName.charAt(0).toUpperCase();
@@ -1327,67 +1327,82 @@
       }
 
       return (
-        <div style={{ padding: '20px 16px 100px', overflowY: 'auto', height: '100%' }}>
-          <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Settings</div>
-
-          {/* Account */}
-          <SectionCard title="Account" mb={14}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 18 }}>
-              <div style={{ width: 44, height: 44, borderRadius: '50%', background: C.navy, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.goldSoft, fontWeight: 300, fontSize: '1.2rem', fontFamily: C.fontSans, flexShrink: 0 }}>
-                {initial}
-              </div>
-              <div>
-                <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '0.95rem' }}>{fullName}</div>
-                <div style={{ color: C.textSecondary, fontSize: '0.8rem', marginTop: 2 }}>{email}</div>
-              </div>
+        <>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,26,74,0.45)' }} />
+          <div style={{
+            position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 301,
+            background: C.surface, borderRadius: '20px 20px 0 0',
+            padding: '24px 20px 40px',
+            boxShadow: '0 -4px 32px rgba(0,26,74,0.15)',
+            maxHeight: '85vh', overflowY: 'auto',
+          }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+              <div style={{ fontSize: '1.2rem', fontStyle: 'italic', fontFamily: C.fontDisplay, color: C.navy }}>Settings</div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: C.textMuted, fontSize: 20, display: 'flex' }}>
+                <i className="ti ti-x" />
+              </button>
             </div>
-            <ActionButton label="Sign out" danger onClick={() => window.SupabaseAuth.signOut()} />
-          </SectionCard>
 
-          {/* SMS Templates */}
-          <SectionCard title="SMS Follow-up Templates" mb={14}>
-            <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 14, lineHeight: 1.8 }}>
-              Available placeholders:{' '}
-              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{agent_first_name}}'}</span>{' · '}
-              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{address}}'}</span>{' · '}
-              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{my_name}}'}</span>{' · '}
-              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{listing_agent}}'}</span>{' · '}
-              <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{zillow_url}}'}</span>
-            </div>
-            {SMS_TEMPLATE_DEFAULTS.map((t, i) => (
-              <div key={t.touch} style={{ marginBottom: i < 2 ? 14 : 0 }}>
-                <div style={{ fontSize: '0.62rem', fontWeight: 500, color: C.navy, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 6, fontFamily: C.fontSans }}>
-                  Follow-up {t.touch} · Day {t.day}
+            {/* Account */}
+            <SectionCard title="Account" mb={14}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 18 }}>
+                <div style={{ width: 44, height: 44, borderRadius: '50%', background: C.navy, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.goldSoft, fontWeight: 300, fontSize: '1.2rem', fontFamily: C.fontSans, flexShrink: 0 }}>
+                  {initial}
                 </div>
-                <textarea
-                  value={templates[i]}
-                  onChange={e => { const n = [...templates]; n[i] = e.target.value; setTemplates(n); }}
-                  rows={3}
-                  style={{
-                    width: '100%', background: C.bg, border: `1px solid ${C.border}`,
-                    borderRadius: 10, padding: '10px 12px', color: C.textPrimary,
-                    fontSize: '0.83rem', lineHeight: 1.6, resize: 'none',
-                    fontFamily: C.fontSans, outline: 'none',
-                  }}
+                <div>
+                  <div style={{ color: C.textPrimary, fontWeight: 600, fontSize: '0.95rem' }}>{fullName}</div>
+                  <div style={{ color: C.textSecondary, fontSize: '0.8rem', marginTop: 2 }}>{email}</div>
+                </div>
+              </div>
+              <ActionButton label="Sign out" danger onClick={() => window.SupabaseAuth.signOut()} />
+            </SectionCard>
+
+            {/* SMS Templates */}
+            <SectionCard title="SMS Follow-up Templates" mb={14}>
+              <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 14, lineHeight: 1.8 }}>
+                Available placeholders:{' '}
+                <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{agent_first_name}}'}</span>{' · '}
+                <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{address}}'}</span>{' · '}
+                <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{my_name}}'}</span>{' · '}
+                <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{listing_agent}}'}</span>{' · '}
+                <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{zillow_url}}'}</span>
+              </div>
+              {SMS_TEMPLATE_DEFAULTS.map((t, i) => (
+                <div key={t.touch} style={{ marginBottom: i < 2 ? 14 : 0 }}>
+                  <div style={{ fontSize: '0.62rem', fontWeight: 500, color: C.navy, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 6, fontFamily: C.fontSans }}>
+                    Follow-up {t.touch} · Day {t.day}
+                  </div>
+                  <textarea
+                    value={templates[i]}
+                    onChange={e => { const n = [...templates]; n[i] = e.target.value; setTemplates(n); }}
+                    rows={3}
+                    style={{
+                      width: '100%', background: C.bg, border: `1px solid ${C.border}`,
+                      borderRadius: 10, padding: '10px 12px', color: C.textPrimary,
+                      fontSize: '0.83rem', lineHeight: 1.6, resize: 'none',
+                      fontFamily: C.fontSans, outline: 'none',
+                    }}
+                  />
+                </div>
+              ))}
+              <div style={{ marginTop: 14 }}>
+                <ActionButton
+                  label={tmplSaving ? 'Saving…' : tmplSaved ? 'Saved ✓' : 'Save Templates'}
+                  onClick={handleSaveTemplates}
                 />
               </div>
-            ))}
-            <div style={{ marginTop: 14 }}>
-              <ActionButton
-                label={tmplSaving ? 'Saving…' : tmplSaved ? 'Saved ✓' : 'Save Templates'}
-                onClick={handleSaveTemplates}
-              />
-            </div>
-          </SectionCard>
+            </SectionCard>
 
-          {/* SMS Configuration */}
-          <SectionCard title="SMS Configuration" mb={14}>
-            <SettingsField label="Phone Number" value={SMS_PHONE} readOnly />
-          </SectionCard>
+            {/* SMS Configuration */}
+            <SectionCard title="SMS Configuration" mb={14}>
+              <SettingsField label="Phone Number" value={SMS_PHONE} readOnly />
+            </SectionCard>
 
-          {/* Archived Properties */}
-          <ArchivedProperties />
-        </div>
+            {/* Archived Properties */}
+            <ArchivedProperties />
+          </div>
+        </>
       );
     }
 
@@ -1681,50 +1696,6 @@
       );
     }
 
-    // ─── Bottom Nav (floating pill) ──────────────────────────────────
-    const TABS = [
-      { id: 'overview', label: 'Overview', icon: 'ti-layout-grid' },
-      { id: 'settings', label: 'Settings', icon: 'ti-settings'    },
-    ];
-
-    function BottomNav({ active, onChange, dark }) {
-      return (
-        <nav style={{
-          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 50,
-          background: dark ? '#000D26' : '#FCFBF8',
-          borderTop: dark ? 'none' : '1px solid #E4DFD4',
-          display: 'flex', justifyContent: 'center',
-          padding: `8px 16px calc(8px + env(safe-area-inset-bottom))`,
-        }}>
-          {/* Pill container */}
-          <div style={{
-            display: 'flex', alignItems: 'center',
-            background: dark ? '#0A1E44' : '#001A4A',
-            borderRadius: 40, padding: 4, gap: 2,
-          }}>
-            {TABS.map(({ id, label, icon }) => {
-              const isActive = active === id;
-              return (
-                <button key={id} onClick={() => onChange(id)} style={{
-                  display: 'flex', flexDirection: 'column', alignItems: 'center',
-                  justifyContent: 'center', gap: 2,
-                  padding: '7px 20px', borderRadius: 30, border: 'none', cursor: 'pointer',
-                  background: isActive ? '#AD832F' : (dark ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.32)'),
-                  transition: 'background 0.2s ease',
-                }}>
-                  <i className={`ti ${icon}`} style={{ fontSize: 14, display: 'block', color: '#FFFFFF', lineHeight: 1 }} />
-                  <span style={{
-                    fontSize: 8, fontFamily: "'Jost', sans-serif",
-                    letterSpacing: '0.14em', fontWeight: 500,
-                    textTransform: 'uppercase', color: '#FFFFFF',
-                  }}>{label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </nav>
-      );
-    }
 
     // ─── Top Bar ──────────────────────────────────────────────────────
     function TopBar({ dark, onToggleDark, onAddProperty, onAddShowing, onSettings }) {
@@ -1763,9 +1734,9 @@
 
     // ─── Root App ─────────────────────────────────────────────────────
     function App({ user }) {
-      const [activeTab,          setActiveTab]          = useState('overview');
       const [showAddModal,       setShowAddModal]       = useState(false);
       const [showAddPropModal,   setShowAddPropModal]   = useState(false);
+      const [showSettings,       setShowSettings]       = useState(false);
       const [liveShowings,       setLiveShowings]       = useState([]);
       const [liveProperties,     setLiveProperties]     = useState(PROPERTIES);
       const [dark, setDark] = useState(() => EMBED_THEME ? EMBED_THEME === 'dark' : localStorage.getItem('sffu-theme') === 'dark');
@@ -1788,7 +1759,7 @@
           if (e.origin !== location.origin || !e.data || e.data.tmg !== 'sffu') return;
           if (e.data.action === 'add-property') setShowAddPropModal(true);
           else if (e.data.action === 'add-showing') setShowAddModal(true);
-          else if (e.data.action === 'toggle-settings') setActiveTab(t => t === 'settings' ? 'overview' : 'settings');
+          else if (e.data.action === 'toggle-settings') setShowSettings(s => !s);
         };
         window.addEventListener('message', onMsg);
         return () => window.removeEventListener('message', onMsg);
@@ -1814,14 +1785,13 @@
               onToggleDark={() => setDark(d => !d)}
               onAddProperty={() => setShowAddPropModal(true)}
               onAddShowing={() => setShowAddModal(true)}
-              onSettings={() => setActiveTab('settings')}
+              onSettings={() => setShowSettings(s => !s)}
             />
           )}
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-            {activeTab === 'overview' && <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} onArchive={handlePropertyArchived} />}
-            {activeTab === 'settings' && <SettingsTab user={user} />}
+            <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} onArchive={handlePropertyArchived} />
           </div>
-          {!EMBED && <BottomNav active={activeTab} onChange={setActiveTab} dark={dark} />}
+          {showSettings && <SettingsModal user={user} onClose={() => setShowSettings(false)} />}
           {showAddPropModal && (
             <AddPropertyModal
               onClose={() => setShowAddPropModal(false)}

@@ -50,18 +50,20 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     }
   }
 
-  // Connect Google Calendar (read + write events) — deliberately SEPARATE from login.
-  // Re-runs Google OAuth requesting ONLY the calendar.events scope with offline
+  // Connect Google Calendar + Tasks (read + write) — deliberately SEPARATE from login.
+  // Re-runs Google OAuth requesting the calendar.events + tasks scopes with offline
   // access, so Google issues a refresh token; init() below captures it and the app
   // stores it once (see connectGoogleCalendar in index.html). calendar.events covers
-  // BOTH reading events (current popover) and creating/editing/deleting them (future
-  // "Add Event" feature). Normal sign-in (signInWithGoogle, above) is left untouched.
+  // reading/creating/editing/deleting events; tasks covers pushing TMG tasks into
+  // Google Tasks (Settings → Google Task auto-sync). Normal sign-in (signInWithGoogle,
+  // above) is left untouched. NOTE: anyone who connected before this scope was added
+  // must hit "Reconnect" once — their stored refresh token predates the tasks grant.
   async function connectCalendar() {
     try {
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          scopes: 'https://www.googleapis.com/auth/calendar.events',
+          scopes: 'https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks',
           queryParams: { access_type: 'offline', prompt: 'consent' },
           redirectTo: _cleanUrl,
         },

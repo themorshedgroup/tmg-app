@@ -290,6 +290,14 @@
         if (error) console.error('[DB] updateShowing:', error.message);
       },
 
+      async deleteShowing(id) {
+        if (!this.client()) return;
+        // Remove the conversation thread first (no FK cascade assumed), then the showing.
+        await this.client().from('sms_messages').delete().eq('showing_id', id);
+        const { error } = await this.client().from('showings').delete().eq('id', id);
+        if (error) throw error;
+      },
+
       async loadThread(showingId) {
         if (!this.client()) return SMS_THREADS[showingId] || [];
         const { data, error } = await this.client()
@@ -709,7 +717,7 @@
     }
 
     // ─── Property Card (Overview) ─────────────────────────────────────
-    function PropertyCard({ property, allShowings, user, onArchive }) {
+    function PropertyCard({ property, allShowings, user, onArchive, onDeleteShowing }) {
       const [expanded,      setExpanded]      = useState(false);
       const [openShowingId, setOpenShowingId] = useState(null);
       const [editing,       setEditing]       = useState(false);
@@ -876,6 +884,7 @@
                   onToggle={(forceOpen) => setOpenShowingId(cur =>
                     forceOpen ? s.id : (cur === s.id ? null : s.id)
                   )}
+                  onDelete={(id) => { setOpenShowingId(cur => cur === id ? null : cur); if (onDeleteShowing) onDeleteShowing(id); }}
                 />
               ))}
             </div>
@@ -897,7 +906,7 @@
       );
     }
 
-    function ShowingRow({ showing, isOpen = false, onToggle = () => {}, user }) {
+    function ShowingRow({ showing, isOpen = false, onToggle = () => {}, user, onDelete = () => {} }) {
       const [status,       setStatus]       = useState(showing.status);
       const [localThread,  setLocalThread]  = useState(() => SMS_THREADS[showing.id] || []);
       const [threadLoaded, setThreadLoaded] = useState(false);
@@ -953,6 +962,19 @@
         setEditOffice(dispOffice); setEditDate(dispDate);
         setEditFeedback(dispFeedback);
         setEditing(false);
+      }
+
+      const [deleting, setDeleting] = useState(false);
+      async function handleDelete() {
+        if (!window.confirm(`Delete this showing for ${dispAgent || 'this agent'}? This also removes its text conversation and cannot be undone.`)) return;
+        setDeleting(true);
+        try {
+          await DB.deleteShowing(showing.id);
+          onDelete(showing.id);           // remove from the list (parent state)
+        } catch (e) {
+          setDeleting(false);
+          alert('Could not delete the showing: ' + (e.message || e));
+        }
       }
 
       const inputStyle = {
@@ -1056,6 +1078,16 @@
                     <button onClick={handleSaveEdit} style={{ flex: 1, padding: '9px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.82rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>Save</button>
                     <button onClick={handleCancelEdit} style={{ flex: 1, padding: '9px', background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
                   </div>
+                  {/* Delete — destructive, set apart below the primary actions */}
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                    <button
+                      onClick={handleDelete}
+                      disabled={deleting}
+                      style={{ width: '100%', padding: '9px', background: 'none', color: C.red, border: `1px solid ${C.red}44`, borderRadius: 8, fontSize: '0.8rem', fontWeight: 500, cursor: deleting ? 'default' : 'pointer', opacity: deleting ? 0.6 : 1, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                    >
+                      <i className="ti ti-trash" style={{ fontSize: 13 }} />{deleting ? 'Deleting…' : 'Delete Showing'}
+                    </button>
+                  </div>
                 </div>
               ) : (
                 /* ── Normal view ── */
@@ -1100,7 +1132,7 @@
     }
 
     // ─── Overview Tab ─────────────────────────────────────────────────
-    function OverviewTab({ user, liveShowings, properties, onArchive }) {
+    function OverviewTab({ user, liveShowings, properties, onArchive, onDeleteShowing }) {
       const firstName = user?.user_metadata?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there';
 
       return (
@@ -1114,7 +1146,7 @@
           )}
 
           {properties.map(p => (
-            <PropertyCard key={p.id} property={p} allShowings={liveShowings} user={user} onArchive={onArchive} />
+            <PropertyCard key={p.id} property={p} allShowings={liveShowings} user={user} onArchive={onArchive} onDeleteShowing={onDeleteShowing} />
           ))}
         </div>
       );
@@ -1777,6 +1809,10 @@
         setLiveProperties(prev => prev.filter(p => p.id !== propId));
       }
 
+      function handleShowingDeleted(showingId) {
+        setLiveShowings(prev => prev.filter(s => s.id !== showingId));
+      }
+
       return (
         <div style={{ height: '100%', background: dark ? '#000D26' : C.bg, display: 'flex', flexDirection: 'column', color: C.textPrimary, transition: 'background 0.2s ease' }}>
           {!EMBED && (
@@ -1789,7 +1825,7 @@
             />
           )}
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-            <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} onArchive={handlePropertyArchived} />
+            <OverviewTab user={user} liveShowings={liveShowings} properties={liveProperties} onArchive={handlePropertyArchived} onDeleteShowing={handleShowingDeleted} />
           </div>
           {showSettings && <SettingsModal user={user} onClose={() => setShowSettings(false)} />}
           {showAddPropModal && (

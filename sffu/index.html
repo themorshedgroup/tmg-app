@@ -913,12 +913,40 @@
       const [replyText,    setReplyText]    = useState('');
       const [editing,      setEditing]      = useState(false);
 
-      // Load thread from DB when first expanded
+      // Load thread from DB when first expanded, then keep it live while open —
+      // subscribe to new sms_messages rows so replies (and our own sends) appear
+      // without a refresh. Unsubscribes when the row closes.
       useEffect(() => {
-        if (isOpen && !threadLoaded) {
+        if (!isOpen) return;
+        if (!threadLoaded) {
           setThreadLoaded(true);
           DB.loadThread(showing.id).then(t => setLocalThread(t));
         }
+        const client = DB.client();
+        if (!client) return;
+        const channel = client
+          .channel('sms-' + showing.id)
+          .on('postgres_changes', {
+            event: 'INSERT', schema: 'public', table: 'sms_messages',
+            filter: `showing_id=eq.${showing.id}`,
+          }, (payload) => {
+            const row = payload.new;
+            const incoming = {
+              id: row.id, dir: row.direction, touch: row.touch_number,
+              time: new Date(row.sent_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
+              body: row.body, sentByName: row.sent_by_name,
+            };
+            setLocalThread(t => {
+              if (t.some(m => m.id === incoming.id)) return t;             // already have it
+              const optimisticIdx = t.findIndex(m => !m.id && m.dir === 'out' && m.body === incoming.body);
+              if (optimisticIdx !== -1) {                                  // fill in our own optimistic send
+                const copy = t.slice(); copy[optimisticIdx] = incoming; return copy;
+              }
+              return [...t, incoming];
+            });
+          })
+          .subscribe();
+        return () => { client.removeChannel(channel); };
       }, [isOpen]);
       const [editAgent,    setEditAgent]    = useState(showing.agent);
       const [editPhone,    setEditPhone]    = useState(showing.phone);

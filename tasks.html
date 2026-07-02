@@ -1054,15 +1054,19 @@ Rules:
         const [tRes, pRes, prRes, lRes] = await Promise.all([
           c.from('tasks').select('*').order('created_at', { ascending: false }),
           c.from('task_people').select('task_id,user_id,role'),
-          c.from('projects').select('id,name'),
+          c.from('projects').select('id,name,archived'),
           c.from('task_labels').select('task_id,user_id,label'),
         ]);
         const peopleByTask = {};
         (pRes.data || []).forEach(p => { (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p); });
         const labelsByTask = {};
         (lRes.data || []).forEach(l => { (labelsByTask[l.task_id] = labelsByTask[l.task_id] || []).push(l); });
-        const projById = {}; (prRes.data || []).forEach(p => { projById[p.id] = p.name; });
-        return { tasks: tRes.data || [], peopleByTask, projById, labelsByTask };
+        // Archived projects (e.g. the App Masterplan roadmap) never surface in the
+        // regular Tasks list — they're a separate admin-only surface (RoadmapDB).
+        const archivedIds = new Set((prRes.data || []).filter(p => p.archived).map(p => p.id));
+        const projById = {}; (prRes.data || []).forEach(p => { if (!p.archived) projById[p.id] = p.name; });
+        const tasks = (tRes.data || []).filter(t => !t.project_id || !archivedIds.has(t.project_id));
+        return { tasks, peopleByTask, projById, labelsByTask };
       },
 
       async findOrCreateProject(name, user) {

@@ -1469,15 +1469,19 @@ Rules:
         const [tRes, pRes, prRes, lRes] = await Promise.all([
           c.from('tasks').select('*').order('created_at', { ascending: false }),
           c.from('task_people').select('task_id,user_id,role'),
-          c.from('projects').select('id,name'),
+          c.from('projects').select('id,name,archived'),
           c.from('task_labels').select('task_id,user_id,label'),
         ]);
         const peopleByTask = {};
         (pRes.data || []).forEach(p => { (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p); });
         const labelsByTask = {};
         (lRes.data || []).forEach(l => { (labelsByTask[l.task_id] = labelsByTask[l.task_id] || []).push(l); });
-        const projById = {}; (prRes.data || []).forEach(p => { projById[p.id] = p.name; });
-        return { tasks: tRes.data || [], peopleByTask, projById, labelsByTask };
+        // Archived projects (e.g. the App Masterplan roadmap) never surface in the
+        // regular Tasks list — they're a separate admin-only surface (RoadmapDB).
+        const archivedIds = new Set((prRes.data || []).filter(p => p.archived).map(p => p.id));
+        const projById = {}; (prRes.data || []).forEach(p => { if (!p.archived) projById[p.id] = p.name; });
+        const tasks = (tRes.data || []).filter(t => !t.project_id || !archivedIds.has(t.project_id));
+        return { tasks, peopleByTask, projById, labelsByTask };
       },
 
       async findOrCreateProject(name, user) {
@@ -1732,6 +1736,86 @@ Rules:
       async updateActivityContent(id, content) {
         const c = this.client(); if (!c) return;
         await c.from('task_activity').update({ content }).eq('id', id);
+      },
+    };
+
+    // ─── App Masterplan (Roadmap) — backed by the shared tasks/projects tables ──
+    // Lives as a real Project named "App Masterplan"; each roadmap "tab" is a
+    // top-level task (parent_task_id null), each "subtask" a child task. Reuses
+    // roadmap_type/roadmap_difficulty/roadmap_order columns added for this feature
+    // so the granular app-feature list AND big initiatives are visible to anyone
+    // (including Claude) via the same Supabase tables — no more localStorage-only.
+    const RoadmapDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      PROJECT_NAME: 'App Masterplan',
+
+      dbToUi(row) {
+        return {
+          id: row.id, name: row.title || '', status: row.status || 'todo',
+          type: row.roadmap_type || 'mvp', difficulty: row.roadmap_difficulty || 'normal',
+          dueDate: row.due_at ? row.due_at.slice(0, 10) : null,
+          parentId: row.parent_task_id || null, order: row.roadmap_order || 0,
+          notes: row.description || '',
+        };
+      },
+
+      // archived: true keeps it out of the normal Tasks project picker (which
+      // filters .eq('archived', false)) — this project is only ever opened here.
+      async findOrCreateProjectId() {
+        const c = this.client(); if (!c) return null;
+        const { data: ex } = await c.from('projects').select('id').eq('name', this.PROJECT_NAME).limit(1).maybeSingle();
+        if (ex) return ex.id;
+        const { data, error } = await c.from('projects').insert({ name: this.PROJECT_NAME, archived: true }).select('id').single();
+        if (error) { console.error('[RoadmapDB] project:', error.message); return null; }
+        return data.id;
+      },
+
+      async load() {
+        const projectId = await this.findOrCreateProjectId();
+        if (!projectId) return { projectId: null, rows: [] };
+        const c = this.client();
+        const { data, error } = await c.from('tasks').select('*').eq('project_id', projectId).order('roadmap_order', { ascending: true });
+        if (error) { console.error('[RoadmapDB] load:', error.message); return { projectId, rows: [] }; }
+        return { projectId, rows: (data || []).map(r => this.dbToUi(r)) };
+      },
+
+      async insert(projectId, { name, status, type, dueDate, parentId, order }, user) {
+        const c = this.client(); if (!c) return null;
+        const { data, error } = await c.from('tasks').insert({
+          title: name || '', status: status || 'todo', roadmap_type: type || 'mvp',
+          roadmap_order: order || 0, due_at: dueDate || null, project_id: projectId,
+          parent_task_id: parentId || null, created_by: user?.id || null,
+        }).select().single();
+        if (error) { console.error('[RoadmapDB] insert:', error.message); return null; }
+        return this.dbToUi(data);
+      },
+
+      async update(id, patch) {
+        const c = this.client(); if (!c) return;
+        const dbPatch = { updated_at: new Date().toISOString() };
+        if ('name' in patch) dbPatch.title = patch.name;
+        if ('status' in patch) dbPatch.status = patch.status;
+        if ('type' in patch) dbPatch.roadmap_type = patch.type;
+        if ('difficulty' in patch) dbPatch.roadmap_difficulty = patch.difficulty;
+        if ('dueDate' in patch) dbPatch.due_at = patch.dueDate || null;
+        if ('parentId' in patch) dbPatch.parent_task_id = patch.parentId || null;
+        if ('order' in patch) dbPatch.roadmap_order = patch.order;
+        if ('notes' in patch) dbPatch.description = patch.notes;
+        const { error } = await c.from('tasks').update(dbPatch).eq('id', id);
+        if (error) console.error('[RoadmapDB] update:', error.message);
+      },
+
+      // Persist every row's current order (cheap — only fires on structural changes
+      // like drag-drop/add/delete, not on every keystroke) so order never drifts.
+      async persistOrder(rows) {
+        const c = this.client(); if (!c) return;
+        await Promise.all(rows.map(r => c.from('tasks').update({ roadmap_order: r.order, due_at: r.dueDate || null, parent_task_id: r.parentId || null }).eq('id', r.id)));
+      },
+
+      async delete(ids) {
+        const c = this.client(); if (!c || !ids.length) return;
+        const { error } = await c.from('tasks').delete().in('id', ids);
+        if (error) console.error('[RoadmapDB] delete:', error.message);
       },
     };
 
@@ -3192,8 +3276,8 @@ Rules:
     // (quarter/month) — no separate quarter field. Light mode only (per spec).
     const RM_STATUS = [
       { id: 'todo',       label: 'To Do',       bg: '#F1EFE8', text: '#5F5E5A', dot: '#888780' },
-      { id: 'inprogress', label: 'In Progress', bg: '#E6F1FB', text: '#185FA5', dot: '#185FA5' },
-      { id: 'completed',  label: 'Completed',   bg: '#E6F2EC', text: '#0F6E56', dot: '#0F6E56' },
+      { id: 'in_progress', label: 'In Progress', bg: '#E6F1FB', text: '#185FA5', dot: '#185FA5' },
+      { id: 'done',  label: 'Completed',   bg: '#E6F2EC', text: '#0F6E56', dot: '#0F6E56' },
       { id: 'stuck',      label: 'Stuck',       bg: '#FCEBEB', text: '#A32D2D', dot: '#A32D2D' },
     ];
     const RM_TYPES = [
@@ -3273,8 +3357,8 @@ Rules:
     function rmGroupProgress(group) {
       let total = 0, done = 0;
       group.families.forEach(f => {
-        total++; if (f.parent.status === 'completed') done++;
-        f.children.forEach(c => { total++; if (c.status === 'completed') done++; });
+        total++; if (f.parent.status === 'done') done++;
+        f.children.forEach(c => { total++; if (c.status === 'done') done++; });
       });
       return total ? Math.round(done / total * 100) : 0;
     }
@@ -3298,70 +3382,12 @@ Rules:
       blocks.push(dblock);
       return rmNormalize(blocks.reduce((a, b) => a.concat(b.items), []));
     }
-    function rmMigrate(oldArr) {
-      const mapS = { todo: 'todo', in_progress: 'inprogress', stuck: 'stuck', done: 'completed' };
-      const mapT = { mvp: 'mvp', vanity: 'future' };
-      const rows = [];
-      (oldArr || []).forEach(it => {
-        const pid = it.id || ('p' + rows.length);
-        rows.push({ id: pid, name: it.title || '', status: mapS[it.status] || 'todo', type: mapT[it.type] || 'mvp', dueDate: it.due || null, parentId: null, order: 0 });
-        (it.subtasks || []).forEach(s => rows.push({ id: s.id || ('c' + rows.length), name: s.title || '', status: s.done ? 'completed' : 'todo', type: 'mvp', dueDate: null, parentId: pid, order: 0 }));
-      });
-      return rmNormalize(rows);
-    }
-    function rmSeed() {
-      const DEF = [
-        { n: 'AI Chat', s: 'completed', t: 'mvp', subs: [['AI Mode (general assistant)', 'completed'], ['Work Mode (guided pills)', 'completed'], ['Prompt pills', 'completed'], ['Form-type pills', 'completed'], ['Guided-steps pills', 'completed'], ['Chat history (pin / archive / rename / delete)', 'completed'], ['Attachments (files / photos / PDF)', 'completed'], ['Auto-grow message box', 'completed'], ['Claude AI proxy + usage tracking', 'completed']] },
-        { n: 'Team Chat', s: 'todo', t: 'future', subs: [['Message threads preview', 'inprogress']] },
-        { n: 'Calls', s: 'todo', t: 'future', subs: [['Recent calls preview', 'inprogress']] },
-        { n: 'KPIs', s: 'todo', t: 'future', subs: [['Sales goals / KPI preview', 'inprogress']] },
-        { n: 'Deals', s: 'todo', t: 'future', subs: [['Coming-soon placeholder', 'todo']] },
-        { n: 'Shared Drives', s: 'completed', t: 'mvp', subs: [['8 Google Drive folder tiles', 'completed'], ['Admin + Agents folder links', 'completed']] },
-        { n: 'Company Directory', s: 'completed', t: 'mvp', subs: [['Live roster (Supabase + curated)', 'completed'], ['Search', 'completed'], ['Role badges', 'completed'], ['Per-person profile pages', 'completed'], ['Clickable phone (tel:) / email (mailto:)', 'completed']] },
-        { n: 'Exp Survey', s: 'completed', t: 'mvp', subs: [['Survey QR code', 'completed'], ['Survey link', 'completed']] },
-        { n: 'SFFU (Showing Follow-Up)', s: 'inprogress', t: 'mvp', subs: [['Embedded app (iframe)', 'completed'], ['Add property / add showing', 'completed'], ['SMS follow-up engine (Quo)', 'inprogress']] },
-        { n: 'Calendar', s: 'stuck', t: 'mvp', subs: [['Week view UI', 'completed'], ['Google Calendar sync', 'stuck']] },
-        { n: 'Tasks', s: 'completed', t: 'mvp', subs: [['Statuses + priority', 'completed'], ['Subtasks', 'completed'], ['Recurrence (daily / weekly / monthly)', 'completed'], ['Assignees + labels', 'completed'], ['Decision tasks', 'completed'], ['Activity log', 'completed']] },
-        { n: 'Profile & Status', s: 'completed', t: 'mvp', subs: [['Avatar chip + presence dot', 'completed'], ['Status (emoji + text)', 'completed'], ['Set away (green / amber)', 'completed'], ['Profile details + edit', 'completed']] },
-        { n: 'Admin', s: 'completed', t: 'mvp', subs: [['Manage Users (roles / access)', 'completed'], ['Tab Access (per-role)', 'completed'], ['Work Mode Builder', 'completed'], ['Usage stats', 'completed']] },
-        { n: 'Settings', s: 'completed', t: 'mvp', subs: [['Dark mode', 'completed'], ['Text-size slider', 'completed'], ['Chat history side', 'completed'], ['Sign out', 'completed']] },
-        { n: 'Roadmap', s: 'inprogress', t: 'mvp', subs: [['Quarter grouping', 'completed'], ['Month progress tiles', 'completed'], ['Drag to reschedule', 'completed'], ['Subtasks', 'completed']] },
-        { n: 'Auth / Account', s: 'completed', t: 'mvp', subs: [['Google SSO', 'completed'], ['Email + OTP / MFA', 'completed'], ['Access gating (pending / active)', 'completed']] },
-      ];
-      let i = 0;
-      const dueFor = () => { const off = ((i * 50 + 23) % 163); i++; const d = new Date(2026, 0, 1 + off); return d.getFullYear() + '-' + rmPad(d.getMonth() + 1) + '-' + rmPad(d.getDate()); };
-      const rows = [];
-      DEF.forEach((tab, ti) => {
-        const pid = 't' + ti;
-        rows.push({ id: pid, name: tab.n, status: tab.s, type: tab.t, dueDate: dueFor(), parentId: null, order: 0 });
-        (tab.subs || []).forEach((sub, si) => rows.push({ id: pid + '-' + si, name: sub[0], status: sub[1], type: sub[2] || tab.t, dueDate: dueFor(), parentId: pid, order: 0 }));
-      });
-      return rmNormalize(rows);
-    }
-
-    // One-time merge: append dictated features onto existing saved data
-    // (idempotent — only adds what isn't already there). Bumped via RM_KEY.
-    function rmEnsureAdditions(rows) {
-      let out = rows.slice();
-      const topByName = (name, fid) => out.find(r => !r.parentId && (r.name === name || r.id === fid));
-      const hasChild = (pid, name) => out.some(r => r.parentId === pid && r.name === name);
-      const addChild = (pid, name) => { if (pid && !hasChild(pid, name)) out.push({ id: pid + '-x' + out.length, name: name, status: 'todo', type: 'mvp', dueDate: null, parentId: pid, order: 0 }); };
-      const ai = topByName('AI Chat', 't0'); if (ai) addChild(ai.id, 'Projects (Files + Contacts)');
-      const tc = topByName('Team Chat', 't1'); if (tc) { ['Direct Messaging', 'Group Chat', 'Assigned Tasks'].forEach(n => addChild(tc.id, n)); }
-      let crm = topByName('CRM', 'crm');
-      if (!crm) { out.push({ id: 'crm', name: 'CRM', status: 'todo', type: 'mvp', dueDate: null, parentId: null, order: 0 }); crm = out[out.length - 1]; }
-      addChild(crm.id, 'Contacts'); addChild(crm.id, 'Deals');
-      return rmNormalize(out);
-    }
-
     function AppRoadmap({ dark, onBack }) {
       const J = "'Jost', sans-serif";
-      const RM_KEY = 'tmg-roadmap-v4', RM_PREV = 'tmg-roadmap-v3';
-      const [rows, setRows] = useState(() => {
-        try { const raw = localStorage.getItem(RM_KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p) && p.length) return rmNormalize(p); } } catch (e) {}
-        try { const prev = localStorage.getItem(RM_PREV); if (prev) { const p = JSON.parse(prev); if (Array.isArray(p) && p.length) return rmEnsureAdditions(rmNormalize(p)); } } catch (e) {}
-        return rmEnsureAdditions(rmSeed());
-      });
+      const user = (window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user) || null;
+      const [rows, setRows] = useState([]);
+      const [projectId, setProjectId] = useState(null);
+      const [loading, setLoading] = useState(true);
       const [groupBy, setGroupBy] = useState('quarter');
       const [collapsedP, setCollapsedP] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-rm-collapsedP') || '{}') || {}; } catch (e) { return {}; } });
       const [collapsedG, setCollapsedG] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-rm-collapsedG') || '{}') || {}; } catch (e) { return {}; } });
@@ -3371,31 +3397,61 @@ Rules:
       const [editId, setEditId] = useState(null);
       const [dragId, setDragId] = useState(null);
       const [dropHint, setDropHint] = useState(null);
-      useEffect(() => { try { localStorage.setItem(RM_KEY, JSON.stringify(rows)); } catch (e) {} }, [rows]);
+      useEffect(() => {
+        let c = false;
+        RoadmapDB.load().then(({ projectId: pid, rows: r }) => { if (!c) { setProjectId(pid); setRows(rmNormalize(r)); setLoading(false); } })
+          .catch(() => { if (!c) setLoading(false); });
+        return () => { c = true; };
+      }, []);
       useEffect(() => { try { localStorage.setItem('tmg-rm-collapsedP', JSON.stringify(collapsedP)); } catch (e) {} }, [collapsedP]);
       useEffect(() => { try { localStorage.setItem('tmg-rm-collapsedG', JSON.stringify(collapsedG)); } catch (e) {} }, [collapsedG]);
 
-      const uid = () => 'r' + Math.random().toString(36).slice(2, 9);
       const todayISO = (() => { const d = new Date(); return d.getFullYear() + '-' + rmPad(d.getMonth() + 1) + '-' + rmPad(d.getDate()); })();
       const fmtDate = (s) => { try { return new Date(s + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch (e) { return s; } };
 
-      const updateRow = (id, patch) => setRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
-      const addSiblingAfter = (row) => {
-        const id = uid();
-        setRows(prev => {
-          const idx = prev.findIndex(r => r.id === row.id);
-          if (idx < 0) return prev;
-          const nw = row.parentId
-            ? { id, name: '', status: 'todo', type: 'mvp', dueDate: null, parentId: row.parentId, order: 0 }
-            : { id, name: '', status: 'todo', type: 'mvp', dueDate: row.dueDate, parentId: null, order: 0 };
-          const copy = prev.slice(); copy.splice(idx + 1, 0, nw); return rmNormalize(copy);
-        });
-        setFocusId(id);
+      const updateRow = (id, patch) => { setRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r)); RoadmapDB.update(id, patch); };
+      const addSiblingAfter = async (row) => {
+        if (!projectId) return;
+        const created = await RoadmapDB.insert(projectId, { name: '', status: 'todo', type: 'mvp', dueDate: row.parentId ? null : row.dueDate, parentId: row.parentId, order: 0 }, user);
+        if (!created) return;
+        const idx = rows.findIndex(r => r.id === row.id);
+        if (idx < 0) return;
+        const copy = rows.slice(); copy.splice(idx + 1, 0, created);
+        const next = rmNormalize(copy);
+        setRows(next); RoadmapDB.persistOrder(next);
+        setFocusId(created.id);
       };
-      const deleteRow = (id) => setRows(prev => { const row = prev.find(r => r.id === id); if (!row) return prev; return rmNormalize(row.parentId ? prev.filter(r => r.id !== id) : prev.filter(r => r.id !== id && r.parentId !== id)); });
-      const moveRow = (id, newParentId) => setRows(prev => { const np = newParentId || null; return rmNormalize(prev.map(r => r.id === id ? { ...r, parentId: np } : (np && r.parentId === id ? { ...r, parentId: np } : r))); });
-      const addTab = () => { const n = newTitle.trim(); if (!n) return; setRows(prev => rmNormalize(prev.concat([{ id: uid(), name: n, status: 'todo', type: 'mvp', dueDate: null, parentId: null, order: 0 }]))); setNewTitle(''); };
-      const addSub = (pid) => { setRows(prev => { const blocks = rmBlocks(prev); const b = blocks.find(x => x.pid === pid); if (!b) return prev; b.items.push({ id: uid(), name: '', status: 'todo', type: 'mvp', dueDate: null, parentId: pid, order: 0 }); return rmNormalize(blocks.reduce((a, x) => a.concat(x.items), [])); }); setCollapsedP(c => { const n = { ...c }; delete n[pid]; return n; }); };
+      const deleteRow = (id) => {
+        const row = rows.find(r => r.id === id); if (!row) return;
+        const toDelete = row.parentId ? [id] : [id, ...rows.filter(r => r.parentId === id).map(r => r.id)];
+        const next = rmNormalize(row.parentId ? rows.filter(r => r.id !== id) : rows.filter(r => r.id !== id && r.parentId !== id));
+        setRows(next);
+        RoadmapDB.delete(toDelete);
+        RoadmapDB.persistOrder(next);
+      };
+      const moveRow = (id, newParentId) => {
+        const np = newParentId || null;
+        const next = rmNormalize(rows.map(r => r.id === id ? { ...r, parentId: np } : (np && r.parentId === id ? { ...r, parentId: np } : r)));
+        setRows(next);
+        RoadmapDB.persistOrder(next);
+      };
+      const addTab = async () => {
+        const n = newTitle.trim(); if (!n || !projectId) return;
+        setNewTitle('');
+        const created = await RoadmapDB.insert(projectId, { name: n, status: 'todo', type: 'mvp', dueDate: null, parentId: null, order: rows.filter(r => !r.parentId).length }, user);
+        if (created) setRows(prev => rmNormalize(prev.concat([created])));
+      };
+      const addSub = async (pid) => {
+        if (!projectId) return;
+        const created = await RoadmapDB.insert(projectId, { name: '', status: 'todo', type: 'mvp', dueDate: null, parentId: pid, order: 0 }, user);
+        if (!created) return;
+        const blocks = rmBlocks(rows); const b = blocks.find(x => x.pid === pid); if (!b) return;
+        b.items.push(created);
+        const next = rmNormalize(blocks.reduce((a, x) => a.concat(x.items), []));
+        setRows(next);
+        RoadmapDB.persistOrder(next);
+        setCollapsedP(c => { const n = { ...c }; delete n[pid]; return n; });
+      };
 
       // drag (parents only)
       const isParent = (id) => rows.some(r => r.id === id && !r.parentId);
@@ -3405,22 +3461,24 @@ Rules:
         e.preventDefault();
         const dId = dragId, hint = dropHint; setDragId(null); setDropHint(null);
         if (!dId || !isParent(targetId) || dId === targetId) return;
-        setRows(prev => {
-          const target = prev.find(r => r.id === targetId), dragged = prev.find(r => r.id === dId);
-          if (!target || !dragged) return prev;
-          const tB = target.dueDate ? rmBucketKey(target.dueDate, groupBy) : '__unscheduled';
-          const dB = dragged.dueDate ? rmBucketKey(dragged.dueDate, groupBy) : '__unscheduled';
-          let newDue;
-          if (tB !== dB) newDue = target.dueDate ? rmGroupInfo(tB, groupBy).dropDate : null;
-          return rmMoveFamily(prev, dId, targetId, hint && hint.pos === 'after' ? 'after' : 'before', newDue);
-        });
+        const target = rows.find(r => r.id === targetId), dragged = rows.find(r => r.id === dId);
+        if (!target || !dragged) return;
+        const tB = target.dueDate ? rmBucketKey(target.dueDate, groupBy) : '__unscheduled';
+        const dB = dragged.dueDate ? rmBucketKey(dragged.dueDate, groupBy) : '__unscheduled';
+        let newDue;
+        if (tB !== dB) newDue = target.dueDate ? rmGroupInfo(tB, groupBy).dropDate : null;
+        const next = rmMoveFamily(rows, dId, targetId, hint && hint.pos === 'after' ? 'after' : 'before', newDue);
+        setRows(next);
+        RoadmapDB.persistOrder(next);
       };
       const onGroupDrop = (e, key) => {
         e.preventDefault();
         const dId = dragId; setDragId(null); setDropHint(null);
         if (!dId) return;
         const newDue = key === '__unscheduled' ? null : rmGroupInfo(key, groupBy).dropDate;
-        setRows(prev => rmMoveToGroupEnd(prev, dId, newDue));
+        const next = rmMoveToGroupEnd(rows, dId, newDue);
+        setRows(next);
+        RoadmapDB.persistOrder(next);
       };
 
       const groups = rmGroups(rows, groupBy);
@@ -3430,6 +3488,10 @@ Rules:
       // ── palette (light only) ──
       const NAVY = '#001A4A', GOLD = '#AD832F', PAPER = '#FCFBF8', LINE = '#EDE7DC', MUTE = '#B4B2A9';
       const COLS = '1fr 130px 80px 88px 96px 68px';
+
+      if (loading) {
+        return <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: PAPER, fontFamily: J, fontSize: 13, color: MUTE }}>Loading…</div>;
+      }
 
       const seg = (id, label) => {
         const on = groupBy === id;
@@ -3521,7 +3583,7 @@ Rules:
       const renderRow = (r, opts) => {
         const isSub = !!r.parentId, hasKids = opts.hasKids, expanded = opts.expanded;
         const kids = isSub ? [] : rows.filter(x => x.parentId === r.id);
-        const kpct = kids.length ? Math.round(kids.filter(x => x.status === 'completed').length / kids.length * 100) : 0;
+        const kpct = kids.length ? Math.round(kids.filter(x => x.status === 'done').length / kids.length * 100) : 0;
         return (
           <div key={r.id} className="rm-row"
             onDragOver={!isSub ? (e => onRowOver(e, r.id)) : undefined} onDrop={!isSub ? (e => onRowDrop(e, r.id)) : undefined}
@@ -3535,7 +3597,7 @@ Rules:
                 : <span style={{ width: 18, flexShrink: 0 }} />)}
               {isSub && <i className="ti ti-corner-down-right" style={{ fontSize: 13, color: '#C9C2B2', flexShrink: 0 }} />}
               <input value={r.name} ref={el => { if (el && focusId === r.id) { el.focus(); setFocusId(null); } }} onChange={e => updateRow(r.id, { name: e.target.value })} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSiblingAfter(r); } }} placeholder={isSub ? 'Subtask' : 'Tab name'} style={{ flex: '0 1 auto', fieldSizing: 'content', minWidth: 60, maxWidth: 240, border: 'none', outline: 'none', background: 'transparent', fontFamily: J, fontSize: 13, fontWeight: isSub ? 400 : 500, color: NAVY, padding: 0 }} />
-              {!isSub && kids.length > 0 && (<div title={kids.filter(x => x.status === 'completed').length + '/' + kids.length + ' subtasks done'} style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, marginLeft: 8 }}><div style={{ width: 44, height: 5, borderRadius: 3, background: '#F0EBE3', overflow: 'hidden' }}><div style={{ width: kpct + '%', height: '100%', background: '#0F6E56' }} /></div><span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 700, color: kpct ? '#0F6E56' : '#C9C2B2' }}>{kpct}%</span></div>)}
+              {!isSub && kids.length > 0 && (<div title={kids.filter(x => x.status === 'done').length + '/' + kids.length + ' subtasks done'} style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, marginLeft: 8 }}><div style={{ width: 44, height: 5, borderRadius: 3, background: '#F0EBE3', overflow: 'hidden' }}><div style={{ width: kpct + '%', height: '100%', background: '#0F6E56' }} /></div><span style={{ fontFamily: J, fontSize: 8.5, fontWeight: 700, color: kpct ? '#0F6E56' : '#C9C2B2' }}>{kpct}%</span></div>)}
             </div>
             {/* status */}
             <div>{statusPill(r)}</div>
@@ -3621,7 +3683,7 @@ Rules:
                 const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
                 const y = d.getFullYear(), mo = d.getMonth();
                 let total = 0, done = 0;
-                rows.forEach(r => { if (!r.dueDate) return; const pp = r.dueDate.split('-'); if (+pp[0] === y && (+pp[1] - 1) === mo) { total++; if (r.status === 'completed') done++; } });
+                rows.forEach(r => { if (!r.dueDate) return; const pp = r.dueDate.split('-'); if (+pp[0] === y && (+pp[1] - 1) === mo) { total++; if (r.status === 'done') done++; } });
                 const pct = total ? Math.round(done / total * 100) : 0, empty = total === 0;
                 const label = d.toLocaleString('en-US', { month: 'long' });
                 return (
@@ -3812,7 +3874,7 @@ Rules:
     // Embeds the standalone SFFU app (same origin + same Supabase login) as a TMG view.
     // The header row drives SFFU's actions via postMessage; SFFU keeps its own settings.
     // Bump SFFU_VERSION when sffu/index.html changes to bust the iframe cache.
-    const SFFU_VERSION = '20260625a';
+    const SFFU_VERSION = '20260702a';
     function SffuFrame({ dark, onBack }) {
       const J = "'Jost', sans-serif";
       const frameRef = useRef(null);

@@ -41,11 +41,13 @@ function fill(body: string, s: any): string {
   const address = s.property_address || "";
   const myName = (s.added_by_name || "").split(" ")[0] || "The Morshed Group";
   const listingAgent = s.listing_agent || "our team";
+  const zillowUrl = s.zillow_url || "";
   return (body || "")
     .replace(/\{\{\s*agent_first_name\s*\}\}/g, agentFirst)
     .replace(/\{\{\s*address\s*\}\}/g, address)
     .replace(/\{\{\s*my_name\s*\}\}/g, myName)
-    .replace(/\{\{\s*listing_agent\s*\}\}/g, listingAgent);
+    .replace(/\{\{\s*listing_agent\s*\}\}/g, listingAgent)
+    .replace(/\{\{\s*zillow_url\s*\}\}/g, zillowUrl);
 }
 
 Deno.serve(async (req) => {
@@ -80,9 +82,12 @@ Deno.serve(async (req) => {
   const tplByTouch: Record<number, string> = {};
   (tpls || []).forEach((t: any) => { tplByTouch[t.touch_number] = t.body; });
 
-  const { data: props } = await sb.from("properties").select("address, listing_agent");
+  const { data: props } = await sb.from("properties").select("address, listing_agent, zillow_url");
   const agentByAddr: Record<string, string> = {};
-  (props || []).forEach((p: any) => { if (p.address) agentByAddr[p.address] = p.listing_agent; });
+  const urlByAddr: Record<string, string> = {};
+  (props || []).forEach((p: any) => {
+    if (p.address) { agentByAddr[p.address] = p.listing_agent; urlByAddr[p.address] = p.zillow_url; }
+  });
 
 
   let sent = 0;
@@ -92,11 +97,13 @@ Deno.serve(async (req) => {
     const body = tplByTouch[touch];
     if (!body) continue;
     (s as any).listing_agent = agentByAddr[s.property_address] || null;
+    (s as any).zillow_url = urlByAddr[s.property_address] || null;
     const content = fill(body, s);
 
     // 3) Send via Quo. (If you get 401, change the header to `Bearer ${QUO_KEY}`.)
     let quoId: string | null = null;
     let quoStatus = "sent";
+    let quoConversationId: string | null = null;
     try {
       const r = await fetch("https://api.quo.com/v1/messages", {
         method: "POST",
@@ -107,22 +114,30 @@ Deno.serve(async (req) => {
       if (!r.ok) { errors.push({ id: s.id, status: r.status, quo: data }); continue; }
       quoId = data?.data?.id ?? null;
       quoStatus = data?.data?.status ?? "sent";
+      quoConversationId = data?.data?.conversationId ?? null;
     } catch (e) {
       errors.push({ id: s.id, error: String(e) });
       continue;
     }
 
-    // 4) Log the outbound + advance the schedule.
+    // 4) Log the outbound + advance the schedule. Stamp the showing with
+    // Quo's conversationId so sffu-inbound can match replies precisely
+    // (the sending number is shared across team members, so phone-number
+    // matching alone can't tell a real reply apart from unrelated texting
+    // on the same number).
     await sb.from("sms_messages").insert({
       showing_id: s.id, direction: "out", touch_number: touch, body: content,
-      quo_message_id: quoId, status: quoStatus, sent_by_name: "Auto · SFFU",
+      quo_message_id: quoId, quo_conversation_id: quoConversationId,
+      status: quoStatus, sent_by_name: "Auto · SFFU",
     });
     const done = touch >= 3;
-    await sb.from("showings").update({
+    const showingUpdate: Record<string, unknown> = {
       touch_count: touch,
       next_touch_at: done ? null : new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString(),
       followup_status: done ? "completed" : "active",
-    }).eq("id", s.id);
+    };
+    if (quoConversationId) showingUpdate.quo_conversation_id = quoConversationId;
+    await sb.from("showings").update(showingUpdate).eq("id", s.id);
     sent++;
   }
 

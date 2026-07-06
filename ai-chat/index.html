@@ -44,6 +44,7 @@ body{font-family:'Jost',sans-serif;background:#001A4A;color:var(--ink);-webkit-f
 .note .ng{color:var(--gold);font-weight:600}
 .subnote{font-size:11px;color:var(--ink-faint);line-height:1.6;margin:0 0 14px;padding-left:2px}
 .subnote b{color:var(--gold);font-weight:600}
+.rtag{display:inline-block;margin-left:2px;padding:2px 8px;border-radius:9px;background:var(--note-bg);border:1px solid var(--line);font-size:8px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--gold);vertical-align:middle}
 
 /* Inline UI references */
 .chip{display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.07);border:.5px solid rgba(255,255,255,.14);border-radius:6px;padding:1px 7px;font-size:11px;font-weight:500;color:#fff;white-space:nowrap;vertical-align:middle}
@@ -170,8 +171,9 @@ html.gs-embed .step-desc b{color:#001A4A}
 
   <div class="note"><b><span class="ng">New Chat</span></b> — always the first pill, in both modes. Starts a fresh conversation so a new topic doesn't get mixed into the old one.</div>
   <div class="note"><b><span class="ng">Add To Do</span></b> — quickly capture a task. The assistant turns what you type into a to-do for you.</div>
-  <div class="note"><b><span class="ng">Add KPIs</span></b> — log your weekly numbers (calls, pop-bys, notes…). The assistant collects them step by step and files them.</div>
+  <div class="note"><b><span class="ng">Add KPIs</span></b> — log your weekly numbers (calls, pop-bys, notes…). The assistant collects them step by step and files them. <span class="rtag">For Sales Agents only</span></div>
   <div class="subnote"><b>Note:</b> Work Mode is where the action pills live. AI Mode shows New Chat (and any extra AI shortcuts an admin has added).</div>
+  <div class="subnote"><b>Note:</b> Which pills you see can depend on your role — an admin may set a pill (like Add KPIs) to show only for certain roles.</div>
 
   <!-- 3 · CHAT HISTORY -->
   <div class="section-hd"><div class="sh-num">3</div><div class="sh-label">Chat history</div><div class="sh-line"></div></div>

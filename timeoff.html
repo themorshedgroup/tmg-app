@@ -135,6 +135,16 @@
         if (error) { console.error('[TimeOffDB] listPending:', error.message); return []; }
         return data || [];
       },
+      // Org-wide, for the Team roster. RLS scopes this to what the caller may see —
+      // for a true time-off admin that's everyone; for anyone else, just their own + reports'.
+      async listAllForYear(year) {
+        if (!this.client()) return [];
+        const start = year + '-01-01T00:00:00';
+        const end = (year + 1) + '-01-01T00:00:00';
+        const { data, error } = await this.client().from('time_off_requests').select('*').gte('start_at', start).lt('start_at', end);
+        if (error) { console.error('[TimeOffDB] listAllForYear:', error.message); return []; }
+        return data || [];
+      },
       async create(req) {
         if (!this.client()) return null;
         const { data, error } = await this.client().from('time_off_requests').insert({
@@ -169,20 +179,40 @@
       }
       return Math.max(0, Math.round(((e - s) / 3600000) * 100) / 100);
     }
-    // Per-person: allotment hours = the person's profile.time_off_days × hours-per-workday.
+    // A person hired mid-year gets a prorated allotment for that first calendar year —
+    // the fraction of the year remaining from their hire date onward. Hired in an earlier
+    // year (or no hire_date on file) → full allotment, unchanged. Hired in a future year
+    // (bad data) → 0 for this year.
+    function timeoffProration(hireDateStr, year) {
+      if (!hireDateStr) return 1;
+      const hire = timeoffDate(hireDateStr);
+      if (isNaN(hire)) return 1;
+      const hireYear = hire.getFullYear();
+      if (hireYear < year) return 1;
+      if (hireYear > year) return 0;
+      const yearStart = new Date(year, 0, 1);
+      const yearEnd = new Date(year, 11, 31);
+      const hireDay = new Date(hire.getFullYear(), hire.getMonth(), hire.getDate());
+      const daysInYear = Math.round((yearEnd - yearStart) / 86400000) + 1;
+      const daysRemaining = Math.round((yearEnd - hireDay) / 86400000) + 1;
+      return Math.max(0, Math.min(1, daysRemaining / daysInYear));
+    }
+    // Per-person: allotment hours = the person's profile.time_off_days × hours-per-workday,
+    // prorated for the calendar year they were hired in.
     function timeoffBalance(cfg, profile, rows) {
       const days = Math.max(0, Number(profile && profile.time_off_days) || 0);
       const hpw = (cfg && Number(cfg.hours_per_workday)) || 8;
-      const allot = days * hpw;
-      const tracked = allot > 0;
+      const tracked = days > 0;
       const year = new Date().getFullYear();
+      const proration = timeoffProration(profile && profile.hire_date, year);
+      const allot = days * hpw * proration;
       let used = 0, pending = 0;
       (rows || []).forEach(r => {
         if (!r.tracked || timeoffDate(r.start_at).getFullYear() !== year) return;
         const h = Number(r.total_hours) || 0;
         if (r.status === 'approved') used += h; else if (r.status === 'pending') pending += h;
       });
-      return { tracked, allot, used, pending, remaining: allot - used };
+      return { tracked, allot, used, pending, remaining: allot - used, proration };
     }
     function timeoffWhen(r) {
       const s = timeoffDate(r.start_at), e = timeoffDate(r.end_at);
@@ -200,6 +230,9 @@
       const [mine, setMine] = useState([]);
       const [pending, setPending] = useState([]);
       const [people, setPeople] = useState({});
+      const [profiles, setProfiles] = useState([]);
+      const [yearRequests, setYearRequests] = useState([]);
+      const [scope, setScope] = useState('mine'); // 'mine' | 'team' — admins only
       const [loading, setLoading] = useState(true);
       const [view, setView] = useState('list');
       const [busy, setBusy] = useState(false);
@@ -221,9 +254,12 @@
           const cfg = normalizeTimeoffPolicy((await PolicyDB.load()) || TIMEOFF_DEFAULT);
           const ppl = await ProfileDB.loadAll();
           const map = {}; ppl.forEach(u => { map[u.id] = (((u.first_name || '') + ' ' + (u.last_name || '')).trim()) || u.email || 'Someone'; });
-          const [m, p] = await Promise.all([TimeOffDB.listMine(), TimeOffDB.listPending()]);
+          const [m, p, yr] = await Promise.all([
+            TimeOffDB.listMine(), TimeOffDB.listPending(),
+            isAdmin ? TimeOffDB.listAllForYear(new Date().getFullYear()) : Promise.resolve([]),
+          ]);
           if (!on) return;
-          setPolicy(cfg); setPeople(map); setMine(m); setPending(p); setLoading(false);
+          setPolicy(cfg); setPeople(map); setProfiles(ppl); setMine(m); setPending(p); setYearRequests(yr); setLoading(false);
         })();
         return () => { on = false; };
       }, []);
@@ -312,6 +348,26 @@
           </div>
         </div>
       );
+      // Admin-only Team roster: every active profile's balance for the year, side by side.
+      const activeProfiles = profiles.filter(p => !p.status || p.status === 'active');
+      const rosterRow = (p) => {
+        const b = timeoffBalance(policy, p, yearRequests.filter(r => r.user_id === p.id));
+        const name = (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'Someone';
+        return (
+          <div key={p.id} style={{ ...card, marginBottom: 10, padding: 13 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ flex: 1, fontSize: '0.88rem', fontWeight: 700, color: t.text, fontFamily: C.fontSans }}>{name}</span>
+              {!b.tracked ? <span style={{ fontSize: '0.68rem', color: t.muted, fontFamily: C.fontSans }}>Not tracked</span> : null}
+            </div>
+            {b.tracked ? (
+              <div style={{ fontSize: '0.78rem', color: t.sub, fontFamily: C.fontSans, marginTop: 4 }}>
+                <b style={{ color: t.text }}>{timeoffFmtHours(b.remaining)}h</b> left · {timeoffFmtHours(b.used)}h used · {timeoffFmtHours(b.pending)}h pending · of {timeoffFmtHours(b.allot)}h
+                {b.proration < 1 ? <span style={{ color: C.gold }}> · prorated ({p.hire_date ? timeoffDate(p.hire_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'started'} start)</span> : null}
+              </div>
+            ) : null}
+          </div>
+        );
+      };
 
       if (loading) return <div style={{ padding: '20px 16px', background: t.bg }}><div style={{ fontSize: '0.85rem', color: t.muted, fontFamily: C.fontSans }}>Loading…</div></div>;
 
@@ -356,34 +412,52 @@
           {!hideHeader ? <button onClick={onBack} style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: t.sub, fontSize: '0.86rem', fontWeight: 600, fontFamily: C.fontSans, marginBottom: 16 }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} />Back</button> : null}
           {!hideHeader ? <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: t.text, marginBottom: 18, fontFamily: C.fontDisplay }}>Time Off</div> : null}
 
-          {bal && bal.tracked ? (
-            <div style={{ ...card, background: dark ? '#12203B' : C.navy }}>
-              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.7)', letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Time off — {new Date().getFullYear()}</div>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
-                <span style={{ fontSize: '2.2rem', fontWeight: 400, color: '#fff', fontFamily: C.fontDisplay, fontStyle: 'italic' }}>{timeoffFmtHours(bal.remaining)}h</span>
-                <span style={{ fontSize: '0.9rem', color: dark ? '#C9A45A' : C.goldSoft, fontFamily: C.fontSans }}>≈ {daysEq(bal.remaining)} days left</span>
-              </div>
-              <div style={{ fontSize: '0.78rem', color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.66)', fontFamily: C.fontSans, marginTop: 4 }}>{timeoffFmtHours(bal.used)}h used · {timeoffFmtHours(bal.pending)}h awaiting · of {timeoffFmtHours(bal.allot)}h ({daysEq(bal.allot)} days)</div>
+          {isAdmin ? (
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              {[{ k: 'mine', l: 'Mine' }, { k: 'team', l: 'Team' }].map(o => {
+                const on = scope === o.k;
+                return <button key={o.k} onClick={() => setScope(o.k)} style={{ flex: 1, padding: '9px 0', borderRadius: 9, border: `1.5px solid ${on ? C.navy : t.border}`, background: on ? C.navy : t.surface, color: on ? '#fff' : t.sub, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{o.l}</button>;
+              })}
             </div>
-          ) : (
-            <div style={card}>
-              <div style={{ fontSize: '0.88rem', fontWeight: 600, color: t.text, fontFamily: C.fontSans }}>Time off isn’t tracked for your role</div>
-              <div style={{ fontSize: '0.8rem', color: t.sub, fontFamily: C.fontSans, marginTop: 4, lineHeight: 1.5 }}>You can still log it here so your manager and team can see it — there’s just no balance to track.</div>
-            </div>
-          )}
-
-          <button onClick={() => setView('new')} style={{ ...primaryBtn, marginBottom: 22 }}>{bal && bal.tracked ? 'Request time off' : 'Log time off'}</button>
-
-          {toReview.length ? (
-            <React.Fragment>
-              <div style={{ fontSize: '0.72rem', fontWeight: 700, color: C.gold, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>Requests to review ({toReview.length})</div>
-              {toReview.map(reviewRow)}
-              <div style={{ height: 14 }} />
-            </React.Fragment>
           ) : null}
 
-          <div style={{ fontSize: '0.72rem', fontWeight: 700, color: t.sub, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>My requests</div>
-          {mine.length ? mine.map(myRow) : <div style={{ fontSize: '0.82rem', color: t.muted, fontFamily: C.fontSans, padding: '4px 2px' }}>Nothing yet — file your first request above.</div>}
+          {scope === 'team' ? (
+            <React.Fragment>
+              <div style={{ fontSize: '0.72rem', fontWeight: 700, color: t.sub, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>Team time off — {new Date().getFullYear()} ({activeProfiles.length})</div>
+              {activeProfiles.length ? activeProfiles.map(rosterRow) : <div style={{ fontSize: '0.82rem', color: t.muted, fontFamily: C.fontSans, padding: '4px 2px' }}>No one on the roster yet.</div>}
+            </React.Fragment>
+          ) : (
+            <React.Fragment>
+              {bal && bal.tracked ? (
+                <div style={{ ...card, background: dark ? '#12203B' : C.navy }}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 600, color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.7)', letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Time off — {new Date().getFullYear()}</div>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
+                    <span style={{ fontSize: '2.2rem', fontWeight: 400, color: '#fff', fontFamily: C.fontDisplay, fontStyle: 'italic' }}>{timeoffFmtHours(bal.remaining)}h</span>
+                    <span style={{ fontSize: '0.9rem', color: dark ? '#C9A45A' : C.goldSoft, fontFamily: C.fontSans }}>≈ {daysEq(bal.remaining)} days left</span>
+                  </div>
+                  <div style={{ fontSize: '0.78rem', color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.66)', fontFamily: C.fontSans, marginTop: 4 }}>{timeoffFmtHours(bal.used)}h used · {timeoffFmtHours(bal.pending)}h awaiting · of {timeoffFmtHours(bal.allot)}h ({daysEq(bal.allot)} days){bal.proration < 1 ? <span style={{ color: dark ? '#C9A45A' : C.goldSoft }}> · prorated for your {new Date().getFullYear()} start</span> : null}</div>
+                </div>
+              ) : (
+                <div style={card}>
+                  <div style={{ fontSize: '0.88rem', fontWeight: 600, color: t.text, fontFamily: C.fontSans }}>Time off isn’t tracked for your role</div>
+                  <div style={{ fontSize: '0.8rem', color: t.sub, fontFamily: C.fontSans, marginTop: 4, lineHeight: 1.5 }}>You can still log it here so your manager and team can see it — there’s just no balance to track.</div>
+                </div>
+              )}
+
+              <button onClick={() => setView('new')} style={{ ...primaryBtn, marginBottom: 22 }}>{bal && bal.tracked ? 'Request time off' : 'Log time off'}</button>
+
+              {toReview.length ? (
+                <React.Fragment>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 700, color: C.gold, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>Requests to review ({toReview.length})</div>
+                  {toReview.map(reviewRow)}
+                  <div style={{ height: 14 }} />
+                </React.Fragment>
+              ) : null}
+
+              <div style={{ fontSize: '0.72rem', fontWeight: 700, color: t.sub, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>My requests</div>
+              {mine.length ? mine.map(myRow) : <div style={{ fontSize: '0.82rem', color: t.muted, fontFamily: C.fontSans, padding: '4px 2px' }}>Nothing yet — file your first request above.</div>}
+            </React.Fragment>
+          )}
         </div>
       );
     }

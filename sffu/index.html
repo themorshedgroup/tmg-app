@@ -406,8 +406,13 @@
         if (!this.client()) return SMS_TEMPLATE_DEFAULTS.map(t => t.body);
         const { data, error } = await this.client()
           .from('sms_templates').select('*').order('touch_number', { ascending: true });
-        if (error || !data || data.length === 0) return SMS_TEMPLATE_DEFAULTS.map(t => t.body);
-        return data.map(row => row.body);
+        if (error) return SMS_TEMPLATE_DEFAULTS.map(t => t.body);
+        // Map by touch_number (not array position) so a touch missing from
+        // the DB — e.g. template 4 before it's ever been saved — falls back
+        // to its own default instead of shifting every later template up.
+        const byTouch = {};
+        (data || []).forEach(row => { byTouch[row.touch_number] = row.body; });
+        return SMS_TEMPLATE_DEFAULTS.map(t => byTouch[t.touch] ?? t.body);
       },
 
       async saveTemplates(bodies, user) {
@@ -721,6 +726,7 @@
       const [expanded,      setExpanded]      = useState(false);
       const [openShowingId, setOpenShowingId] = useState(null);
       const [editing,       setEditing]       = useState(false);
+      const [showFeedback,  setShowFeedback]  = useState(false);
       const [editAddr,   setEditAddr]   = useState(property.address);
       const [editZillow, setEditZillow] = useState(property.zillowUrl || '');
       const [editAgent,  setEditAgent]  = useState(property.agent || '');
@@ -734,6 +740,7 @@
       const showings = allShowings.filter(s => s.propertyAddress === dispAddr);
       const active   = showings.filter(s => s.status === 'in_progress').length;
       const closed   = showings.filter(s => s.status === 'closed').length;
+      const feedbackShowings = showings.filter(s => s.feedback && s.feedback.trim());
       const unreadCount = showings.filter(s => {
         const t = SMS_THREADS[s.id] || [];
         return t.length > 0 && t[t.length - 1].dir === 'in';
@@ -818,6 +825,23 @@
               {!editing && <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />}
             </div>
 
+            {/* Generate Feedback — only once at least one showing here has feedback recorded */}
+            {!editing && feedbackShowings.length > 0 && (
+              <button
+                onClick={e => { e.stopPropagation(); setShowFeedback(true); }}
+                style={{
+                  width: '100%', marginBottom: editing ? 0 : 10, padding: '8px 10px',
+                  background: 'none', border: `1px solid ${C.border}`, borderRadius: 10,
+                  color: C.navy, fontSize: '0.78rem', fontWeight: 500, cursor: 'pointer',
+                  fontFamily: C.fontSans, display: 'flex', alignItems: 'center',
+                  justifyContent: 'center', gap: 6,
+                }}
+              >
+                <i className="ti ti-notes" style={{ fontSize: 13 }} />
+                Generate Feedback
+              </button>
+            )}
+
             {editing ? (
               /* ── Inline edit form ── */
               <div onClick={e => e.stopPropagation()}>
@@ -889,7 +913,85 @@
               ))}
             </div>
           )}
+
+          {showFeedback && (
+            <FeedbackSummaryModal
+              address={dispAddr}
+              feedbackShowings={feedbackShowings}
+              onClose={() => setShowFeedback(false)}
+            />
+          )}
         </div>
+      );
+    }
+
+    // ─── Feedback Summary Modal ────────────────────────────────────────
+    // Copy-pasteable rollup of every showing on this property that has
+    // feedback recorded — one block per agent, in the format Symon can
+    // paste straight into an email/report to the listing agent.
+    function FeedbackSummaryModal({ address, feedbackShowings, onClose }) {
+      const [copied, setCopied] = useState(false);
+      const summary = feedbackShowings
+        .map(s => `${s.agent || 'Agent'}, ${s.office || 'Brokerage'}:\n ${s.feedback.trim()}`)
+        .join('\n\n');
+
+      async function handleCopy() {
+        try {
+          await navigator.clipboard.writeText(summary);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1800);
+        } catch (e) {
+          alert('Could not copy automatically — select the text above and copy manually.');
+        }
+      }
+
+      return (
+        <>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,26,74,0.45)' }} />
+          <div style={{
+            position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 301,
+            background: C.surface, borderRadius: '20px 20px 0 0',
+            padding: '24px 20px 40px',
+            boxShadow: '0 -4px 32px rgba(0,26,74,0.15)',
+            maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+              <div style={{ fontSize: '1.2rem', fontStyle: 'italic', fontFamily: C.fontDisplay, color: C.navy }}>Feedback Summary</div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: C.textMuted, fontSize: 20, display: 'flex' }}>
+                <i className="ti ti-x" />
+              </button>
+            </div>
+            <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 14 }}>{address}</div>
+
+            <textarea
+              readOnly
+              value={summary}
+              rows={Math.min(14, feedbackShowings.length * 3)}
+              onClick={e => e.target.select()}
+              style={{
+                width: '100%', flex: 1, resize: 'none',
+                border: `1px solid ${C.border}`, borderRadius: 10,
+                background: C.bg, color: C.textPrimary,
+                fontSize: '0.85rem', fontFamily: C.fontSans, lineHeight: 1.6,
+                padding: 12, outline: 'none', marginBottom: 14,
+              }}
+            />
+
+            <button
+              onClick={handleCopy}
+              style={{
+                width: '100%', padding: 12, borderRadius: 12, border: 'none',
+                background: copied ? C.green : C.navy, color: '#fff',
+                fontSize: '0.88rem', fontWeight: 500, cursor: 'pointer',
+                fontFamily: C.fontSans, display: 'flex', alignItems: 'center',
+                justifyContent: 'center', gap: 8, transition: 'background 0.15s',
+              }}
+            >
+              <i className={copied ? 'ti ti-check' : 'ti ti-copy'} />
+              {copied ? 'Copied!' : 'Copy to Clipboard'}
+            </button>
+          </div>
+        </>
       );
     }
 
@@ -1360,9 +1462,10 @@
     const SMS_PHONE = '(512) 610-1095';
 
     const SMS_TEMPLATE_DEFAULTS = [
-      { touch: 1, day: 1, body: "Hi {{agent_first_name}}! This is {{my_name}} with The Morshed Group, reaching out on behalf of our listing agent {{listing_agent}}. Just following up on your showing at {{address}} — did your clients enjoy the property? Any feedback would be greatly appreciated! 🏡" },
-      { touch: 2, day: 2, body: "Hi {{agent_first_name}}, this is {{my_name}} again from The Morshed Group — just checking back in on {{address}}. Did your clients have any thoughts they'd like to share? {{listing_agent}} would love to hear from you!" },
-      { touch: 3, day: 3, body: "Hi {{agent_first_name}}, one last follow-up on {{address}}. Feel free to reach out anytime if your clients have questions for {{listing_agent}}. Thanks so much for showing the property!" },
+      { touch: 1, day: 1, label: 'Follow-up 1 · Day 1', body: "Hi {{agent_first_name}}! This is {{my_name}} with The Morshed Group, reaching out on behalf of our listing agent {{listing_agent}}. Just following up on your showing at {{address}} — did your clients enjoy the property? Any feedback would be greatly appreciated! 🏡" },
+      { touch: 2, day: 2, label: 'Follow-up 2 · Day 2', body: "Hi {{agent_first_name}}, this is {{my_name}} again from The Morshed Group — just checking back in on {{address}}. Did your clients have any thoughts they'd like to share? {{listing_agent}} would love to hear from you!" },
+      { touch: 3, day: 3, label: 'Follow-up 3 · Day 3', body: "Hi {{agent_first_name}}, one last follow-up on {{address}}. Feel free to reach out anytime if your clients have questions for {{listing_agent}}. Thanks so much for showing the property!" },
+      { touch: 4, day: null, label: 'Reply Received', body: "Thanks for the feedback!\n\n{{my_name}}\nThe Morshed Group" },
     ];
 
     function SettingsModal({ user, onClose }) {
@@ -1429,9 +1532,9 @@
                 <span style={{ color: C.gold, fontFamily: 'monospace' }}>{'{{zillow_url}}'}</span>
               </div>
               {SMS_TEMPLATE_DEFAULTS.map((t, i) => (
-                <div key={t.touch} style={{ marginBottom: i < 2 ? 14 : 0 }}>
+                <div key={t.touch} style={{ marginBottom: i < SMS_TEMPLATE_DEFAULTS.length - 1 ? 14 : 0 }}>
                   <div style={{ fontSize: '0.62rem', fontWeight: 500, color: C.navy, letterSpacing: '0.18em', textTransform: 'uppercase', marginBottom: 6, fontFamily: C.fontSans }}>
-                    Follow-up {t.touch} · Day {t.day}
+                    {t.label}
                   </div>
                   <textarea
                     value={templates[i]}

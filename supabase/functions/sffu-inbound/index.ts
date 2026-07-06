@@ -107,7 +107,7 @@ Deno.serve(async (req) => {
     if (!conversationId) return json({ ignored: "no conversationId on payload" });
     const { data: hit } = await sb
       .from("showings")
-      .select("id, agent_name, followup_status")
+      .select("id, agent_name, followup_status, reply_ack_sent")
       .eq("quo_conversation_id", conversationId)
       .maybeSingle();
     if (!hit) return json({ ok: true, matched: false, note: "no showing for this conversation" });
@@ -122,7 +122,14 @@ Deno.serve(async (req) => {
     // (but never un-stop a showing the agent previously opted out of).
     const isStop = /^\s*(stop|unsubscribe|cancel|quit|end)\b/i.test(String(text));
     const newStatus = isStop ? "stopped" : (hit.followup_status === "stopped" ? "stopped" : "received");
-    await sb.from("showings").update({ followup_status: newStatus, next_touch_at: null }).eq("id", hit.id);
+    // Queue the "Reply Received" auto-ack (sent by sffu-sender's existing
+    // cron) — but only once per showing, ever: any reply counts as
+    // feedback, but a STOP doesn't deserve a "thanks for the feedback!",
+    // and a second/third reply in the same conversation shouldn't get
+    // thanked again now that the first one already has been.
+    const showingUpdate: Record<string, unknown> = { followup_status: newStatus, next_touch_at: null };
+    if (!isStop && !hit.reply_ack_sent) showingUpdate.reply_ack_pending = true;
+    await sb.from("showings").update(showingUpdate).eq("id", hit.id);
 
     return json({ ok: true, matched: true, showing_id: hit.id });
   } catch (e) {

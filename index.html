@@ -168,6 +168,12 @@
   <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.5/dist/purify.min.js"></script>
+  <!-- Office file support: xlsx read/write, docx/pptx read (mammoth/jszip), docx/pptx write (docx/pptxgenjs) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 </head>
 <body>
   <!-- ─── Dark mode init (before render to avoid flash) ─── -->
@@ -321,12 +327,125 @@ Continue with TMG Gmail
       }
     }
 
+    // The AI can hand back a downloadable Word/Excel/PowerPoint file, or a generated image, by
+    // wrapping content in a fenced ```tmg-doc / tmg-sheet / tmg-slides / tmg-image``` block (see
+    // SYSTEM_PROMPT). Split those out of the raw text so they render as a card instead of a
+    // plain code block.
+    const TMG_FILE_BLOCK_RE = /```tmg-(doc|sheet|slides|image)(?:\s+filename="([^"\n]*)")?[ \t]*\n([\s\S]*?)```/g;
+    function splitGeneratedBlocks(text) {
+      const segments = [];
+      let last = 0, m;
+      TMG_FILE_BLOCK_RE.lastIndex = 0;
+      const t = text || '';
+      while ((m = TMG_FILE_BLOCK_RE.exec(t))) {
+        if (m.index > last) segments.push({ type: 'md', text: t.slice(last, m.index) });
+        segments.push({ type: m[1], filename: m[2] || null, body: m[3] });
+        last = m.index + m[0].length;
+      }
+      if (last < t.length) segments.push({ type: 'md', text: t.slice(last) });
+      return segments.length ? segments : [{ type: 'md', text: t }];
+    }
+
     // Renders AI markdown safely; falls back to plain text if parsing fails
     // or the CDN scripts didn't load, so a formatting bug never blanks a message.
     function MarkdownContent({ text }) {
-      const html = useMemo(() => mdToSafeHtml(text), [text]);
-      if (html == null) return <span style={{ whiteSpace: 'pre-wrap' }}>{text}</span>;
-      return <div className="md-body" dangerouslySetInnerHTML={{ __html: html }} />;
+      const segments = useMemo(() => splitGeneratedBlocks(text), [text]);
+      if (segments.length === 1 && segments[0].type === 'md') {
+        const html = mdToSafeHtml(segments[0].text);
+        if (html == null) return <span style={{ whiteSpace: 'pre-wrap' }}>{text}</span>;
+        return <div className="md-body" dangerouslySetInnerHTML={{ __html: html }} />;
+      }
+      return (
+        <React.Fragment>
+          {segments.map((seg, i) => {
+            if (seg.type === 'md') {
+              if (!seg.text.trim()) return null;
+              const html = mdToSafeHtml(seg.text);
+              return html == null
+                ? <span key={i} style={{ whiteSpace: 'pre-wrap' }}>{seg.text}</span>
+                : <div key={i} className="md-body" dangerouslySetInnerHTML={{ __html: html }} />;
+            }
+            if (seg.type === 'image') return <GeneratedImageCard key={i} prompt={seg.body} />;
+            return <GeneratedFileCard key={i} kind={seg.type} filename={seg.filename} body={seg.body} />;
+          })}
+        </React.Fragment>
+      );
+    }
+
+    // A card offering to download an AI-generated Word/Excel/PowerPoint file. The actual
+    // file (docx/xlsx/pptx) is only built on click, from the plain-text/CSV/slide body
+    // the model produced — nothing binary is ever sent over the wire.
+    const GEN_FILE_META = {
+      doc:    { icon: 'ti-file-type-doc', label: 'Word document',              ext: '.docx' },
+      sheet:  { icon: 'ti-file-type-xls', label: 'Excel spreadsheet',          ext: '.xlsx' },
+      slides: { icon: 'ti-file-type-ppt', label: 'PowerPoint presentation',    ext: '.pptx' },
+    };
+    function GeneratedFileCard({ kind, filename, body }) {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+      const meta = GEN_FILE_META[kind] || GEN_FILE_META.doc;
+      const name = ((filename || ('Generated' + meta.ext)).replace(/\.[a-z0-9]+$/i, '')) + meta.ext;
+      const download = async () => {
+        if (busy) return;
+        setBusy(true); setErr(null);
+        try {
+          const blob = kind === 'doc' ? await genDocxBlob(body) : kind === 'sheet' ? genXlsxBlob(body) : await genPptxBlob(body);
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click();
+          setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 400);
+        } catch (e) { setErr(e.message || String(e)); }
+        finally { setBusy(false); }
+      };
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, margin: '6px 0' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', borderRadius: 12, border: `1px solid ${C.border}`, background: C.surfaceHover }}>
+            <i className={`ti ${meta.icon}`} style={{ fontSize: 22, color: C.gold, flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.84rem', fontWeight: 600, color: C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: C.fontSans }}>{name}</div>
+              <div style={{ fontSize: '0.7rem', color: C.textSecondary, fontFamily: C.fontSans }}>{meta.label}</div>
+            </div>
+            <button onClick={download} disabled={busy} style={{ padding: '7px 12px', borderRadius: 9, border: 'none', background: C.navy, color: '#fff', fontSize: '0.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: busy ? 0.6 : 1, flexShrink: 0 }}>{busy ? '…' : 'Download'}</button>
+          </div>
+          {err ? <div style={{ fontSize: '0.7rem', color: C.red, fontFamily: C.fontSans, padding: '0 2px' }}>{err}</div> : null}
+        </div>
+      );
+    }
+
+    // A card offering to generate a real AI image via OpenAI (gpt-image-1.5). Generation
+    // is NEVER automatic — it costs real money per click, so it only runs when the user
+    // taps "Generate image", and the result is cached in this component's own state (not
+    // re-generated on re-render; a fresh reload of the conversation will show the button
+    // again rather than silently re-spending).
+    function GeneratedImageCard({ prompt }) {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+      const [url, setUrl] = useState(null);
+      const generate = async () => {
+        if (busy) return;
+        setBusy(true); setErr(null);
+        try { setUrl(await callGenerateImage(prompt, 'medium')); }
+        catch (e) { setErr(e.message || String(e)); }
+        finally { setBusy(false); }
+      };
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, margin: '6px 0' }}>
+          {url ? (
+            <a href={url} download="generated-image.png" style={{ display: 'block' }}>
+              <img src={url} alt={prompt} style={{ maxWidth: 280, maxHeight: 280, borderRadius: 12, display: 'block', border: `1px solid ${C.border}` }} />
+            </a>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', borderRadius: 12, border: `1px solid ${C.border}`, background: C.surfaceHover }}>
+              <i className="ti ti-photo-plus" style={{ fontSize: 22, color: C.gold, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '0.84rem', fontWeight: 600, color: C.textPrimary, fontFamily: C.fontSans }}>AI-generated image</div>
+                <div style={{ fontSize: '0.7rem', color: C.textSecondary, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{prompt}</div>
+              </div>
+              <button onClick={generate} disabled={busy} style={{ padding: '7px 12px', borderRadius: 9, border: 'none', background: C.navy, color: '#fff', fontSize: '0.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: busy ? 0.6 : 1, flexShrink: 0 }}>{busy ? 'Generating…' : 'Generate image'}</button>
+            </div>
+          )}
+          {err ? <div style={{ fontSize: '0.7rem', color: C.red, fontFamily: C.fontSans, padding: '0 2px' }}>{err}</div> : null}
+        </div>
+      );
     }
 
     // ─── AI backend ──────────────────────────────────────────────────
@@ -336,7 +455,27 @@ Continue with TMG Gmail
     const SYSTEM_PROMPT =
       "You are the TMG assistant, an AI helper for The Morshed Group, a real estate team. " +
       "Be warm, concise, and conversational — talk like a helpful colleague, not a report. " +
-      "Help with general questions, drafting, and day-to-day tasks.";
+      "Help with general questions, drafting, and day-to-day tasks.\n\n" +
+      "You can hand back an actual downloadable Word document, Excel spreadsheet, or PowerPoint " +
+      "presentation. Only do this when the user clearly wants a file (e.g. \"make me a doc/deck/sheet\", " +
+      "\"write this up as a Word doc\", \"put this in a spreadsheet\") — not for normal chat answers. " +
+      "When you do, write a short one-line intro, then EXACTLY ONE fenced code block using one of these " +
+      "language tags (include filename=\"...\" with a sensible name and the right extension), then an " +
+      "optional short one-line outro:\n" +
+      "- ```tmg-doc filename=\"Name.docx\"``` — content is Markdown: \"# \" for a heading, \"## \" for a " +
+      "subheading, \"- \" for a bullet, **bold** for bold, blank lines between paragraphs.\n" +
+      "- ```tmg-sheet filename=\"Name.xlsx\"``` — content is CSV. For more than one sheet, put a line " +
+      "\"### Sheet: <name>\" before each sheet's CSV rows.\n" +
+      "- ```tmg-slides filename=\"Name.pptx\"``` — content is one slide per block, separated by a line " +
+      "containing only \"---\". Each slide's first line is its title; remaining lines starting with " +
+      "\"- \" are bullets.\n\n" +
+      "You can also offer to generate an actual AI image (a real picture, e.g. \"generate an image of a " +
+      "modern living room\") using: ```tmg-image``` where the content is a single clear, detailed image-" +
+      "generation prompt (no filename attribute needed). Only offer this when the user wants a picture " +
+      "generated, not for anything else — generating an image costs real money per use, so never use it " +
+      "speculatively or more than once per request.\n\n" +
+      "Never mix these with your normal answer in the same block, and never use any of these tags unless " +
+      "the user actually wants a file or image.";
 
     function authToken() {
       return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON;
@@ -359,6 +498,22 @@ Continue with TMG Gmail
         throw new Error(data.error || ('Request failed (' + res.status + ')'));
       }
       return data.text || '';
+    }
+
+    // ─── AI image generation (OpenAI, via edge function) ─────────────
+    const IMAGE_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/generate-image';
+    // Returns a data: URL (base64) for the generated image. Real per-call cost — only
+    // invoked when the user explicitly clicks "Generate image" (see GeneratedImageCard).
+    async function callGenerateImage(prompt, quality = 'medium') {
+      const res = await fetch(IMAGE_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+        body: JSON.stringify({ prompt, quality }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) throw new Error(data.error || ('Request failed (' + res.status + ')'));
+      if (!data.b64) throw new Error('No image returned.');
+      return 'data:image/png;base64,' + data.b64;
     }
 
     // ─── Google Calendar (read-only) via edge function ──────────────
@@ -729,6 +884,108 @@ Continue with TMG Gmail
       }
       if (msg.content) blocks.push({ type: 'text', text: msg.content });
       return blocks.length ? blocks : (msg.content || '');
+    }
+
+    // Icon for a non-image/pdf attachment badge, based on filename extension.
+    function attFileIcon(name) {
+      if (/\.(xlsx|xls|csv)$/i.test(name || '')) return 'ti-file-type-xls';
+      if (/\.docx?$/i.test(name || '')) return 'ti-file-type-doc';
+      if (/\.pptx?$/i.test(name || '')) return 'ti-file-type-ppt';
+      return 'ti-file-text';
+    }
+
+    // ─── Office file reading (attachments) ────────────────────────────
+    // Word/PowerPoint/Excel are parsed client-side into plain text and sent through
+    // the same 'text' attachment path CSV/txt already use — no backend changes needed.
+    async function readXlsxAsText(file) {
+      const XLSX = window.XLSX;
+      if (!XLSX) throw new Error('Spreadsheet reader failed to load — check your connection and try again.');
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      return wb.SheetNames.map(name => '### Sheet: ' + name + '\n' + XLSX.utils.sheet_to_csv(wb.Sheets[name])).join('\n\n');
+    }
+    async function readDocxAsText(file) {
+      const mammoth = window.mammoth;
+      if (!mammoth) throw new Error('Word reader failed to load — check your connection and try again.');
+      const buf = await file.arrayBuffer();
+      const result = await mammoth.extractRawText({ arrayBuffer: buf });
+      return result.value || '';
+    }
+    async function readPptxAsText(file) {
+      const JSZip = window.JSZip;
+      if (!JSZip) throw new Error('Presentation reader failed to load — check your connection and try again.');
+      const zip = await JSZip.loadAsync(await file.arrayBuffer());
+      const slideFiles = Object.keys(zip.files)
+        .filter(p => /^ppt\/slides\/slide\d+\.xml$/.test(p))
+        .sort((a, b) => (parseInt(a.match(/(\d+)/)[1], 10) - parseInt(b.match(/(\d+)/)[1], 10)));
+      const parser = new DOMParser();
+      const slides = [];
+      for (let i = 0; i < slideFiles.length; i++) {
+        const xml = await zip.files[slideFiles[i]].async('text');
+        const doc = parser.parseFromString(xml, 'application/xml');
+        const texts = Array.from(doc.getElementsByTagName('a:t')).map(n => n.textContent || '').filter(Boolean);
+        slides.push('Slide ' + (i + 1) + ':\n' + texts.join('\n'));
+      }
+      return slides.join('\n\n');
+    }
+    // Generates a downloadable file from a ```tmg-doc/tmg-sheet/tmg-slides``` block the AI produced.
+    function mdInlineRuns(line) {
+      const { TextRun } = window.docx;
+      return line.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map(p => {
+        const m = /^\*\*([^*]+)\*\*$/.exec(p);
+        return m ? new TextRun({ text: m[1], bold: true }) : new TextRun(p);
+      });
+    }
+    async function genDocxBlob(body) {
+      const d = window.docx;
+      if (!d) throw new Error('Word writer failed to load — check your connection and try again.');
+      const { Document, Packer, Paragraph, HeadingLevel } = d;
+      const children = (body || '').split('\n').map(raw => {
+        const l = raw.replace(/\r$/, '');
+        if (/^#\s+/.test(l)) return new Paragraph({ text: l.replace(/^#\s+/, ''), heading: HeadingLevel.HEADING_1 });
+        if (/^##\s+/.test(l)) return new Paragraph({ text: l.replace(/^##\s+/, ''), heading: HeadingLevel.HEADING_2 });
+        if (/^-\s+/.test(l)) return new Paragraph({ text: l.replace(/^-\s+/, ''), bullet: { level: 0 } });
+        if (!l.trim()) return new Paragraph({ text: '' });
+        return new Paragraph({ children: mdInlineRuns(l) });
+      });
+      const doc = new Document({ sections: [{ children }] });
+      return Packer.toBlob(doc);
+    }
+    function genXlsxBlob(body) {
+      const XLSX = window.XLSX;
+      if (!XLSX) throw new Error('Spreadsheet writer failed to load — check your connection and try again.');
+      const wb = XLSX.utils.book_new();
+      const re = /^### Sheet: (.+)$/gm;
+      const marks = []; let m;
+      while ((m = re.exec(body || ''))) marks.push({ name: m[1].trim(), markStart: m.index, bodyStart: m.index + m[0].length });
+      if (!marks.length) {
+        const sub = XLSX.read(body || '', { type: 'string' });
+        XLSX.utils.book_append_sheet(wb, sub.Sheets[sub.SheetNames[0]], 'Sheet1');
+      } else {
+        marks.forEach((mk, i) => {
+          const end = i + 1 < marks.length ? marks[i + 1].markStart : body.length;
+          const chunk = body.slice(mk.bodyStart, end).trim();
+          const sub = XLSX.read(chunk || ' ', { type: 'string' });
+          XLSX.utils.book_append_sheet(wb, sub.Sheets[sub.SheetNames[0]], (mk.name || 'Sheet').slice(0, 31));
+        });
+      }
+      const arr = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+      return new Blob([arr], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    }
+    async function genPptxBlob(body) {
+      const PptxGenJS = window.PptxGenJS;
+      if (!PptxGenJS) throw new Error('Presentation writer failed to load — check your connection and try again.');
+      const pptx = new PptxGenJS();
+      const slides = (body || '').split(/^---\s*$/m).map(s => s.trim()).filter(Boolean);
+      slides.forEach(raw => {
+        const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+        const title = (lines[0] || '').replace(/^#+\s*/, '').replace(/^Slide\s*\d+:?\s*/i, '');
+        const bullets = lines.slice(1).map(l => l.replace(/^[-*]\s*/, '')).filter(Boolean);
+        const slide = pptx.addSlide();
+        slide.addText(title, { x: 0.5, y: 0.3, w: 9, h: 1, fontSize: 28, bold: true, color: '001A4A' });
+        if (bullets.length) slide.addText(bullets.map(b => ({ text: b, options: { bullet: true, breakLine: true } })), { x: 0.5, y: 1.3, w: 9, h: 4.5, fontSize: 16, color: '333333' });
+      });
+      return pptx.write({ outputType: 'blob' });
     }
 
     const WORK_REQUESTS = [
@@ -1314,7 +1571,7 @@ Rules:
                                 border: `1px solid ${isUser ? 'rgba(255,255,255,0.18)' : C.border}`,
                                 textDecoration: 'none', color: isUser ? '#fff' : C.textPrimary,
                               }}>
-                                <i className={`ti ${a.kind === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text'}`} style={{ fontSize: 18, color: isUser ? '#fff' : C.gold, flexShrink: 0 }} />
+                                <i className={`ti ${a.kind === 'pdf' ? 'ti-file-type-pdf' : attFileIcon(a.name)}`} style={{ fontSize: 18, color: isUser ? '#fff' : C.gold, flexShrink: 0 }} />
                                 <span style={{ fontSize: '0.75rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.name}</span>
                               </a>
                             )
@@ -1999,6 +2256,9 @@ Rules:
       'claude-haiku-4':    { in: 1.00, out: 5.00 },
       'claude-sonnet-4':   { in: 3.00, out: 15.00 },
       'claude-opus-4':     { in: 15.00, out: 75.00 },
+      // OpenAI image generation is billed per-image, not per-token — this is a rough
+      // $/1M-token-equivalent so it slots into the same cost math (see generate-image edge fn).
+      'gpt-image-1.5':     { in: 5.00, out: 32.00 },
     };
     const priceFor = (model) => { const m = model || ''; const k = Object.keys(PRICING).find(x => m.includes(x)); return PRICING[k] || PRICING['claude-3-5-sonnet']; };
     const rowCost = (r) => { const p = priceFor(r.model); return (Number(r.input_tokens) || 0) / 1e6 * p.in + (Number(r.output_tokens) || 0) / 1e6 * p.out; };
@@ -2006,7 +2266,7 @@ Rules:
     const fmtUsd = (n) => '$' + (Number(n) || 0).toFixed(2);
 
     // Friendly names for the feature tags written to usage_log by each surface.
-    const FEATURE_LABEL = { ai_chat: 'AI Chat', kpi: 'KPI Entry', add_todo: 'Add To-Do', intake_form: 'Intake Forms', tasks: 'Tasks', crm_tasks: 'CRM Tasks', voice_transcribe: 'Voice Transcribe', chat_title: 'Chat Titles', other: 'Other / untagged' };
+    const FEATURE_LABEL = { ai_chat: 'AI Chat', kpi: 'KPI Entry', add_todo: 'Add To-Do', intake_form: 'Intake Forms', tasks: 'Tasks', crm_tasks: 'CRM Tasks', voice_transcribe: 'Voice Transcribe', chat_title: 'Chat Titles', 'image-generation': 'AI Images', other: 'Other / untagged' };
     const featLabel = (f) => FEATURE_LABEL[f] || (f || 'Other');
     const MONTHLY_CAP_USD = 20; // per-person estimated-spend cap (calendar month). Warn-only: over = flagged red, never blocked.
 
@@ -5028,7 +5288,7 @@ Rules:
                     <img src={a.previewUrl} alt={a.name} style={{ width: 46, height: 46, borderRadius: 10, objectFit: 'cover', display: 'block', border: `1px solid ${dark ? '#152545' : '#E0D8CC'}` }} />
                   ) : (
                     <div style={{ height: 46, display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', borderRadius: 10, maxWidth: 160, background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${dark ? '#152545' : '#E0D8CC'}` }}>
-                      <i className={`ti ${a.kind === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text'}`} style={{ fontSize: 18, color: C.gold, flexShrink: 0 }} />
+                      <i className={`ti ${a.kind === 'pdf' ? 'ti-file-type-pdf' : attFileIcon(a.name)}`} style={{ fontSize: 18, color: C.gold, flexShrink: 0 }} />
                       <span style={{ fontSize: '0.7rem', color: dark ? '#fff' : C.textPrimary, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: C.fontSans }}>{a.name}</span>
                     </div>
                   )}
@@ -6289,12 +6549,19 @@ Rules:
         for (const file of files) {
           if (file.size > 20 * 1024 * 1024) { alert('"' + file.name + '" is over 20 MB and was skipped.'); continue; }
           const type = file.type || '';
+          const name = file.name || '';
           let kind = null, textContent = null, previewUrl = null;
-          if (type.startsWith('image/')) { kind = 'image'; previewUrl = URL.createObjectURL(file); }
-          else if (type === 'application/pdf' || /\.pdf$/i.test(file.name)) { kind = 'pdf'; }
-          else if (type.startsWith('text/') || /\.(txt|csv|md|json|log)$/i.test(file.name)) { kind = 'text'; textContent = await file.text(); }
-          else { alert('The AI can\'t read "' + file.name + '" yet (unsupported type).'); continue; }
-          additions.push({ id: crypto.randomUUID(), file, kind, name: file.name, mediaType: type, size: file.size, previewUrl, textContent });
+          try {
+            if (type.startsWith('image/')) { kind = 'image'; previewUrl = URL.createObjectURL(file); }
+            else if (type === 'application/pdf' || /\.pdf$/i.test(name)) { kind = 'pdf'; }
+            else if (/\.(xlsx|xls)$/i.test(name)) { kind = 'text'; textContent = await readXlsxAsText(file); }
+            else if (/\.docx$/i.test(name)) { kind = 'text'; textContent = await readDocxAsText(file); }
+            else if (/\.pptx$/i.test(name)) { kind = 'text'; textContent = await readPptxAsText(file); }
+            else if (/\.(doc|ppt)$/i.test(name)) { alert('"' + name + '" is an older Office format the app can\'t read. Please re-save it as .docx or .pptx and try again.'); continue; }
+            else if (type.startsWith('text/') || /\.(txt|csv|md|json|log)$/i.test(name)) { kind = 'text'; textContent = await file.text(); }
+            else { alert('The AI can\'t read "' + name + '" yet (unsupported type).'); continue; }
+          } catch (e) { alert('Could not read "' + name + '": ' + (e.message || e)); continue; }
+          additions.push({ id: crypto.randomUUID(), file, kind, name, mediaType: type, size: file.size, previewUrl, textContent });
         }
         if (additions.length) setPendingAttachments(prev => [...prev, ...additions]);
       }
@@ -6728,7 +6995,7 @@ Rules:
             ref={fileInputRef}
             type="file"
             multiple
-            accept="image/*,application/pdf,.txt,.csv,.md,.json,.log,text/*"
+            accept="image/*,application/pdf,.txt,.csv,.md,.json,.log,.xlsx,.xls,.docx,.pptx,text/*"
             style={{ display: 'none' }}
             onChange={e => { onSelectFiles(e.target.files); e.target.value = ''; }}
           />

@@ -141,5 +141,52 @@ Deno.serve(async (req) => {
     sent++;
   }
 
-  return json({ sent, due: due.length, errors });
+  // 5) "Thanks for the feedback!" auto-ack — queued by sffu-inbound the
+  // moment a genuine (non-STOP) reply comes in, for showings that haven't
+  // already gotten one. Uses the same send path + template 4 ("Reply
+  // Received" in Settings). Runs on this same 30-min cron; no separate
+  // scheduled job needed for this.
+  const { data: pendingAcks, error: ackErr } = await sb
+    .from("showings")
+    .select("id, agent_name, agent_phone, property_address, added_by_name")
+    .eq("reply_ack_pending", true)
+    .not("agent_phone", "is", null)
+    .limit(25);
+  let acksSent = 0;
+  const ackErrors: any[] = [];
+  if (ackErr) ackErrors.push({ error: ackErr.message });
+  const ackBody = tplByTouch[4];
+  for (const s of pendingAcks || []) {
+    if (!ackBody) break; // no "Reply Received" template configured yet
+    (s as any).listing_agent = agentByAddr[s.property_address] || null;
+    (s as any).zillow_url = urlByAddr[s.property_address] || null;
+    const content = fill(ackBody, s);
+    let quoId: string | null = null;
+    let quoStatus = "sent";
+    let quoConversationId: string | null = null;
+    try {
+      const r = await fetch("https://api.quo.com/v1/messages", {
+        method: "POST",
+        headers: { "Authorization": QUO_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ from: QUO_FROM, to: [s.agent_phone], content }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { ackErrors.push({ id: s.id, status: r.status, quo: data }); continue; }
+      quoId = data?.data?.id ?? null;
+      quoStatus = data?.data?.status ?? "sent";
+      quoConversationId = data?.data?.conversationId ?? null;
+    } catch (e) {
+      ackErrors.push({ id: s.id, error: String(e) });
+      continue;
+    }
+    await sb.from("sms_messages").insert({
+      showing_id: s.id, direction: "out", touch_number: 4, body: content,
+      quo_message_id: quoId, quo_conversation_id: quoConversationId,
+      status: quoStatus, sent_by_name: "Auto · SFFU",
+    });
+    await sb.from("showings").update({ reply_ack_pending: false, reply_ack_sent: true }).eq("id", s.id);
+    acksSent++;
+  }
+
+  return json({ sent, due: due.length, errors, acksSent, ackErrors });
 });

@@ -83,15 +83,17 @@ Deno.serve(async (req) => {
     const conversationId = m.conversationId || m.conversation_id || null;
 
     // Distinguish an inbound reply from our OWN outbound (Quo also fires
-    // webhooks for messages we send + delivery-status events). Gate POSITIVELY
-    // on Quo's real inbound signal (top-level `type` + message `direction`)
-    // rather than only excluding an outbound-looking string — that way a
-    // status/delivery event can never be mistaken for a reply.
+    // webhooks for messages we send + delivery-status events). Trust the
+    // top-level event `type` alone — it's Quo's authoritative "this is a
+    // genuine inbound message" signal ("message.received" fires only for
+    // incoming messages, per Quo's own event docs). The per-message
+    // `direction` field is NOT a reliable second signal in practice — real
+    // payloads from this account show direction:"outgoing" on messages that
+    // are unambiguously inbound replies (confirmed via conversationId +
+    // sender + body match on a live test), so it must not be checked.
     const evtType = String(payload?.type || "").toLowerCase();
-    const dir = String(m.direction || "").toLowerCase();
     const typeSaysOutbound = evtType ? evtType !== "message.received" : false;
-    const dirSaysOutbound = dir ? dir !== "incoming" : false;
-    if (typeSaysOutbound || dirSaysOutbound) {
+    if (typeSaysOutbound) {
       return json({ ignored: "outbound / status event, not an inbound reply" });
     }
 

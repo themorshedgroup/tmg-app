@@ -1181,7 +1181,7 @@ Rules:
     // Built-in pill, always shown first — starts a fresh chat.
     const NEW_CHAT_PILL = { id: 'new-chat', label: 'New Chat', icon: 'ti-message-plus', colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'newchat', config: {} };
 
-    // Built-in Calendar Brief + Deal Update pills — always shown, like New Chat.
+    // Built-in Calendar Brief + Deals Update pills — always shown, like New Chat.
     // Hardcoded so they need no admin row or SQL; each opens the interactive
     // CalendarBriefCard. dispatchPill handles type 'calendar'.
     const CALENDAR_PILLS = [
@@ -1189,7 +1189,7 @@ Rules:
       { id: 'cal-weekly', label: 'Weekly Brief',  icon: 'ti-calendar',       colorLight: '#5A3FA0', colorDark: '#B79CEB', type: 'calendar', mode: 'work', config: { kind: 'weekly' }, enabled: true },
     ];
     // Prompt-only — the AI just asks conversationally, no special dispatch needed.
-    const DEAL_PILL = { id: 'fb-deal', label: 'Deal Update', icon: 'ti-currency-dollar', type: 'soon', config: {}, enabled: true };
+    const DEAL_PILL = { id: 'fb-deal', label: 'Deals Update', icon: 'ti-currency-dollar', type: 'soon', config: {}, enabled: true };
 
     // Placeholder pills for features not built yet — rendered in neutral black/white with a
     // "SOON" badge (not the live AI_UI color) and dispatchPill's 'soon' case is a no-op alert.
@@ -1570,14 +1570,16 @@ Rules:
 
       // "Coming soon" pills render neutral black/white (not the live AI_UI accent) with a SOON badge.
       // Every pill renders in neutral black/white — "SOON" is the only thing that marks a
-      // placeholder, not a color difference.
+      // placeholder, not a color difference. Marquee pills (the ones in the middle of the
+      // screen on a fresh chat) sit at 80% opacity so they read a touch quieter than the
+      // compact row's pinned pills, which are at full strength once you're actually chatting.
       const pillChip = (p, key, compact) => {
         const soon = p.type === 'soon';
         return (
           <button key={key} onClick={() => onPill(p)} style={{
             position: 'relative', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
             padding: compact ? '6px 12px' : '8px 16px 8px 12px', borderRadius: compact ? 16 : 15,
-            border: '0.5px solid #DDD', background: '#fff',
+            border: '0.5px solid #DDD', background: '#fff', opacity: compact ? 1 : 0.8,
           }}>
             {soon && (
               <span style={{

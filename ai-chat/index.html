@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
-<meta name="description" content="How to use the TMG App AI Chat — Work Mode & AI Mode, pill shortcuts, chat history, and projects.">
+<meta name="description" content="How to use the TMG App AI Chat — quick-action pills, chat history, and projects.">
 <title>TMG App — AI Chat Guide</title>
 <link rel="icon" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -56,20 +56,14 @@ body{font-family:'Jost',sans-serif;background:#001A4A;color:var(--ink);-webkit-f
 .mock-cap{font-size:10px;color:rgba(255,255,255,.45);text-align:center;margin:-6px 0 16px;line-height:1.6}
 html.gs-embed .mock-cap{color:#8A8A8A}
 
-/* the bottom input bar mock */
-.barmock{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #E8E0D2;border-radius:18px;padding:7px 12px}
-.barmock .ham{color:#7A7468;font-size:17px;display:flex}
-.barmock .modetag{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:600;letter-spacing:.12em;color:#AD832F}
-.barmock .modetag.ai{color:#185FA5}
-.barmock .vline{width:1px;height:20px;background:#E8E0D2}
-.barmock .ph{flex:1;font-size:11px;color:#B8B2A6}
+/* standalone hamburger-row mock (mobile chat-history trigger) */
+.hambtn{width:32px;height:32px;border-radius:9px;background:#EEF0FB;border:.5px solid #C9CDF2;color:#4C56C7;display:inline-flex;align-items:center;justify-content:center}
 
-/* pill row mock */
-.pillrow{display:flex;flex-wrap:wrap;gap:7px}
-.pill{display:inline-flex;align-items:center;gap:5px;border-radius:16px;padding:6px 12px;font-size:11px;font-weight:500;border:1px solid #E8D9BC;background:#FDF8F0;color:#7A5B1E}
-.pill .pi{color:#AD832F;display:flex}
-.pill.ai{border-color:#C8D0F0;background:#F0F4FF;color:#2A4FA4}
-.pill.ai .pi{color:#4A6FD4}
+/* pill row mock — neutral black/white; a SOON badge (not color) marks placeholders */
+.pillrow{display:flex;flex-wrap:wrap;gap:14px 7px}
+.pill{position:relative;display:inline-flex;align-items:center;gap:5px;border-radius:16px;padding:6px 12px;font-size:11px;font-weight:500;border:1px solid #ddd;background:#fff;color:#1A1A1A}
+.pill .pi{color:#1A1A1A;display:flex}
+.pill .soontag{position:absolute;top:-9px;left:8px;padding:1px 6px;border-radius:8px;background:#1A1A1A;color:#fff;font-size:7px;font-weight:700;letter-spacing:.08em}
 
 /* sidebar mock */
 .sb{background:#F5F0E8;border:1px solid #E8E0D2;border-radius:12px;overflow:hidden}
@@ -81,8 +75,6 @@ html.gs-embed .mock-cap{color:#8A8A8A}
 .sb-row{padding:8px 12px;border-radius:8px;margin:1px 6px}
 .sb-row.on{background:#E8E3DB}
 .sb-row .rt{font-size:12.5px;color:#001A4A}
-.sb-row .rm{display:flex;align-items:center;gap:3px;font-size:8.5px;color:#B4B2A9;margin-top:2px}
-.sb-row .rm.work{color:#C9A45A}.sb-row .rm.ai{color:#8A9CC0}
 .sb-proj{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;margin:1px 6px}
 .sb-proj .pn{flex:1;font-size:12.5px;color:#001A4A}
 .sb-proj .pc{font-size:10px;color:#C4BFBA}
@@ -125,7 +117,7 @@ html.gs-embed .step-desc b{color:#001A4A}
     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#C9A45A" stroke-width="1.6"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"/><circle cx="18.5" cy="17.5" r="2.2"/><circle cx="6" cy="16" r="1.5"/></svg>
   </div>
   <div class="cover-title">AI Chat</div>
-  <div class="cover-desc">Your TMG assistant — switch modes, fire shortcuts, and keep your work organized in projects.</div>
+  <div class="cover-desc">Your TMG assistant — fire quick-action shortcuts, and keep your work organized in projects.</div>
   <div class="cover-vals">
     <span class="cv">Be Irreplaceable</span><span class="cs">·</span>
     <span class="cv">Accountability</span><span class="cs">·</span>
@@ -137,48 +129,37 @@ html.gs-embed .step-desc b{color:#001A4A}
 
 <div class="content">
 
-  <!-- 1 · MODES -->
-  <div class="section-hd"><div class="sh-num">1</div><div class="sh-label">The two modes</div><div class="sh-line"></div></div>
-  <div class="step-title">Work Mode &amp; AI Mode</div>
-  <div class="step-desc">The assistant has two modes. Tap the <b>mode tag</b> just left of the message box to switch between them — the icon and label tell you which one you're in.</div>
-
-  <div class="mock">
-    <div class="barmock">
-      <span class="ham"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/></svg></span>
-      <span class="modetag"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>WORK MODE</span>
-      <span class="vline"></span>
-      <span class="ph">Message TMG assistant…</span>
-    </div>
-  </div>
-  <div class="mock-cap">Tap the tag and it flips to <b>AI MODE</b> (a sparkles icon).</div>
-
-  <div class="note"><b><span class="ng">AI Mode</span></b> — a general assistant, like ChatGPT or Claude. Ask anything: draft an email, summarize, brainstorm, explain. Greets you with "How can I help you today?"</div>
-  <div class="note"><b><span class="ng">Work Mode</span></b> — guided TMG shortcuts for logging your work. Greets you with "What would you like to do?" and shows action pills (next section).</div>
-
-  <!-- 2 · PILLS -->
-  <div class="section-hd"><div class="sh-num">2</div><div class="sh-label">Pill shortcuts</div><div class="sh-line"></div></div>
+  <!-- 1 · PILLS -->
+  <div class="section-hd"><div class="sh-num">1</div><div class="sh-label">Quick-action pills</div><div class="sh-line"></div></div>
   <div class="step-title">Tap a pill to start fast</div>
-  <div class="step-desc">Pills are the rounded shortcuts above the message box. Tap one and the assistant walks you through it — no need to type the whole request.</div>
+  <div class="step-desc">Pills are shortcuts so you don't have to type the whole request — tap one and the assistant walks you through it. Open a fresh chat and you'll see two scrolling rows of them below the greeting; once you're mid-conversation they collapse into a short row with a <b>⋯</b> for everything else.</div>
 
   <div class="mock">
     <div class="pillrow">
       <span class="pill"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 9h8M8 13h5"/><path d="M21 12a9 9 0 1 1-3.5-7.1"/><path d="M16 4l2 2 4-4"/></svg></span>New Chat</span>
       <span class="pill"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3.5 5.5l1.5 1.5 2.5-3M3.5 12l1.5 1.5 2.5-3M3.5 18.5L5 20l2.5-3M11 6h10M11 12h10M11 18h10"/></svg></span>Add To Do</span>
       <span class="pill"><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="6" y1="20" x2="6" y2="12"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="9"/></svg></span>Add KPIs</span>
+      <span class="pill"><span class="soontag">SOON</span><span class="pi"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span>Deals Update</span>
     </div>
   </div>
-  <div class="mock-cap">Pills take the current mode's color — gold in Work Mode, blue in AI Mode.</div>
+  <div class="mock-cap">Pills are plain black &amp; white — a <b>SOON</b> badge, not a color, is what marks one as not live yet.</div>
 
-  <div class="note"><b><span class="ng">New Chat</span></b> — always the first pill, in both modes. Starts a fresh conversation so a new topic doesn't get mixed into the old one.</div>
+  <div class="note"><b><span class="ng">New Chat</span></b> — always the first pill. Starts a fresh conversation so a new topic doesn't get mixed into the old one.</div>
   <div class="note"><b><span class="ng">Add To Do</span></b> — quickly capture a task. The assistant turns what you type into a to-do for you.</div>
   <div class="note"><b><span class="ng">Add KPIs</span></b> — log your weekly numbers (calls, pop-bys, notes…). The assistant collects them step by step and files them. <span class="rtag">For Sales Agents only</span></div>
-  <div class="subnote"><b>Note:</b> Work Mode is where the action pills live. AI Mode shows New Chat (and any extra AI shortcuts an admin has added).</div>
+  <div class="note"><b><span class="ng">Today's Brief / Weekly Brief</span></b> — pulls your calendar into an interactive schedule card you can RSVP from, right in the chat.</div>
   <div class="subnote"><b>Note:</b> Which pills you see can depend on your role — an admin may set a pill (like Add KPIs) to show only for certain roles.</div>
+  <div class="subnote"><b>Note:</b> A few pills are marked <b>SOON</b> — they're on the roadmap but not wired up yet, so tapping one just says so.</div>
 
-  <!-- 3 · CHAT HISTORY -->
-  <div class="section-hd"><div class="sh-num">3</div><div class="sh-label">Chat history</div><div class="sh-line"></div></div>
+  <!-- 2 · CHAT HISTORY -->
+  <div class="section-hd"><div class="sh-num">2</div><div class="sh-label">Chat history</div><div class="sh-line"></div></div>
   <div class="step-title">Find and manage past chats</div>
-  <div class="step-desc">Tap the <b>☰ menu</b> on the left of the message box to open the <b>AI Chat</b> panel. (On a wide screen it's always docked on the left.) Tap any chat to reopen it.</div>
+  <div class="step-desc">On a phone, tap the <b>☰ menu</b> button in its own row just below the top bar to open the <b>AI Chat</b> panel — it slides in as a panel over the chat, not a full-screen takeover. (On a wide screen the panel is always docked on the left.) Tap any chat to reopen it.</div>
+
+  <div class="mock" style="padding:12px 16px">
+    <span class="hambtn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/></svg></span>
+  </div>
+  <div class="mock-cap">The chat-history button, in its own row below the top bar.</div>
 
   <div class="mock">
     <div class="sb">
@@ -191,14 +172,14 @@ html.gs-embed .step-desc b{color:#001A4A}
       <div class="sb-lbl">PROJECTS</div>
       <div class="sb-proj"><span class="pn">123 Main St Listing</span><span class="pc">4</span></div>
       <div class="sb-lbl">TODAY</div>
-      <div class="sb-row on"><div class="rt">Buyer follow-up email</div><div class="rm ai">✦ AI Mode</div></div>
-      <div class="sb-row"><div class="rt">Weekly KPIs</div><div class="rm work">▮ Work Mode</div></div>
+      <div class="sb-row on"><div class="rt">Buyer follow-up email</div></div>
+      <div class="sb-row"><div class="rt">Weekly KPIs</div></div>
     </div>
   </div>
   <div class="mock-cap">Header icons: <b>⚙ memory</b> · <b>sort &amp; filter</b> · <b>✎ new chat</b>.</div>
 
-  <div class="note">Chats group automatically into <b>Pinned</b>, then <b>Today</b> / <b>This week</b> / <b>Earlier</b>, and each row is tagged <span class="ng">Work Mode</span> or <span class="ng">AI Mode</span>.</div>
-  <div class="note"><b>Sort &amp; filter</b> (the slider icon): show only Work Mode or AI Mode chats, and sort by <b>Most recent</b> or <b>Alphabetical</b>.</div>
+  <div class="note">Chats group automatically into <b>Pinned</b>, then <b>Today</b> / <b>This week</b> / <b>Earlier</b>.</div>
+  <div class="note"><b>Sort &amp; filter</b> (the slider icon): sort by <b>Most recent</b> or <b>Alphabetical</b>.</div>
 
   <div class="step-desc" style="margin-top:6px">Tap the <b>⋯</b> on a chat (or press-and-hold the row) for its menu:</div>
   <div class="menu">
@@ -211,8 +192,8 @@ html.gs-embed .step-desc b{color:#001A4A}
   </div>
   <div class="subnote" style="margin-top:12px"><b>Archive</b> hides a chat without deleting it. <b>Delete</b> removes it for good — that one can't be undone.</div>
 
-  <!-- 4 · PROJECTS -->
-  <div class="section-hd"><div class="sh-num">4</div><div class="sh-label">Projects</div><div class="sh-line"></div></div>
+  <!-- 3 · PROJECTS -->
+  <div class="section-hd"><div class="sh-num">3</div><div class="sh-label">Projects</div><div class="sh-line"></div></div>
   <div class="step-title">Group chats into Projects</div>
   <div class="step-desc">A project keeps all the chats for one deal or topic together — with its own <b>instructions</b>, <b>memory</b>, and <b>files</b> the assistant uses every time you chat inside it. Like a Claude Project.</div>
 
@@ -233,8 +214,8 @@ html.gs-embed .step-desc b{color:#001A4A}
   <div class="note"><b>New chats inside a project</b> automatically use its instructions, memory, and files. A 📁 tag shows at the top of those chats.</div>
   <div class="subnote"><b>Delete a project:</b> open it and tap the <b>🗑 trash</b> in the top-right. The project is removed and its chats are unlinked (the chats themselves stay).</div>
 
-  <!-- 5 · MEMORY -->
-  <div class="section-hd"><div class="sh-num">5</div><div class="sh-label">Assistant memory</div><div class="sh-line"></div></div>
+  <!-- 4 · MEMORY -->
+  <div class="section-hd"><div class="sh-num">4</div><div class="sh-label">Assistant memory</div><div class="sh-line"></div></div>
   <div class="step-title">Teach it once, for every chat</div>
   <div class="step-desc">Tap the <b>⚙ gear</b> at the top of the AI Chat panel to set <b>Assistant memory</b> — notes the assistant keeps in mind across <b>every</b> AI chat (not just one project).</div>
   <div class="note">Good things to put here: your role, who you work with, how you like replies (short vs detailed), recurring context. It's personal to you.</div>
@@ -242,8 +223,8 @@ html.gs-embed .step-desc b{color:#001A4A}
   <!-- GOOD TO KNOW -->
   <div class="section-hd"><div class="sh-num" style="background:rgba(201,164,90,.1)">★</div><div class="sh-label">Good to know</div><div class="sh-line"></div></div>
   <div class="note"><b>Start fresh often.</b> New topic? Hit <span class="ng">New Chat</span> so context stays clean and answers stay sharp.</div>
-  <div class="note"><b>Pick the right mode.</b> Logging work → <span class="ng">Work Mode</span>. Thinking, writing, asking → <span class="ng">AI Mode</span>.</div>
-  <div class="note"><b>Attach files</b> to a single message with the 📎 clip in the message bar — images, PDFs, and text. For knowledge the assistant should always have, add it to a <span class="ng">Project</span> instead.</div>
+  <div class="note"><b>Attach files</b> with the 📎 clip in the message bar — images, PDFs, Word/PowerPoint/Excel, and plain text. For knowledge the assistant should always have, add it to a <span class="ng">Project</span> instead.</div>
+  <div class="note"><b>The assistant can hand things back too</b> — ask for a doc, sheet, or slide deck and it can generate a real downloadable file, not just chat text.</div>
 
   <div class="foot">THE MORSHED GROUP · CHRISTIE'S INTERNATIONAL REAL ESTATE</div>
 </div>

@@ -825,8 +825,8 @@
               {!editing && <Icon.Chevron size={14} color={C.textSecondary} down={expanded} />}
             </div>
 
-            {/* Generate Feedback — only once at least one showing here has feedback recorded */}
-            {!editing && feedbackShowings.length > 0 && (
+            {/* Generate Summary — always available; shows "no feedback yet" if none recorded */}
+            {!editing && showings.length > 0 && (
               <button
                 onClick={e => { e.stopPropagation(); setShowFeedback(true); }}
                 style={{
@@ -838,7 +838,7 @@
                 }}
               >
                 <i className="ti ti-notes" style={{ fontSize: 13 }} />
-                Generate Feedback
+                Generate Summary
               </button>
             )}
 
@@ -917,6 +917,7 @@
           {showFeedback && (
             <FeedbackSummaryModal
               address={dispAddr}
+              totalShowings={showings.length}
               feedbackShowings={feedbackShowings}
               onClose={() => setShowFeedback(false)}
             />
@@ -929,11 +930,15 @@
     // Copy-pasteable rollup of every showing on this property that has
     // feedback recorded — one block per agent, in the format Symon can
     // paste straight into an email/report to the listing agent.
-    function FeedbackSummaryModal({ address, feedbackShowings, onClose }) {
+    function FeedbackSummaryModal({ address, totalShowings, feedbackShowings, onClose }) {
       const [copied, setCopied] = useState(false);
-      const summary = feedbackShowings
-        .map(s => `${s.agent || 'Agent'}, ${s.office || 'Brokerage'}:\n ${s.feedback.trim()}`)
-        .join('\n\n');
+      const hasFeedback = feedbackShowings.length > 0;
+      const feedbackBlock = hasFeedback
+        ? feedbackShowings
+            .map(s => `${s.agent || 'Agent'}, ${s.office || 'Brokerage'}:\n ${s.feedback.trim()}`)
+            .join('\n\n')
+        : 'No feedback received yet.';
+      const summary = `Total # of showings: ${totalShowings}\n\n${feedbackBlock}`;
 
       async function handleCopy() {
         try {
@@ -956,7 +961,7 @@
             maxHeight: '80vh', display: 'flex', flexDirection: 'column',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-              <div style={{ fontSize: '1.2rem', fontStyle: 'italic', fontFamily: C.fontDisplay, color: C.navy }}>Feedback Summary</div>
+              <div style={{ fontSize: '1.2rem', fontStyle: 'italic', fontFamily: C.fontDisplay, color: C.navy }}>Summary</div>
               <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4, color: C.textMuted, fontSize: 20, display: 'flex' }}>
                 <i className="ti ti-x" />
               </button>
@@ -966,13 +971,14 @@
             <textarea
               readOnly
               value={summary}
-              rows={Math.min(14, feedbackShowings.length * 3)}
+              rows={hasFeedback ? Math.min(16, 2 + feedbackShowings.length * 3) : 5}
               onClick={e => e.target.select()}
               style={{
                 width: '100%', flex: 1, resize: 'none',
                 border: `1px solid ${C.border}`, borderRadius: 10,
-                background: C.bg, color: C.textPrimary,
+                background: C.bg, color: hasFeedback ? C.textPrimary : C.textMuted,
                 fontSize: '0.85rem', fontFamily: C.fontSans, lineHeight: 1.6,
+                fontStyle: hasFeedback ? 'normal' : 'italic',
                 padding: 12, outline: 'none', marginBottom: 14,
               }}
             />

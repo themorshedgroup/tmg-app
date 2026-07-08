@@ -101,6 +101,16 @@
     #auth-overlay .pulse-dot::after { content:''; position:absolute; inset:-4px; border-radius:50%; background:rgba(61,175,126,.3); animation:tmg-pulse-ring 2s ease infinite; }
     @keyframes tmg-pulse-ring { 0% { transform:scale(1); opacity:1; } 100% { transform:scale(1.7); opacity:0; } }
     @keyframes tmg-spin { to { transform: rotate(360deg); } }
+
+    /* ── AI Chat: fresh-chat quick-action marquee (two rows, opposite directions) ── */
+    @keyframes tmg-marquee-l { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+    @keyframes tmg-marquee-r { from { transform: translateX(-50%); } to { transform: translateX(0); } }
+    .tmg-marquee-track { display: flex; width: max-content; }
+    .tmg-marquee-track.left  { animation: tmg-marquee-l 23s linear infinite; }
+    .tmg-marquee-track.right { animation: tmg-marquee-r 23s linear infinite; }
+    @media (prefers-reduced-motion: reduce) {
+      .tmg-marquee-track.left, .tmg-marquee-track.right { animation: none; }
+    }
     #auth-overlay .status-badge { display:inline-flex; align-items:center; gap:7px; background:rgba(61,175,126,.12); border:1px solid rgba(61,175,126,.3); border-radius:20px; padding:5px 14px; margin-bottom:20px; }
     #auth-overlay .badge-dot { width:6px; height:6px; border-radius:50%; background:#3DAF7E; }
     #auth-overlay .badge-txt { font-size:9px; letter-spacing:.18em; font-weight:600; text-transform:uppercase; color:#3DAF7E; }
@@ -302,6 +312,9 @@ Continue with TMG Gmail
       fontSans:     "-apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif",
       fontDisplay:  "'Cormorant Garamond', Georgia, serif",
     };
+
+    // Unified AI Chat accent palette — one mode only (Work/AI toggle removed).
+    const AI_UI = { primary: '#4C56C7', tint: '#EEF0FB', border: '#C9CDF2', text: '#3C46A8' };
 
     // ─── Markdown rendering for AI responses (tables, bold, lists, etc.) ──
     // AI text arrives as markdown; the chat bubble must render it, not dump
@@ -1025,7 +1038,7 @@ Rules:
 - Resolve relative dates ("Friday", "tomorrow", "next week") to an absolute YYYY-MM-DD using today's date given in the conversation.
 - Keep the conversational part brief and friendly.`;
 
-    // ─── Enter KPI (Work Mode) ───────────────────────────────────────
+    // ─── Enter KPI ─────────────────────────────────────────────────────
     // Phase A: every flow only PREVIEWS what would be sent — no network call.
     const KPI_LIVE = true;
     const KPI_OPTIONS = ['Touch Call', 'Follow Up Call', 'Notes', 'Hotzone Action/s', 'Pop-by', 'Lunch'];
@@ -1157,23 +1170,36 @@ Rules:
       return L.join('\n');
     }
 
-    // ─── Work Mode pills ─────────────────────────────────────────────
+    // ─── AI Chat pills ───────────────────────────────────────────────
     // Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
-    // Pills carry a `mode` ('work' | 'ai') — they show on the matching chat mode.
+    // `mode` is a legacy DB field, no longer used to filter — there's only one unified mode now.
     const FALLBACK_PILLS = [
       { id: 'fb-task', label: 'Add To Do', icon: 'ti-checklist', colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'task',   mode: 'work', config: { instruction: TASK_PILL_INSTRUCTION, seed: 'To Do: ' }, enabled: true },
       { id: 'fb-kpis', label: 'Add KPIs',  icon: 'ti-chart-bar', colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', mode: 'work', config: { kpi: true, prompt: 'Enter KPI' },                       enabled: true },
     ];
 
-    // Built-in pill, always shown first in BOTH modes — starts a fresh chat.
+    // Built-in pill, always shown first — starts a fresh chat.
     const NEW_CHAT_PILL = { id: 'new-chat', label: 'New Chat', icon: 'ti-message-plus', colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'newchat', config: {} };
 
-    // Built-in Calendar Brief pills — always shown in Work Mode (like New Chat).
+    // Built-in Calendar Brief + Deal Update pills — always shown, like New Chat.
     // Hardcoded so they need no admin row or SQL; each opens the interactive
     // CalendarBriefCard. dispatchPill handles type 'calendar'.
     const CALENDAR_PILLS = [
       { id: 'cal-daily',  label: "Today's Brief", icon: 'ti-calendar-stats', colorLight: '#5A3FA0', colorDark: '#B79CEB', type: 'calendar', mode: 'work', config: { kind: 'daily' },  enabled: true },
       { id: 'cal-weekly', label: 'Weekly Brief',  icon: 'ti-calendar',       colorLight: '#5A3FA0', colorDark: '#B79CEB', type: 'calendar', mode: 'work', config: { kind: 'weekly' }, enabled: true },
+    ];
+    // Prompt-only — the AI just asks conversationally, no special dispatch needed.
+    const DEAL_PILL = { id: 'fb-deal', label: 'Deal Update', icon: 'ti-currency-dollar', type: 'soon', config: {}, enabled: true };
+
+    // Placeholder pills for features not built yet — rendered in neutral black/white with a
+    // "SOON" badge (not the live AI_UI color) and dispatchPill's 'soon' case is a no-op alert.
+    const SOON_PILLS = [
+      { id: 'soon-listing', label: 'Req. Listing Presentation', icon: 'ti-presentation',   type: 'soon', config: {}, enabled: true },
+      { id: 'soon-ctc',     label: 'CTC File Update',           icon: 'ti-refresh',        type: 'soon', config: {}, enabled: true },
+      { id: 'soon-timeoff', label: 'File Time Off',             icon: 'ti-calendar-off',   type: 'soon', config: {}, enabled: true },
+      { id: 'soon-email',   label: 'Email Summary',             icon: 'ti-mail',           type: 'soon', config: {}, enabled: true },
+      { id: 'soon-calls',   label: "Today's Call List",         icon: 'ti-phone',          type: 'soon', config: {}, enabled: true },
+      { id: 'soon-score',   label: 'Latest Scorecard',          icon: 'ti-trophy',         type: 'soon', config: {}, enabled: true },
     ];
 
     // Curated icon set for the pill builder's icon picker (all verified Tabler names).
@@ -1513,15 +1539,77 @@ Rules:
       );
     }
 
-    function AIChatTab({ user, messages, loading, mode, dark, pills, onPill, flowCard, flowKey, projectName }) {
+    // Pinned in the compact (active-chat) pill row; everything else lives behind the ⋯ overflow.
+    const AI_PINNED_PILL_IDS = ['new-chat', 'fb-task'];
+    const AI_COMPACT_ROW_H = 54;
+
+    function AIChatTab({ user, messages, loading, dark, pills, onPill, flowCard, flowKey, projectName }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
       const scrollRef = useRef(null);
+      const [showActions, setShowActions] = useState(false);
+      const [reducedMotion, setReducedMotion] = useState(() => typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
       useEffect(() => {
         if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       }, [messages, loading, flowKey]);
 
+      useEffect(() => {
+        if (typeof window === 'undefined' || !window.matchMedia) return;
+        const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+        const f = () => setReducedMotion(mq.matches);
+        (mq.addEventListener ? mq.addEventListener('change', f) : mq.addListener(f));
+        return () => { (mq.removeEventListener ? mq.removeEventListener('change', f) : mq.removeListener(f)); };
+      }, []);
+
       const empty = messages.length === 0 && !flowCard;
+      const allPills = pills || [];
+      // Row 1 = live pills, row 2 = "coming soon" placeholders — not an arbitrary half-split.
+      const marqueeRow1 = allPills.filter(p => p.type !== 'soon');
+      const marqueeRow2 = allPills.filter(p => p.type === 'soon');
+      const pinnedPills = allPills.filter(p => AI_PINNED_PILL_IDS.includes(p.id));
+
+      // "Coming soon" pills render neutral black/white (not the live AI_UI accent) with a SOON badge.
+      // Every pill renders in neutral black/white — "SOON" is the only thing that marks a
+      // placeholder, not a color difference.
+      const pillChip = (p, key, compact) => {
+        const soon = p.type === 'soon';
+        return (
+          <button key={key} onClick={() => onPill(p)} style={{
+            position: 'relative', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+            padding: compact ? '6px 12px' : '8px 16px 8px 12px', borderRadius: compact ? 16 : 15,
+            border: '0.5px solid #DDD', background: '#fff',
+          }}>
+            {soon && (
+              <span style={{
+                position: 'absolute', top: -7, left: 10, padding: '1px 6px', borderRadius: 8,
+                background: '#1A1A1A', color: '#fff', fontFamily: "'Jost', sans-serif", fontSize: 7,
+                fontWeight: 700, letterSpacing: '0.08em', lineHeight: 1.4,
+              }}>SOON</span>
+            )}
+            <i className={`ti ${p.icon}`} style={{ fontSize: 12, color: '#1A1A1A' }} />
+            <span style={{ fontFamily: "'Jost', sans-serif", fontSize: compact ? 10 : 10.5, fontWeight: 500, color: '#1A1A1A' }}>{p.label}</span>
+          </button>
+        );
+      };
+
+      const marqueeRow = (items, dir) => {
+        if (!items.length) return null;
+        const loopItems = reducedMotion ? items : items.concat(items);
+        return (
+          <div style={{
+            overflow: 'hidden', paddingTop: 10, marginTop: -10,
+            maskImage: 'linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent)',
+            WebkitMaskImage: 'linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent)',
+          }}>
+            <div className={reducedMotion ? '' : `tmg-marquee-track ${dir}`} style={{
+              display: 'flex', gap: 9, width: reducedMotion ? '100%' : 'max-content',
+              justifyContent: reducedMotion ? 'center' : 'flex-start', flexWrap: reducedMotion ? 'wrap' : 'nowrap',
+            }}>
+              {loopItems.map((p, i) => pillChip(p, p.id + '-' + i, false))}
+            </div>
+          </div>
+        );
+      };
 
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
@@ -1540,8 +1628,16 @@ Rules:
                   {greeting()}, {firstName}
                 </div>
                 <div style={{ fontSize: '0.8rem', color: C.textSecondary, marginTop: 8, letterSpacing: '0.04em' }}>
-                  {mode === 'work' ? 'What would you like to do?' : 'How can I help you today?'}
+                  What would you like to do?
                 </div>
+                {allPills.length > 0 && (
+                  // Bleed past both ancestors' padding (16px scroll area + 24px empty-state = 40px
+                  // each side) so the marquee actually spans the full screen, not just its column.
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 22, width: 'calc(100% + 80px)', marginLeft: -40, marginRight: -40 }}>
+                    {marqueeRow(marqueeRow1, 'left')}
+                    {marqueeRow(marqueeRow2, 'right')}
+                  </div>
+                )}
               </div>
             ) : (
               messages.map((m, i) => {
@@ -1594,25 +1690,49 @@ Rules:
               </div>
             )}
           </div>
-          {/* Quick-action chips (New Chat + this mode's pills) — colored to match the active mode */}
-          {pills && pills.length > 0 && (() => {
-            const pt = mode === 'work'
-              ? { icon: dark ? '#C9A45A' : '#AD832F', label: dark ? '#C9A45A' : '#7A5B1E', border: dark ? '#1E3360' : '#E8D9BC', bg: dark ? '#0A1730' : '#FDF8F0' }
-              : { icon: dark ? '#7A9AFF' : '#4A6FD4', label: dark ? '#7A9AFF' : '#2A4FA4', border: dark ? '#1A2060' : '#C8D0F0', bg: dark ? '#0A1730' : '#F0F4FF' };
-            return (
-              <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, display: 'flex', gap: 7, overflowX: 'auto', padding: '10px 16px', borderTop: `1px solid ${dark ? '#152545' : C.border}`, background: dark ? '#000D26' : C.bg }}>
-                {pills.map((chip) => (
-                  <button key={chip.id} onClick={() => onPill(chip)} style={{
-                    display: 'flex', alignItems: 'center', gap: 6, borderRadius: 20, padding: '7px 13px', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
-                    background: pt.bg, border: `1px solid ${pt.border}`,
-                  }}>
-                    <i className={`ti ${chip.icon}`} style={{ fontSize: 13, color: pt.icon }} />
-                    <span style={{ fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 500, letterSpacing: '0.08em', color: pt.label }}>{chip.label}</span>
-                  </button>
-                ))}
+          {/* Compact pill row — active chat only. ⋯ opens every action; two are pinned inline. */}
+          {!empty && allPills.length > 0 && (
+            <div style={{
+              position: 'absolute', left: 0, right: 0, bottom: 0, height: AI_COMPACT_ROW_H,
+              display: 'flex', alignItems: 'center', gap: 7, overflowX: 'auto', padding: '0 16px',
+              borderTop: `1px solid ${dark ? '#152545' : C.border}`, background: dark ? '#000D26' : C.bg,
+            }}>
+              <button onClick={() => setShowActions(true)} title="More actions" style={{
+                flexShrink: 0, width: 30, height: 30, borderRadius: '50%', cursor: 'pointer',
+                border: `0.5px solid ${AI_UI.border}`, background: AI_UI.tint,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', color: AI_UI.primary,
+              }}>
+                <i className="ti ti-dots" style={{ fontSize: 15 }} />
+              </button>
+              {pinnedPills.map(p => pillChip(p, p.id, true))}
+            </div>
+          )}
+          {/* All quick actions — bottom sheet from the ⋯ button, bounded to the chat message area. */}
+          {!empty && showActions && (
+            <React.Fragment>
+              <div onClick={() => setShowActions(false)} style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: AI_COMPACT_ROW_H, zIndex: 24, background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)' }} />
+              <div style={{ position: 'absolute', left: 0, right: 0, bottom: AI_COMPACT_ROW_H, zIndex: 25, maxHeight: '60%', overflowY: 'auto', background: '#F5F0E8', borderRadius: '16px 16px 0 0', boxShadow: '0 -8px 28px rgba(0,0,0,0.18)', padding: '8px 8px calc(8px + env(safe-area-inset-bottom))' }}>
+                {allPills.map(p => {
+                  const soon = p.type === 'soon';
+                  return (
+                    <button key={p.id} onClick={() => { setShowActions(false); onPill(p); }} style={{
+                      display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', cursor: 'pointer',
+                      padding: '12px 12px', borderRadius: 10, border: 'none', background: 'none',
+                    }}>
+                      <i className={`ti ${p.icon}`} style={{ fontSize: 16, color: '#1A1A1A', flexShrink: 0 }} />
+                      <span style={{ flex: 1, minWidth: 0, fontFamily: "'Jost', sans-serif", fontSize: 13, fontWeight: 500, color: '#001A4A' }}>{p.label}</span>
+                      {soon && (
+                        <span style={{
+                          flexShrink: 0, padding: '2px 7px', borderRadius: 8, background: '#1A1A1A', color: '#fff',
+                          fontFamily: "'Jost', sans-serif", fontSize: 8, fontWeight: 700, letterSpacing: '0.08em',
+                        }}>SOON</span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
-            );
-          })()}
+            </React.Fragment>
+          )}
         </div>
       );
     }
@@ -1673,7 +1793,7 @@ Rules:
     const GUIDE_SECTIONS = ['Getting Started', 'App Guides', 'Reference'];
     const GUIDES = [
       { slug: 'get-started', emoji: '🚀', title: 'Get Started', description: 'Install the TMG App on your iPhone in under 60 seconds — no App Store needed.', section: 'Getting Started', url: '/get-started/' },
-      { slug: 'ai-chat', emoji: '✨', title: 'AI Chat', description: 'Work Mode & AI Mode, pill shortcuts, chat history, and projects.', section: 'App Guides', url: '/ai-chat/' },
+      { slug: 'ai-chat', emoji: '✨', title: 'AI Chat', description: 'Pill shortcuts, chat history, and projects.', section: 'App Guides', url: '/ai-chat/' },
       { slug: 'enter-kpis', emoji: '📊', title: 'Enter KPIs', description: 'Log your KPIs two ways — fill out a form or paste a note (the // divider).', section: 'App Guides', url: '/Enter-KPIs/' },
     ];
 
@@ -2119,7 +2239,7 @@ Rules:
       if (created && created.id) {
         const opts = (payload.decisionOptions || []).map(o => (typeof o === 'string' ? { body: o, is_chosen: false } : { body: (o && o.body) || '', is_chosen: !!(o && o.is_chosen) }));
         if (opts.length) await TaskDB.setDecisionOptions(created.id, opts);
-        await TaskDB.addActivity(created.id, 'ai', 'Created from Work Mode (AI)', user);
+        await TaskDB.addActivity(created.id, 'ai', 'Created from AI Chat', user);
       }
       return created;
     }
@@ -2390,7 +2510,7 @@ Rules:
       );
     }
 
-    // ─── Work Mode builder (admin) ───────────────────────────────────
+    // ─── AI Chat Pills builder (admin) ────────────────────────────────
     function IconGridPicker({ dark, value, onChange }) {
       const bord = dark ? '#152545' : C.border;
       return (
@@ -2508,7 +2628,6 @@ Rules:
       const [colorLight, setColorLight] = useState(pill?.colorLight || PILL_COLORS[0].l);
       const [colorDark, setColorDark] = useState(pill?.colorDark || PILL_COLORS[0].d);
       const [type, setType] = useState(pill?.type || 'prompt');
-      const [pmode, setPmode] = useState(pill?.mode || 'work');
       const [enabled, setEnabled] = useState(pill?.enabled !== false);
       const [config, setConfig] = useState(pill?.config || {});
       const [roles, setRoles] = useState(pill?.roles || []);
@@ -2549,7 +2668,7 @@ Rules:
         const err = validate();
         if (err) { alert(err); return; }
         setSaving(true);
-        try { await onSave({ label: label.trim(), icon, colorLight, colorDark, type, mode: pmode, enabled, config, roles }, pill?.id); }
+        try { await onSave({ label: label.trim(), icon, colorLight, colorDark, type, enabled, config, roles }, pill?.id); }
         finally { setSaving(false); }
       }
 
@@ -2558,13 +2677,6 @@ Rules:
           <div style={section}>
             <div style={lbl}>Label</div>
             <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. KPIs" style={inp} />
-            <div style={{ ...lbl, marginTop: 14 }}>Mode</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {[{ v: 'work', t: 'Work Mode' }, { v: 'ai', t: 'AI Mode' }].map(o => {
-                const on = pmode === o.v;
-                return <button key={o.v} onClick={() => setPmode(o.v)} style={{ flex: 1, padding: '9px 10px', borderRadius: 9, cursor: 'pointer', fontFamily: C.fontSans, fontSize: '0.8rem', fontWeight: on ? 600 : 500, border: `1px solid ${on ? (dark ? C.gold : C.navy) : bord}`, background: on ? (dark ? C.gold : C.navy) : 'transparent', color: on ? '#fff' : sub }}>{o.t}</button>;
-              })}
-            </div>
             <div style={{ ...lbl, marginTop: 14 }}>Icon</div>
             <IconGridPicker dark={dark} value={icon} onChange={setIcon} />
             <div style={{ ...lbl, marginTop: 14 }}>Color</div>
@@ -2666,7 +2778,7 @@ Rules:
             <div style={{ width: 30, height: 30, borderRadius: 7, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? 'rgba(255,255,255,0.06)' : '#F3EFE7' }}><i className={`ti ${pill.icon}`} style={{ fontSize: 16, color: dark ? pill.colorDark : pill.colorLight }} /></div>
             <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={onEdit}>
               <div style={{ fontFamily: C.fontSans, fontSize: '0.9rem', fontWeight: 600, color: txt, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{pill.label}{pill.enabled === false && <span style={{ fontSize: '0.62rem', color: sub, fontWeight: 500 }}>  · off</span>}</div>
-              <div style={{ fontFamily: C.fontSans, fontSize: '0.62rem', color: sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: 1 }}>{typeLabel} · {pill.mode === 'ai' ? 'AI Mode' : 'Work Mode'}{rolesLabel ? ' · ' + rolesLabel : ''}</div>
+              <div style={{ fontFamily: C.fontSans, fontSize: '0.62rem', color: sub, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: 1 }}>{typeLabel}{rolesLabel ? ' · ' + rolesLabel : ''}</div>
             </div>
             <button onClick={() => setOpen(o => !o)} title="How it's wired" style={{ background: 'none', border: 'none', cursor: 'pointer', color: open ? (dark ? C.gold : C.navy) : sub, fontSize: 17, padding: 3, display: 'flex' }}><i className={`ti ti-${open ? 'chevron-up' : 'info-circle'}`} /></button>
             <button onClick={onEdit} title="Edit" style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 17, padding: 3, display: 'flex' }}><i className="ti ti-pencil" /></button>
@@ -2714,11 +2826,8 @@ Rules:
       async function move(pill, dir) {
         if (!pills) return;
         const idx = pills.findIndex(p => p.id === pill.id);
-        if (idx < 0) return;
-        const md = pill.mode || 'work';
-        let j = idx + dir;
-        while (j >= 0 && j < pills.length && (pills[j].mode || 'work') !== md) j += dir; // nearest same-mode neighbor
-        if (j < 0 || j >= pills.length) return;
+        const j = idx + dir;
+        if (idx < 0 || j < 0 || j >= pills.length) return;
         const arr = pills.slice();
         const t = arr[idx]; arr[idx] = arr[j]; arr[j] = t;
         setPills(arr);
@@ -2741,26 +2850,16 @@ Rules:
             ) : pills.length === 0 ? (
               <div style={{ textAlign: 'center', color: sub, fontSize: '0.85rem', padding: '40px 16px', lineHeight: 1.6 }}>No pills yet.<br />Tap <b style={{ color: txt }}>Add</b> to create your first pill.</div>
             ) : (
-              [{ key: 'work', title: 'Work Mode Pills' }, { key: 'ai', title: 'AI Mode Pills' }].map(g => {
-                const group = pills.filter(p => (p.mode || 'work') === g.key);
-                return (
-                  <div key={g.key} style={{ marginBottom: 18 }}>
-                    <div style={{ fontFamily: C.fontSans, fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, marginBottom: 8 }}>{g.title}<span style={{ opacity: 0.55 }}> · {group.length}</span></div>
-                    {group.length === 0
-                      ? <div style={{ fontFamily: C.fontSans, fontSize: '0.78rem', color: sub, opacity: 0.7, padding: '2px 0 6px' }}>None yet — tap Add and choose <b>{g.title.replace(' Pills', '')}</b>.</div>
-                      : group.map((p, gi) => (
-                        <PillRow key={p.id} dark={dark} pill={p} first={gi === 0} last={gi === group.length - 1} onEdit={() => setEditing(p)} onDelete={() => deletePill(p.id)} onUp={() => move(p, -1)} onDown={() => move(p, 1)} />
-                      ))}
-                  </div>
-                );
-              })
+              pills.map((p, i) => (
+                <PillRow key={p.id} dark={dark} pill={p} first={i === 0} last={i === pills.length - 1} onEdit={() => setEditing(p)} onDelete={() => deletePill(p.id)} onUp={() => move(p, -1)} onDown={() => move(p, 1)} />
+              ))
             )}
           </div>
         </div>
       );
     }
 
-    // ─── Work Mode runtime sheets (form / guided steps) ──────────────
+    // ─── AI Chat pill runtime sheets (form / guided steps) ───────────
     function FormSheet({ dark, pill, onClose, onSubmit }) {
       const fields = (pill.config && pill.config.fields) || [];
       const [vals, setVals] = useState(() => { const o = {}; fields.forEach(f => { o[f.key] = f.kind === 'select' ? ((f.options && f.options[0]) || '') : ''; }); return o; });
@@ -3203,7 +3302,7 @@ Rules:
               <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-layout-grid" style={{ fontSize: 18, color: C.gold }} /></div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>AI Chat Pills</div>
-                <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Design the AI &amp; Work Mode shortcuts and what each one does.</div>
+                <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Design the AI Chat quick-action shortcuts and what each one does.</div>
               </div>
               <i className="ti ti-chevron-right" style={{ fontSize: 18, color: C.textMuted, flexShrink: 0 }} />
             </div>
@@ -5240,21 +5339,8 @@ Rules:
     const dotsItem = { display: 'block', width: '100%', textAlign: 'left', border: 'none', background: 'none', cursor: 'pointer', fontFamily: C.fontSans, fontSize: 11, color: '#001A4A', padding: '8px 10px', borderRadius: 7 };
 
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
-    function BottomZone({ active, activeMoreView, tabs, onChange, dark, mode, onToggleMode, onOpenHistory, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, activeMoreView, tabs, onChange, dark, isWide, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
       const navTabs = tabs || TABS;
-      const modeIcon = mode === 'work' ? 'ti-briefcase' : 'ti-sparkles';
-      const modeLabel = mode === 'work' ? 'Work Mode' : 'AI Mode';
-      const MODE_THEME = {
-        work: {
-          light: { barBg: '#FDF6EC', barBord: '#E8D9BC', ham: '#C4A97A', tagIcon: '#AD832F', tagLabel: '#7A5B1E', div: '#DCC99A', ph: '#C4A97A', clip: '#C4A97A', send: '#7A5B1E' },
-          dark:  { barBg: '#0A1730', barBord: '#152545', ham: 'rgba(255,255,255,0.25)', tagIcon: '#C9A45A', tagLabel: '#C9A45A', div: '#1E3360', ph: 'rgba(255,255,255,0.25)', clip: 'rgba(255,255,255,0.25)', send: '#AD832F' },
-        },
-        ai: {
-          light: { barBg: '#F0F2FF', barBord: '#C8D0F0', ham: '#7A8EC4', tagIcon: '#4A6FD4', tagLabel: '#2A4FA4', div: '#B0C0E8', ph: '#7A8EC4', clip: '#7A8EC4', send: '#2A4FA4' },
-          dark:  { barBg: '#0D1040', barBord: '#1A2060', ham: 'rgba(255,255,255,0.25)', tagIcon: '#7A9AFF', tagLabel: '#7A9AFF', div: '#2A3580', ph: 'rgba(255,255,255,0.25)', clip: 'rgba(255,255,255,0.25)', send: '#4A6FD4' },
-        },
-      };
-      const M = MODE_THEME[mode === 'work' ? 'work' : 'ai'][dark ? 'dark' : 'light'];
       const isAI = active === 'chat';
       const pending = pendingAttachments || [];
 
@@ -5262,8 +5348,10 @@ Rules:
       const taRef = useRef(null);
       React.useLayoutEffect(() => {
         const el = taRef.current; if (!el) return;
-        el.style.height = 'auto';
-        const max = 136; // 6 lines @ 20px line-height + 16px vertical padding
+        // Reset to 0 (not 'auto') before measuring — 'auto' lets the browser's own <textarea
+        // rows> sizing kick in first, which is taller than our line-height and defeats the collapse.
+        el.style.height = '0px';
+        const max = 136; // 6 lines @ 20px line-height, no vertical padding to account for
         el.style.height = Math.min(el.scrollHeight, max) + 'px';
         el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
       }, [input, isAI]);
@@ -5301,37 +5389,15 @@ Rules:
               ))}
             </div>
           )}
-          {/* Input bar (AI tab only) — themed by active mode */}
+          {/* Input bar (AI tab only) — single unified mode, no toggle */}
           {isAI && (
             <div style={{
-              display: 'flex', alignItems: 'center', minHeight: 61,
-              borderRadius: 28, overflow: 'hidden',
-              background: M.barBg,
-              border: `1px solid ${M.barBord}`,
-              transition: 'background-color 200ms ease, border-color 200ms ease',
+              display: 'flex', alignItems: 'center', minHeight: isWide ? 44 : 40,
+              borderRadius: isWide ? 24 : 22, overflow: 'hidden',
+              background: '#fff',
+              border: `1px solid ${AI_UI.border}`,
             }}>
-              <style>{`.tmg-ai-input::placeholder{color:${M.ph};opacity:1;}`}</style>
-              {/* Hamburger — AI history */}
-              <button onClick={onOpenHistory} title="Chat history" style={{
-                flexShrink: 0, width: 36, height: 61, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: 'none', border: 'none', cursor: 'pointer', paddingLeft: 6,
-                color: M.ham, fontSize: 18,
-              }}>
-                <i className="ti ti-menu-2" />
-              </button>
-              {/* Mode tag */}
-              <button onClick={onToggleMode} style={{
-                flexShrink: 0, height: 61, display: 'flex', alignItems: 'center', gap: 7,
-                background: 'none', border: 'none', cursor: 'pointer',
-                padding: '0 10px 0 2px',
-                color: M.tagLabel,
-                fontFamily: "'Jost', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '0.13em',
-              }}>
-                <i className={`ti ${modeIcon}`} style={{ fontSize: 16, color: M.tagIcon }} />
-                {modeLabel}
-              </button>
-              {/* Divider */}
-              <div style={{ flexShrink: 0, width: 1, height: 24, background: M.div }} />
+              <style>{`.tmg-ai-input::placeholder{color:#A9ADD6;opacity:1;}`}</style>
               {/* Input */}
               <textarea
                 ref={taRef}
@@ -5339,31 +5405,29 @@ Rules:
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={onKeyDown}
-                placeholder="Message TMG assistant…"
-                rows={1}
+                placeholder="Message TMG assistant..."
                 style={{
                   flex: 1, minWidth: 0, border: 'none', outline: 'none',
-                  background: 'transparent', padding: '8px 10px', margin: 0,
-                  fontFamily: "'Jost', sans-serif", fontSize: 12, lineHeight: '20px',
-                  color: dark ? '#FFFFFF' : '#001A4A',
-                  resize: 'none', boxSizing: 'border-box', display: 'block', maxHeight: 136,
+                  background: 'transparent', padding: '0 8px 0 14px', margin: 0,
+                  fontFamily: "'Jost', sans-serif", fontSize: isWide ? 12 : 10, lineHeight: '20px',
+                  color: '#001A4A',
+                  resize: 'none', boxSizing: 'border-box', display: 'block', height: 20, maxHeight: 136,
                 }}
               />
               {/* Attach file / photo */}
               <button onClick={onOpenAttach} title="Attach file or photo" style={{
-                flexShrink: 0, width: 34, height: 61, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, width: 32, height: isWide ? 36 : 32, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer',
-                color: M.clip, fontSize: 18,
+                color: AI_UI.primary, opacity: 0.7, fontSize: 17,
               }}>
                 <i className="ti ti-paperclip" />
               </button>
               {/* Send */}
               <button onClick={onSend} disabled={loading} style={{
-                flexShrink: 0, width: 44, height: 44, marginRight: 8, borderRadius: '50%', border: 'none',
-                background: M.send,
+                flexShrink: 0, width: isWide ? 36 : 32, height: isWide ? 36 : 32, marginRight: 4, borderRadius: '50%', border: 'none',
+                background: AI_UI.primary,
                 color: '#fff', cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
-                transition: 'background-color 200ms ease',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16,
               }}>
                 <i className="ti ti-arrow-up" />
               </button>
@@ -5885,8 +5949,6 @@ Rules:
       const [movingId, setMovingId] = useState(null);
       const [projMenuId, setProjMenuId] = useState(null);
       const [filterOpen, setFilterOpen] = useState(false);
-      const [showWork, setShowWork] = useState(true);
-      const [showAI, setShowAI] = useState(true);
       const [sortBy, setSortBy] = useState('recent');
       const [projectFilter, setProjectFilter] = useState(null);
       // Clear the filter if its project no longer exists (e.g. it was deleted) — otherwise
@@ -5895,12 +5957,10 @@ Rules:
       const J = "'Jost', sans-serif";
       const titleCol = '#001A4A', previewCol = '#B4B2A9', pinCol = '#AD832F', panelBg = '#fff', menuBord = '#EAE3D6';
       const iconBtn = wide ? 26 : 28;
-      const filterActive = !showWork || !showAI || sortBy !== 'recent';
+      const filterActive = sortBy !== 'recent';
 
       const all = (conversations || []).filter(c => !c.archived);
-      const workHidden = !showWork ? all.filter(c => c.type === 'work').length : 0;
-      const aiHidden = !showAI ? all.filter(c => c.type !== 'work').length : 0;
-      let pool = all.filter(c => (c.type === 'work' ? showWork : showAI));
+      let pool = all;
       if (projectFilter) pool = pool.filter(c => c.projectId === projectFilter);
       const sortFn = sortBy === 'alpha'
         ? (a, b) => (a.title || '').localeCompare(b.title || '')
@@ -5911,18 +5971,15 @@ Rules:
       const groups = sortBy === 'alpha' ? [['All chats', rest]] : ['Today', 'This week', 'Earlier'].map(g => [g, rest.filter(c => groupOf(c) === g)]).filter(x => x[1].length);
 
       const checkbox = (on) => <div style={{ width: 16, height: 16, borderRadius: 4, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `1.5px solid ${on ? '#001A4A' : '#C4B9A8'}`, background: on ? '#001A4A' : 'transparent' }}>{on && <i className="ti ti-check" style={{ fontSize: 10, color: '#fff' }} />}</div>;
-      const modeTag = (w) => <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: w ? '#F3EBDA' : '#EEF3FB', color: w ? '#AD832F' : '#185FA5', padding: '2px 7px', borderRadius: 5, fontFamily: J, fontSize: 8, fontWeight: 600 }}><i className={`ti ${w ? 'ti-briefcase' : 'ti-sparkles'}`} style={{ fontSize: 9 }} />{w ? 'Work Mode' : 'AI Mode'}</span>;
       const sectionLabel = (txt, right) => <div style={{ display: 'flex', alignItems: 'center', padding: '12px 14px 4px' }}><div style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: '#9A958A', flex: 1 }}>{txt}</div>{right}</div>;
 
       const chatRow = (c) => {
         const active = c.id === currentConvId;
         const open = menuId === c.id;
-        const w = c.type === 'work';
         return (
           <div key={c.id} className="hp-row" onClick={() => onSelect(c.id)} onContextMenu={(e) => { e.preventDefault(); setMenuId(open ? null : c.id); }} style={{ position: 'relative', padding: '9px 14px', borderRadius: 8, margin: '1px 6px', cursor: 'pointer', background: active ? '#E8E3DB' : undefined, transition: 'background 0.1s' }}>
             {c.pinned && <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginBottom: 1 }}><i className="ti ti-pin-filled" style={{ fontSize: 9, color: '#AD832F' }} /><span style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: '#AD832F' }}>Pinned</span></div>}
             <div style={{ fontFamily: J, fontSize: 13, fontWeight: 400, color: '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: 1.3, paddingRight: 16 }}>{c.title}</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 2 }}><i className={`ti ${w ? 'ti-briefcase' : 'ti-sparkles'}`} style={{ fontSize: 10, color: w ? '#C9A45A' : '#8A9CC0' }} /><span style={{ fontSize: 8.5, color: '#B4B2A9', fontFamily: J }}>{w ? 'Work Mode' : 'AI Mode'}</span></div>
             <button className="hp-dots" onClick={(e) => { e.stopPropagation(); setMenuId(open ? null : c.id); }} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: '#D4D0CC', fontSize: 12, display: 'flex', opacity: active ? 0.5 : undefined }}><i className="ti ti-dots" /></button>
             {open && (
               <React.Fragment>
@@ -5962,13 +6019,7 @@ Rules:
             <React.Fragment>
               <div onClick={() => setFilterOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 18 }} />
               <div style={{ position: 'relative', zIndex: 19, background: '#fff', border: '0.5px solid #EDE7DC', borderRadius: 10, margin: '6px 10px 0', boxShadow: '0 4px 14px rgba(0,26,74,.10)', overflow: 'hidden', flexShrink: 0 }}>
-                <div style={{ padding: '8px 12px 5px', fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#AD832F', borderBottom: '0.5px solid #F0EBE3' }}>Show chats from</div>
-                {[{ on: showWork, set: setShowWork, w: true }, { on: showAI, set: setShowAI, w: false }].map(o => (
-                  <div key={o.w ? 'w' : 'a'} className="hp-opt" onClick={() => o.set(v => !v)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: '0.5px solid #F5F2EE', cursor: 'pointer' }}>
-                    {checkbox(o.on)}<span style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: '#001A4A', flex: 1 }}>{o.w ? 'Work Mode' : 'AI Mode'}</span>{modeTag(o.w)}
-                  </div>
-                ))}
-                <div style={{ padding: '8px 12px 5px', fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#AD832F', borderBottom: '0.5px solid #F0EBE3', borderTop: '0.5px solid #F0EBE3' }}>Sort by</div>
+                <div style={{ padding: '8px 12px 5px', fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#AD832F', borderBottom: '0.5px solid #F0EBE3' }}>Sort by</div>
                 {[{ v: 'recent', t: 'Most recent first' }, { v: 'alpha', t: 'Alphabetical' }].map((o, i, arr) => (
                   <div key={o.v} className="hp-opt" onClick={() => setSortBy(o.v)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: i === arr.length - 1 ? 'none' : '0.5px solid #F5F2EE', cursor: 'pointer' }}>
                     {checkbox(sortBy === o.v)}<span style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: '#001A4A', flex: 1 }}>{o.t}</span>
@@ -6015,8 +6066,6 @@ Rules:
               <div style={{ textAlign: 'center', color: '#B4B2A9', fontSize: 11, padding: '24px 16px', fontFamily: J }}>{projectFilter ? <React.Fragment>No chats in this project yet.<br /><span onClick={() => setProjectFilter(null)} style={{ color: '#AD832F', fontWeight: 500, cursor: 'pointer' }}>Show all chats</span></React.Fragment> : 'No conversations yet.'}</div>
             )}
 
-            {workHidden > 0 && <div style={{ background: '#F9F6F0', borderRadius: 8, border: '0.5px solid #EDE7DC', margin: '10px 14px', padding: '9px 12px', textAlign: 'center', fontFamily: J, fontSize: 10, color: '#B4B2A9' }}>{workHidden} Work Mode chat{workHidden === 1 ? '' : 's'} hidden · <span onClick={() => setShowWork(true)} style={{ color: '#AD832F', fontWeight: 500, cursor: 'pointer' }}>Show all</span></div>}
-            {aiHidden > 0 && <div style={{ background: '#F9F6F0', borderRadius: 8, border: '0.5px solid #EDE7DC', margin: '10px 14px', padding: '9px 12px', textAlign: 'center', fontFamily: J, fontSize: 10, color: '#B4B2A9' }}>{aiHidden} AI Mode chat{aiHidden === 1 ? '' : 's'} hidden · <span onClick={() => setShowAI(true)} style={{ color: '#AD832F', fontWeight: 500, cursor: 'pointer' }}>Show all</span></div>}
           </div>
 
           {movingId && (
@@ -6466,7 +6515,6 @@ Rules:
       const [input, setInput] = useState(() => localStorage.getItem('tmg-draft-new') || '');
       const [loading, setLoading] = useState(false);
       const [pendingAttachments, setPendingAttachments] = useState([]); // { id, file, kind, name, mediaType, size, previewUrl, textContent }
-      const [mode, setMode] = useState(() => localStorage.getItem('tmg-mode') || 'ai');
 
       // Conversation persistence + history
       const [conversations, setConversations] = useState([]);
@@ -6489,7 +6537,7 @@ Rules:
       }
       const [historySide, setHistorySide] = useState(() => localStorage.getItem('tmg-history-side') || 'left');
 
-      // Work Mode pills (admin-configurable)
+      // AI Chat pills (admin-configurable)
       const [pills, setPills] = useState(null);
       const [builderOpen, setBuilderOpen] = useState(false);
       const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
@@ -6635,10 +6683,8 @@ Rules:
       const myRoles = toRoles(profile && profile.access);
       const pillVisible = (p) => !p.roles || !p.roles.length || isAdmin || p.roles.some(r => myRoles.includes(r));
       const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false && pillVisible(p));
-      // New Chat first, then the pills tagged for the current mode (legacy pills default to Work).
-      const shownPills = [NEW_CHAT_PILL]
-        .concat(effectivePills.filter(p => (p.mode || 'work') === mode))
-        .concat(CALENDAR_PILLS.filter(p => p.mode === mode));
+      // New Chat first, then every visible pill — there's only one unified mode now.
+      const shownPills = [NEW_CHAT_PILL].concat(effectivePills).concat(CALENDAR_PILLS).concat([DEAL_PILL]).concat(SOON_PILLS);
       useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
 
       // Per-conversation draft autosave (device-local). Key 'new' before a conversation exists.
@@ -6672,10 +6718,6 @@ Rules:
         return () => { clearInterval(iv); document.removeEventListener('visibilitychange', onVis); window.removeEventListener('focus', onVis); };
       }, []);
 
-      useEffect(() => {
-        localStorage.setItem('tmg-mode', mode);
-      }, [mode]);
-
       // Keep content padding in sync with the fixed bottom zone height.
       useEffect(() => {
         if (zoneRef.current) setZoneH(zoneRef.current.offsetHeight);
@@ -6703,7 +6745,7 @@ Rules:
         const pend = opts.attachments !== undefined ? opts.attachments : pendingAttachments;
         if ((!text || !text.trim()) && (!pend || !pend.length)) return;
         if (loading) return;
-        const startType = opts.type || (mode === 'work' ? 'work' : 'ai');
+        const startType = opts.type || 'ai';
         const startReq  = opts.workRequest !== undefined ? opts.workRequest : workRequest;
         const isFirst = !currentConvId;
 
@@ -6808,11 +6850,6 @@ Rules:
         setInput(localStorage.getItem('tmg-draft-new') || '');
       }
 
-      function toggleMode() {
-        setMode(m => (m === 'work' ? 'ai' : 'work'));
-        newChat();
-      }
-
       async function selectConversation(id) {
         const conv = conversations.find(c => c.id === id);
         setDrawerOpen(false);
@@ -6823,7 +6860,6 @@ Rules:
         setInput(localStorage.getItem(draftKey(id)) || '');
         setWorkRequest(conv?.workRequest || null);
         setActiveProjectId(conv?.projectId || null);
-        if (conv) setMode(conv.type === 'work' ? 'work' : 'ai');
         setActiveTab('chat');
         const msgs = await ConvDB.loadMessages(id);
         setMessages(msgs);
@@ -6861,9 +6897,10 @@ Rules:
         if (cid) { try { await ConvDB.insertMessage(cid, 'assistant', content); await ConvDB.touchConversation(cid); } catch (e) {} }
       }
 
-      // Tap a work-mode pill → run its configured behavior.
+      // Tap a pill → run its configured behavior.
       function dispatchPill(pill) {
         if (!pill) return;
+        if (pill.type === 'soon') { alert('“' + pill.label + '” is coming soon.'); return; }
         if (pill.id === 'new-chat' || pill.type === 'newchat') { newChat(); return; }
         if (pill.id === 'fb-kpis' || (pill.config && pill.config.kpi)) {
           setTaskInstruction(null); setKpiInstruction(null);
@@ -6888,13 +6925,12 @@ Rules:
           return;
         }
         const text = (pill.config && pill.config.prompt) || pill.label; // prompt (default)
-        runSend(text, { type: 'work' });
+        runSend(text);
       }
 
       function startWorkRequest(key) {
         const req = WORK_REQUESTS.find(w => w.key === key);
         if (!req) return;
-        setMode('work');
         setWorkRequest(key);
         setCurrentConvId(null);
         setMessages([]);
@@ -6934,11 +6970,25 @@ Rules:
             return p ? <ProjectModal dark={dark} project={p} conversations={conversations} onSaveFields={saveProject} onDelete={deleteProject} onClose={() => setOpenProjectId(null)} onOpenChat={(cid) => { setOpenProjectId(null); selectConversation(cid); }} onNewChat={(pid) => { setOpenProjectId(null); setDrawerOpen(false); newChat(pid); setActiveTab('chat'); }} onMutated={(pid) => { refreshProjects(); if (pid === activeProjectId) ProjectDB.listFiles(pid).then(setActiveProjectFiles); }} /> : null;
           })()}
           {showNewProject && <NewProjectModal onCreate={async (name, instructions) => { const p = await ProjectDB.create(name); if (instructions) await ProjectDB.update(p.id, { instructions }); await refreshProjects(); }} onClose={() => setShowNewProject(false)} />}
+          {/* Chat-history hamburger — mobile only; the sidebar is already always-visible on wide screens */}
+          {activeTab === 'chat' && !isWide && (
+            <div style={{ padding: '9px 12px 4px', background: dark ? '#000D26' : C.bg, flexShrink: 0 }}>
+              <button onClick={() => setDrawerOpen(o => !o)} title="Chat history" style={{
+                width: 32, height: 32, borderRadius: 9, cursor: 'pointer',
+                background: AI_UI.tint, border: `0.5px solid ${AI_UI.border}`,
+                boxShadow: drawerOpen ? `0 0 0 2px ${AI_UI.primary}` : 'none',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: AI_UI.primary, fontSize: 15, transition: 'box-shadow 0.15s',
+              }}>
+                <i className="ti ti-menu-2" />
+              </button>
+            </div>
+          )}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (() => {
               const openConv = conversations.find(c => c.id === currentConvId) || null;
               const aiChat = (
-                <AIChatTab user={user} messages={messages} loading={loading} mode={mode} dark={dark} pills={shownPills} onPill={dispatchPill}
+                <AIChatTab user={user} messages={messages} loading={loading} dark={dark} pills={shownPills} onPill={dispatchPill}
                   projectName={activeProject ? activeProject.name : null}
                   flowKey={kpiFlow ? kpiFlow.step : calBrief ? ('cal-' + calBrief.kind) : ''}
                   flowCard={kpiFlow ? (
@@ -6973,7 +7023,7 @@ Rules:
                 <div style={{ position: 'relative', height: '100%' }}>
                   {aiChat}
                   {drawerOpen && <div onClick={() => setDrawerOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 29, background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)' }} />}
-                  {drawerOpen && <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, zIndex: 30, boxShadow: '0 0 28px rgba(0,0,0,0.18)' }}>{sidebar}</div>}
+                  {drawerOpen && <div style={{ position: 'absolute', top: 0, bottom: 0, [historySide]: 0, width: '82%', maxWidth: 320, zIndex: 30, boxShadow: '0 0 28px rgba(0,0,0,0.18)' }}>{sidebar}</div>}
                 </div>
               );
             })()}
@@ -7022,9 +7072,7 @@ Rules:
               else { setMoreView(t); setActiveTab('more'); }
             }}
             dark={dark}
-            mode={mode}
-            onToggleMode={toggleMode}
-            onOpenHistory={() => setDrawerOpen(o => !o)}
+            isWide={isWide}
             onOpenAttach={openFilePicker}
             pendingAttachments={pendingAttachments}
             onRemoveAttach={removeAttachment}

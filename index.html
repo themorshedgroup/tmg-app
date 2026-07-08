@@ -359,6 +359,13 @@ Continue with TMG Gmail
       return segments.length ? segments : [{ type: 'md', text: t }];
     }
 
+    // Loose heuristic: does the user's message clearly ask for a downloadable file? Used only to
+    // explain a miss (see runSend's fallback note) — never to force or block generation, since
+    // SYSTEM_PROMPT already decides when the model should actually produce one.
+    const FILE_INTENT_RE = /\b(excel|spreadsheet|xlsx|csv|powerpoint|pptx|docx|word doc|slide ?deck)\b/i;
+    function looksLikeFileRequest(text) { return FILE_INTENT_RE.test(text || ''); }
+    function hasFileBlock(text) { TMG_FILE_BLOCK_RE.lastIndex = 0; return TMG_FILE_BLOCK_RE.test(text || ''); }
+
     // Renders AI markdown safely; falls back to plain text if parsing fails
     // or the CDN scripts didn't load, so a formatting bug never blanks a message.
     function MarkdownContent({ text }) {
@@ -6816,6 +6823,12 @@ Rules:
             }
           }
           if (!display) display = reply;
+          // The model decides for itself when to hand back a real file (see SYSTEM_PROMPT) — it's
+          // not always reliable at recognizing intent. Only armed (Add To-Do/KPI) replies never try;
+          // for a normal chat message that clearly asked for one, say so instead of going quiet.
+          if (!armed && looksLikeFileRequest(text) && !hasFileBlock(reply)) {
+            display += '\n\n_Didn’t catch that as a file request — try being explicit, e.g. “put this in a spreadsheet” or “make this a Word doc,” and I’ll hand back a real download._';
+          }
           setMessages(prev => [...prev, { role: 'assistant', content: display }]);
           await ConvDB.insertMessage(convId, 'assistant', display);
           if (isFirst) {

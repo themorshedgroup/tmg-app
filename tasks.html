@@ -2857,10 +2857,13 @@ Rules:
           : view === 'labels' ? <LabelManager dark={dark} user={user} onClose={() => setView('list')} />
           : null
       );
-      // ── Container chrome: embed → fill the iframe (it provides the panel chrome); standalone → floating panel ──
+      // ── Container chrome: embed → fill the iframe (it provides the panel chrome);
+      // standalone → a real full-bleed page under the top bar, NOT a floating popout
+      // panel. This is the Menu → More → Tasks page; the header icon's popout is a
+      // separate, untouched surface (the embed branch below). ──
       const containerStyle = embed
         ? { position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', background: bg, overflow: 'hidden', opacity: vis ? 1 : 0, transition: 'opacity 150ms ease' }
-        : { position: 'fixed', top: POPOUT_TOP, right: 10, bottom: 0, width: wide ? 'min(calc(100% - 20px), 820px)' : 'min(calc(100% - 20px), 560px)', zIndex: 60, display: 'flex', flexDirection: 'column', borderRadius: '14px 14px 0 0', overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.18)', background: bg, border: `1px solid ${bord}`, borderBottom: 'none', opacity: vis ? 1 : 0, transition: 'opacity 150ms ease' };
+        : { position: 'fixed', top: POPOUT_TOP, left: 0, right: 0, bottom: 0, zIndex: 60, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: bg, opacity: vis ? 1 : 0, transition: 'opacity 150ms ease' };
 
       // ══════════════════════════════════════════════════════════════════════
       // STANDALONE-ONLY REDESIGN — "My Tasks" (per CLAUDE_CODE_INSTRUCTIONS.md /
@@ -3063,7 +3066,6 @@ Rules:
 
       return (
         <React.Fragment>
-          {!embed && <div onClick={onClose} style={{ position: 'fixed', top: POPOUT_TOP, left: 0, right: 0, bottom: 0, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />}
           <div onClick={(e) => e.stopPropagation()} style={containerStyle}>
             {embed ? (
               /* ══════ EMBEDDED POPOUT — unchanged, out of scope for the My Tasks redesign ══════ */
@@ -3128,57 +3130,81 @@ Rules:
                   </div>
                   <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>{detailPane}</div>
                 </React.Fragment>
-              ) : (
-                <React.Fragment>
-                  <div style={{ padding: wide ? '14px 18px 0' : '12px 14px 0', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, marginBottom: wide ? 11 : 8, flexWrap: 'wrap' }}>
-                      <div>
-                        <div style={{ fontFamily: C.fontSans, fontSize: wide ? 17 : 15, fontWeight: 600, color: ink, letterSpacing: '-0.01em' }}>My Tasks</div>
-                        {wide && <div style={{ fontFamily: C.fontSans, fontSize: '0.68rem', color: sub, marginTop: 3, fontWeight: 300 }}>{dueTodayCount} due today · {overdueCount} overdue · {openCount} open</div>}
+              ) : wide ? (
+                /* ── Desktop: real page — section sidebar + main content filling the rest of the width ── */
+                <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+                  <div style={{ width: 216, flexShrink: 0, borderRight: `1px solid ${bord}`, padding: '18px 0', background: dark ? '#08132A' : '#FCFBF8', overflowY: 'auto' }}>
+                    <div style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, padding: '0 18px', marginBottom: 8, fontFamily: C.fontSans }}>Tasks</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 18px', fontSize: '0.82rem', fontWeight: 500, color: ink, background: dark ? 'rgba(255,255,255,0.06)' : '#F7F4EE', boxShadow: `inset 2px 0 0 ${gold}`, fontFamily: C.fontSans }}>
+                      <span style={{ width: 6, height: 6, borderRadius: '50%', background: gold, flexShrink: 0 }} />
+                      My Tasks
+                      <span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: sub }}>{data.tasks.length}</span>
+                    </div>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                    <div style={{ padding: '14px 18px 0', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, marginBottom: 11, flexWrap: 'wrap' }}>
+                        <div>
+                          <div style={{ fontFamily: C.fontSans, fontSize: 17, fontWeight: 600, color: ink, letterSpacing: '-0.01em' }}>My Tasks</div>
+                          <div style={{ fontFamily: C.fontSans, fontSize: '0.68rem', color: sub, marginTop: 3, fontWeight: 300 }}>{dueTodayCount} due today · {overdueCount} overdue · {openCount} open</div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                          {groupChip}{sortChip}{searchChip}
+                          <div style={{ display: 'flex', border: `1px solid ${bord}`, borderRadius: 3, overflow: 'hidden' }}>
+                            <div onClick={() => setViewMode('list')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'list' ? C.navy : 'transparent', color: viewMode === 'list' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-list" style={{ fontSize: 12 }} />List</div>
+                            <div onClick={() => setViewMode('kanban')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'kanban' ? C.navy : 'transparent', color: viewMode === 'kanban' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-layout-kanban" style={{ fontSize: 12 }} />Kanban</div>
+                          </div>
+                          {viewMode === 'list' && colsChip}
+                          {labelsBtn}
+                          {newBtn}
+                        </div>
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
-                        {groupChip}{sortChip}{searchChip}
-                        {wide && (
+                    </div>
+                    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column' }}>
+                      {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
+                        : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
+                        : viewMode === 'kanban' ? kanbanBoard()
+                        : (
                           <React.Fragment>
-                            <div style={{ display: 'flex', border: `1px solid ${bord}`, borderRadius: 3, overflow: 'hidden' }}>
-                              <div onClick={() => setViewMode('list')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'list' ? C.navy : 'transparent', color: viewMode === 'list' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-list" style={{ fontSize: 12 }} />List</div>
-                              <div onClick={() => setViewMode('kanban')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'kanban' ? C.navy : 'transparent', color: viewMode === 'kanban' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-layout-kanban" style={{ fontSize: 12 }} />Kanban</div>
+                            <div style={{ display: 'flex', alignItems: 'center', padding: '8px 18px', fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600, color: sub, borderBottom: `1px solid ${bord}`, gap: 12, fontFamily: C.fontSans }}>
+                              <span style={{ width: 14, flexShrink: 0 }} /><span style={{ flex: 1 }}>Task</span>
+                              {cols.includes('source') && <span style={{ width: 160, flexShrink: 0 }}>Source</span>}
+                              {cols.includes('status') && <span style={{ width: 96, flexShrink: 0 }}>Status</span>}
+                              {cols.includes('priority') && <span style={{ width: 70, flexShrink: 0 }}>Priority</span>}
+                              {cols.includes('due') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Due</span>}
+                              {cols.includes('assignee') && <span style={{ width: 110, flexShrink: 0 }}>Assignee</span>}
+                              {cols.includes('labels') && <span style={{ width: 120, flexShrink: 0 }}>Labels</span>}
+                              {cols.includes('created') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Created</span>}
+                              {cols.includes('modified') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Modified</span>}
                             </div>
-                            {viewMode === 'list' && colsChip}
+                            <div style={{ padding: '4px 0 24px' }}>{renderGroupedList(deskRow)}</div>
                           </React.Fragment>
                         )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* ── Mobile: single column, no sidebar ── */
+                <React.Fragment>
+                  <div style={{ padding: '12px 14px 0', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+                      <div style={{ fontFamily: C.fontSans, fontSize: 15, fontWeight: 600, color: ink, letterSpacing: '-0.01em' }}>My Tasks</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                        {groupChip}{sortChip}{searchChip}
                         {labelsBtn}
                         {newBtn}
                       </div>
                     </div>
-                    {!wide && (
-                      <div style={{ display: 'flex', alignItems: 'center', padding: '2px 0 10px' }}>
-                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, paddingRight: 14, marginRight: 14, borderRight: `1px solid ${bord}` }}><span style={{ fontSize: 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{dueTodayCount}</span><span style={{ fontSize: 10, color: sub, fontFamily: C.fontSans }}>due today</span></div>
-                        {overdueCount > 0 && <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, paddingRight: 14, marginRight: 14, borderRight: `1px solid ${bord}` }}><span style={{ fontSize: 15, fontWeight: 600, color: lateColor, fontFamily: C.fontSans }}>{overdueCount}</span><span style={{ fontSize: 10, color: lateColor, fontFamily: C.fontSans }}>overdue</span></div>}
-                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}><span style={{ fontSize: 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{openCount}</span><span style={{ fontSize: 10, color: sub, fontFamily: C.fontSans }}>open</span></div>
-                      </div>
-                    )}
+                    <div style={{ display: 'flex', alignItems: 'center', padding: '2px 0 10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, paddingRight: 14, marginRight: 14, borderRight: `1px solid ${bord}` }}><span style={{ fontSize: 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{dueTodayCount}</span><span style={{ fontSize: 10, color: sub, fontFamily: C.fontSans }}>due today</span></div>
+                      {overdueCount > 0 && <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, paddingRight: 14, marginRight: 14, borderRight: `1px solid ${bord}` }}><span style={{ fontSize: 15, fontWeight: 600, color: lateColor, fontFamily: C.fontSans }}>{overdueCount}</span><span style={{ fontSize: 10, color: lateColor, fontFamily: C.fontSans }}>overdue</span></div>}
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}><span style={{ fontSize: 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{openCount}</span><span style={{ fontSize: 10, color: sub, fontFamily: C.fontSans }}>open</span></div>
+                    </div>
                   </div>
                   <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column' }}>
                     {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
                       : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
-                      : wide && viewMode === 'kanban' ? kanbanBoard()
-                      : wide ? (
-                        <React.Fragment>
-                          <div style={{ display: 'flex', alignItems: 'center', padding: '8px 18px', fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600, color: sub, borderBottom: `1px solid ${bord}`, gap: 12, fontFamily: C.fontSans }}>
-                            <span style={{ width: 14, flexShrink: 0 }} /><span style={{ flex: 1 }}>Task</span>
-                            {cols.includes('source') && <span style={{ width: 160, flexShrink: 0 }}>Source</span>}
-                            {cols.includes('status') && <span style={{ width: 96, flexShrink: 0 }}>Status</span>}
-                            {cols.includes('priority') && <span style={{ width: 70, flexShrink: 0 }}>Priority</span>}
-                            {cols.includes('due') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Due</span>}
-                            {cols.includes('assignee') && <span style={{ width: 110, flexShrink: 0 }}>Assignee</span>}
-                            {cols.includes('labels') && <span style={{ width: 120, flexShrink: 0 }}>Labels</span>}
-                            {cols.includes('created') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Created</span>}
-                            {cols.includes('modified') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Modified</span>}
-                          </div>
-                          <div style={{ padding: '4px 0 24px' }}>{renderGroupedList(deskRow)}</div>
-                        </React.Fragment>
-                      ) : <div style={{ padding: '10px 14px 24px' }}>{renderGroupedList(taskRowNew)}</div>}
+                      : <div style={{ padding: '10px 14px 24px' }}>{renderGroupedList(taskRowNew)}</div>}
                   </div>
                 </React.Fragment>
               )

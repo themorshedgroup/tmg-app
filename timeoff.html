@@ -119,6 +119,43 @@
       },
     };
 
+    // ─── Google Calendar (write-only here) — mirrors tasks.html's callCalendar exactly,
+    // so an approved time-off request can drop an OOO event on the shared team calendar. ───
+    const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
+    const CAL_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-calendar';
+    const CAL_IS_DEV = (typeof window !== 'undefined') && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:');
+    // TODO(confirm w/ Symon): this is the shared "TMG" calendar the app's own Google Calendar
+    // settings already list (writer access) — the only real candidate for a company-wide team
+    // calendar today. Swap this constant if the actual OOO destination is different.
+    const TEAM_CALENDAR_ID = 'tmg@group.calendar.google.com';
+    function authToken() { return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON; }
+    async function callCalendar(payload) {
+      if (CAL_IS_DEV) return { ok: true, status: 200, data: payload.action === 'create' ? { ok: true, id: 'dev-' + Math.random().toString(36).slice(2) } : { ok: true } };
+      const res = await fetch(CAL_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    }
+    // Google's all-day event `end.date` is EXCLUSIVE — one day past the last included day.
+    function isoPlusOneDay(isoDate) {
+      const d = new Date(isoDate + 'T00:00:00'); d.setDate(d.getDate() + 1);
+      const p2 = (n) => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+    }
+    async function createOOOEvent(name, startISO, endISO) {
+      const event = { summary: 'OOO - ' + name, start: { date: startISO }, end: { date: isoPlusOneDay(endISO) } };
+      const { ok, data } = await callCalendar({ action: 'create', calendarId: TEAM_CALENDAR_ID, event });
+      if (!ok) { const err = new Error(data.error || 'calendar_error'); err.code = data.error; throw err; }
+      return data.id || null;
+    }
+    async function deleteOOOEvent(eventId, calendarId) {
+      if (!eventId) return;
+      try { await callCalendar({ action: 'delete', calendarId: calendarId || TEAM_CALENDAR_ID, eventId }); } catch (e) {}
+    }
+
     // ─── Time Off: request data + balance math ───────────────────────
     const TimeOffDB = {
       client() { return window.SupabaseAuth?._client || null; },
@@ -160,6 +197,7 @@
         const { data, error } = await this.client().from('time_off_requests').update({
           start_at: req.start_at, end_at: req.end_at, full_day: !!req.full_day, reason: req.reason || null,
           status: 'pending', decision_note: null, decided_by: null, decided_at: null,
+          calendar_id: null, calendar_event_id: null,
         }).eq('id', id).select().single();
         if (error) { console.error('[TimeOffDB] update:', error.message); throw error; }
         return data;
@@ -168,6 +206,13 @@
         if (!this.client()) return;
         const { error } = await this.client().from('time_off_requests').update({ status, decision_note: note || null }).eq('id', id);
         if (error) { console.error('[TimeOffDB] decide:', error.message); throw error; }
+      },
+      // Records the OOO calendar event created for an approved request, so a later edit
+      // (which withdraws the approval) knows which event to delete.
+      async setCalendarEvent(id, calendarId, eventId) {
+        if (!this.client()) return;
+        const { error } = await this.client().from('time_off_requests').update({ calendar_id: calendarId, calendar_event_id: eventId }).eq('id', id);
+        if (error) console.error('[TimeOffDB] setCalendarEvent:', error.message);
       },
       async cancel(id) {
         if (!this.client()) return;
@@ -256,6 +301,7 @@
       const [reason, setReason] = useState('');
       const [editingId, setEditingId] = useState(null);
       const [editingStatus, setEditingStatus] = useState(null);
+      const [editingCalEvent, setEditingCalEvent] = useState(null); // { calendarId, eventId } | null
 
       const reload = async () => {
         const [m, p] = await Promise.all([TimeOffDB.listMine(), TimeOffDB.listPending()]);
@@ -304,7 +350,7 @@
       const draftValid = mode === 'fullday' ? !!(startDate && endDate && endDate >= startDate) : !!(startDate && endTime > startTime);
 
       const startCreate = () => {
-        setEditingId(null); setEditingStatus(null);
+        setEditingId(null); setEditingStatus(null); setEditingCalEvent(null);
         setMode('fullday'); setStartDate(today); setEndDate(today); setStartTime('09:00'); setEndTime('13:00'); setReason('');
         setView('new');
       };
@@ -314,6 +360,7 @@
         const timeStr = d => pad(d.getHours()) + ':' + pad(d.getMinutes());
         const s = timeoffDate(r.start_at), e = timeoffDate(r.end_at);
         setEditingId(r.id); setEditingStatus(r.status);
+        setEditingCalEvent(r.calendar_event_id ? { calendarId: r.calendar_id, eventId: r.calendar_event_id } : null);
         setMode(r.full_day ? 'fullday' : 'hours');
         setStartDate(dateStr(s)); setEndDate(dateStr(e));
         setStartTime(r.full_day ? '09:00' : timeStr(s)); setEndTime(r.full_day ? '13:00' : timeStr(e));
@@ -324,9 +371,14 @@
         if (!draftValid || busy) return;
         setBusy(true);
         try {
-          if (editingId) await TimeOffDB.update(editingId, { start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason });
-          else await TimeOffDB.create({ start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason });
-          setReason(''); setMode('fullday'); setEditingId(null); setEditingStatus(null); setView('list'); await reload();
+          if (editingId) {
+            // Editing withdraws any prior approval — drop its OOO event before saving the new dates.
+            if (editingCalEvent) await deleteOOOEvent(editingCalEvent.eventId, editingCalEvent.calendarId);
+            await TimeOffDB.update(editingId, { start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason });
+          } else {
+            await TimeOffDB.create({ start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason });
+          }
+          setReason(''); setMode('fullday'); setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setView('list'); await reload();
         }
         catch (e) { alert('Could not file: ' + (e.message || e)); }
         finally { setBusy(false); }
@@ -341,7 +393,23 @@
       const doDecide = async (r, status) => {
         const note = status === 'denied' ? (window.prompt('Reason for denial (optional):') || null) : null;
         setBusy(true);
-        try { await TimeOffDB.decide(r.id, status, note); await reload(); }
+        try {
+          await TimeOffDB.decide(r.id, status, note);
+          if (status === 'approved') {
+            // Best-effort: the approval itself already succeeded, so a calendar hiccup
+            // (e.g. the approver hasn't connected Google Calendar) shouldn't block it.
+            try {
+              const name = people[r.user_id] || 'Team member';
+              const startISO = (r.start_at || '').slice(0, 10);
+              const endISO = (r.end_at || '').slice(0, 10) || startISO;
+              const eventId = await createOOOEvent(name, startISO, endISO);
+              if (eventId) await TimeOffDB.setCalendarEvent(r.id, TEAM_CALENDAR_ID, eventId);
+            } catch (ce) {
+              alert('Approved — but couldn’t add it to the Team Calendar (' + (ce.message || ce) + '). You can add it there manually.');
+            }
+          }
+          await reload();
+        }
         catch (e) { alert('Could not update: ' + (e.message || e)); }
         finally { setBusy(false); }
       };
@@ -414,7 +482,7 @@
       if (view === 'new') {
         return (
           <div style={{ padding: '20px 16px 100px', background: t.bg, minHeight: '100%' }}>
-            <button onClick={() => { setEditingId(null); setEditingStatus(null); setView('list'); }} style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: t.sub, fontSize: '0.86rem', fontWeight: 600, fontFamily: C.fontSans, marginBottom: 16 }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} />Back</button>
+            <button onClick={() => { setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setView('list'); }} style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: t.sub, fontSize: '0.86rem', fontWeight: 600, fontFamily: C.fontSans, marginBottom: 16 }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} />Back</button>
             <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: t.text, marginBottom: 18, fontFamily: C.fontDisplay }}>{editingId ? 'Edit request' : (bal && bal.tracked ? 'Request time off' : 'Log time off')}</div>
             <div style={card}>
               <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>

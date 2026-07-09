@@ -1377,7 +1377,7 @@ Rules:
         if (fields.status === 'done' && oldTask.status !== 'done') patch.completed_at = new Date().toISOString();
         let { error } = await c.from('tasks').update(patch).eq('id', id);
         if (error && /column|schema cache|PGRST204|42703/i.test((error.message || '') + (error.code || ''))) {
-          const p2 = { ...patch }; delete p2.weekly_priority; delete p2.weekly_rank; delete p2.daily_priority; delete p2.daily_rank; delete p2.decision_due_at; delete p2.decision_due_has_time; delete p2.recur_interval; delete p2.recur_unit; delete p2.recur_copy_fields;
+          const p2 = { ...patch }; delete p2.weekly_priority; delete p2.weekly_rank; delete p2.daily_priority; delete p2.daily_rank; delete p2.decision_due_at; delete p2.decision_due_has_time; delete p2.recur_interval; delete p2.recur_unit; delete p2.recur_copy_fields; delete p2.is_milestone;
           ({ error } = await c.from('tasks').update(p2).eq('id', id));
         }
         if (error) { console.error('[TaskDB] update:', error.message); throw error; }
@@ -1389,6 +1389,7 @@ Rules:
           if (k === 'status') msg = 'Status: ' + statusLabel(oldTask.status) + ' → ' + statusLabel(fields.status);
           else if (k === 'priority') msg = 'Priority: ' + priorityLabel(oldTask.priority) + ' → ' + priorityLabel(fields.priority);
           else if (k === 'recurrence') msg = 'Recurrence: ' + recurLabel(fields.recurrence);
+          else if (k === 'is_milestone') msg = fields.is_milestone ? 'Marked as milestone' : 'Unmarked as milestone';
           else msg = (FL[k] || k) + ' updated';
           await this.addActivity(id, 'system', msg, user, k);
         }
@@ -2722,13 +2723,27 @@ Rules:
       const [loading, setLoading] = useState(true);
       const [view, setView] = useState('list');   // list | detail | form | labels
       const [current, setCurrent] = useState(null);
-      const [sortBy, setSortBy] = useState('status');   // status | due | label  (primary: sets grouping)
-      const [thenBy, setThenBy] = useState(() => localStorage.getItem('tmg-task-thenby') || 'due');  // secondary: orders rows within each group
-      useEffect(() => { localStorage.setItem('tmg-task-thenby', thenBy); }, [thenBy]);
+      const [sortBy, setSortBy] = useState(() => localStorage.getItem('tmg-tasks-group') || 'status');   // status | due | label | none  (primary: sets grouping)
+      const [thenBy, setThenBy] = useState(() => localStorage.getItem('tmg-tasks-sort') || 'due');  // secondary: orders rows within each group
+      useEffect(() => { localStorage.setItem('tmg-tasks-group', sortBy); }, [sortBy]);
+      useEffect(() => { localStorage.setItem('tmg-tasks-sort', thenBy); }, [thenBy]);
       const [labelColors, setLabelColors] = useState({});
       const [vis, setVis] = useState(false);
       const wide = useWide(700);   // tablet/desktop → two-pane master-detail
       const embed = TASKS_EMBED;   // inside the main app's iframe → fill edge-to-edge (iframe is the panel chrome)
+      // ── Standalone-only redesign state (My Tasks: list/kanban, columns, search, milestones) ──
+      // Never read by the embedded popout — that surface renders the original branch untouched.
+      const [viewMode, setViewMode] = useState(() => localStorage.getItem('tmg-tasks-view') || 'list');   // 'list' | 'kanban' (desktop only)
+      const [cols, setCols] = useState(() => { try { const s = JSON.parse(localStorage.getItem('tmg-cols-tasks') || 'null'); return Array.isArray(s) && s.length ? s : ['source', 'status', 'due']; } catch (e) { return ['source', 'status', 'due']; } });
+      useEffect(() => { localStorage.setItem('tmg-tasks-view', viewMode); }, [viewMode]);
+      useEffect(() => { localStorage.setItem('tmg-cols-tasks', JSON.stringify(cols)); }, [cols]);
+      const [search, setSearch] = useState('');
+      const [searchOpen, setSearchOpen] = useState(false);
+      const [groupOpen, setGroupOpen] = useState(false);
+      const [sortOpen, setSortOpen] = useState(false);
+      const [colsOpen, setColsOpen] = useState(false);
+      const [completedOpen, setCompletedOpen] = useState(false);
+      const [ctxMenu, setCtxMenu] = useState(null);   // { x, y, task }
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
       useEffect(() => { if (initialTask) { setCurrent(initialTask); setView('detail'); } }, [initialTask]);
       const bg = dark ? '#000D26' : '#FCFBF8', bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', gold = dark ? '#C9A45A' : '#AD832F';
@@ -2846,66 +2861,340 @@ Rules:
       const containerStyle = embed
         ? { position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', background: bg, overflow: 'hidden', opacity: vis ? 1 : 0, transition: 'opacity 150ms ease' }
         : { position: 'fixed', top: POPOUT_TOP, right: 10, bottom: 0, width: wide ? 'min(calc(100% - 20px), 820px)' : 'min(calc(100% - 20px), 560px)', zIndex: 60, display: 'flex', flexDirection: 'column', borderRadius: '14px 14px 0 0', overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.18)', background: bg, border: `1px solid ${bord}`, borderBottom: 'none', opacity: vis ? 1 : 0, transition: 'opacity 150ms ease' };
+
+      // ══════════════════════════════════════════════════════════════════════
+      // STANDALONE-ONLY REDESIGN — "My Tasks" (per CLAUDE_CODE_INSTRUCTIONS.md /
+      // TASK-ECOSYSTEM.md §6). Everything below only renders when !embed — the
+      // embedded popout above (wide/narrow branches) is untouched on purpose.
+      // ══════════════════════════════════════════════════════════════════════
+      const now0 = new Date();
+      const startOfToday = new Date(now0.getFullYear(), now0.getMonth(), now0.getDate());
+      const endOfToday = new Date(startOfToday.getTime() + 86400000);
+      const openTasksList = data.tasks.filter(t => t.status !== 'done');
+      const dueTodayCount = openTasksList.filter(t => t.due_at && new Date(t.due_at) >= startOfToday && new Date(t.due_at) < endOfToday).length;
+      const overdueCount = openTasksList.filter(t => t.due_at && new Date(t.due_at) < startOfToday).length;
+      const openCount = openTasksList.length;
+      const lateColor = dark ? '#E07A7A' : '#9B1C1C';
+
+      async function toggleMilestone(t) { await TaskDB.update(t.id, t, { is_milestone: !t.is_milestone }, user); await reload(); }
+
+      const GROUP_OPTS = [['status', 'Status'], ['due', 'Due date'], ['label', 'Label'], ['none', 'None']];
+      const SORT_OPTS = [['due', 'Due date'], ['priority', 'Priority'], ['title', 'Title'], ['created', 'Recently added']];
+      const COLUMN_DEFS = [
+        { id: 'source', label: 'Source' }, { id: 'status', label: 'Status' }, { id: 'priority', label: 'Priority' },
+        { id: 'due', label: 'Due' }, { id: 'assignee', label: 'Assignee' }, { id: 'labels', label: 'Labels' },
+        { id: 'created', label: 'Created' }, { id: 'modified', label: 'Last modified' },
+      ];
+      const filteredTasks = search.trim() ? data.tasks.filter(t => (t.title || '').toLowerCase().includes(search.trim().toLowerCase())) : data.tasks;
+
+      const chipStyle = { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, padding: '5px 8px', border: `1px solid ${bord}`, borderRadius: 3, background: dark ? '#0A1730' : '#fff', color: sub, whiteSpace: 'nowrap', cursor: 'pointer', fontFamily: C.fontSans };
+      const ddStyle = { position: 'absolute', zIndex: 60, top: '100%', right: 0, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, boxShadow: '0 12px 32px rgba(0,26,74,0.16)', padding: 6, minWidth: 168, marginTop: 4 };
+      const ddItem = (label, active, onClick, key) => (
+        <div key={key || label} onClick={onClick} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', fontSize: '0.78rem', color: active ? ink : sub, fontWeight: active ? 500 : 400, borderRadius: 5, background: active ? (dark ? 'rgba(255,255,255,0.06)' : '#F7F4EE') : 'none', cursor: 'pointer', fontFamily: C.fontSans }}>
+          <i className="ti ti-check" style={{ fontSize: 12, color: gold, visibility: active ? 'visible' : 'hidden', flexShrink: 0 }} />{label}
+        </div>
+      );
+      const groupChip = (
+        <div style={{ position: 'relative' }}>
+          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); setColsOpen(false); }} style={chipStyle}>Group <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          {groupOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{GROUP_OPTS.map(([id, label]) => ddItem(label, sortBy === id, () => { setSortBy(id); setGroupOpen(false); }, id))}</div>}
+        </div>
+      );
+      const sortChip = (
+        <div style={{ position: 'relative' }}>
+          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); setColsOpen(false); }} style={chipStyle}>Sort <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          {sortOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{SORT_OPTS.map(([id, label]) => ddItem(label, thenBy === id, () => { setThenBy(id); setSortOpen(false); }, id))}</div>}
+        </div>
+      );
+      const searchChip = searchOpen
+        ? <input autoFocus value={search} onChange={e => setSearch(e.target.value)} onBlur={() => { if (!search) setSearchOpen(false); }} placeholder="Search tasks…" style={{ ...chipStyle, cursor: 'text', width: 130, textTransform: 'none', letterSpacing: 'normal', fontSize: '0.78rem', outline: 'none' }} />
+        : <div onClick={() => setSearchOpen(true)} style={{ ...chipStyle, padding: '5px 6px', color: gold }}><i className="ti ti-search" style={{ fontSize: 13 }} /></div>;
+      const colsChip = (
+        <div style={{ position: 'relative' }}>
+          <div onClick={() => { setColsOpen(o => !o); setGroupOpen(false); setSortOpen(false); }} style={{ ...chipStyle, padding: '5px 6px', color: gold }} title="Choose columns"><i className="ti ti-adjustments-horizontal" style={{ fontSize: 13 }} /></div>
+          {colsOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize: '0.58rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: sub, padding: '4px 9px 6px' }}>Columns</div>
+            {ddItem('Task', true, () => {}, 'task')}
+            {COLUMN_DEFS.map(c => ddItem(c.label, cols.includes(c.id), () => setCols(cs => cs.includes(c.id) ? cs.filter(x => x !== c.id) : [...cs, c.id]), c.id))}
+          </div>}
+        </div>
+      );
+
+      // Milestone flag — a tap toggles it; right-click opens the same action as a
+      // context menu (Symon: "right click... mark as milestone, or maybe an
+      // attach itself... that's it").
+      const milestoneFlag = (t, size) => (
+        <i className={t.is_milestone ? 'ti ti-flag-3-filled' : 'ti ti-flag-3'}
+           onClick={(e) => { e.stopPropagation(); toggleMilestone(t); }}
+           title={t.is_milestone ? 'Unmark as milestone' : 'Mark as milestone'}
+           style={{ fontSize: size || 15, color: t.is_milestone ? gold : (dark ? 'rgba(255,255,255,0.22)' : '#D8D2C6'), flexShrink: 0, cursor: 'pointer' }} />
+      );
+      const sourceChip = (t) => t._projectName ? (
+        <span style={{ fontSize: '0.6rem', fontWeight: 500, padding: '2.5px 7px', borderRadius: 4, background: dark ? 'rgba(173,131,47,.14)' : '#FAF4E8', border: `1px solid ${dark ? 'rgba(173,131,47,.3)' : '#E7D8B4'}`, color: dark ? '#C9A45A' : '#8C6A24', fontFamily: C.fontSans, whiteSpace: 'nowrap' }}>▲ {t._projectName}</span>
+      ) : null;
+      const openCtx = (e, t) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, task: t }); };
+
+      // Mobile/narrow row
+      const taskRowNew = (t) => {
+        const myLabels = myLabelsFor(t.id);
+        const late = t.due_at && t.status !== 'done' && new Date(t.due_at) < startOfToday;
+        return (
+          <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} onContextMenu={(e) => openCtx(e, t)}
+            style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderLeft: `2.5px solid ${statusColor(t.status)}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer', opacity: t.status === 'done' ? 0.72 : 1 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority), marginTop: 6 }} title={priorityLabel(t.priority)} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+                {sourceChip(t)}
+                {t.due_at && <span style={{ fontSize: '0.68rem', color: late ? lateColor : sub, fontWeight: late ? 600 : 400, fontFamily: C.fontSans }}>{new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
+              </div>
+              {myLabels.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>{myLabels.map(l => { const lc = labelColors[l]; return <span key={l} style={{ padding: '1px 6px', borderRadius: 10, background: lc ? lc + '26' : (dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA'), color: lc || (dark ? '#C9A45A' : '#AD832F'), fontSize: '0.58rem', fontWeight: 600, fontFamily: C.fontSans }}>{l}</span>; })}</div>}
+            </div>
+            {milestoneFlag(t, 16)}
+          </div>
+        );
+      };
+
+      // Desktop table row — respects the column picker
+      const deskRow = (t) => {
+        const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
+        const myLabels = myLabelsFor(t.id);
+        const late = t.due_at && t.status !== 'done' && new Date(t.due_at) < startOfToday;
+        return (
+          <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} onContextMenu={(e) => openCtx(e, t)}
+            style={{ display: 'flex', alignItems: 'center', padding: '9px 18px', borderBottom: `1px solid ${bord}`, gap: 12, cursor: 'pointer' }}>
+            {milestoneFlag(t, 14)}
+            <div style={{ flex: 1, minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</div>
+            {cols.includes('source') && <div style={{ width: 160, flexShrink: 0 }}>{sourceChip(t) || <span style={{ color: sub, fontSize: '0.72rem' }}>—</span>}</div>}
+            {cols.includes('status') && <div style={{ width: 96, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.7rem', color: sub }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor(t.status), flexShrink: 0 }} />{statusLabel(t.status)}</div>}
+            {cols.includes('priority') && <div style={{ width: 70, flexShrink: 0, fontSize: '0.7rem', color: priorityColor(t.priority) }}>{priorityLabel(t.priority)}</div>}
+            {cols.includes('due') && <div style={{ width: 88, flexShrink: 0, textAlign: 'right', fontSize: '0.7rem', color: late ? lateColor : sub, fontWeight: late ? 600 : 400 }}>{t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}</div>}
+            {cols.includes('assignee') && <div style={{ width: 110, flexShrink: 0, fontSize: '0.7rem', color: sub, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{assignees.join(', ') || '—'}</div>}
+            {cols.includes('labels') && <div style={{ width: 120, flexShrink: 0, display: 'flex', flexWrap: 'wrap', gap: 3 }}>{myLabels.length ? myLabels.map(l => <span key={l} style={{ fontSize: '0.58rem', color: gold, background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA', padding: '1px 5px', borderRadius: 8 }}>{l}</span>) : <span style={{ color: sub, fontSize: '0.7rem' }}>—</span>}</div>}
+            {cols.includes('created') && <div style={{ width: 88, flexShrink: 0, textAlign: 'right', fontSize: '0.68rem', color: sub }}>{t.created_at ? new Date(t.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}</div>}
+            {cols.includes('modified') && <div style={{ width: 88, flexShrink: 0, textAlign: 'right', fontSize: '0.68rem', color: sub }}>{t.updated_at ? new Date(t.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}</div>}
+          </div>
+        );
+      };
+
+      // Grouping/sorting shared by both row styles above. Completed tasks always
+      // collapse to their own section at the bottom, regardless of Group mode.
+      function renderGroupedList(rowFn) {
+        const PRI = { high: 0, medium: 1, low: 2 };
+        const dueCmp = (a, b) => { if (!a.due_at && !b.due_at) return 0; if (!a.due_at) return 1; if (!b.due_at) return -1; return new Date(a.due_at) - new Date(b.due_at); };
+        const byThen = (a, b) => {
+          if (thenBy === 'priority') return (PRI[a.priority] ?? 1) - (PRI[b.priority] ?? 1);
+          if (thenBy === 'title') return (a.title || '').localeCompare(b.title || '');
+          if (thenBy === 'created') return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+          return dueCmp(a, b);
+        };
+        const active = filteredTasks.filter(t => t.status !== 'done');
+        const completed = filteredTasks.filter(t => t.status === 'done').sort(byThen);
+        let body;
+        if (sortBy === 'none') {
+          body = <div>{active.slice().sort(byThen).map(rowFn)}</div>;
+        } else if (sortBy === 'due') {
+          const sorted = active.slice().sort((a, b) => dueCmp(a, b) || byThen(a, b));
+          body = <div>{groupHead(dark ? '#C9A45A' : '#AD832F', 'By due date · ' + sorted.length)}{sorted.map(rowFn)}</div>;
+        } else if (sortBy === 'label') {
+          const groups = {}; const unlabeled = [];
+          active.forEach(t => { const ls = myLabelsFor(t.id); if (!ls.length) unlabeled.push(t); else ls.forEach(l => { (groups[l] = groups[l] || []).push(t); }); });
+          const names = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+          body = (
+            <React.Fragment>
+              {names.map(n => <div key={n} style={{ marginBottom: 16 }}>{groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length)}{groups[n].slice().sort(byThen).map(rowFn)}</div>)}
+              {unlabeled.length > 0 && <div style={{ marginBottom: 16 }}>{groupHead(sub, 'Unlabeled · ' + unlabeled.length)}{unlabeled.slice().sort(byThen).map(rowFn)}</div>}
+            </React.Fragment>
+          );
+        } else {
+          body = TASK_STATUS.filter(col => col.id !== 'done').map(col => {
+            const items = active.filter(t => t.status === col.id).sort(byThen);
+            if (!items.length) return null;
+            return <div key={col.id} style={{ marginBottom: 16 }}>{groupHead(col.color, col.label + ' · ' + items.length)}{items.map(rowFn)}</div>;
+          });
+        }
+        return (
+          <React.Fragment>
+            {body}
+            <div style={{ marginTop: completed.length ? 16 : 0 }}>
+              {completed.length > 0 && <button onClick={() => setCompletedOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', background: 'none', border: 'none', padding: '6px 0', cursor: 'pointer', fontFamily: C.fontSans }}>
+                <i className={'ti ti-chevron-' + (completedOpen ? 'down' : 'right')} style={{ fontSize: 13, color: sub }} />
+                <span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub }}>Completed · {completed.length}</span>
+              </button>}
+              {completedOpen && completed.map(rowFn)}
+            </div>
+          </React.Fragment>
+        );
+      }
+
+      // Desktop-only Kanban board. Cards open the existing task detail on click —
+      // status changes happen there (same status buttons used everywhere else),
+      // no drag-and-drop in this pass.
+      const kanbanBoard = () => (
+        <div style={{ display: 'flex', gap: 12, padding: '14px 18px', overflowX: 'auto', flex: 1, minHeight: 0 }}>
+          {TASK_STATUS.map(col => {
+            const items = filteredTasks.filter(t => t.status === col.id);
+            return (
+              <div key={col.id} style={{ width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 4px', marginBottom: 8 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: col.color, flexShrink: 0 }} />
+                  <span style={{ fontSize: '0.7rem', fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{col.label}</span>
+                  <span style={{ fontSize: '0.66rem', color: sub, marginLeft: 'auto' }}>{items.length}</span>
+                </div>
+                {items.map(t => (
+                  <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} onContextMenu={(e) => openCtx(e, t)}
+                    style={{ background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '9px 10px', marginBottom: 8, cursor: 'pointer' }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                      <div style={{ flex: 1, minWidth: 0, fontSize: '0.78rem', color: ink, fontFamily: C.fontSans, lineHeight: 1.35 }}>{t.title}</div>
+                      {milestoneFlag(t, 12)}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                      {sourceChip(t)}
+                      {t.due_at && <span style={{ fontSize: '0.62rem', color: sub }}>{new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
+                    </div>
+                  </div>
+                ))}
+                {!items.length && <div style={{ fontSize: '0.7rem', color: sub, padding: '8px 4px', fontFamily: C.fontSans }}>No tasks.</div>}
+              </div>
+            );
+          })}
+        </div>
+      );
+
       return (
         <React.Fragment>
           {!embed && <div onClick={onClose} style={{ position: 'fixed', top: POPOUT_TOP, left: 0, right: 0, bottom: 0, zIndex: 40, background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(0,26,74,0.08)' }} />}
           <div onClick={(e) => e.stopPropagation()} style={containerStyle}>
-            {wide ? (
-              /* ── Tablet/desktop: two-pane master-detail ── */
-              <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-                {/* LEFT — master list */}
-                <div style={{ width: 212, flexShrink: 0, borderRight: `1px solid ${bord}`, background: dark ? '#08132A' : '#FCFBF8', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-                    <i className="ti ti-checklist" style={{ fontSize: 15, color: gold, flexShrink: 0 }} />
-                    <span style={{ flex: 1, fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, color: ink }}>Tasks</span>
-                    {searchBtn}
-                    {labelsBtn}
+            {embed ? (
+              /* ══════ EMBEDDED POPOUT — unchanged, out of scope for the My Tasks redesign ══════ */
+              wide ? (
+                <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+                  <div style={{ width: 212, flexShrink: 0, borderRight: `1px solid ${bord}`, background: dark ? '#08132A' : '#FCFBF8', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+                      <i className="ti ti-checklist" style={{ fontSize: 15, color: gold, flexShrink: 0 }} />
+                      <span style={{ flex: 1, fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, color: ink }}>Tasks</span>
+                      {searchBtn}
+                      {labelsBtn}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>{sortSelect}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>{thenBySelect}</div>
+                      {newBtn}
+                    </div>
+                    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>{listInner(true)}</div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>{sortSelect}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}>{thenBySelect}</div>
-                    {newBtn}
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                      {detailPane || (
+                        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px 24px', textAlign: 'center', color: sub, fontFamily: C.fontSans }}>
+                          <i className="ti ti-list-check" style={{ fontSize: 30, color: dark ? '#22324A' : '#D4D0CC', marginBottom: 12 }} />
+                          <div style={{ fontSize: '0.86rem' }}>Select a task to see its details</div>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>{listInner(true)}</div>
                 </div>
-                {/* RIGHT — detail */}
-                <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-                    {detailPane || (
-                      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px 24px', textAlign: 'center', color: sub, fontFamily: C.fontSans }}>
-                        <i className="ti ti-list-check" style={{ fontSize: 30, color: dark ? '#22324A' : '#D4D0CC', marginBottom: 12 }} />
-                        <div style={{ fontSize: '0.86rem' }}>Select a task to see its details</div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              /* ── Mobile/narrow: single pane, swaps list ↔ detail ── */
-              <React.Fragment>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              ) : (
+                <React.Fragment>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      {view === 'list'
+                        ? <i className="ti ti-checklist" style={{ fontSize: 15, color: gold }} />
+                        : <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />}
+                      <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleText}</span>
+                    </div>
                     {view === 'list'
-                      ? <i className="ti ti-checklist" style={{ fontSize: 15, color: gold }} />
-                      : <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />}
-                    <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{titleText}</span>
+                      ? <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                          {searchBtn}
+                          {sortSelect}
+                          {thenBySelect}
+                          {labelsBtn}
+                          {newBtn}
+                        </div>
+                      : (!embed && <i className="ti ti-x" onClick={onClose} aria-label="Close" style={{ fontSize: 15, cursor: 'pointer', color: dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9', flexShrink: 0 }} />)}
                   </div>
-                  {view === 'list'
-                    ? <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                        {searchBtn}
-                        {sortSelect}
-                        {thenBySelect}
+                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                    {detailPane || listInner(false)}
+                  </div>
+                </React.Fragment>
+              )
+            ) : (
+              /* ══════ STANDALONE /tasks — redesigned My Tasks ══════ */
+              view !== 'list' ? (
+                <React.Fragment>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+                    <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
+                    <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink }}>{titleText}</span>
+                  </div>
+                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>{detailPane}</div>
+                </React.Fragment>
+              ) : (
+                <React.Fragment>
+                  <div style={{ padding: wide ? '14px 18px 0' : '12px 14px 0', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, marginBottom: wide ? 11 : 8, flexWrap: 'wrap' }}>
+                      <div>
+                        <div style={{ fontFamily: C.fontSans, fontSize: wide ? 17 : 15, fontWeight: 600, color: ink, letterSpacing: '-0.01em' }}>My Tasks</div>
+                        {wide && <div style={{ fontFamily: C.fontSans, fontSize: '0.68rem', color: sub, marginTop: 3, fontWeight: 300 }}>{dueTodayCount} due today · {overdueCount} overdue · {openCount} open</div>}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                        {groupChip}{sortChip}{searchChip}
+                        {wide && (
+                          <React.Fragment>
+                            <div style={{ display: 'flex', border: `1px solid ${bord}`, borderRadius: 3, overflow: 'hidden' }}>
+                              <div onClick={() => setViewMode('list')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'list' ? C.navy : 'transparent', color: viewMode === 'list' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-list" style={{ fontSize: 12 }} />List</div>
+                              <div onClick={() => setViewMode('kanban')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'kanban' ? C.navy : 'transparent', color: viewMode === 'kanban' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-layout-kanban" style={{ fontSize: 12 }} />Kanban</div>
+                            </div>
+                            {viewMode === 'list' && colsChip}
+                          </React.Fragment>
+                        )}
                         {labelsBtn}
                         {newBtn}
                       </div>
-                    : (!embed && <i className="ti ti-x" onClick={onClose} aria-label="Close" style={{ fontSize: 15, cursor: 'pointer', color: dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9', flexShrink: 0 }} />)}
-                </div>
-                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-                  {detailPane || listInner(false)}
-                </div>
-              </React.Fragment>
+                    </div>
+                    {!wide && (
+                      <div style={{ display: 'flex', alignItems: 'center', padding: '2px 0 10px' }}>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, paddingRight: 14, marginRight: 14, borderRight: `1px solid ${bord}` }}><span style={{ fontSize: 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{dueTodayCount}</span><span style={{ fontSize: 10, color: sub, fontFamily: C.fontSans }}>due today</span></div>
+                        {overdueCount > 0 && <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, paddingRight: 14, marginRight: 14, borderRight: `1px solid ${bord}` }}><span style={{ fontSize: 15, fontWeight: 600, color: lateColor, fontFamily: C.fontSans }}>{overdueCount}</span><span style={{ fontSize: 10, color: lateColor, fontFamily: C.fontSans }}>overdue</span></div>}
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}><span style={{ fontSize: 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{openCount}</span><span style={{ fontSize: 10, color: sub, fontFamily: C.fontSans }}>open</span></div>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column' }}>
+                    {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
+                      : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
+                      : wide && viewMode === 'kanban' ? kanbanBoard()
+                      : wide ? (
+                        <React.Fragment>
+                          <div style={{ display: 'flex', alignItems: 'center', padding: '8px 18px', fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600, color: sub, borderBottom: `1px solid ${bord}`, gap: 12, fontFamily: C.fontSans }}>
+                            <span style={{ width: 14, flexShrink: 0 }} /><span style={{ flex: 1 }}>Task</span>
+                            {cols.includes('source') && <span style={{ width: 160, flexShrink: 0 }}>Source</span>}
+                            {cols.includes('status') && <span style={{ width: 96, flexShrink: 0 }}>Status</span>}
+                            {cols.includes('priority') && <span style={{ width: 70, flexShrink: 0 }}>Priority</span>}
+                            {cols.includes('due') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Due</span>}
+                            {cols.includes('assignee') && <span style={{ width: 110, flexShrink: 0 }}>Assignee</span>}
+                            {cols.includes('labels') && <span style={{ width: 120, flexShrink: 0 }}>Labels</span>}
+                            {cols.includes('created') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Created</span>}
+                            {cols.includes('modified') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Modified</span>}
+                          </div>
+                          <div style={{ padding: '4px 0 24px' }}>{renderGroupedList(deskRow)}</div>
+                        </React.Fragment>
+                      ) : <div style={{ padding: '10px 14px 24px' }}>{renderGroupedList(taskRowNew)}</div>}
+                  </div>
+                </React.Fragment>
+              )
             )}
           </div>
+          {ctxMenu && (
+            <React.Fragment>
+              <div onClick={() => setCtxMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }} style={{ position: 'fixed', inset: 0, zIndex: 70 }} />
+              <div style={{ position: 'fixed', left: ctxMenu.x, top: ctxMenu.y, zIndex: 71, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, boxShadow: '0 8px 24px rgba(0,26,74,0.18)', padding: 5, minWidth: 180 }}>
+                <button onClick={() => { toggleMilestone(ctxMenu.task); setCtxMenu(null); }} style={{ width: '100%', textAlign: 'left', padding: '8px 10px', background: 'none', border: 'none', borderRadius: 6, color: ink, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <i className={ctxMenu.task.is_milestone ? 'ti ti-flag-3-filled' : 'ti ti-flag-3'} style={{ color: gold, fontSize: 14, flexShrink: 0 }} />
+                  {ctxMenu.task.is_milestone ? 'Unmark as milestone' : 'Mark as milestone'}
+                </button>
+              </div>
+            </React.Fragment>
+          )}
         </React.Fragment>
       );
     }

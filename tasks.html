@@ -4482,8 +4482,15 @@ Rules:
           const r = parseRoute(location.hash);
           setActiveTab(r.tab);
           if (r.tab === 'more' && r.view) setMoreView(r.view);
-          setMoreMenuOpen(false); setDrawerOpen(false);
-          setShowCalendar(false); setShowTasks(false); setShowProfile(false); setShowStatus(false);
+          setMoreMenuOpen(false); setDrawerOpen(false); setShowProfile(false); setShowStatus(false);
+          // Recompute which popout should be visible from the FRESH hash (not the
+          // stale page-load TASKS_HASH const) — mirrors the initial useState logic
+          // below. Previously this just blanked all three with nothing to restore
+          // them, so any hashchange/popstate left the standalone page blank.
+          const rawHash = (location.hash || '').replace('#', '').toLowerCase();
+          setShowCalendar(rawHash === 'calendar');
+          setShowDecisions(rawHash === 'decisions');
+          setShowTasks(rawHash === 'decisions' || rawHash === 'calendar' ? false : TASKS_STANDALONE);
         };
         window.addEventListener('popstate', apply);
         window.addEventListener('hashchange', apply);

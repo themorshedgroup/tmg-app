@@ -6242,7 +6242,7 @@ Rules:
     // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
     // /tasks app. The top-bar icons open it in an iframe popout inside the content
     // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-    const TASKS_POPOUT_VERSION = '20260711a';  // bump when tasks.html changes to bust the iframe/standalone-link cache
+    const TASKS_POPOUT_VERSION = '20260711b';  // bump when tasks.html changes to bust the iframe/standalone-link cache
     function TaskFramePopover({ which, zoneH, onClose }) {
       const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
       useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);

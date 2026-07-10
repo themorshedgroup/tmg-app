@@ -2836,7 +2836,7 @@ Rules:
       useEffect(() => { localStorage.setItem(sKey, sort); }, [sort]);
 
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', gold = dark ? '#C9A45A' : '#AD832F', bg = dark ? '#000D26' : '#FCFBF8', card = dark ? '#0A1730' : '#fff';
-      const lateColor = dark ? '#E07A7A' : '#9B1C1C', teal = dark ? '#7FC6AF' : '#0F6E56', dotIdle = dark ? 'rgba(255,255,255,.24)' : '#C4B9A8';
+      const lateColor = dark ? '#E07A7A' : '#9B1C1C', teal = dark ? '#7FC6AF' : '#0F6E56', blue = dark ? '#8FB6DC' : '#185FA5', dotIdle = dark ? 'rgba(255,255,255,.24)' : '#C4B9A8';
 
       async function reload() { setLoading(true); const r = await ProjectDB.loadFull(kind); setRows(r); setLoading(false); return r; }
       useEffect(() => { setPview('list'); setCurrent(null); reload(); }, [kind]);
@@ -2846,6 +2846,22 @@ Rules:
       const today0 = (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; })();
       const fmtD = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
       const isOverdue = (d) => d && new Date(d) < today0;
+      const daysTo = (d) => d ? Math.round((new Date(d) - today0) / 86400000) : '—';
+
+      // ── CTC-only: "attention" flag + hero color, derived from real open-task
+      // status (stuck / overdue) rather than a stored field — mirrors the
+      // reference's blocked/overdue/clear/dates-missing states. ──
+      const attentionOf = (p) => {
+        const stuck = p._openTasks.filter(t => t.status === 'stuck').length;
+        if (stuck) return { text: stuck + (stuck === 1 ? ' task blocked' : ' tasks blocked'), tone: 'red' };
+        const overdue = p._openTasks.filter(t => t.due_at && new Date(t.due_at) < today0).length;
+        if (overdue) return { text: overdue + (overdue === 1 ? ' task overdue' : ' tasks overdue'), tone: 'red' };
+        if (p._taskCount === 0) return { text: 'No tasks yet', tone: 'sub' };
+        const anyDates = p._tasks.some(t => t.due_at);
+        if (!anyDates) return { text: 'Dates missing', tone: 'sub' };
+        return { text: 'Clear', tone: 'sub' };
+      };
+      const heroColor = (p) => { const a = attentionOf(p); return a.tone === 'red' ? lateColor : (a.text === 'Clear' ? teal : blue); };
 
       // ── shared header chips (mirror the My Tasks chip system) ──
       const chipStyle = { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, padding: '5px 8px', border: `1px solid ${bord}`, borderRadius: 3, background: card, color: sub, whiteSpace: 'nowrap', cursor: 'pointer', fontFamily: C.fontSans };
@@ -2911,6 +2927,16 @@ Rules:
       const mDot = (state, sz) => { const s = sz || 5; const base = { width: s, height: s, borderRadius: '50%', flexShrink: 0 }; if (state === 'done') return { ...base, background: teal }; if (state === 'next') return { ...base, background: gold, boxShadow: `0 0 0 3px ${dark ? 'rgba(201,164,90,.2)' : 'rgba(173,131,47,.16)'}` }; return { ...base, background: dotIdle }; };
       const msState = (p, m) => m.status === 'done' ? 'done' : (p._nextMs && p._nextMs.id === m.id ? 'next' : 'future');
 
+      // ── CTC-only: horizontal milestone-chain rail node (replaces the % complete
+      // column — reference: "the number that matters is days to the next binding date") ──
+      const msRailNode = (p, m) => { const st = msState(p, m); return (
+        <div key={m.id} style={{ width: 76, flexShrink: 0, textAlign: 'center' }}>
+          <span style={{ ...mDot(st, 8), display: 'block', margin: '4px auto 6px' }} />
+          <div style={{ fontSize: '0.56rem', letterSpacing: '0.05em', textTransform: 'uppercase', color: st === 'next' ? gold : sub, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: C.fontSans }}>{m.title}</div>
+          <div style={{ fontSize: '0.58rem', color: st === 'done' ? teal : (st === 'next' ? ink : sub), marginTop: 2, fontFamily: C.fontSans }}>{m.status === 'done' ? 'Done' : fmtD(m.due_at)}</div>
+        </div>
+      ); };
+
       // ── mobile project card ──
       const projCard = (p) => (
         <div key={p.id} onClick={() => { setCurrent(p); setPview('detail'); setAddTask(''); setAddMs(''); }} style={{ background: card, border: `1px solid ${bord}`, borderRadius: 6, padding: 14, marginBottom: 11, cursor: 'pointer' }}>
@@ -2954,6 +2980,72 @@ Rules:
           <div style={{ width: 76, flexShrink: 0, textAlign: 'right', fontSize: '0.72rem', color: isOverdue(p.target_date) ? lateColor : sub, fontWeight: isOverdue(p.target_date) ? 600 : 400, fontFamily: C.fontSans }}>{fmtD(p.target_date)}</div>
         </div>
       );
+
+      // ── mobile CTC file card — address-forward, hero "days to next binding
+      // date" block, horizontal milestone rail. Deliberately NOT the project
+      // card: a transaction is an address and a chain of dates, not an outcome. ──
+      const ctcCard = (p) => {
+        const att = attentionOf(p);
+        const hc = heroColor(p);
+        const heroBg = hc === teal ? (dark ? 'rgba(15,110,86,.12)' : '#E6F5F0') : hc === lateColor ? (dark ? 'rgba(155,28,28,.12)' : '#FBF0F0') : (dark ? 'rgba(24,95,165,.12)' : '#EEF3FB');
+        return (
+          <div key={p.id} onClick={() => { setCurrent(p); setPview('detail'); setAddTask(''); setAddMs(''); }} style={{ background: card, border: `1px solid ${bord}`, borderLeft: `2.5px solid ${hc}`, borderRadius: 6, padding: 14, marginBottom: 11, cursor: 'pointer' }}>
+            <div style={{ fontSize: '0.95rem', fontWeight: 600, color: ink, lineHeight: 1.25, marginBottom: 8, fontFamily: C.fontSans }}>{p.name}</div>
+            {(p.group_tag || p.owner_id) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                {p.group_tag && <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '3px 7px', borderRadius: 3, background: dark ? 'rgba(255,255,255,.08)' : '#F7F4EE', color: sub, fontWeight: 500, fontFamily: C.fontSans }}>{p.group_tag}</span>}
+                {p.owner_id && <span style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: '0.7rem', color: sub, fontFamily: C.fontSans }}>{avatar(p.owner_id, 16)}{nameOf(p.owner_id)}</span>}
+              </div>
+            )}
+            {p._nextMs && (
+              <div style={{ borderRadius: 5, padding: '9px 11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, background: heroBg, border: `1px solid ${bord}` }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontWeight: 500, marginBottom: 3, fontFamily: C.fontSans }}>Next binding date</div>
+                  <div style={{ fontSize: '0.76rem', fontWeight: 500, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p._nextMs.title}</div>
+                </div>
+                <div style={{ flexShrink: 0, textAlign: 'right', marginLeft: 10 }}>
+                  <div style={{ fontFamily: "'Cormorant Garamond', serif", fontStyle: 'italic', fontSize: '1.5rem', lineHeight: 1, color: hc }}>{daysTo(p._nextMs.due_at)}</div>
+                  <div style={{ fontSize: '0.5rem', fontFamily: C.fontSans, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, marginTop: 3 }}>days</div>
+                </div>
+              </div>
+            )}
+            {p._milestones.length > 0 && <div style={{ display: 'flex', overflowX: 'auto', gap: 8, marginBottom: 12, paddingBottom: 2 }}>{p._milestones.map(m => msRailNode(p, m))}</div>}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 10, borderTop: `1px solid ${bord}`, fontSize: '0.7rem', fontFamily: C.fontSans }}>
+              <span style={{ color: att.tone === 'red' ? lateColor : sub, fontWeight: att.tone === 'red' ? 600 : 400 }}>{att.text}</span>
+              <span style={{ color: sub }}>{p._doneMs} of {p._totalMs} milestones</span>
+            </div>
+          </div>
+        );
+      };
+
+      // ── desktop CTC file row — hairline row, no card shell. Milestone rail
+      // replaces the % complete column; the number that matters is days to the
+      // next binding date, not overall progress. ──
+      const ctcRow = (p) => {
+        const att = attentionOf(p);
+        return (
+          <div key={p.id} onClick={() => { setCurrent(p); setPview('detail'); setAddTask(''); setAddMs(''); }} style={{ display: 'flex', alignItems: 'center', padding: '10px 18px', borderBottom: `1px solid ${bord}`, gap: 12, cursor: 'pointer' }}>
+            <div style={{ width: 224, flexShrink: 0 }}>
+              <div style={{ fontSize: '0.82rem', fontWeight: 500, color: ink, marginBottom: p.group_tag ? 4 : 0, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+              {p.group_tag && <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 6px', borderRadius: 3, background: dark ? 'rgba(255,255,255,.08)' : '#F7F4EE', color: sub, fontWeight: 500, fontFamily: C.fontSans }}>{p.group_tag}</span>}
+            </div>
+            <div style={{ width: 146, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+              {p._nextMs ? (
+                <React.Fragment>
+                  <div style={{ fontFamily: "'Cormorant Garamond', serif", fontStyle: 'italic', fontSize: '1.3rem', lineHeight: 1, color: heroColor(p) }}>{daysTo(p._nextMs.due_at)}</div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 2, fontFamily: C.fontSans }}>Days</div>
+                    <div style={{ fontSize: '0.68rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p._nextMs.title}</div>
+                  </div>
+                </React.Fragment>
+              ) : <span style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans }}>No dates set</span>}
+            </div>
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'flex-start', gap: 8, overflow: 'hidden' }}>{p._milestones.map(m => msRailNode(p, m))}</div>
+            <div style={{ width: 96, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.72rem', color: sub, fontFamily: C.fontSans }}>{p.owner_id ? <React.Fragment>{avatar(p.owner_id, 16)}{nameOf(p.owner_id).split(' ')[0]}</React.Fragment> : '—'}</div>
+            <div style={{ width: 96, flexShrink: 0, textAlign: 'right', fontSize: '0.68rem', fontWeight: att.tone === 'red' ? 600 : 400, color: att.tone === 'red' ? lateColor : sub, fontFamily: C.fontSans }}>{att.text}</div>
+          </div>
+        );
+      };
 
       // ── list body ──
       const listBody = (rowFn, wideList) => {
@@ -3011,7 +3103,7 @@ Rules:
           <React.Fragment>
             {fld('Owner', p.owner_id ? <React.Fragment>{avatar(p.owner_id, 16)}{nameOf(p.owner_id)}</React.Fragment> : '—')}
             {fld('Type', isCtc ? 'CTC File' : 'Project')}
-            {fld('Group', p.group_tag || '—')}
+            {fld(isCtc ? 'Side' : 'Group', p.group_tag || '—')}
             {fld('Status', <React.Fragment><span style={{ width: 7, height: 7, borderRadius: '50%', background: projStatusMeta(p.status).color }} />{projStatusMeta(p.status).label}</React.Fragment>)}
             {fld('Started', p.started_at ? fmtD(p.started_at) : '—')}
             {fld('Target', <span style={{ color: isOverdue(p.target_date) ? lateColor : ink }}>{fmtD(p.target_date)}</span>)}
@@ -3098,6 +3190,30 @@ Rules:
           </div>
         </div>
       );
+      // Desktop column header — distinct per surface: CTC is property/deadline/
+      // rail/agent/attention, Projects is name+outcome/next milestone/progress/owner/target.
+      const theadRow = (
+        <div style={{ display: 'flex', alignItems: 'center', padding: '8px 18px', fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600, color: sub, borderBottom: `1px solid ${bord}`, gap: 12, fontFamily: C.fontSans }}>
+          {isCtc ? (
+            <React.Fragment>
+              <span style={{ width: 224, flexShrink: 0 }}>Property</span>
+              <span style={{ width: 146, flexShrink: 0 }}>Next binding date</span>
+              <span style={{ flex: 1 }}>Milestone chain</span>
+              <span style={{ width: 96, flexShrink: 0 }}>Agent</span>
+              <span style={{ width: 96, flexShrink: 0, textAlign: 'right' }}>Attention</span>
+            </React.Fragment>
+          ) : (
+            <React.Fragment>
+              <span style={{ width: 250, flexShrink: 0 }}>Project &amp; outcome</span>
+              <span style={{ flex: 1 }}>Next milestone</span>
+              <span style={{ width: 132, flexShrink: 0 }}>Progress</span>
+              <span style={{ width: 96, flexShrink: 0 }}>Owner</span>
+              <span style={{ width: 76, flexShrink: 0, textAlign: 'right' }}>Target</span>
+            </React.Fragment>
+          )}
+        </div>
+      );
+      const wideRowFn = isCtc ? ctcRow : projRow;
 
       return (
         <React.Fragment>
@@ -3113,18 +3229,20 @@ Rules:
                 </div>
                 <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                   {listHeader}
-                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 18px 24px' }}>{listBody(projRow, true)}</div>
+                  {theadRow}
+                  <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 18px 24px' }}>{listBody(wideRowFn, true)}</div>
                 </div>
               </div>
             ) : wide ? (
               <React.Fragment>
                 {listHeader}
-                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 18px 24px' }}>{listBody(projRow, true)}</div>
+                {theadRow}
+                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 18px 24px' }}>{listBody(wideRowFn, true)}</div>
               </React.Fragment>
             ) : (
               <React.Fragment>
                 {listHeader}
-                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 14px 24px' }}>{listBody(projCard, false)}</div>
+                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 14px 24px' }}>{listBody(isCtc ? ctcCard : projCard, false)}</div>
               </React.Fragment>
             )}
         </React.Fragment>
@@ -3171,7 +3289,7 @@ Rules:
             {field('Outcome', <textarea value={outcome} onChange={e => setOutcome(e.target.value)} rows={2} placeholder="One sentence — what this is trying to achieve" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
             <div style={{ display: 'flex', gap: 10 }}>
               <div style={{ flex: 1 }}>{field('Status', <select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{PROJECT_STATUS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select>)}</div>
-              <div style={{ flex: 1 }}>{field('Group', <input value={groupTag} onChange={e => setGroupTag(e.target.value)} placeholder="e.g. Q3 Rocks" style={inp} />)}</div>
+              <div style={{ flex: 1 }}>{field(isCtc ? 'Side' : 'Group', <input value={groupTag} onChange={e => setGroupTag(e.target.value)} placeholder={isCtc ? 'e.g. Buyer, Seller, Landlord' : 'e.g. Q3 Rocks'} style={inp} />)}</div>
             </div>
             {field('Owner', <select value={ownerId} onChange={e => setOwnerId(e.target.value)} style={inp}><option value="">(No owner)</option>{team.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>)}
             <div style={{ display: 'flex', gap: 10 }}>

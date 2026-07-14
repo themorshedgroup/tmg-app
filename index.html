@@ -886,7 +886,7 @@ Continue with TMG Gmail
       async adminUpdate(id, fields) {
         if (!this.client()) return;
         const mapped = {};
-        ['employee_id', 'title', 'reports_to', 'assigned_tc', 'access', 'status', 'hire_date', 'time_off_days'].forEach(k => { if (fields[k] !== undefined) mapped[k] = fields[k] || null; });
+        ['first_name', 'last_name', 'employee_id', 'title', 'reports_to', 'assigned_tc', 'access', 'status', 'hire_date', 'time_off_days'].forEach(k => { if (fields[k] !== undefined) mapped[k] = fields[k] || null; });
         const { error } = await this.client().from('profiles').update(mapped).eq('id', id);
         if (error) { console.error('[ProfileDB] adminUpdate:', error.message); throw error; }
       },
@@ -2290,6 +2290,8 @@ Rules:
     // re-render gave it a new function identity → React remounted it → all the
     // field state reset to the saved values, so edits appeared to be "lost".)
     function UserEditor({ u, users, refresh, setOpenId, nameOf, inp, lbl }) {
+      const [firstName, setFirstName] = useState(u.first_name || '');
+      const [lastName, setLastName] = useState(u.last_name || '');
       const [emp, setEmp] = useState(u.employee_id || '');
       const [hireDate, setHireDate] = useState(u.hire_date || '');
       const [title, setTitle] = useState(u.title || '');
@@ -2307,7 +2309,7 @@ Rules:
         // Open the tab synchronously (inside the click) so it isn't popup-blocked; fill it after the save succeeds.
         const mailTab = justApproved ? window.open('', '_blank') : null;
         try {
-          await ProfileDB.adminUpdate(u.id, { employee_id: emp, hire_date: hireDate || null, title, reports_to: reports || null, assigned_tc: isAgent ? (assignedTc || null) : null, access: roles, status, time_off_days: timeOffDays === '' ? null : Math.max(0, Math.round(Number(timeOffDays) || 0)) });
+          await ProfileDB.adminUpdate(u.id, { first_name: firstName || null, last_name: lastName || null, employee_id: emp, hire_date: hireDate || null, title, reports_to: reports || null, assigned_tc: isAgent ? (assignedTc || null) : null, access: roles, status, time_off_days: timeOffDays === '' ? null : Math.max(0, Math.round(Number(timeOffDays) || 0)) });
           await refresh(); setOpenId(null);
           if (mailTab) mailTab.location.href = gmailComposeUrl(u);
         }
@@ -2317,6 +2319,8 @@ Rules:
       return (
         <div style={{ padding: '10px 12px', background: C.bg, borderRadius: 10, marginTop: 6 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <div><div style={lbl}>First name</div><input value={firstName} onChange={e => setFirstName(e.target.value)} style={inp} /></div>
+            <div><div style={lbl}>Last name</div><input value={lastName} onChange={e => setLastName(e.target.value)} style={inp} /></div>
             <div><div style={lbl}>Employee ID</div><input value={emp} onChange={e => setEmp(e.target.value)} style={inp} /></div>
             <div><div style={lbl}>Hire date</div><input type="date" value={hireDate} onChange={e => setHireDate(e.target.value)} style={inp} /></div>
             <div><div style={lbl}>Time off (days/yr)</div><input type="number" min="0" value={timeOffDays} onChange={e => setTimeOffDays(e.target.value)} style={inp} /></div>

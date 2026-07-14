@@ -182,10 +182,12 @@
         if (error) { console.error('[TimeOffDB] listAllForYear:', error.message); return []; }
         return data || [];
       },
+      // forUserId lets a timeoff admin file on behalf of a teammate — the DB guard trigger
+      // enforces that only an admin may pass a user_id other than their own.
       async create(req) {
         if (!this.client()) return null;
         const { data, error } = await this.client().from('time_off_requests').insert({
-          user_id: this.uid(), start_at: req.start_at, end_at: req.end_at, full_day: !!req.full_day, reason: req.reason || null,
+          user_id: req.forUserId || this.uid(), start_at: req.start_at, end_at: req.end_at, full_day: !!req.full_day, reason: req.reason || null,
         }).select().single();
         if (error) { console.error('[TimeOffDB] create:', error.message); throw error; }
         return data;
@@ -302,10 +304,14 @@
       const [editingId, setEditingId] = useState(null);
       const [editingStatus, setEditingStatus] = useState(null);
       const [editingCalEvent, setEditingCalEvent] = useState(null); // { calendarId, eventId } | null
+      const [forUserId, setForUserId] = useState(null); // admin-only: filing on behalf of a teammate; null = self
 
       const reload = async () => {
-        const [m, p] = await Promise.all([TimeOffDB.listMine(), TimeOffDB.listPending()]);
-        setMine(m); setPending(p);
+        const [m, p, yr] = await Promise.all([
+          TimeOffDB.listMine(), TimeOffDB.listPending(),
+          isAdmin ? TimeOffDB.listAllForYear(new Date().getFullYear()) : Promise.resolve(null),
+        ]);
+        setMine(m); setPending(p); if (yr) setYearRequests(yr);
       };
       useEffect(() => {
         let on = true;
@@ -336,6 +342,10 @@
       const pill = (s) => { const p = PILL[s] || PILL.pending; return <span style={{ display: 'inline-flex', alignItems: 'center', padding: '3px 9px', borderRadius: 20, background: p.bg, color: p.fg, fontSize: '0.68rem', fontWeight: 700, fontFamily: C.fontSans, letterSpacing: '0.02em' }}>{p.label}</span>; };
 
       const bal = policy ? timeoffBalance(policy, profile, mine) : null;
+      // When an admin is filing on behalf of someone else, show THEIR balance/warnings instead
+      // of the admin's own — sourced from yearRequests, which is only loaded for admins.
+      const forProfile = (isAdmin && forUserId) ? profiles.find(p => p.id === forUserId) : null;
+      const forBal = forProfile ? timeoffBalance(policy, forProfile, yearRequests.filter(r => r.user_id === forUserId)) : bal;
       const hpw = policy ? policy.hours_per_workday : 8;
       const daysEq = (h) => Math.round((h / (hpw || 8)) * 10) / 10;
       // Approver sees: their reports' requests, or (admin/ops) everyone's. A TRUE admin
@@ -350,7 +360,7 @@
       const draftValid = mode === 'fullday' ? !!(startDate && endDate && endDate >= startDate) : !!(startDate && endTime > startTime);
 
       const startCreate = () => {
-        setEditingId(null); setEditingStatus(null); setEditingCalEvent(null);
+        setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setForUserId(null);
         setMode('fullday'); setStartDate(today); setEndDate(today); setStartTime('09:00'); setEndTime('13:00'); setReason('');
         setView('new');
       };
@@ -359,7 +369,7 @@
         const dateStr = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
         const timeStr = d => pad(d.getHours()) + ':' + pad(d.getMinutes());
         const s = timeoffDate(r.start_at), e = timeoffDate(r.end_at);
-        setEditingId(r.id); setEditingStatus(r.status);
+        setEditingId(r.id); setEditingStatus(r.status); setForUserId(null);
         setEditingCalEvent(r.calendar_event_id ? { calendarId: r.calendar_id, eventId: r.calendar_event_id } : null);
         setMode(r.full_day ? 'fullday' : 'hours');
         setStartDate(dateStr(s)); setEndDate(dateStr(e));
@@ -376,9 +386,9 @@
             if (editingCalEvent) await deleteOOOEvent(editingCalEvent.eventId, editingCalEvent.calendarId);
             await TimeOffDB.update(editingId, { start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason });
           } else {
-            await TimeOffDB.create({ start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason });
+            await TimeOffDB.create({ start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason, forUserId });
           }
-          setReason(''); setMode('fullday'); setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setView('list'); await reload();
+          setReason(''); setMode('fullday'); setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setForUserId(null); setView('list'); await reload();
         }
         catch (e) { alert('Could not file: ' + (e.message || e)); }
         finally { setBusy(false); }
@@ -482,9 +492,20 @@
       if (view === 'new') {
         return (
           <div style={{ padding: '20px 16px 100px', background: t.bg, minHeight: '100%' }}>
-            <button onClick={() => { setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setView('list'); }} style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: t.sub, fontSize: '0.86rem', fontWeight: 600, fontFamily: C.fontSans, marginBottom: 16 }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} />Back</button>
-            <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: t.text, marginBottom: 18, fontFamily: C.fontDisplay }}>{editingId ? 'Edit request' : (bal && bal.tracked ? 'Request time off' : 'Log time off')}</div>
+            <button onClick={() => { setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setForUserId(null); setView('list'); }} style={{ background: 'none', border: 'none', padding: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: t.sub, fontSize: '0.86rem', fontWeight: 600, fontFamily: C.fontSans, marginBottom: 16 }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} />Back</button>
+            <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: t.text, marginBottom: 18, fontFamily: C.fontDisplay }}>{editingId ? 'Edit request' : (forUserId ? 'Log time off for ' + (people[forUserId] || 'them') : (forBal && forBal.tracked ? 'Request time off' : 'Log time off'))}</div>
             <div style={card}>
+              {isAdmin && !editingId ? (
+                <div style={{ marginBottom: 16 }}>
+                  <span style={lbl}>For</span>
+                  <select value={forUserId || uid} onChange={e => setForUserId(e.target.value === uid ? null : e.target.value)} style={fld}>
+                    <option value={uid}>Myself</option>
+                    {activeProfiles.filter(p => p.id !== uid).map(p => (
+                      <option key={p.id} value={p.id}>{(((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'Someone'}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
               <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                 {[{ k: 'fullday', l: 'Full day(s)' }, { k: 'hours', l: 'Specific hours' }].map(o => (
                   <button key={o.k} onClick={() => setMode(o.k)} style={{ flex: 1, padding: '9px 0', borderRadius: 9, border: `1.5px solid ${mode === o.k ? C.navy : t.border}`, background: mode === o.k ? C.navy : t.surface, color: mode === o.k ? '#fff' : t.sub, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{o.l}</button>
@@ -506,11 +527,11 @@
               )}
               <div style={{ marginBottom: 14 }}><span style={lbl}>Reason (optional)</span><input type="text" value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. family trip" style={fld} /></div>
               <div style={{ fontSize: '0.82rem', color: t.sub, fontFamily: C.fontSans, marginBottom: 6 }}>
-                {draftValid ? <React.Fragment><strong style={{ color: t.text }}>= {timeoffFmtHours(draftHours)} hours</strong>{bal && bal.tracked ? ' (' + daysEq(draftHours) + ' day' + (daysEq(draftHours) === 1 ? '' : 's') + ')' : ''}</React.Fragment> : <span style={{ color: t.muted }}>Pick a valid date/time range.</span>}
+                {draftValid ? <React.Fragment><strong style={{ color: t.text }}>= {timeoffFmtHours(draftHours)} hours</strong>{forBal && forBal.tracked ? ' (' + daysEq(draftHours) + ' day' + (daysEq(draftHours) === 1 ? '' : 's') + ')' : ''}</React.Fragment> : <span style={{ color: t.muted }}>Pick a valid date/time range.</span>}
               </div>
-              {bal && bal.tracked && draftValid && draftHours > bal.remaining ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ This is more than your {timeoffFmtHours(bal.remaining)}h remaining.</div> : null}
+              {forBal && forBal.tracked && draftValid && draftHours > forBal.remaining ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ This is more than {timeoffFmtHours(forBal.remaining)}h remaining{forUserId ? ' for ' + (people[forUserId] || 'this person') : ''}.</div> : null}
               {editingId && (editingStatus === 'approved' || editingStatus === 'denied') ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ Saving will withdraw this {PILL[editingStatus].label.toLowerCase()} request and send it back for approval.</div> : null}
-              <button onClick={submit} disabled={!draftValid || busy} style={{ ...primaryBtn, marginTop: 6, opacity: (!draftValid || busy) ? 0.5 : 1 }}>{busy ? 'Saving…' : (editingId ? 'Save changes' : (bal && bal.tracked ? 'Submit request' : 'Log it'))}</button>
+              <button onClick={submit} disabled={!draftValid || busy} style={{ ...primaryBtn, marginTop: 6, opacity: (!draftValid || busy) ? 0.5 : 1 }}>{busy ? 'Saving…' : (editingId ? 'Save changes' : (forBal && forBal.tracked ? 'Submit request' : 'Log it'))}</button>
             </div>
           </div>
         );

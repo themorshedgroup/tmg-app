@@ -65,19 +65,16 @@ Deno.serve(async (req) => {
   const QUO_FROM = Deno.env.get("QUO_FROM_NUMBER");
   if (!QUO_KEY || !QUO_FROM) return json({ error: "Quo secrets missing" }, 500);
 
-  // 1) Due showings.
-  const { data: due, error: dueErr } = await sb
-    .from("showings")
-    .select("id, agent_name, agent_phone, property_address, added_by_name, touch_count")
-    .eq("followup_status", "active")
-    .not("next_touch_at", "is", null)
-    .lte("next_touch_at", new Date().toISOString())
-    .not("agent_phone", "is", null)
-    .limit(25);
-  if (dueErr) return json({ error: dueErr.message }, 500);
-  if (!due || due.length === 0) return json({ sent: 0, note: "nothing due" });
-
-  // 2) Templates (touch 1..3) + property → listing-agent lookup + sender name from settings.
+  // 1) Templates (touch 1..3 + the "Reply Received" ack) + property →
+  // listing-agent lookup + sender name from settings. Loaded up front,
+  // unconditionally — both the regular touch-sender (step 2) and the
+  // reply-ack sender (step 3) need these, and step 3 must run even on a
+  // cycle where nothing is due for a regular touch (see the removed early
+  // return below: it used to skip step 3 entirely whenever `due` was empty,
+  // which meant a queued "Reply Received" ack silently never sent unless
+  // another showing happened to have a regular touch due in the very same
+  // 30-min window — confirmed via live data as the cause of acks sitting
+  // unsent for days).
   const { data: tpls } = await sb.from("sms_templates").select("touch_number, body").order("touch_number");
   const tplByTouch: Record<number, string> = {};
   (tpls || []).forEach((t: any) => { tplByTouch[t.touch_number] = t.body; });
@@ -89,10 +86,20 @@ Deno.serve(async (req) => {
     if (p.address) { agentByAddr[p.address] = p.listing_agent; urlByAddr[p.address] = p.zillow_url; }
   });
 
+  // 2) Due showings (regular touch sequence).
+  const { data: due, error: dueErr } = await sb
+    .from("showings")
+    .select("id, agent_name, agent_phone, property_address, added_by_name, touch_count")
+    .eq("followup_status", "active")
+    .not("next_touch_at", "is", null)
+    .lte("next_touch_at", new Date().toISOString())
+    .not("agent_phone", "is", null)
+    .limit(25);
+  if (dueErr) return json({ error: dueErr.message }, 500);
 
   let sent = 0;
   const errors: any[] = [];
-  for (const s of due) {
+  for (const s of due || []) {
     const touch = (s.touch_count || 0) + 1; // 1, 2, or 3
     const body = tplByTouch[touch];
     if (!body) continue;
@@ -144,8 +151,8 @@ Deno.serve(async (req) => {
   // 5) "Thanks for the feedback!" auto-ack — queued by sffu-inbound the
   // moment a genuine (non-STOP) reply comes in, for showings that haven't
   // already gotten one. Uses the same send path + template 4 ("Reply
-  // Received" in Settings). Runs on this same 30-min cron; no separate
-  // scheduled job needed for this.
+  // Received" in Settings). Runs on this same 30-min cron, unconditionally
+  // (see the note on step 1) — no separate scheduled job needed for this.
   const { data: pendingAcks, error: ackErr } = await sb
     .from("showings")
     .select("id, agent_name, agent_phone, property_address, added_by_name")
@@ -188,5 +195,5 @@ Deno.serve(async (req) => {
     acksSent++;
   }
 
-  return json({ sent, due: due.length, errors, acksSent, ackErrors });
+  return json({ sent, due: (due || []).length, errors, acksSent, ackErrors });
 });

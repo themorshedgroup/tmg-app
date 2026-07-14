@@ -107,7 +107,7 @@ Deno.serve(async (req) => {
     if (!conversationId) return json({ ignored: "no conversationId on payload" });
     const { data: hit } = await sb
       .from("showings")
-      .select("id, agent_name, followup_status, reply_ack_sent")
+      .select("id, agent_name, followup_status, reply_ack_sent, feedback")
       .eq("quo_conversation_id", conversationId)
       .maybeSingle();
     if (!hit) return json({ ok: true, matched: false, note: "no showing for this conversation" });
@@ -129,6 +129,16 @@ Deno.serve(async (req) => {
     // thanked again now that the first one already has been.
     const showingUpdate: Record<string, unknown> = { followup_status: newStatus, next_touch_at: null };
     if (!isStop && !hit.reply_ack_sent) showingUpdate.reply_ack_pending = true;
+    // A genuine reply IS the feedback the whole sequence exists to capture —
+    // fold it straight into showings.feedback (what Generate Summary reads)
+    // and close the showing out of the working list, instead of leaving both
+    // stuck until someone notices the thread and retypes the reply by hand.
+    // (A STOP isn't feedback, so it doesn't touch either field.)
+    if (!isStop) {
+      const prior = (hit.feedback || "").trim();
+      showingUpdate.feedback = prior ? `${prior}\n\n${text}`.trim() : String(text || "").trim();
+      showingUpdate.status = "closed";
+    }
     await sb.from("showings").update(showingUpdate).eq("id", hit.id);
 
     return json({ ok: true, matched: true, showing_id: hit.id });

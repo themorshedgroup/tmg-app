@@ -1527,6 +1527,18 @@
               <ActionButton label="Sign out" danger onClick={() => window.SupabaseAuth.signOut()} />
             </SectionCard>
 
+            {/* Process flow SOP — sits above the templates so anyone editing them
+                understands what the automation actually does end-to-end. */}
+            <SectionCard title="How This Works" mb={14}>
+              <ol style={{ margin: 0, paddingLeft: 18, color: C.textSecondary, fontSize: '0.78rem', lineHeight: 1.9 }}>
+                <li>Add the <b style={{ color: C.textPrimary }}>property</b>.</li>
+                <li>Add a <b style={{ color: C.textPrimary }}>showing</b> for that property (agent + phone).</li>
+                <li>Up to <b style={{ color: C.textPrimary }}>3 follow-up texts</b> go out automatically, a couple of days apart.</li>
+                <li>When the agent <b style={{ color: C.textPrimary }}>replies</b>, that reply is logged to the thread, folded into the property's Feedback automatically, and the <b style={{ color: C.textPrimary }}>"Reply Received"</b> template below goes out automatically.</li>
+                <li>The showing is <b style={{ color: C.textPrimary }}>closed automatically</b> and shows up in <b style={{ color: C.textPrimary }}>Generate Summary</b> — no manual status change or copy-pasting the reply required.</li>
+              </ol>
+            </SectionCard>
+
             {/* SMS Templates */}
             <SectionCard title="SMS Follow-up Templates" mb={14}>
               <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginBottom: 14, lineHeight: 1.8 }}>

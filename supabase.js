@@ -64,7 +64,10 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
         provider: 'google',
         options: {
           scopes: 'https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks',
-          queryParams: { access_type: 'offline', prompt: 'consent' },
+          // select_account alongside consent — same 403 org_internal issue as plain sign-in
+          // (see signInWithGoogle above): without it, Google silently uses the browser's
+          // default Google session, which may not be the @themorshedgroup.com account.
+          queryParams: { access_type: 'offline', prompt: 'select_account consent' },
           redirectTo: _cleanUrl,
         },
       });

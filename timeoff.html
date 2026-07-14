@@ -124,10 +124,8 @@
     const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     const CAL_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-calendar';
     const CAL_IS_DEV = (typeof window !== 'undefined') && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:');
-    // TODO(confirm w/ Symon): this is the shared "TMG" calendar the app's own Google Calendar
-    // settings already list (writer access) — the only real candidate for a company-wide team
-    // calendar today. Swap this constant if the actual OOO destination is different.
-    const TEAM_CALENDAR_ID = 'tmg@group.calendar.google.com';
+    // The shared "TMG" team calendar (confirmed by Symon) — OOO events land here.
+    const TEAM_CALENDAR_ID = 'c_u17la9j1annqi72em9qs3e8v44';
     function authToken() { return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON; }
     async function callCalendar(payload) {
       if (CAL_IS_DEV) return { ok: true, status: 200, data: payload.action === 'create' ? { ok: true, id: 'dev-' + Math.random().toString(36).slice(2) } : { ok: true } };

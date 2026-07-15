@@ -540,6 +540,16 @@ Continue with TMG Gmail
       if (!ok) { const err = new Error(data.error || 'calendar_error'); err.code = data.error; err.detail = data.detail || ''; throw err; }
       return data.events || [];
     }
+    // Team Calendar events via the shared SERVICE ACCOUNT — so the OOO/team ribbon shows
+    // for everyone regardless of whether they've connected their own Google Calendar.
+    // Best-effort: returns [] if the team calendar isn't configured or on any error.
+    async function fetchTeamEvents(timeMin, timeMax) {
+      try {
+        const { ok, data } = await callCalendar({ action: 'team-events-list', timeMin, timeMax });
+        if (!ok) return [];
+        return Array.isArray(data.events) ? data.events : [];
+      } catch (e) { return []; }
+    }
     // Lists the calendars on the connected Google account ({ id, summary, color, primary }).
     // Returns [] if the account isn't connected or the edge function predates this action.
     async function fetchCalendarList() {
@@ -4270,9 +4280,23 @@ Rules:
         if (view === 'month') { tMin = mondayOf(new Date(anchor.getFullYear(), anchor.getMonth(), 1)); tMax = addDays(tMin, 42); }
         else if (view === 'week') { tMin = mondayOf(anchor); tMax = addDays(tMin, 7); }
         else { tMin = new Date(anchor); tMin.setHours(0, 0, 0, 0); tMax = addDays(tMin, 1); }
-        fetchGoogleEvents(tMin.toISOString(), tMax.toISOString(), calList.map(c => c.id))
-          .then(list => { if (!cancelled) { setGevents(list || []); setGcal('ready'); } })
-          .catch(err => { if (!cancelled) setGcal(err && err.code === 'needs_connect' ? 'needs_connect' : 'error'); });
+        // Two independent feeds: the caller's PERSONAL calendars (needs their Google connect)
+        // and the shared Team Calendar via the service account (always works). Merge them so the
+        // team OOO ribbon shows even when the personal connection is down — dedupe by id in case
+        // the personal feed also returned the team calendar.
+        const personalP = fetchGoogleEvents(tMin.toISOString(), tMax.toISOString(), calList.map(c => c.id))
+          .then(list => ({ ok: true, list: list || [] }))
+          .catch(err => ({ ok: false, code: err && err.code }));
+        const teamP = fetchTeamEvents(tMin.toISOString(), tMax.toISOString());
+        Promise.all([personalP, teamP]).then(([p, team]) => {
+          if (cancelled) return;
+          const teamIds = new Set((team || []).map(e => e.id));
+          const personalList = (p.ok ? p.list : []).filter(e => !teamIds.has(e.id));
+          setGevents(personalList.concat(team || []));
+          // Ribbon shows regardless; gcal state still reflects the PERSONAL connection so the
+          // day/week grid can prompt a connect when that's what's missing.
+          setGcal(p.ok ? 'ready' : (p.code === 'needs_connect' ? 'needs_connect' : 'error'));
+        });
         return () => { cancelled = true; };
       }, [view, anchor, calList, reloadKey]);
       useEffect(() => { let c = false;

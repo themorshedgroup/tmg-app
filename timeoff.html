@@ -124,11 +124,14 @@
     const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
     const CAL_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-calendar';
     const CAL_IS_DEV = (typeof window !== 'undefined') && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:');
-    // The shared "TMG" team calendar (confirmed by Symon) — OOO events land here.
+    // The shared "TMG" team calendar (confirmed by Symon). Writes go through the
+    // edge function's SERVICE ACCOUNT (action: team-event-*), which owns this calendar —
+    // so an approver never needs their own Google Calendar connected. The edge function
+    // holds the authoritative id; this constant is only recorded alongside the event.
     const TEAM_CALENDAR_ID = 'c_u17la9j1annqi72em9qs3e8v44';
     function authToken() { return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON; }
     async function callCalendar(payload) {
-      if (CAL_IS_DEV) return { ok: true, status: 200, data: payload.action === 'create' ? { ok: true, id: 'dev-' + Math.random().toString(36).slice(2) } : { ok: true } };
+      if (CAL_IS_DEV) return { ok: true, status: 200, data: (payload.action === 'create' || payload.action === 'team-event-create') ? { ok: true, id: 'dev-' + Math.random().toString(36).slice(2) } : { ok: true } };
       const res = await fetch(CAL_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
@@ -145,13 +148,13 @@
     }
     async function createOOOEvent(name, startISO, endISO) {
       const event = { summary: 'OOO - ' + name, start: { date: startISO }, end: { date: isoPlusOneDay(endISO) } };
-      const { ok, data } = await callCalendar({ action: 'create', calendarId: TEAM_CALENDAR_ID, event });
+      const { ok, data } = await callCalendar({ action: 'team-event-create', event });
       if (!ok) { const err = new Error(data.error || 'calendar_error'); err.code = data.error; throw err; }
       return data.id || null;
     }
     async function deleteOOOEvent(eventId, calendarId) {
       if (!eventId) return;
-      try { await callCalendar({ action: 'delete', calendarId: calendarId || TEAM_CALENDAR_ID, eventId }); } catch (e) {}
+      try { await callCalendar({ action: 'team-event-delete', eventId }); } catch (e) {}
     }
 
     // ─── Time Off: request data + balance math ───────────────────────
@@ -413,7 +416,10 @@
               const eventId = await createOOOEvent(name, startISO, endISO);
               if (eventId) await TimeOffDB.setCalendarEvent(r.id, TEAM_CALENDAR_ID, eventId);
             } catch (ce) {
-              alert('Approved — but couldn’t add it to the Team Calendar (' + (ce.message || ce) + '). You can add it there manually.');
+              const msg = ce.code === 'team_calendar_not_configured'
+                ? 'Approved. (Team Calendar sync isn’t set up yet — no OOO event was added.)'
+                : 'Approved — but couldn’t add it to the Team Calendar (' + (ce.message || ce) + '). You can add it there manually.';
+              alert(msg);
             }
           }
           await reload();

@@ -60,6 +60,13 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
   // must hit "Reconnect" once — their stored refresh token predates the tasks grant.
   async function connectCalendar() {
     try {
+      // Mark that the NEXT OAuth redirect is a deliberate calendar-connect, so init()
+      // knows to persist the returned Google refresh token. Without this flag, a plain
+      // login's refresh token (scoped to email/profile only) would also be stored and
+      // would CLOBBER the calendar+tasks grant — every subsequent calendar call then
+      // fails with "insufficient authentication scopes". (This is exactly what happened
+      // when a user reconnected, then later logged out and back in.)
+      try { sessionStorage.setItem('tmg_calendar_connect', '1'); } catch (e) {}
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -120,9 +127,16 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
         const { data, error } = await client.auth.setSession({ access_token: at, refresh_token: rt });
         if (!error && data.session) _state.session = data.session;
       }
-      // Capture the Google refresh token (offline access) so the app can persist it once.
+      // Capture the Google refresh token — but ONLY if this redirect came from the
+      // deliberate "Connect Calendar" flow (which requested calendar+tasks scopes).
+      // A plain login also returns a refresh token, but one scoped to email/profile
+      // only; storing THAT would overwrite the calendar grant and break every calendar
+      // call with "insufficient authentication scopes". The flag is set in
+      // connectCalendar() right before its redirect.
       const prt = p.get('provider_refresh_token');
-      if (prt) { try { window.SupabaseAuth._googleRefresh = prt; } catch (e) {} }
+      let fromConnect = false;
+      try { fromConnect = sessionStorage.getItem('tmg_calendar_connect') === '1'; sessionStorage.removeItem('tmg_calendar_connect'); } catch (e) {}
+      if (prt && fromConnect) { try { window.SupabaseAuth._googleRefresh = prt; } catch (e) {} }
       window.history.replaceState({}, document.title, _cleanUrl);
     }
     if (!_state.session) {

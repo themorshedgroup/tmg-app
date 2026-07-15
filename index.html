@@ -5546,7 +5546,17 @@ Rules:
       const [dob, setDob] = useState((profile && profile.dob) || '');
       const [pets, setPets] = useState((profile && profile.pets) || []);
       const [saving, setSaving] = useState(false);
+      const [gcalState, setGcalState] = useState('checking'); // checking | connected | disconnected
       useEffect(() => { ProfileDB.loadAll().then(setAllUsers); }, []);
+      // Best-effort Google connection status: the 'calendars' action returns the account's
+      // calendars when connected, or needs_connect (412) when not.
+      useEffect(() => {
+        let c = false;
+        callCalendar({ action: 'calendars' })
+          .then(({ ok, data }) => { if (!c) setGcalState(ok && Array.isArray(data.calendars) && data.calendars.length ? 'connected' : 'disconnected'); })
+          .catch(() => { if (!c) setGcalState('disconnected'); });
+        return () => { c = true; };
+      }, []);
 
       const email = (me && me.email) || (user && user.email) || '';
       const roleLine = (me && me.title) || '';
@@ -5652,9 +5662,30 @@ Rules:
                     </div>
 
                     {/* 6 · edit button */}
-                    <div style={{ padding: '14px 18px 18px' }}>
+                    <div style={{ padding: '14px 18px 8px' }}>
                       <button onClick={() => { setFirst((me && me.first_name) || ''); setLast((me && me.last_name) || ''); setPhone((me && me.phone) || ''); setCountry((me && me.country) || ''); setTimezone((me && me.timezone) || ''); setDob((me && me.dob) || ''); setPets((me && me.pets) || []); setEditing(true); }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, width: '100%', padding: 13, borderRadius: 11, border: 'none', cursor: 'pointer', fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', background: dark ? '#AD832F' : '#001A4A', color: '#fff' }}>
                         <i className="ti ti-pencil" style={{ fontSize: 14 }} />Edit my info
+                      </button>
+                    </div>
+
+                    {/* 7 · Google Calendar & Tasks connect */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 18px 8px' }}>
+                      <span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.18em', fontWeight: 600, textTransform: 'uppercase', color: gold }}>Google Calendar &amp; Tasks</span>
+                      <span style={{ flex: 1, height: 1, background: ruleCol }} />
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontFamily: J, fontSize: 8, fontWeight: 600, letterSpacing: '0.04em', color: gcalState === 'connected' ? presence : keyMuted }}>
+                        <span style={{ width: 5, height: 5, borderRadius: '50%', background: gcalState === 'connected' ? presence : valMuted }} />
+                        {gcalState === 'checking' ? '…' : gcalState === 'connected' ? 'CONNECTED' : 'NOT CONNECTED'}
+                      </span>
+                    </div>
+                    <div style={{ padding: '0 18px 18px' }}>
+                      <div style={{ fontFamily: J, fontSize: 10, color: keyMuted, lineHeight: 1.5, marginBottom: 10 }}>
+                        {gcalState === 'connected'
+                          ? 'Your Google Calendar shows in the Calendar tab, and your tasks can sync to Google Tasks.'
+                          : 'Connect to see your Google Calendar in the app and sync tasks to Google Tasks.'}
+                      </div>
+                      <button onClick={() => { try { window.SupabaseAuth.connectCalendar(); } catch (e) {} }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, width: '100%', padding: 12, borderRadius: 11, border: `1px solid ${ctrlBorder}`, cursor: 'pointer', fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.04em', background: ctrlBg, color: ink }}>
+                        <i className="ti ti-brand-google" style={{ fontSize: 14, color: gold }} />
+                        {gcalState === 'connected' ? 'Reconnect Google Calendar & Tasks' : 'Connect Google Calendar & Tasks'}
                       </button>
                     </div>
                   </React.Fragment>

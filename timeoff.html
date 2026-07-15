@@ -128,7 +128,7 @@
     // edge function's SERVICE ACCOUNT (action: team-event-*), which owns this calendar —
     // so an approver never needs their own Google Calendar connected. The edge function
     // holds the authoritative id; this constant is only recorded alongside the event.
-    const TEAM_CALENDAR_ID = 'c_u17la9j1annqi72em9qs3e8v44';
+    const TEAM_CALENDAR_ID = 'c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com';
     function authToken() { return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON; }
     async function callCalendar(payload) {
       if (CAL_IS_DEV) return { ok: true, status: 200, data: (payload.action === 'create' || payload.action === 'team-event-create') ? { ok: true, id: 'dev-' + Math.random().toString(36).slice(2) } : { ok: true } };

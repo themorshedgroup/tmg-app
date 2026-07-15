@@ -517,7 +517,7 @@ Continue with TMG Gmail
     // Mirrors the same constant in timeoff.html — the shared "TMG" team calendar (confirmed by
     // Symon). The two Google-provided holiday calendars are read-only and qualify for the
     // "Holiday" lane category.
-    const TEAM_CALENDAR_ID = 'c_u17la9j1annqi72em9qs3e8v44';
+    const TEAM_CALENDAR_ID = 'c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com';
     const TEAM_LANE_CAL_IDS = [TEAM_CALENDAR_ID, 'ph#holiday@group.v.calendar.google.com', 'us#holiday@group.v.calendar.google.com'];
     async function callCalendar(payload) {
       // Preview/localhost has no real Google connection — serve mock data so the
@@ -569,13 +569,13 @@ Continue with TMG Gmail
       if (payload.action === 'delete') return { ok: true };
       if (payload.action === 'calendars') return { calendars: [
         { id: 'primary', summary: 'Hidenori Symon', primary: true, color: '#D50000', accessRole: 'owner', canWrite: true },
-        { id: 'c_u17la9j1annqi72em9qs3e8v44', summary: 'TMG', color: '#F6BF26', accessRole: 'writer', canWrite: true },
+        { id: 'c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com', summary: 'TMG', color: '#F6BF26', accessRole: 'writer', canWrite: true },
         { id: 'ph#holiday@group.v.calendar.google.com', summary: 'Holidays in Philippines', color: '#3F51B5', accessRole: 'reader', canWrite: false },
         { id: 'us#holiday@group.v.calendar.google.com', summary: 'Holidays in United States', color: '#0B8043', accessRole: 'reader', canWrite: false },
       ] };
       if (payload.action === 'list') {
         const ids = Array.isArray(payload.calendarIds) && payload.calendarIds.length ? payload.calendarIds : ['primary'];
-        const colorOf = { 'primary': '#D50000', 'c_u17la9j1annqi72em9qs3e8v44': '#F6BF26', 'ph#holiday@group.v.calendar.google.com': '#3F51B5', 'us#holiday@group.v.calendar.google.com': '#0B8043' };
+        const colorOf = { 'primary': '#D50000', 'c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com': '#F6BF26', 'ph#holiday@group.v.calendar.google.com': '#3F51B5', 'us#holiday@group.v.calendar.google.com': '#0B8043' };
         const base = payload.timeMin ? new Date(payload.timeMin) : new Date();
         const day0 = new Date(base); day0.setHours(0, 0, 0, 0);
         const iso = (d, h, m) => { const x = new Date(d); x.setHours(h, m || 0, 0, 0); return x.toISOString(); };
@@ -583,16 +583,16 @@ Continue with TMG Gmail
         for (let i = 0; i < 14; i++) {
           const d = new Date(day0); d.setDate(d.getDate() + i);
           if (ids.includes('primary') && i % 2 === 0) evs.push({ id: 'p' + i, title: 'Buyer call', start: iso(d, 9), end: iso(d, 9, 30), allDay: false, calendarId: 'primary', color: colorOf['primary'], colorId: null });
-          if (ids.includes('c_u17la9j1annqi72em9qs3e8v44') && i % 3 === 0) evs.push({ id: 't' + i, title: 'TMG standup', start: iso(d, 14), end: iso(d, 15), allDay: false, calendarId: 'c_u17la9j1annqi72em9qs3e8v44', color: colorOf['c_u17la9j1annqi72em9qs3e8v44'], colorId: '5' });
+          if (ids.includes('c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com') && i % 3 === 0) evs.push({ id: 't' + i, title: 'TMG standup', start: iso(d, 14), end: iso(d, 15), allDay: false, calendarId: 'c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com', color: colorOf['c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com'], colorId: '5' });
         }
         // ── Dev-only fixtures for the Team All-Day Lane (mirrors the Buyer call/TMG standup
         // fixtures above) — so the lane is visible on localhost without a live Google connection.
         const isoDate = (d) => { const p2 = (n) => String(n).padStart(2, '0'); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
         const addD = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-        if (ids.includes('c_u17la9j1annqi72em9qs3e8v44')) {
-          evs.push({ id: 'ooo-multi', title: 'OOO - Kyle Baird', start: isoDate(addD(day0, -3)), end: isoDate(addD(day0, 11)), allDay: true, calendarId: 'c_u17la9j1annqi72em9qs3e8v44', color: null, colorId: null });
+        if (ids.includes('c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com')) {
+          evs.push({ id: 'ooo-multi', title: 'OOO - Kyle Baird', start: isoDate(addD(day0, -3)), end: isoDate(addD(day0, 11)), allDay: true, calendarId: 'c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com', color: null, colorId: null });
           ['Maria Cruz', 'John Reyes', 'Ana Lopez'].forEach((name, idx) => {
-            evs.push({ id: 'ooo-' + idx, title: 'OOO - ' + name, start: isoDate(addD(day0, 2)), end: isoDate(addD(day0, 3)), allDay: true, calendarId: 'c_u17la9j1annqi72em9qs3e8v44', color: null, colorId: null });
+            evs.push({ id: 'ooo-' + idx, title: 'OOO - ' + name, start: isoDate(addD(day0, 2)), end: isoDate(addD(day0, 3)), allDay: true, calendarId: 'c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com', color: null, colorId: null });
           });
         }
         if (ids.includes('us#holiday@group.v.calendar.google.com')) evs.push({ id: 'hol1', title: 'Independence Day', start: isoDate(addD(day0, 1)), end: isoDate(addD(day0, 2)), allDay: true, calendarId: 'us#holiday@group.v.calendar.google.com', color: null, colorId: null });

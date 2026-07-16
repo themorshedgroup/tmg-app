@@ -40,6 +40,11 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+// The shared company Team Calendar. OOO/time-off events are written here by the
+// service account (see serviceAccountToken) so approvals never depend on the
+// approver having connected their personal Google Calendar.
+const TEAM_CALENDAR_ID = "c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com";
+
 // Service-role client (server-side only; bypasses RLS for token + profile lookups).
 function serviceClient() {
   const url = Deno.env.get("SUPABASE_URL");
@@ -89,6 +94,76 @@ async function googleAccessToken(refreshToken: string): Promise<string> {
   return data.access_token;
 }
 
+// ── Service-account access token for the shared Team Calendar ──────────────
+// Lets the app write/read the company Team Calendar with its own identity, so a
+// time-off approval can drop an OOO event regardless of whether the approver has
+// connected their personal Google Calendar. The service account is granted
+// "Make changes to events" on the Team Calendar directly (calendar sharing) —
+// no domain-wide delegation needed. Secrets: GCAL_SA_CLIENT_EMAIL + GCAL_SA_PRIVATE_KEY.
+function b64url(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+async function importPkcs8(pem: string): Promise<CryptoKey> {
+  const b64 = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/, "")
+    .replace(/-----END PRIVATE KEY-----/, "")
+    .replace(/\s+/g, "");
+  const der = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  return await crypto.subtle.importKey(
+    "pkcs8", der.buffer,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false, ["sign"],
+  );
+}
+let _saCache: { token: string; exp: number } | null = null;
+async function serviceAccountToken(): Promise<string> {
+  const email = Deno.env.get("GCAL_SA_CLIENT_EMAIL");
+  let key = Deno.env.get("GCAL_SA_PRIVATE_KEY") || "";
+  if (!email || !key) throw new Error("team_calendar_not_configured");
+  key = key.replace(/\\n/g, "\n"); // secret managers commonly store the PEM with escaped newlines
+
+  const now = Math.floor(Date.now() / 1000);
+  if (_saCache && _saCache.exp > now + 60) return _saCache.token;
+
+  const header = { alg: "RS256", typ: "JWT" };
+  const claim: Record<string, unknown> = {
+    iss: email,
+    scope: "https://www.googleapis.com/auth/calendar",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  };
+  // Domain-wide delegation: if a subject is configured, the service account acts AS
+  // that internal Workspace user (who owns/can-edit the Team Calendar). This avoids
+  // having to share the calendar externally with the service account (secondary
+  // calendars block external editing by org policy). Requires the SA's client id to
+  // be authorized for the calendar scope in Admin → API controls → Domain-wide delegation.
+  const subject = Deno.env.get("GCAL_SA_SUBJECT");
+  if (subject) claim.sub = subject;
+  const te = new TextEncoder();
+  const unsigned = b64url(te.encode(JSON.stringify(header))) + "." + b64url(te.encode(JSON.stringify(claim)));
+  const pk = await importPkcs8(key);
+  const sig = await crypto.subtle.sign({ name: "RSASSA-PKCS1-v1_5" }, pk, te.encode(unsigned));
+  const jwt = unsigned + "." + b64url(new Uint8Array(sig));
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }).toString(),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.access_token) {
+    throw new Error(data.error_description || data.error || "Service-account token failed");
+  }
+  _saCache = { token: data.access_token, exp: now + (Number(data.expires_in) || 3600) };
+  return data.access_token;
+}
+
 // Look up the caller's stored refresh token and mint a fresh access token.
 // Returns either { token } or { err } where err is a ready-to-send {status, body}.
 async function callerAccessToken(sb: any, userId: string): Promise<{ token?: string; err?: { status: number; body: unknown } }> {
@@ -124,6 +199,34 @@ Deno.serve(async (req) => {
       });
       if (error) return json({ error: error.message }, 500);
       return json({ ok: true }, 200);
+    }
+
+    // ── Diagnostic: what scope did Google actually grant on the caller's stored
+    // token? (Distinguishes "Google silently dropped calendar/tasks scope" from
+    // other failure modes — see project_tmg_team_calendar_service_account memory.)
+    if (action === "token-diag") {
+      const { data: row } = await sb
+        .from("google_tokens").select("refresh_token, updated_at").eq("user_id", auth.userId).maybeSingle();
+      if (!row?.refresh_token) return json({ error: "needs_connect" }, 412);
+      const body2 = new URLSearchParams({
+        client_id: "931478099859-9jifv0fl9v3s67oc7pa5ka6j61eeujfq.apps.googleusercontent.com",
+        client_secret: Deno.env.get("GOOGLE_CLIENT_SECRET") || "",
+        refresh_token: row.refresh_token,
+        grant_type: "refresh_token",
+      });
+      const res2 = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body2.toString(),
+      });
+      const data2 = await res2.json();
+      return json({
+        tokenUpdatedAt: row.updated_at,
+        exchangeOk: res2.ok,
+        grantedScope: data2.scope || null,
+        error: data2.error || null,
+        errorDescription: data2.error_description || null,
+      }, 200);
     }
 
     // ── List the calendars on the caller's account (id, name, color) ──
@@ -321,6 +424,99 @@ Deno.serve(async (req) => {
       const pd = await pr.json().catch(() => ({}));
       if (!pr.ok) return json({ error: pd?.error?.message || "RSVP failed." }, pr.status);
       return json({ ok: true, status }, 200);
+    }
+
+    // ── Diagnostic: list every calendar the service account can actually see ──
+    // Used to confirm the Team Calendar was shared with the SA and to read back its
+    // exact, full calendar id. Safe/read-only; gated to active TMG users like everything else.
+    if (action === "team-diag") {
+      let saToken: string;
+      try { saToken = await serviceAccountToken(); }
+      catch (e) { return json({ error: String((e as any)?.message || e) }, 500); }
+      const r = await fetch("https://www.googleapis.com/calendar/v3/users/me/calendarList", {
+        headers: { Authorization: "Bearer " + saToken },
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: d?.error?.message || "calendarList failed", status: r.status }, r.status);
+      return json({
+        configuredTeamId: TEAM_CALENDAR_ID,
+        visible: (d.items || []).map((c: any) => ({ id: c.id, summary: c.summary, accessRole: c.accessRole })),
+      }, 200);
+    }
+
+    // ── Team Calendar ops via the shared service account (no personal connect needed) ──
+    // The caller is still gated to an active TMG profile above; the Google write/read
+    // itself uses the service account, so it works even if the caller never connected
+    // their own Google Calendar. The target is always the company Team Calendar.
+    if (action === "team-event-create" || action === "team-event-update" ||
+        action === "team-event-delete" || action === "team-events-list") {
+      let saToken: string;
+      try {
+        saToken = await serviceAccountToken();
+      } catch (e) {
+        const msg = String((e as any)?.message || e);
+        return json({ error: msg === "team_calendar_not_configured" ? "team_calendar_not_configured" : "Team Calendar auth failed." }, msg === "team_calendar_not_configured" ? 501 : 502);
+      }
+      const encId = encodeURIComponent(TEAM_CALENDAR_ID);
+      const evBase = "https://www.googleapis.com/calendar/v3/calendars/" + encId + "/events";
+
+      // Diagnostic: what calendars can the service account actually see? Helps confirm the
+      // Team Calendar was shared with it and that TEAM_CALENDAR_ID matches.
+      if (action === "team-events-list" && body.diag === "calendars") {
+        const r = await fetch("https://www.googleapis.com/calendar/v3/users/me/calendarList", { headers: { Authorization: "Bearer " + saToken } });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: d?.error?.message || "calendarList failed.", status: r.status }, r.status);
+        return json({ target: TEAM_CALENDAR_ID, visible: (d.items || []).map((c: any) => ({ id: c.id, summary: c.summary, accessRole: c.accessRole })) }, 200);
+      }
+
+      if (action === "team-events-list") {
+        const url = new URL(evBase);
+        url.searchParams.set("singleEvents", "true");
+        url.searchParams.set("orderBy", "startTime");
+        url.searchParams.set("maxResults", "250");
+        if (body.timeMin) url.searchParams.set("timeMin", body.timeMin);
+        if (body.timeMax) url.searchParams.set("timeMax", body.timeMax);
+        const r = await fetch(url.toString(), { headers: { Authorization: "Bearer " + saToken } });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: d?.error?.message || "Team Calendar read failed." }, r.status);
+        const events = (d.items || []).map((e: any) => ({
+          id: e.id,
+          title: e.summary || "(no title)",
+          start: e.start?.dateTime || e.start?.date || null,
+          end: e.end?.dateTime || e.end?.date || null,
+          allDay: !e.start?.dateTime,
+          calendarId: TEAM_CALENDAR_ID,
+          colorId: e.colorId || null,
+          color: null,
+        }));
+        return json({ events }, 200);
+      }
+
+      if (action === "team-event-delete") {
+        if (!body.eventId) return json({ error: "Missing eventId." }, 400);
+        const r = await fetch(evBase + "/" + encodeURIComponent(body.eventId), {
+          method: "DELETE", headers: { Authorization: "Bearer " + saToken },
+        });
+        if (!r.ok && r.status !== 410) { // 410 Gone = already deleted → treat as success
+          const d = await r.json().catch(() => ({}));
+          return json({ error: d?.error?.message || "Team Calendar delete failed." }, r.status);
+        }
+        return json({ ok: true }, 200);
+      }
+
+      // create / update
+      const ev = (body.event && typeof body.event === "object") ? body.event : null;
+      if (!ev) return json({ error: "Missing event payload." }, 400);
+      const isUpd = action === "team-event-update";
+      if (isUpd && !body.eventId) return json({ error: "Missing eventId for update." }, 400);
+      const r = await fetch(evBase + (isUpd ? "/" + encodeURIComponent(body.eventId) : ""), {
+        method: isUpd ? "PATCH" : "POST",
+        headers: { Authorization: "Bearer " + saToken, "Content-Type": "application/json" },
+        body: JSON.stringify(ev),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: d?.error?.message || "Team Calendar write failed." }, r.status);
+      return json({ ok: true, id: d.id }, 200);
     }
 
     return json({ error: "Unknown action." }, 400);

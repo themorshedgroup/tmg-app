@@ -71,6 +71,10 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
       // fails with "insufficient authentication scopes". (This is exactly what happened
       // when a user reconnected, then later logged out and back in.)
       try { sessionStorage.setItem('tmg_calendar_connect', '1'); } catch (e) {}
+      // Also remember to reopen the Profile panel once the OAuth redirect lands back —
+      // otherwise the page reload drops the user on the default Chat tab, which reads as
+      // the app randomly bouncing them away mid-connect. Read once and cleared by index.html.
+      try { sessionStorage.setItem('tmg_calendar_connect_return', '1'); } catch (e) {}
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
         options: {

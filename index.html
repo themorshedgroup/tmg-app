@@ -6496,7 +6496,18 @@ Rules:
       const [showTasks, setShowTasks] = useState(false);
       const [showDecisions, setShowDecisions] = useState(false);
       const [tasksFocus, setTasksFocus] = useState(null);   // a task to open directly (e.g. from the Projects tab)
-      const [showProfile, setShowProfile] = useState(false);
+      const [showProfile, setShowProfile] = useState(() => {
+        // Reopen the Profile panel after a Connect Google Calendar redirect lands back
+        // (the OAuth round-trip reloads the page, which would otherwise always drop the
+        // user on the default Chat tab with the panel closed — reads as a random bounce).
+        try {
+          if (sessionStorage.getItem('tmg_calendar_connect_return') === '1') {
+            sessionStorage.removeItem('tmg_calendar_connect_return');
+            return true;
+          }
+        } catch (e) {}
+        return false;
+      });
       const [showStatus, setShowStatus] = useState(false);
       const [away, setAway] = useState(!!(profile && profile.away));
       const [statusText, setStatusText] = useState((profile && profile.status_text) || '');

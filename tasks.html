@@ -4205,6 +4205,7 @@ Rules:
       const [decDraft, setDecDraft] = useState({});      // taskId -> comment draft
       const [gcal, setGcal] = useState('loading');        // loading | ready | needs_connect | error
       const scrollRef = useRef(null);
+      const dateInputRef = useRef(null);
       const user = (window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user) || null;
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
 
@@ -4494,7 +4495,7 @@ Rules:
       const HOURS = []; for (let h = 0; h < 24; h++) HOURS.push(h);
       const SL = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
       const DL2 = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
-      useEffect(() => { if (scrollRef.current && view !== 'month') scrollRef.current.scrollTop = 7 * (view === 'week' ? 38 : 48); }, [view, anchor]);
+      useEffect(() => { if (scrollRef.current && view !== 'month') scrollRef.current.scrollTop = 7 * (view === 'week' ? 44 : 48); }, [view, anchor]);
 
       const circle = (t, sz) => { const done = t.status === 'done'; const sc = statusColor(t.status); return (
         <div style={{ width: sz, height: sz, borderRadius: '50%', flexShrink: 0, border: `1.5px solid ${done ? K.doneBg : sc}`, background: done ? K.doneBg : (t.status === 'in_progress' ? (dark ? 'rgba(24,95,165,0.20)' : '#EEF3FB') : 'transparent'), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{done && <i className="ti ti-check" style={{ fontSize: sz - 5, color: '#fff' }} />}</div>
@@ -4518,7 +4519,18 @@ Rules:
             <button onClick={() => step(-1)} style={{ width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', background: K.npBg, border: `0.5px solid ${K.npBd}`, borderRight: 'none', borderRadius: '4px 0 0 4px', cursor: 'pointer', padding: 0 }}><i className="ti ti-chevron-left" style={{ fontSize: 11, color: K.npIc }} /></button>
             <button onClick={() => step(1)} style={{ width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', background: K.npBg, border: `0.5px solid ${K.npBd}`, borderRadius: '0 4px 4px 0', cursor: 'pointer', padding: 0 }}><i className="ti ti-chevron-right" style={{ fontSize: 11, color: K.npIc }} /></button>
           </div>
-          <span onClick={goToday} style={{ flexShrink: 0, fontFamily: J, fontSize: 11, fontWeight: 600, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap' }}>{dateLabel()}</span>
+          <span onClick={() => { const el = dateInputRef.current; if (!el) return; if (el.showPicker) el.showPicker(); else el.focus(); }} style={{ flexShrink: 0, fontFamily: J, fontSize: 11, fontWeight: 600, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap' }}>{dateLabel()}</span>
+          <input
+            ref={dateInputRef}
+            type="date"
+            value={isoOf(anchor)}
+            onChange={(e) => {
+              if (!e.target.value) return;
+              const [y, m, d] = e.target.value.split('-').map(Number);
+              setAnchor(new Date(y, m - 1, d));
+            }}
+            style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
+          />
           {sep}
           {navChip('ti-search', false, () => {})}
           {navChip('ti-settings-2', true, () => setShowSettings(true))}
@@ -4833,13 +4845,13 @@ Rules:
             {HOURS.map(h => { const inst = tzInstant(mondayOf(anchor), h, primaryTz); return (
               <div key={h} style={{ display: 'flex' }}>
                 <div style={{ width: GUTTER_W, flexShrink: 0, background: K.tzBg, borderRight: `0.5px solid ${K.bd2}`, padding: '4px 6px 0' }}>
-                  <div style={{ fontFamily: J, fontSize: 9, fontWeight: 600, color: K.tx }}>{fmtHour(inst, primaryTz)}</div>
-                  {showSecondaryTz && <div style={{ fontFamily: J, fontSize: 8, fontWeight: 400, color: K.ph, opacity: 0.85 }}>{fmtHour(inst, secondaryTz)}</div>}
+                  <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: K.tx }}>{fmtHour(inst, primaryTz)}</div>
+                  {showSecondaryTz && <div style={{ fontFamily: J, fontSize: 9, fontWeight: 400, color: K.ph, opacity: 0.85 }}>{fmtHour(inst, secondaryTz)}</div>}
                 </div>
                 {stripDays.map((d, di) => { const isTod = sameDay(d, todayD), wknd = di >= 5; const evs = dayEvents(d).filter(e => Math.floor(tzFloat(e.start, primaryTz)) === h); return (
-                  <div key={di} style={{ flex: 1, minWidth: 0, height: 38, borderBottom: `0.5px solid ${K.gline}`, borderRight: `0.5px solid ${K.gline}`, background: isTod ? K.weekTodayCol : (wknd ? K.weekendCell : 'transparent'), padding: '1px 2px', overflow: 'hidden' }}>
+                  <div key={di} style={{ flex: 1, minWidth: 0, height: 44, borderBottom: `0.5px solid ${K.gline}`, borderRight: `0.5px solid ${K.gline}`, background: isTod ? K.weekTodayCol : (wknd ? K.weekendCell : 'transparent'), padding: '1px 2px', overflow: 'hidden' }}>
                     {evs.map((e, ei) => (
-                      <div key={ei} onClick={() => openEdit(e.raw)} style={{ fontFamily: J, fontSize: 6.5, fontWeight: 500, padding: '2px 4px', borderRadius: 3, marginBottom: 1, background: evBg(e), borderLeft: `2px solid ${evBd(e)}`, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'pointer' }}>{e.title}</div>
+                      <div key={ei} onClick={() => openEdit(e.raw)} style={{ fontFamily: J, fontSize: 9.5, fontWeight: 600, padding: '2px 4px', borderRadius: 3, marginBottom: 1, background: evBg(e), borderLeft: `2px solid ${evBd(e)}`, color: K.evTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'pointer' }}>{e.title}</div>
                     ))}
                   </div>
                 ); })}

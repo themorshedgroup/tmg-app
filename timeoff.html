@@ -378,6 +378,25 @@
         setReason(r.reason || '');
         setView('new');
       };
+      // Shared by the approval flow AND by "logged" (noted) entries — both mean the time off
+      // is a settled fact, not a pending ask, so both should land an OOO event on the Team
+      // Calendar. Best-effort: a calendar hiccup shouldn't block the request/log itself.
+      const syncOOOToCalendar = async (row) => {
+        try {
+          const name = people[row.user_id] || 'Team member';
+          const startISO = (row.start_at || '').slice(0, 10);
+          const endISO = (row.end_at || '').slice(0, 10) || startISO;
+          const eventId = await createOOOEvent(name, startISO, endISO);
+          if (eventId) await TimeOffDB.setCalendarEvent(row.id, TEAM_CALENDAR_ID, eventId);
+          return true;
+        } catch (ce) {
+          const msg = ce.code === 'team_calendar_not_configured'
+            ? 'Team Calendar sync isn’t set up yet — no OOO event was added.'
+            : 'Couldn’t add it to the Team Calendar (' + (ce.message || ce) + '). You can add it there manually.';
+          alert(msg);
+          return false;
+        }
+      };
       const submit = async () => {
         if (!draftValid || busy) return;
         setBusy(true);
@@ -387,7 +406,10 @@
             if (editingCalEvent) await deleteOOOEvent(editingCalEvent.eventId, editingCalEvent.calendarId);
             await TimeOffDB.update(editingId, { start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason });
           } else {
-            await TimeOffDB.create({ start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason, forUserId });
+            const row = await TimeOffDB.create({ start_at: draftStart, end_at: draftEnd, full_day: draftFull, reason, forUserId });
+            // 'noted' = logged, not a pending ask (e.g. an admin filing on someone else's behalf)
+            // — it never goes through doDecide()/Approve, so sync it to the Team Calendar now.
+            if (row && row.status === 'noted') await syncOOOToCalendar(row);
           }
           setReason(''); setMode('fullday'); setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setForUserId(null); setView('list'); await reload();
         }
@@ -406,22 +428,7 @@
         setBusy(true);
         try {
           await TimeOffDB.decide(r.id, status, note);
-          if (status === 'approved') {
-            // Best-effort: the approval itself already succeeded, so a calendar hiccup
-            // (e.g. the approver hasn't connected Google Calendar) shouldn't block it.
-            try {
-              const name = people[r.user_id] || 'Team member';
-              const startISO = (r.start_at || '').slice(0, 10);
-              const endISO = (r.end_at || '').slice(0, 10) || startISO;
-              const eventId = await createOOOEvent(name, startISO, endISO);
-              if (eventId) await TimeOffDB.setCalendarEvent(r.id, TEAM_CALENDAR_ID, eventId);
-            } catch (ce) {
-              const msg = ce.code === 'team_calendar_not_configured'
-                ? 'Approved. (Team Calendar sync isn’t set up yet — no OOO event was added.)'
-                : 'Approved — but couldn’t add it to the Team Calendar (' + (ce.message || ce) + '). You can add it there manually.';
-              alert(msg);
-            }
-          }
+          if (status === 'approved') await syncOOOToCalendar(r);
           await reload();
         }
         catch (e) { alert('Could not update: ' + (e.message || e)); }

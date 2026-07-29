@@ -567,11 +567,17 @@
     }
 
     const AI_CONTEXT_CAP = 200; // max tasks fed into the AI prompt; tools cover the rest
-    function aiSystem(tasks, colMap, meta) {
-      const rows = (tasks || []).map(t => ({
-        id: t.id, subject: t.Subject, type: t[colMap.type] || null, status: t.Status || null,
-        due_date: t.Due_Date || null, contact: t.Who_Id?.name || null, closed_time: t.Closed_Time || null, owner: t.Owner?.name || null,
-      }));
+    function aiSystem(tasks, colMap, meta, extraFields) {
+      const scalarOf = (v) => (v && typeof v === 'object') ? (v.name ?? null) : (v ?? null);
+      const rows = (tasks || []).map(t => {
+        const row = {
+          id: t.id, subject: t.Subject, type: t[colMap.type] || null, status: t.Status || null,
+          due_date: t.Due_Date || null, contact: t.Who_Id?.name || null, closed_time: t.Closed_Time || null,
+          owner: t.Owner?.name || null, description: t.Description || null, trigger: t[colMap.trigger] || null,
+        };
+        (extraFields || []).forEach(f => { row[f.label] = scalarOf(t[f.api_name]); });
+        return row;
+      });
       return [
         "You are the TMG CRM Tasks assistant. You help the user understand and manage their Zoho CRM Tasks (calls, notes, pop-bys, follow-ups).",
         "Today is " + todayISO() + ". Dates are formatted YYYY-MM-DD.",
@@ -587,6 +593,7 @@
         "For update_task / delete_task, use the exact task id from the JSON. Valid statuses: " + (meta.statusOptions || []).join(", ") + ".",
         "To clean up duplicate calls (a contact with more than one Not-Started call), call find_duplicate_calls — it returns each such contact with the call to keep and the extras to remove; then offer to delete the extras via bulk_delete_tasks.",
         "Be concise — after a change is applied the app shows the exact records changed below your message, so a short confirmation is enough.",
+        (extraFields && extraFields.length) ? `This org's Tasks module also has these custom fields, included per-task below: ${extraFields.map(f => f.label).join(', ')}.` : "",
         rows.length > AI_CONTEXT_CAP ? `IMPORTANT: ${rows.length} tasks are in view, but only the first ${AI_CONTEXT_CAP} are listed below. Do NOT infer totals, counts, duplicates, or audits from this partial list — use the tools (find_duplicate_calls, check_call_due_dates, check_couple_cadence, search_tasks), which run over ALL tasks in view, and report from their results.` : "",
         "",
         "TASKS IN VIEW (JSON" + (rows.length > AI_CONTEXT_CAP ? `, first ${AI_CONTEXT_CAP} of ${rows.length}` : "") + "):",
@@ -785,12 +792,38 @@
       return 'done';
     }
 
-    function AIChat({ tasks, colMap, meta, onRead, onWrite, onClose, split, showActivity }) {
-      const [log, setLog] = useState([]);
+    // Persisted across page reloads/exits — one running thread, saved to this browser
+    // (matches the saved-prompts pattern above: localStorage, no backend/account needed).
+    const AI_CHAT_KEY = 'tmg_crmtasks_ai_chat';
+    function loadSavedChat() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(AI_CHAT_KEY) || 'null');
+        if (saved && Array.isArray(saved.log) && Array.isArray(saved.claude)) return saved;
+      } catch (e) {}
+      return { log: [], claude: [] };
+    }
+    // A tool_use awaiting confirmation has no resolver after a reload (its Promise
+    // died with the old page) — demote it so a restored card can't render live-but-dead
+    // buttons, and drop the matching dangling assistant turn so the next message sent
+    // doesn't land right after an unanswered tool_use (Claude requires a tool_result there).
+    function sanitizeRestoredChat({ log, claude }) {
+      const safeLog = log.map(it => (it.type === 'confirm' && it.status === 'pending')
+        ? { ...it, status: 'cancelled' } : it);
+      let safeClaude = claude;
+      const last = claude[claude.length - 1];
+      if (last && last.role === 'assistant' && Array.isArray(last.content) && last.content.some(b => b.type === 'tool_use')) {
+        safeClaude = claude.slice(0, -1);
+      }
+      return { log: safeLog, claude: safeClaude };
+    }
+    function AIChat({ tasks, colMap, meta, extraFields, onRead, onWrite, onClose, split, showActivity }) {
+      const restoredRef = useRef(null);
+      if (restoredRef.current === null) restoredRef.current = sanitizeRestoredChat(loadSavedChat());
+      const [log, setLog] = useState(() => restoredRef.current.log);
       const [input, setInput] = useState('');
       const [busy, setBusy] = useState(false);
-      const claudeRef = useRef([]);
-      const idRef = useRef(0);
+      const claudeRef = useRef(restoredRef.current.claude);
+      const idRef = useRef(restoredRef.current.log.reduce((m, it) => Math.max(m, it.id || 0), 0));
       const resolvers = useRef({});
       const scrollRef = useRef(null);
       const nextId = () => ++idRef.current;
@@ -799,6 +832,14 @@
       const [showSaved, setShowSaved] = useState(false);
 
       useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [log, busy]);
+      // Save after every turn so the thread survives closing the panel, reloading, or leaving the page.
+      useEffect(() => {
+        try { localStorage.setItem(AI_CHAT_KEY, JSON.stringify({ log, claude: claudeRef.current })); } catch (e) {}
+      }, [log]);
+      function clearChat() {
+        setLog([]); claudeRef.current = []; setActivity([]);
+        try { localStorage.removeItem(AI_CHAT_KEY); } catch (e) {}
+      }
 
       function push(item) { setLog(l => [...l, { id: nextId(), ...item }]); }
       function pushActivity(entry) { const id = nextId(); setActivity(a => [...a, { id, ...entry }]); return id; }
@@ -826,7 +867,7 @@
       async function step(depth) {
         if (depth > 6) { push({ type:'note', text:'(stopped — too many steps)' }); return; }
         setBusy(true);
-        const res = await callTasksAI({ system: aiSystem(tasks, colMap, meta), messages: claudeRef.current, tasks, colMap });
+        const res = await callTasksAI({ system: aiSystem(tasks, colMap, meta, extraFields), messages: claudeRef.current, tasks, colMap });
         setBusy(false);
         if (!res.ok) { push({ type:'note', text: res.error || 'Something went wrong.' }); return; }
         if (res.stop_reason === 'max_tokens') { push({ type:'note', text: 'That response was too long to finish in one go — try a smaller batch (filter the view first), or ask me to do it in chunks.' }); }
@@ -882,7 +923,10 @@
                 <span style={{ fontFamily:C.fontDisplay, fontSize:'1.45rem', fontWeight:600, color:C.navy }}>Tasks AI</span>
                 <span style={{ fontSize:'0.66rem', color:C.textMuted }}>· {tasks ? tasks.length : 0} in view</span>
               </div>
-              <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
+              <div style={{ display:'flex', alignItems:'center', gap:14 }}>
+                {log.length > 0 && <button onClick={() => { if (window.confirm('Clear this AI conversation?')) clearChat(); }} title="Clear chat" style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-trash" style={{ fontSize:17 }} /></button>}
+                <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
+              </div>
             </div>
 
             {/* messages */}
@@ -1043,6 +1087,7 @@
       const [needsDeploy, setNeedsDeploy] = useState(false);
       const [capped, setCapped] = useState(false);
       const [colMap, setColMap] = useState({ type:'Task_Type', trigger:'Trigger' });
+      const [extraFields, setExtraFields] = useState([]); // other custom Tasks fields: [{ api_name, label }]
       const [meta, setMeta] = useState({ statusOptions:['Not Started','Deferred','In Progress','Completed','Waiting on someone else'], typeOptions:['Call','Note','Pop-by','Lunch','Email','Meeting'] });
       const [q, setQ] = useState('');
       const [sel, setSel] = useState({});            // filters
@@ -1056,11 +1101,15 @@
         if (isDev()) {
           await new Promise(r => setTimeout(r, 350));
           setColMap({ type:'Task_Type', trigger:'Trigger' });
+          setExtraFields([]);
           setTasks(DEV_TASKS);
           return;
         }
-        // Resolve this org's custom field api-names (Task Type / Trigger).
+        // Resolve this org's custom field api-names (Task Type / Trigger), and pick up
+        // ANY OTHER custom field on Tasks too — so the AI (and the record fetch below)
+        // isn't blind to org-specific fields beyond this app's fixed baseline.
         let type = 'Task_Type', trigger = 'Trigger';
+        let extra = [];
         const fres = await callZoho({ action:'get_fields', module:'Tasks' });
         if (fres.ok) {
           const fields = fres.data.fields || [];
@@ -1074,12 +1123,17 @@
             statusOptions: (statusF?.picklist_values && statusF.picklist_values.length) ? statusF.picklist_values : m.statusOptions,
             typeOptions: (typeF?.picklist_values && typeF.picklist_values.length) ? typeF.picklist_values : m.typeOptions,
           }));
+          const skip = new Set(['id', type, trigger]);
+          extra = fields
+            .filter(f => f.custom_field && f.api_name && !skip.has(f.api_name))
+            .map(f => ({ api_name: f.api_name, label: f.field_label || f.api_name }));
         }
         setColMap({ type, trigger });
+        setExtraFields(extra);
         // Pull the tasks — Zoho returns max 200 per page, so page through
         // them and combine, up to a safety cap (huge sets stay responsive;
         // beyond the cap, Filter/search narrows it down).
-        const reqFields = ['Owner','Subject','Status','Due_Date','Closed_Time','Description','Who_Id', type, trigger]
+        const reqFields = ['Owner','Subject','Status','Due_Date','Closed_Time','Description','Who_Id','Priority', type, trigger, ...extra.map(f => f.api_name)]
           .filter((v, i, a) => v && a.indexOf(v) === i);
         const CAP = 2000;
         let all = [], page = 1, more = true;
@@ -1137,8 +1191,17 @@
         if (!ok) return { matches:[], error: data?.error };
         return { matches: (data.contacts || []).map(c => ({ id:c.id, name:c.full_name })) };
       }
+      // Any field value can come back as a Zoho lookup object ({id,name}) rather than a
+      // plain scalar — normalize to a name/string so the AI gets readable JSON either way.
+      const scalarOf = (v) => (v && typeof v === 'object') ? (v.name ?? null) : (v ?? null);
       function compactTask(x) {
-        return { id:x.id, subject:x.Subject, type:x[colMap.type] || null, status:x.Status || null, due_date:x.Due_Date || null, contact:x.Who_Id?.name || null, owner:x.Owner?.name || null, closed_time:x.Closed_Time || null };
+        const row = {
+          id:x.id, subject:x.Subject, type:x[colMap.type] || null, status:x.Status || null,
+          due_date:x.Due_Date || null, contact:x.Who_Id?.name || null, owner:x.Owner?.name || null,
+          closed_time:x.Closed_Time || null, description:x.Description || null, trigger:x[colMap.trigger] || null,
+        };
+        extraFields.forEach(f => { row[f.label] = scalarOf(x[f.api_name]); });
+        return row;
       }
       async function execSearchTasks(input) {
         if (isDev()) {
@@ -1152,7 +1215,7 @@
           if (input.type) res = res.filter(x => (x[colMap.type] || '').toLowerCase() === String(input.type).toLowerCase());
           return { tasks: res.map(compactTask) };
         }
-        const args = { action:'search_tasks', type_field: colMap.type };
+        const args = { action:'search_tasks', type_field: colMap.type, extra_fields: extraFields.map(f => f.api_name) };
         ['status', 'status_not', 'due_before', 'due_after', 'due_on', 'type', 'owner'].forEach(k => { if (input[k] != null) args[k] = input[k]; });
         const { ok, data } = await callZoho(args);
         if (!ok) return { tasks:[], error: data?.error };
@@ -1640,10 +1703,10 @@
               </table>
             )}
           </main>
-          {aiSplit && <AIChat tasks={view} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} split showActivity={isXWide} />}
+          {aiSplit && <AIChat tasks={view} colMap={colMap} meta={meta} extraFields={extraFields} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} split showActivity={isXWide} />}
           </div>
 
-          {aiOverlay && <AIChat tasks={view} colMap={colMap} meta={meta} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
+          {aiOverlay && <AIChat tasks={view} colMap={colMap} meta={meta} extraFields={extraFields} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
           {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
             <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}
               onClose={() => setDrawer(null)} onWrite={writeTask} onDelete={removeTask} />

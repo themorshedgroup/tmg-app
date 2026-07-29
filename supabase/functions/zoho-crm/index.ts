@@ -627,8 +627,14 @@ Deno.serve(async (req) => {
       // Search API requires a criteria; this default matches every task (no task has that status).
       const criteria = crit.length ? (crit.length > 1 ? "(" + crit.join("and") + ")" : crit[0]) : "(Status:not_equal:__ZZZ_NONE__)";
 
+      // extra_fields: any other Tasks field api-names the client wants back (e.g. Description,
+      // Trigger, and whatever org-specific custom fields it discovered via get_fields) — so the
+      // AI isn't blind to fields beyond this fixed baseline.
+      const extraFields = Array.isArray(body.extra_fields)
+        ? body.extra_fields.map(apiName).filter(Boolean)
+        : [];
       const fields = Array.from(new Set(
-        ["Owner", "Subject", "Status", "Due_Date", "Closed_Time", "Who_Id", typeField].filter(Boolean)
+        ["Owner", "Subject", "Status", "Due_Date", "Closed_Time", "Description", "Who_Id", typeField, ...extraFields].filter(Boolean)
       ));
       const per = Math.min(parseInt(body.per_page, 10) || 100, 200);
 

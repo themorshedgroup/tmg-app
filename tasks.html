@@ -1048,7 +1048,8 @@ Rules:
     ];
     async function createAgentKpi(payload) {
       // Maps the app payload onto the REAL Agent_KPIs module fields (verified against Zoho 2026-06-20).
-      // Owner is omitted on purpose — Zoho auto-assigns the record owner (it's a user lookup).
+      // Owner isn't set here — the edge function resolves payload.owner_email to a Zoho user id
+      // and sets it server-side (Owner is a Zoho user lookup, not a plain string).
       const record = { KPI_Date: payload.date || kpiTodayStr() };
       if (payload.ctc != null && payload.ctc !== '') record.CTC_Hours_2 = Number(payload.ctc);
 
@@ -1073,7 +1074,7 @@ Rules:
         if (o.count) record['Other_KPI_' + n + '_Count'] = Number(o.count);
       });
 
-      const { ok, data } = await callZoho({ action: 'create_agent_kpi', record });
+      const { ok, data } = await callZoho({ action: 'create_agent_kpi', record, owner_email: payload.owner_email || null });
       if (!ok) throw new Error(data.error || 'Failed to create Agent KPI');
       return data;
     }
@@ -5615,7 +5616,10 @@ Rules:
       }
 
       // Confirm step → finalize. Phase A (KPI_LIVE=false): preview only, no network. Persists the preview message.
-      async function submitKpi(payload) {
+      async function submitKpi(rawPayload) {
+        // Owner is always the logged-in submitter, set here (the single funnel for both the
+        // form and paste-notes flows) so it can't be missed or spoofed by either path.
+        const payload = { ...rawPayload, owner: myName, owner_email: (profile && profile.email) || null };
         setKpiFlow(null);
         const preview = formatKpiPreview(payload);
         let content;

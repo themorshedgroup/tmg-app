@@ -1162,7 +1162,11 @@
           if (page === 1 || page % 5 === 0) setTasks(all.slice()); // progressive render — table fills in as it loads, doesn't feel frozen
           more = !!(res.data.info && res.data.info.more_records);
           pageToken = (res.data.info && res.data.info.next_page_token) || null;
-          if (more && !pageToken) break; // can't continue without a token — stop rather than loop forever
+          // Zoho's Search API (used for status_not) never returns a page_token at all — but
+          // plain page-number pagination still works fine there below the ~2000-record ceiling
+          // (verified live). So only treat "no token" as stuck once we're AT that ceiling —
+          // below it, just keep incrementing page like before.
+          if (more && !pageToken && page >= 10) break;
           page++;
         }
         setCapped(more && all.length >= CAP);

@@ -567,6 +567,13 @@ Deno.serve(async (req) => {
     //  GET /crm/v6/Tasks with paging + sort. `fields` is required by Zoho;
     //  the caller passes the resolved api-names (incl. custom fields it
     //  discovered via get_fields). Returns raw records + paging info.
+    //
+    //  Zoho's plain `page` param only works up to page*per_page = 2000 —
+    //  requesting page 11+ silently returns nothing, even when `more_records`
+    //  was true on page 10. Past that point Zoho requires continuing via the
+    //  opaque `page_token` it returns in `info.next_page_token` instead of a
+    //  page number. So: page 1 uses `page`; once the caller has a page_token
+    //  (from a prior response), pass that instead and drop `page` entirely.
     if (action === "list_tasks") {
       const conn = await loadConnection(sb);
       const accessToken = await getZohoToken(sb, conn);
@@ -575,6 +582,7 @@ Deno.serve(async (req) => {
 
       const per = Math.min(parseInt(body.per_page, 10) || 100, 200);
       const page = Math.max(parseInt(body.page, 10) || 1, 1);
+      const pageToken = typeof body.page_token === "string" && body.page_token ? body.page_token : null;
       const fields =
         Array.isArray(body.fields) && body.fields.length
           ? body.fields.filter(Boolean).join(",")
@@ -583,7 +591,8 @@ Deno.serve(async (req) => {
       const url = new URL(`https://${apiDomain}/crm/v6/${moduleName}`);
       url.searchParams.set("fields", fields);
       url.searchParams.set("per_page", String(per));
-      url.searchParams.set("page", String(page));
+      if (pageToken) url.searchParams.set("page_token", pageToken);
+      else url.searchParams.set("page", String(page));
       if (body.sort_by) {
         url.searchParams.set("sort_by", String(body.sort_by));
         url.searchParams.set("sort_order", body.sort_order === "asc" ? "asc" : "desc");

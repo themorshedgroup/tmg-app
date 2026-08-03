@@ -583,14 +583,26 @@ Deno.serve(async (req) => {
       const per = Math.min(parseInt(body.per_page, 10) || 100, 200);
       const page = Math.max(parseInt(body.page, 10) || 1, 1);
       const pageToken = typeof body.page_token === "string" && body.page_token ? body.page_token : null;
+      // status_not: excludes one status (e.g. "Completed") so the default view can stay to
+      // OPEN tasks only — with 20k+ historical tasks in this org, loading everything on every
+      // page visit is a ~100-call, 90+ second fetch. Uses the Search Records API (same one
+      // search_tasks already uses) since the plain list endpoint has no criteria filtering.
+      const statusNot = typeof body.status_not === "string" && body.status_not ? body.status_not : null;
       const fields =
         Array.isArray(body.fields) && body.fields.length
           ? body.fields.filter(Boolean).join(",")
           : "Owner,Subject,Status,Due_Date,Closed_Time,Description,Who_Id,What_Id,Priority";
 
-      const url = new URL(`https://${apiDomain}/crm/v6/${moduleName}`);
+      const base = statusNot
+        ? `https://${apiDomain}/crm/v6/${moduleName}/search`
+        : `https://${apiDomain}/crm/v6/${moduleName}`;
+      const url = new URL(base);
       url.searchParams.set("fields", fields);
       url.searchParams.set("per_page", String(per));
+      if (statusNot) {
+        const val = String(statusNot).replace(/[()]/g, "").slice(0, 80);
+        url.searchParams.set("criteria", `(Status:not_equal:${val})`);
+      }
       if (pageToken) url.searchParams.set("page_token", pageToken);
       else url.searchParams.set("page", String(page));
       if (body.sort_by) {

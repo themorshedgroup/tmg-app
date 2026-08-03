@@ -1086,6 +1086,8 @@
       const [err, setErr] = useState('');
       const [needsDeploy, setNeedsDeploy] = useState(false);
       const [capped, setCapped] = useState(false);
+      const [includeCompleted, setIncludeCompleted] = useState(false); // off = fast default; on = full history (slow, 20k+ tasks)
+      const [loadedSoFar, setLoadedSoFar] = useState(0);
       const [colMap, setColMap] = useState({ type:'Task_Type', trigger:'Trigger' });
       const [extraFields, setExtraFields] = useState([]); // other custom Tasks fields: [{ api_name, label }]
       const [meta, setMeta] = useState({ statusOptions:['Not Started','Deferred','In Progress','Completed','Waiting on someone else'], typeOptions:['Call','Note','Pop-by','Lunch','Email','Meeting'] });
@@ -1135,19 +1137,29 @@
         // empty even when more_records was true) — past that, Zoho requires
         // continuing via the page_token it hands back each response, not a
         // page number. So: page 1 uses `page`; every page after uses the prior
-        // response's page_token. CAP is now a real safety ceiling (not the
-        // everyday limit it used to be) so a runaway loop can't hang the page.
+        // response's page_token.
+        //
+        // This org has 20k+ total tasks (mostly historical completed calls/notes) —
+        // pulling everything is ~100+ sequential calls, ~90+ seconds. So by default
+        // (includeCompleted=false) the fetch excludes Completed tasks server-side,
+        // which is normally a small fraction of the total and loads fast. The
+        // "Include completed" toggle re-loads with the full history instead — CAP
+        // is a real safety ceiling for that case, not the everyday limit.
         const reqFields = ['Owner','Subject','Status','Due_Date','Closed_Time','Description','Who_Id','Priority', type, trigger, ...extra.map(f => f.api_name)]
           .filter((v, i, a) => v && a.indexOf(v) === i);
-        const CAP = 20000;
+        const CAP = 50000;
+        setLoadedSoFar(0);
         let all = [], page = 1, pageToken = null, more = true;
         while (more && all.length < CAP) {
           const args = { action:'list_tasks', fields:reqFields, per_page:200 };
           if (pageToken) args.page_token = pageToken; else args.page = page;
+          if (!includeCompleted) args.status_not = 'Completed';
           const res = await callZoho(args);
           if (!res.ok && /unknown action/i.test(res.data?.error || '')) { setNeedsDeploy(true); setTasks([]); return; }
           if (!res.ok) { if (page === 1 && !pageToken) { setErr(res.data?.error || 'Could not load tasks.'); setTasks([]); return; } break; }
           all = all.concat(res.data.tasks || []);
+          setLoadedSoFar(all.length);
+          if (page === 1 || page % 5 === 0) setTasks(all.slice()); // progressive render — table fills in as it loads, doesn't feel frozen
           more = !!(res.data.info && res.data.info.more_records);
           pageToken = (res.data.info && res.data.info.next_page_token) || null;
           if (more && !pageToken) break; // can't continue without a token — stop rather than loop forever
@@ -1156,7 +1168,7 @@
         setCapped(more && all.length >= CAP);
         setTasks(all);
       }
-      useEffect(() => { load(); }, []);
+      useEffect(() => { load(); }, [includeCompleted]);
 
       // Write handlers — propose→confirm: a save/create is the user's explicit
       // confirm; delete uses a two-step confirm in the drawer. Dev simulates.
@@ -1614,7 +1626,11 @@
             <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:16, flexWrap:'wrap', marginBottom:13 }}>
               <div>
                 <h1 style={{ fontFamily:C.fontDisplay, fontSize:'1.7rem', fontWeight:600, color:C.navy, lineHeight:1.05 }}>All Tasks</h1>
-                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{tasks ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` + (capped ? ' · truncated — filter to narrow' : '') : 'Loading…'}</div>
+                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>
+                  {tasks
+                    ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` + (capped ? ' · truncated — filter to narrow' : '') + (!includeCompleted ? ' · completed hidden' : '')
+                    : `Loading…${loadedSoFar ? ' (' + loadedSoFar.toLocaleString() + ' so far)' : ''}`}
+                </div>
               </div>
               <div style={{ display:'flex', alignItems:'center', gap:10 }}>
                 <button onClick={() => setDrawer(d => d?.mode === 'ai' ? null : { mode:'ai' })} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background: aiOpen ? C.gold+'22' : C.gold+'0f', fontWeight:600 }}>
@@ -1639,6 +1655,10 @@
                 </button>
                 {showFilter && <FilterPopover tasks={tasks || []} colMap={colMap} sel={sel} setSel={setSel} onClose={() => setShowFilter(false)} />}
               </div>
+              <button onClick={() => setIncludeCompleted(v => !v)} title={includeCompleted ? 'Showing full history (including completed) — click to hide completed again' : 'Completed tasks are hidden for a faster load — click to include full history (slower, 20k+ tasks)'}
+                style={{ ...iconBtn, color:includeCompleted?C.gold:C.navy, borderColor:includeCompleted?C.gold:C.border }}>
+                <i className="ti ti-history" style={{ fontSize:15 }} /> {includeCompleted ? 'Full history' : 'Include completed'}
+              </button>
               <button onClick={load} title="Refresh" style={iconBtn}><i className="ti ti-refresh" style={{ fontSize:15 }} /></button>
             </div>
           </div>

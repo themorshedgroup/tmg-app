@@ -1676,13 +1676,18 @@ Rules:
         await c.from('projects').update({ archived: true }).eq('id', id);
       },
 
-      // Lightweight sidebar counts — record_type only, no task joins.
-      async counts() {
-        const c = this.client(); if (!c) return { project: 0, ctc_file: 0 };
-        const { data } = await c.from('projects').select('record_type').eq('archived', false);
-        const out = { project: 0, ctc_file: 0 };
-        (data || []).forEach(p => { const k = p.record_type || 'project'; if (out[k] != null) out[k]++; });
-        return out;
+      // Lightweight sidebar list — id/name/record_type + a per-item task count
+      // (from a minimal tasks query, not the full loadFull() join) for the
+      // 3-level sidebar (section -> "All X" -> each named project/file).
+      async sidebarList() {
+        const c = this.client(); if (!c) return [];
+        const [pRes, tRes] = await Promise.all([
+          c.from('projects').select('id,name,record_type').eq('archived', false).order('name', { ascending: true }),
+          c.from('tasks').select('project_id'),
+        ]);
+        const counts = {};
+        (tRes.data || []).forEach(t => { if (t.project_id) counts[t.project_id] = (counts[t.project_id] || 0) + 1; });
+        return (pRes.data || []).map(p => ({ id: p.id, name: p.name, record_type: p.record_type || 'project', taskCount: counts[p.id] || 0 }));
       },
     };
 
@@ -2825,7 +2830,7 @@ Rules:
     // Self-contained: list + detail + create/edit form, mobile + desktop.
     // `titleNode(fontSize)` renders the shared My Tasks/CTC Files/Projects switcher.
     // ══════════════════════════════════════════════════════════════════════
-    function ProjectsSurface({ kind, dark, user, team, titleNode, hideSidebar }) {
+    function ProjectsSurface({ kind, dark, user, team, titleNode, hideSidebar, openId, onOpenIdConsumed }) {
       const isCtc = kind === 'ctc_file';
       const [rows, setRows] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -2851,6 +2856,17 @@ Rules:
 
       async function reload() { setLoading(true); const r = await ProjectDB.loadFull(kind); setRows(r); setLoading(false); return r; }
       useEffect(() => { setPview('list'); setCurrent(null); reload(); }, [kind]);
+
+      // Sidebar-initiated navigation: jump straight to a specific project/file
+      // ('new' opens the create form instead). Waits for `rows` if they haven't
+      // loaded yet (e.g. right after a `kind` switch triggered the reload above).
+      useEffect(() => {
+        if (openId == null) return;
+        if (openId === 'new') { setCurrent(null); setPview('form'); }
+        else if (rows.length) { const r = rows.find(x => x.id === openId); if (r) { setCurrent(r); setPview('detail'); } else return; }
+        else return;
+        if (onOpenIdConsumed) onOpenIdConsumed();
+      }, [openId, rows]);
 
       const nameOf = (id) => (team.find(m => m.id === id) || {}).name || '';
       const initialsOf = (id) => { const n = nameOf(id); return n ? n.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase() : '?'; };
@@ -3347,9 +3363,10 @@ Rules:
       // Surface switcher (standalone only): My Tasks | CTC Files | Projects.
       const [surface, setSurface] = useState(() => localStorage.getItem('tmg-tasks-surface') || 'my');
       const [surfaceMenuOpen, setSurfaceMenuOpen] = useState(false);
-      const [surfaceCounts, setSurfaceCounts] = useState({ project: 0, ctc_file: 0 });
+      const [navItems, setNavItems] = useState([]);   // sidebar: every project/CTC file, for the per-item rows
+      const [openItemId, setOpenItemId] = useState(null);   // sidebar-initiated: jump straight to this project/file ('new' = open the create form)
       useEffect(() => { localStorage.setItem('tmg-tasks-surface', surface); }, [surface]);
-      useEffect(() => { ProjectDB.counts().then(setSurfaceCounts); }, [surface]);
+      useEffect(() => { ProjectDB.sidebarList().then(setNavItems); }, [surface]);
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
       useEffect(() => { if (initialTask) { setCurrent(initialTask); setView('detail'); } }, [initialTask]);
       const bg = dark ? '#000D26' : '#FCFBF8', bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', gold = dark ? '#C9A45A' : '#AD832F';
@@ -3584,14 +3601,33 @@ Rules:
           <span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: sub }}>{count}</span>
         </div>
       );
+      // Individual project/file row (3rd sidebar level) — jumps straight into
+      // that item's detail via openItemId, consumed by ProjectsSurface.
+      const sbItemRow = (item) => (
+        <div key={item.id} onClick={() => { setSurface(item.record_type === 'ctc_file' ? 'ctc' : 'projects'); setOpenItemId(item.id); }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 18px 7px 34px', fontSize: '0.78rem', color: sub, cursor: 'pointer', fontFamily: C.fontSans }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
+          <span style={{ fontSize: '0.66rem', color: sub, flexShrink: 0 }}>{item.taskCount}</span>
+        </div>
+      );
+      const sbAddRow = (label, onClick) => (
+        <div onClick={onClick} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 18px', color: sub, fontSize: '0.72rem', cursor: 'pointer', fontFamily: C.fontSans }}>
+          <i className="ti ti-plus" style={{ fontSize: 12 }} />{label}
+        </div>
+      );
+      const ctcNavItems = navItems.filter(i => i.record_type === 'ctc_file');
+      const projNavItems = navItems.filter(i => i.record_type === 'project');
       const navSidebar = (
         <div style={{ width: 216, flexShrink: 0, borderRight: `1px solid ${bord}`, padding: '18px 0', background: dark ? '#08132A' : '#FCFBF8', overflowY: 'auto' }}>
           {sbSectionHead('Tasks', true)}
           {sbRow('my', 'My Tasks', data.tasks.length)}
           {sbSectionHead('CTC Files')}
-          {sbRow('ctc', 'All files', surfaceCounts.ctc_file)}
+          {sbRow('ctc', 'All files', ctcNavItems.length)}
+          {ctcNavItems.map(sbItemRow)}
+          {sbAddRow('New file', () => { setSurface('ctc'); setOpenItemId('new'); })}
           {sbSectionHead('Projects')}
-          {sbRow('projects', 'All projects', surfaceCounts.project)}
+          {sbRow('projects', 'All projects', projNavItems.length)}
+          {projNavItems.map(sbItemRow)}
+          {sbAddRow('New project', () => { setSurface('projects'); setOpenItemId('new'); })}
         </div>
       );
 
@@ -3787,7 +3823,7 @@ Rules:
                   {navSidebar}
                   <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                     {surface !== 'my' ? (
-                      <ProjectsSurface kind={surface === 'ctc' ? 'ctc_file' : 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} hideSidebar />
+                      <ProjectsSurface kind={surface === 'ctc' ? 'ctc_file' : 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} hideSidebar openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
                     ) : view !== 'list' ? (
                       <React.Fragment>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
@@ -3844,7 +3880,7 @@ Rules:
               ) : (
                 /* ── Mobile: single column, no sidebar — title dropdown switches surfaces ── */
                 surface !== 'my' ? (
-                  <ProjectsSurface kind={surface === 'ctc' ? 'ctc_file' : 'project'} dark={dark} user={user} team={team} titleNode={surfaceTitle} />
+                  <ProjectsSurface kind={surface === 'ctc' ? 'ctc_file' : 'project'} dark={dark} user={user} team={team} titleNode={surfaceTitle} openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
                 ) : view !== 'list' ? (
                   <React.Fragment>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>

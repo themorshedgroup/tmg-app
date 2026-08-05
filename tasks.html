@@ -3589,7 +3589,7 @@ Rules:
       // ── Standalone-only redesign state (My Tasks: list/kanban, columns, search, milestones) ──
       // Never read by the embedded popout — that surface renders the original branch untouched.
       const [viewMode, setViewMode] = useState(() => localStorage.getItem('tmg-tasks-view') || 'list');   // 'list' | 'kanban' (desktop only)
-      const [cols, setCols] = useState(() => { try { const s = JSON.parse(localStorage.getItem('tmg-cols-tasks') || 'null'); return Array.isArray(s) && s.length ? s : ['source', 'status', 'priority', 'due']; } catch (e) { return ['source', 'status', 'priority', 'due']; } });
+      const [cols, setCols] = useState(() => { try { const s = JSON.parse(localStorage.getItem('tmg-cols-tasks') || 'null'); return Array.isArray(s) && s.length ? s : ['source', 'status', 'due']; } catch (e) { return ['source', 'status', 'due']; } });
       useEffect(() => { localStorage.setItem('tmg-tasks-view', viewMode); }, [viewMode]);
       useEffect(() => { localStorage.setItem('tmg-cols-tasks', JSON.stringify(cols)); }, [cols]);
       const [search, setSearch] = useState('');
@@ -3764,8 +3764,10 @@ Rules:
 
       const GROUP_OPTS = [['status', 'Status'], ['assignee', 'Assignee'], ['priority', 'Priority'], ['due', 'Due date'], ['project', 'Project / File'], ['label', 'Label'], ['none', 'None']];
       const SORT_OPTS = [['due', 'Due date'], ['priority', 'Priority'], ['title', 'Title'], ['created', 'Recently added']];
+      // Priority isn't in this list — it's a fixed column, always shown (see deskRow
+      // and its header row), not opt-in via the column picker.
       const COLUMN_DEFS = [
-        { id: 'source', label: 'Source' }, { id: 'status', label: 'Status' }, { id: 'priority', label: 'Priority' },
+        { id: 'source', label: 'Source' }, { id: 'status', label: 'Status' },
         { id: 'due', label: 'Due' }, { id: 'assignee', label: 'Assignee' }, { id: 'labels', label: 'Labels' },
         { id: 'created', label: 'Created' }, { id: 'modified', label: 'Last modified' },
       ];
@@ -3899,6 +3901,10 @@ Rules:
         <div style={{ width: 216, flexShrink: 0, borderRight: `1px solid ${bord}`, padding: '18px 0', background: dark ? '#08132A' : '#FCFBF8', overflowY: 'auto' }}>
           {sbSectionHead('Tasks', true)}
           {sbRow('my', 'My Tasks', data.tasks.length)}
+          {sbSectionHead('Company')}
+          {sbRow('rocks', 'Rocks', rockNavItems.length)}
+          {rockNavItems.map(sbItemRow)}
+          {sbAddRow('New rock', () => { setSurface('rocks'); setOpenItemId('new'); })}
           {sbSectionHead('CTC Files')}
           {sbRow('ctc', 'All files', ctcNavItems.length)}
           {ctcNavItems.map(sbItemRow)}
@@ -3907,10 +3913,6 @@ Rules:
           {sbRow('projects', 'All projects', projNavItems.length)}
           {projNavItems.map(sbItemRow)}
           {sbAddRow('New project', () => { setSurface('projects'); setOpenItemId('new'); })}
-          {sbSectionHead('Company')}
-          {sbRow('rocks', 'Rocks', rockNavItems.length)}
-          {rockNavItems.map(sbItemRow)}
-          {sbAddRow('New rock', () => { setSurface('rocks'); setOpenItemId('new'); })}
         </div>
       );
 
@@ -3956,7 +3958,7 @@ Rules:
             </div>
             {cols.includes('source') && <div style={{ width: 160, flexShrink: 0 }}>{sourceChip(t) || <span style={{ color: sub, fontSize: '0.72rem' }}>—</span>}</div>}
             {cols.includes('status') && <div style={{ width: 96, flexShrink: 0 }}>{statusPillEl(t)}</div>}
-            {cols.includes('priority') && <div style={{ width: 70, flexShrink: 0, fontSize: '0.7rem', color: priorityColor(t.priority) }}>{priorityLabel(t.priority)}</div>}
+            <div style={{ width: 70, flexShrink: 0, fontSize: '0.7rem', color: priorityColor(t.priority) }}>{priorityLabel(t.priority)}</div>
             {cols.includes('due') && <div style={{ width: 88, flexShrink: 0, textAlign: 'right', fontSize: '0.7rem', color: late ? lateColor : sub, fontWeight: late ? 600 : 400 }}>{t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}</div>}
             {cols.includes('assignee') && <div style={{ width: 110, flexShrink: 0, fontSize: '0.7rem', color: sub, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{assignees.join(', ') || '—'}</div>}
             {cols.includes('labels') && <div style={{ width: 120, flexShrink: 0, display: 'flex', flexWrap: 'wrap', gap: 3 }}>{myLabels.length ? myLabels.map(l => <span key={l} style={{ fontSize: '0.58rem', color: gold, background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA', padding: '1px 5px', borderRadius: 8 }}>{l}</span>) : <span style={{ color: sub, fontSize: '0.7rem' }}>—</span>}</div>}
@@ -4127,7 +4129,7 @@ Rules:
                               {groupChip}{sortChip}{searchChip}
                               <div style={{ display: 'flex', border: `1px solid ${bord}`, borderRadius: 3, overflow: 'hidden' }}>
                                 <div onClick={() => setViewMode('list')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'list' ? C.navy : 'transparent', color: viewMode === 'list' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-list" style={{ fontSize: 12 }} />List</div>
-                                <div onClick={() => setViewMode('kanban')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'kanban' ? C.navy : 'transparent', color: viewMode === 'kanban' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-layout-kanban" style={{ fontSize: 12 }} />Kanban</div>
+                                <div onClick={() => setViewMode('kanban')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'kanban' ? C.navy : 'transparent', color: viewMode === 'kanban' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-layout-kanban" style={{ fontSize: 12 }} />Board</div>
                                 <div onClick={() => setViewMode('timeline')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'timeline' ? C.navy : 'transparent', color: viewMode === 'timeline' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-timeline" style={{ fontSize: 12 }} />Timeline</div>
                               </div>
                               {viewMode === 'list' && colsChip}
@@ -4147,15 +4149,15 @@ Rules:
                                   <span style={{ width: 14, flexShrink: 0 }} /><span style={{ flex: 1 }}>Task</span>
                                   {cols.includes('source') && <span style={{ width: 160, flexShrink: 0 }}>Source</span>}
                                   {cols.includes('status') && <span style={{ width: 96, flexShrink: 0 }}>Status</span>}
-                                  {cols.includes('priority') && <span style={{ width: 70, flexShrink: 0 }}>Priority</span>}
+                                  <span style={{ width: 70, flexShrink: 0 }}>Priority</span>
                                   {cols.includes('due') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Due</span>}
                                   {cols.includes('assignee') && <span style={{ width: 110, flexShrink: 0 }}>Assignee</span>}
                                   {cols.includes('labels') && <span style={{ width: 120, flexShrink: 0 }}>Labels</span>}
                                   {cols.includes('created') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Created</span>}
                                   {cols.includes('modified') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Modified</span>}
                                 </div>
-                                {quickAddRow}
                                 <div style={{ padding: '4px 0 24px' }}>{renderGroupedList(deskRow)}</div>
+                                {quickAddRow}
                               </React.Fragment>
                             )}
                         </div>
@@ -4208,7 +4210,7 @@ Rules:
                     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column' }}>
                       {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
                         : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
-                        : <div style={{ padding: '10px 14px 24px' }}>{quickAddRow}{renderGroupedList(taskRowNew)}</div>}
+                        : <div style={{ padding: '10px 14px 24px' }}>{renderGroupedList(taskRowNew)}{quickAddRow}</div>}
                     </div>
                   </React.Fragment>
                 )

@@ -1640,17 +1640,20 @@ Rules:
         const c = this.client(); if (!c) return [];
         const [pRes, tRes, pplRes] = await Promise.all([
           c.from('projects').select('*').eq('archived', false).order('created_at', { ascending: false }),
-          c.from('tasks').select('id,title,status,priority,due_at,project_id,is_milestone,created_at,updated_at,completed_at'),
+          c.from('tasks').select('*'),   // full rows — a task opened from inside a project needs every field TaskDetail/TaskForm can show, not just the summary columns
           c.from('task_people').select('task_id,user_id,role'),
         ]);
         const projects = (pRes.data || []).filter(p => (p.record_type || 'project') === recordType);
-        const tasksByProj = {};
-        (tRes.data || []).forEach(t => { if (t.project_id) (tasksByProj[t.project_id] = tasksByProj[t.project_id] || []).push(t); });
         const peopleByTask = {};
         (pplRes.data || []).forEach(p => { (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p); });
+        const tasksByProj = {};
+        (tRes.data || []).forEach(t => { if (t.project_id) (tasksByProj[t.project_id] = tasksByProj[t.project_id] || []).push({ ...t, _people: peopleByTask[t.id] || [] }); });
         const dueCmp = (a, b) => { if (!a.due_at && !b.due_at) return 0; if (!a.due_at) return 1; if (!b.due_at) return -1; return new Date(a.due_at) - new Date(b.due_at); };
         return projects.map(p => {
-          const ts = tasksByProj[p.id] || [];
+          // _projectName: TaskForm reads this to pre-fill the Project field when
+          // editing a task opened from inside its own container — without it the
+          // field shows blank and saving would detach the task (project_id: null).
+          const ts = (tasksByProj[p.id] || []).map(t => ({ ...t, _projectName: p.name }));
           const milestones = ts.filter(t => t.is_milestone).slice().sort(dueCmp);
           const doneMs = milestones.filter(m => m.status === 'done').length;
           const totalMs = milestones.length;
@@ -2859,6 +2862,13 @@ Rules:
       const [sortOpen, setSortOpen] = useState(false);
       const [addTask, setAddTask] = useState('');
       const [addMs, setAddMs] = useState('');
+      // Container detail: Overview/List/Board tabs, and the task opened from
+      // any of them (fixes tasks-inside-a-project being unopenable — they now
+      // reuse the exact same TaskDetail/TaskForm as everywhere else).
+      const [dtab, setDtab] = useState('overview');   // 'overview' | 'list' | 'board'
+      const [openTask, setOpenTask] = useState(null);
+      const [taskEditing, setTaskEditing] = useState(false);
+      useEffect(() => { setDtab('overview'); setOpenTask(null); setTaskEditing(false); }, [current && current.id]);
       const wide = useWide(700);
 
       useEffect(() => { localStorage.setItem(gKey, group); }, [group]);
@@ -2880,6 +2890,40 @@ Rules:
         else return;
         if (onOpenIdConsumed) onOpenIdConsumed();
       }, [openId, rows]);
+
+      // Reload this container's data and re-select both `current` and (if given)
+      // the task being viewed, so edits/status-changes reflect immediately.
+      async function refreshContainer(focusTaskId) {
+        const fresh = await reload();
+        const proj = current && fresh.find(x => x.id === current.id);
+        if (proj) {
+          setCurrent(proj);
+          if (focusTaskId) setOpenTask(proj._tasks.find(x => x.id === focusTaskId) || null);
+        }
+      }
+      async function onTaskStatus(task, status) { await TaskDB.update(task.id, task, { status }, user); await refreshContainer(task.id); }
+      async function onBoardDrop(taskId, status) {
+        const t = (current && current._tasks || []).find(x => x.id === taskId);
+        if (t && t.status !== status) await onTaskStatus(t, status);
+      }
+      // Same field mapping as TasksScreen's handleSave — task creation/edit is
+      // identical whether opened from My Tasks or from inside a container.
+      // form.project stays a free-text name (findOrCreateProject), pre-filled to
+      // this container's own name by TaskForm/TaskDetail when opened from here.
+      async function onTaskSave(form) {
+        const due_at = form.due ? new Date(form.due).toISOString() : null;
+        const decision_due_at = form.decisionDue ? new Date(form.decisionDue).toISOString() : null;
+        const project_id = form.project ? await TaskDB.findOrCreateProject(form.project, user) : null;
+        const pl = form.planning || {};
+        const fields = { title: form.title, due_at, project_id, priority: form.priority, status: form.status, description: form.description || null, context: form.context || null, working_url: form.working_url || null, email_link: form.email_link || null, decision_question: form.decisionQuestion || null, decision_due_at, decision_due_has_time: !!(form.decisionDue && form.decisionHasTime), recurrence: form.recurrence || 'none', recur_interval: form.recurInterval || null, recur_unit: form.recurUnit || null, recur_copy_fields: form.recurCopy || null, weekly_priority: pl.wp || null, weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null, daily_priority: pl.dp || null, daily_rank: pl.dr ? parseInt(pl.dr, 10) : null };
+        const people = { assignee: form.assignees, assigner: form.assigners, decision_maker: form.decisionMakers || [] };
+        let taskId;
+        if (openTask && openTask.id) { await TaskDB.update(openTask.id, openTask, fields, user); await TaskDB.setPeople(openTask.id, people); taskId = openTask.id; }
+        else { const created = await TaskDB.create(fields, people, user); taskId = created && created.id; }
+        if (taskId) { await TaskDB.setLabels(taskId, user && user.id, form.labels || []); await TaskDB.setDecisionOptions(taskId, form.decisionOptions || []); }
+        setTaskEditing(false);
+        await refreshContainer(taskId);
+      }
 
       const nameOf = (id) => (team.find(m => m.id === id) || {}).name || '';
       const initialsOf = (id) => { const n = nameOf(id); return n ? n.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase() : '?'; };
@@ -3118,7 +3162,7 @@ Rules:
         </div>
       ); };
       const detailTaskRow = (t) => (
-        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: `1px solid ${bord}` }}>
+        <div key={t.id} onClick={() => setOpenTask(t)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: `1px solid ${bord}`, cursor: 'pointer' }}>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: priorityColor(t.priority), flexShrink: 0 }} />
           <span style={{ flex: 1, minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}{t.is_milestone && <i className="ti ti-flag-3-filled" style={{ fontSize: 11, color: gold, marginLeft: 6 }} />}</span>
           <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.68rem', color: sub, flexShrink: 0, fontFamily: C.fontSans }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor(t.status) }} />{statusLabel(t.status)}</span>
@@ -3152,8 +3196,56 @@ Rules:
           </React.Fragment>
         );
       };
+      // A task opened from inside this container's List/Board/Overview —
+      // reuses the exact same TaskDetail/TaskForm as My Tasks, so nothing about
+      // the task (Decisions, labels, dependencies, the AI thread, etc.) is a
+      // stripped-down copy. allTasks is scoped to this container's own tasks
+      // (subtask/dependency lookups that cross into another project won't
+      // resolve here — a known, minor limitation of viewing a task this way).
+      const taskDetailOverlay = () => (
+        <React.Fragment>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+            <i className="ti ti-chevron-left" onClick={() => { setOpenTask(null); setTaskEditing(false); }} style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
+            <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, color: ink }}>{taskEditing ? 'Edit task' : 'Task'}</span>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            {taskEditing
+              ? <TaskForm dark={dark} task={openTask} team={team} user={user} onSave={onTaskSave} onCancel={() => setTaskEditing(false)} />
+              : <TaskDetail dark={dark} task={openTask} people={openTask._people || []} team={team} user={user} allTasks={(current && current._tasks) || []} onEdit={() => setTaskEditing(true)} onStatus={(s) => onTaskStatus(openTask, s)} onOpenSubtask={(child) => setOpenTask(child)} />}
+          </div>
+        </React.Fragment>
+      );
+
+      const dtabBar = (
+        <div style={{ display: 'flex', gap: 4, padding: wide ? '0 20px' : '0 14px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+          {[['overview', 'Overview'], ['list', 'List'], ['board', 'Board']].map(([id, label]) => (
+            <div key={id} onClick={() => setDtab(id)} style={{ padding: '9px 12px', fontSize: '0.76rem', color: dtab === id ? ink : sub, fontWeight: dtab === id ? 600 : 400, borderBottom: `2px solid ${dtab === id ? gold : 'transparent'}`, cursor: 'pointer', fontFamily: C.fontSans, marginBottom: -1 }}>{label}</div>
+          ))}
+        </div>
+      );
+      const listTab = (p) => (
+        <div style={{ padding: wide ? '14px 20px 24px' : '12px 14px 24px', flex: 1, minWidth: 0, overflowY: 'auto' }}>
+          {p._tasks.length === 0 ? <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans }}>No tasks yet.</div> : TASK_STATUS.map(col => {
+            const items = p._tasks.filter(t => t.status === col.id);
+            if (!items.length) return null;
+            return (
+              <div key={col.id} style={{ marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} />
+                  <span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{col.label} · {items.length}</span>
+                </div>
+                {items.map(detailTaskRow)}
+              </div>
+            );
+          })}
+          {addInputs}
+        </div>
+      );
+      const boardTab = (p) => <TaskBoard items={p._tasks} dark={dark} onOpen={setOpenTask} onDrop={onBoardDrop} showSource={false} />;
+
       const detailView = () => {
         const p = current; if (!p) return null;
+        if (openTask) return taskDetailOverlay();
         const spine = (
           <React.Fragment>
             <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '0 0 10px', fontFamily: C.fontSans }}>Milestones</div>
@@ -3196,24 +3288,30 @@ Rules:
         return wide ? (
           <React.Fragment>
             {header}
-            <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-              <div style={{ flex: 1, minWidth: 0, overflowY: 'auto' }}>{mainCol}</div>
-              <div style={{ width: 260, flexShrink: 0, borderLeft: `1px solid ${bord}`, padding: '16px 18px', overflowY: 'auto' }}>
-                <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 6, fontFamily: C.fontSans }}>Details</div>
-                {detailFields(p)}
+            {dtabBar}
+            {dtab === 'overview' ? (
+              <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+                <div style={{ flex: 1, minWidth: 0, overflowY: 'auto' }}>{mainCol}</div>
+                <div style={{ width: 260, flexShrink: 0, borderLeft: `1px solid ${bord}`, padding: '16px 18px', overflowY: 'auto' }}>
+                  <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 6, fontFamily: C.fontSans }}>Details</div>
+                  {detailFields(p)}
+                </div>
               </div>
-            </div>
+            ) : dtab === 'list' ? listTab(p) : boardTab(p)}
           </React.Fragment>
         ) : (
           <React.Fragment>
             {header}
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-              {mainCol}
-              <div style={{ padding: '0 14px 24px' }}>
-                <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '8px 0 6px', fontFamily: C.fontSans }}>Details</div>
-                {detailFields(p)}
+            {dtabBar}
+            {dtab === 'overview' ? (
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                {mainCol}
+                <div style={{ padding: '0 14px 24px' }}>
+                  <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '8px 0 6px', fontFamily: C.fontSans }}>Details</div>
+                  {detailFields(p)}
+                </div>
               </div>
-            </div>
+            ) : dtab === 'list' ? listTab(p) : boardTab(p)}
           </React.Fragment>
         );
       };

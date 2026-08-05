@@ -1338,6 +1338,17 @@ Rules:
     ];
     const projStatusMeta = (s) => PROJECT_STATUS.find(x => x.id === s) || PROJECT_STATUS[0];
 
+    // Labels for the 3 record_types that share the ProjectsSurface/ProjectForm
+    // machinery. group_tag is repurposed per kind: Side (buyer/seller) for CTC
+    // files, Quarter (e.g. "Q3 2026") for Rocks — same field, different meaning,
+    // same "computed, not a new table" principle as everything else here.
+    const KIND_LABEL = {
+      project:  { plural: 'Projects',  singular: 'Project',  article: 'project', groupLabel: 'Group',   groupPlaceholder: 'e.g. Q3 Rocks',                namePlaceholder: 'e.g. AI Feature Rollout' },
+      ctc_file: { plural: 'CTC Files', singular: 'CTC File', article: 'file',    groupLabel: 'Side',    groupPlaceholder: 'e.g. Buyer, Seller, Landlord', namePlaceholder: 'e.g. 5999 Ranch Rd 165' },
+      rock:     { plural: 'Rocks',     singular: 'Rock',     article: 'rock',    groupLabel: 'Quarter', groupPlaceholder: 'e.g. Q3 2026',                 namePlaceholder: 'e.g. Close $12M in new brokerage volume' },
+    };
+    const kindLabel = (kind) => KIND_LABEL[kind] || KIND_LABEL.project;
+
     const TaskDB = {
       client() { return window.SupabaseAuth?._client || null; },
 
@@ -2832,12 +2843,14 @@ Rules:
     // ══════════════════════════════════════════════════════════════════════
     function ProjectsSurface({ kind, dark, user, team, titleNode, hideSidebar, openId, onOpenIdConsumed }) {
       const isCtc = kind === 'ctc_file';
+      const KL = kindLabel(kind);
       const [rows, setRows] = useState([]);
       const [loading, setLoading] = useState(true);
       const [pview, setPview] = useState('list');       // 'list' | 'detail' | 'form'
       const [current, setCurrent] = useState(null);      // selected project row
-      const gKey = isCtc ? 'tmg-ctc-group' : 'tmg-projects-group';
-      const sKey = isCtc ? 'tmg-ctc-sort' : 'tmg-projects-sort';
+      const storeKey = { project: 'tmg-projects', ctc_file: 'tmg-ctc', rock: 'tmg-rocks' }[kind] || 'tmg-projects';
+      const gKey = storeKey + '-group';
+      const sKey = storeKey + '-sort';
       const [group, setGroup] = useState(() => localStorage.getItem(gKey) || 'none');
       const [sort, setSort] = useState(() => localStorage.getItem(sKey) || 'target');
       const [search, setSearch] = useState('');
@@ -2915,7 +2928,7 @@ Rules:
       const searchChip = searchOpen
         ? <input autoFocus value={search} onChange={e => setSearch(e.target.value)} onBlur={() => { if (!search) setSearchOpen(false); }} placeholder="Search…" style={{ ...chipStyle, cursor: 'text', width: 130, textTransform: 'none', letterSpacing: 'normal', fontSize: '0.78rem', outline: 'none' }} />
         : <div onClick={() => setSearchOpen(true)} style={{ ...chipStyle, padding: '5px 6px', color: gold }}><i className="ti ti-search" style={{ fontSize: 13 }} /></div>;
-      const newBtn = <button onClick={() => { setCurrent(null); setPview('form'); }} aria-label={isCtc ? 'New file' : 'New project'} style={{ display: 'flex', alignItems: 'center', gap: 4, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '4px 10px', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>;
+      const newBtn = <button onClick={() => { setCurrent(null); setPview('form'); }} aria-label={'New ' + KL.article} style={{ display: 'flex', alignItems: 'center', gap: 4, background: C.gold, color: '#fff', border: 'none', borderRadius: 20, padding: '4px 10px', fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 13 }} />New</button>;
 
       const avatar = (id, sz) => { const s = sz || 16; return <span style={{ width: s, height: s, borderRadius: '50%', background: C.navy, color: '#fff', fontSize: s * 0.42, display: 'grid', placeItems: 'center', fontWeight: 600, flexShrink: 0 }}>{initialsOf(id)}</span>; };
       const statusBadge = (s) => { const m = projStatusMeta(s); return <span style={{ fontSize: '0.58rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: 3, background: dark ? m.bgD : m.bg, color: m.color, fontFamily: C.fontSans }}>{m.label}</span>; };
@@ -3077,7 +3090,7 @@ Rules:
       // ── list body ──
       const listBody = (rowFn, wideList) => {
         if (loading) return <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>;
-        if (!filtered.length) return <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No {isCtc ? 'files' : 'projects'} yet. Tap <b>New</b> to add one.</div>;
+        if (!filtered.length) return <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No {KL.plural.toLowerCase()} yet. Tap <b>New</b> to add one.</div>;
         return grouped().map(([label, items], gi) => (
           <div key={label || gi}>
             {label && groupHeadRow(label, items.length, group === 'status' ? projStatusMeta((items[0] || {}).status).color : gold)}
@@ -3129,8 +3142,8 @@ Rules:
         return (
           <React.Fragment>
             {fld('Owner', p.owner_id ? <React.Fragment>{avatar(p.owner_id, 16)}{nameOf(p.owner_id)}</React.Fragment> : '—')}
-            {fld('Type', isCtc ? 'CTC File' : 'Project')}
-            {fld(isCtc ? 'Side' : 'Group', p.group_tag || '—')}
+            {fld('Type', KL.singular)}
+            {fld(KL.groupLabel, p.group_tag || '—')}
             {fld('Status', <React.Fragment><span style={{ width: 7, height: 7, borderRadius: '50%', background: projStatusMeta(p.status).color }} />{projStatusMeta(p.status).label}</React.Fragment>)}
             {fld('Started', p.started_at ? fmtD(p.started_at) : '—')}
             {fld('Target', <span style={{ color: isOverdue(p.target_date) ? lateColor : ink }}>{fmtD(p.target_date)}</span>)}
@@ -3158,7 +3171,7 @@ Rules:
         const header = (
           <div style={{ padding: wide ? '14px 20px 11px' : '12px 14px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: '0.62rem', letterSpacing: '0.12em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 8, fontFamily: C.fontSans, cursor: 'pointer' }} onClick={() => { setPview('list'); setCurrent(null); }}>
-              <i className="ti ti-chevron-left" style={{ fontSize: 14, color: gold }} />{isCtc ? 'CTC Files' : 'Projects'}
+              <i className="ti ti-chevron-left" style={{ fontSize: 14, color: gold }} />{KL.plural}
             </div>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -3212,7 +3225,7 @@ Rules:
       const listHeader = (
         <div style={{ padding: wide ? '14px 18px 0' : '12px 14px 0', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, marginBottom: 11, flexWrap: 'wrap' }}>
-            {titleNode ? titleNode(wide ? 17 : 15) : <span style={{ fontSize: wide ? 17 : 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{isCtc ? 'CTC Files' : 'Projects'}</span>}
+            {titleNode ? titleNode(wide ? 17 : 15) : <span style={{ fontSize: wide ? 17 : 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{KL.plural}</span>}
             <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>{groupChip}{sortChip}{searchChip}{newBtn}</div>
           </div>
         </div>
@@ -3231,7 +3244,7 @@ Rules:
             </React.Fragment>
           ) : (
             <React.Fragment>
-              <span style={{ width: 250, flexShrink: 0 }}>Project &amp; outcome</span>
+              <span style={{ width: 250, flexShrink: 0 }}>{KL.singular} &amp; outcome</span>
               <span style={{ flex: 1 }}>Next milestone</span>
               <span style={{ width: 132, flexShrink: 0 }}>Progress</span>
               <span style={{ width: 96, flexShrink: 0 }}>Owner</span>
@@ -3249,9 +3262,9 @@ Rules:
             : wide && !hideSidebar ? (
               <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
                 <div style={{ width: 216, flexShrink: 0, borderRight: `1px solid ${bord}`, padding: '18px 0', background: dark ? '#08132A' : '#FCFBF8', overflowY: 'auto' }}>
-                  <div style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, padding: '0 18px', marginBottom: 8, fontFamily: C.fontSans }}>{isCtc ? 'CTC Files' : 'Projects'}</div>
+                  <div style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, padding: '0 18px', marginBottom: 8, fontFamily: C.fontSans }}>{KL.plural}</div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 18px', fontSize: '0.82rem', fontWeight: 500, color: ink, background: dark ? 'rgba(255,255,255,0.06)' : '#F7F4EE', boxShadow: `inset 2px 0 0 ${gold}`, fontFamily: C.fontSans }}>
-                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: gold, flexShrink: 0 }} />{isCtc ? 'All files' : 'All projects'}<span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: sub }}>{rows.length}</span>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: gold, flexShrink: 0 }} />{'All ' + KL.plural.toLowerCase()}<span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: sub }}>{rows.length}</span>
                   </div>
                 </div>
                 <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -3287,7 +3300,7 @@ Rules:
       const [startedAt, setStartedAt] = useState(p.started_at || '');
       const [targetDate, setTargetDate] = useState(p.target_date || '');
       const [saving, setSaving] = useState(false);
-      const isCtc = kind === 'ctc_file';
+      const KL = kindLabel(kind);
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
       const lbl = { fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, margin: '0 0 5px', fontFamily: C.fontSans };
       const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
@@ -3309,14 +3322,14 @@ Rules:
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 16px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
             <i className="ti ti-chevron-left" onClick={onCancel} style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
-            <span style={{ fontFamily: C.fontSans, fontSize: 13, fontWeight: 600, color: ink }}>{p.id ? 'Edit' : 'New'} {isCtc ? 'CTC file' : 'project'}</span>
+            <span style={{ fontFamily: C.fontSans, fontSize: 13, fontWeight: 600, color: ink }}>{p.id ? 'Edit' : 'New'} {KL.article}</span>
           </div>
           <div style={{ padding: '16px 16px 40px', maxWidth: 640 }}>
-            {field(isCtc ? 'File name' : 'Project name', <input value={name} onChange={e => setName(e.target.value)} placeholder={isCtc ? 'e.g. 5999 Ranch Rd 165' : 'e.g. AI Feature Rollout'} style={inp} />)}
+            {field(KL.singular + ' name', <input value={name} onChange={e => setName(e.target.value)} placeholder={KL.namePlaceholder} style={inp} />)}
             {field('Outcome', <textarea value={outcome} onChange={e => setOutcome(e.target.value)} rows={2} placeholder="One sentence — what this is trying to achieve" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
             <div style={{ display: 'flex', gap: 10 }}>
               <div style={{ flex: 1 }}>{field('Status', <select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{PROJECT_STATUS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select>)}</div>
-              <div style={{ flex: 1 }}>{field(isCtc ? 'Side' : 'Group', <input value={groupTag} onChange={e => setGroupTag(e.target.value)} placeholder={isCtc ? 'e.g. Buyer, Seller, Landlord' : 'e.g. Q3 Rocks'} style={inp} />)}</div>
+              <div style={{ flex: 1 }}>{field(KL.groupLabel, <input value={groupTag} onChange={e => setGroupTag(e.target.value)} placeholder={KL.groupPlaceholder} style={inp} />)}</div>
             </div>
             {field('Owner', <select value={ownerId} onChange={e => setOwnerId(e.target.value)} style={inp}><option value="">(No owner)</option>{team.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>)}
             <div style={{ display: 'flex', gap: 10 }}>
@@ -3324,10 +3337,10 @@ Rules:
               <div style={{ flex: 1 }}>{field('Target', <input type="date" value={targetDate || ''} onChange={e => setTargetDate(e.target.value)} style={inp} />)}</div>
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-              <button onClick={save} disabled={saving || !name.trim()} style={{ flex: 1, padding: 12, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !name.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (p.id ? 'Save changes' : (isCtc ? 'Create file' : 'Create project'))}</button>
+              <button onClick={save} disabled={saving || !name.trim()} style={{ flex: 1, padding: 12, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !name.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (p.id ? 'Save changes' : ('Create ' + KL.article))}</button>
               <button onClick={onCancel} style={{ flex: 1, padding: 12, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
             </div>
-            {p.id && <button onClick={async () => { if (!window.confirm('Archive this ' + (isCtc ? 'file' : 'project') + '? It will be hidden from the list.')) return; await ProjectDB.archive(p.id); onArchived(); }} style={{ width: '100%', marginTop: 8, padding: '9px', background: 'none', color: '#C0392B', border: `1px solid #C0392B55`, borderRadius: 8, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-archive" style={{ marginRight: 6, fontSize: 13 }} />Archive {isCtc ? 'file' : 'project'}</button>}
+            {p.id && <button onClick={async () => { if (!window.confirm('Archive this ' + KL.article + '? It will be hidden from the list.')) return; await ProjectDB.archive(p.id); onArchived(); }} style={{ width: '100%', marginTop: 8, padding: '9px', background: 'none', color: '#C0392B', border: `1px solid #C0392B55`, borderRadius: 8, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-archive" style={{ marginRight: 6, fontSize: 13 }} />Archive {KL.article}</button>}
           </div>
         </div>
       );
@@ -3560,10 +3573,13 @@ Rules:
       ) : null;
       const openCtx = (e, t) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, task: t }); };
 
-      // Surface switcher dropdown (My Tasks / CTC Files / Projects) — the clickable
-      // page title. Shared across all three surfaces; passed into ProjectsSurface.
-      const SURFACE_OPTS = [['my', 'My Tasks'], ['ctc', 'CTC Files'], ['projects', 'Projects']];
-      const surfaceLabel = { my: 'My Tasks', ctc: 'CTC Files', projects: 'Projects' };
+      // Surface switcher dropdown (My Tasks / CTC Files / Projects / Rocks) — the
+      // clickable page title. Shared across all surfaces; passed into ProjectsSurface.
+      // surfaceKind maps a surface id to the record_type ProjectsSurface loads —
+      // Rocks are just projects with record_type='rock' ("same under the hood").
+      const SURFACE_OPTS = [['my', 'My Tasks'], ['ctc', 'CTC Files'], ['projects', 'Projects'], ['rocks', 'Rocks']];
+      const surfaceLabel = { my: 'My Tasks', ctc: 'CTC Files', projects: 'Projects', rocks: 'Rocks' };
+      const surfaceKind = { ctc: 'ctc_file', projects: 'project', rocks: 'rock' };
       const surfaceTitle = (fontSize) => (
         <div style={{ position: 'relative' }}>
           <div onClick={() => setSurfaceMenuOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
@@ -3603,8 +3619,9 @@ Rules:
       );
       // Individual project/file row (3rd sidebar level) — jumps straight into
       // that item's detail via openItemId, consumed by ProjectsSurface.
+      const surfaceForRecordType = { ctc_file: 'ctc', project: 'projects', rock: 'rocks' };
       const sbItemRow = (item) => (
-        <div key={item.id} onClick={() => { setSurface(item.record_type === 'ctc_file' ? 'ctc' : 'projects'); setOpenItemId(item.id); }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 18px 7px 34px', fontSize: '0.78rem', color: sub, cursor: 'pointer', fontFamily: C.fontSans }}>
+        <div key={item.id} onClick={() => { setSurface(surfaceForRecordType[item.record_type] || 'projects'); setOpenItemId(item.id); }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 18px 7px 34px', fontSize: '0.78rem', color: sub, cursor: 'pointer', fontFamily: C.fontSans }}>
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
           <span style={{ fontSize: '0.66rem', color: sub, flexShrink: 0 }}>{item.taskCount}</span>
         </div>
@@ -3616,6 +3633,7 @@ Rules:
       );
       const ctcNavItems = navItems.filter(i => i.record_type === 'ctc_file');
       const projNavItems = navItems.filter(i => i.record_type === 'project');
+      const rockNavItems = navItems.filter(i => i.record_type === 'rock');
       const navSidebar = (
         <div style={{ width: 216, flexShrink: 0, borderRight: `1px solid ${bord}`, padding: '18px 0', background: dark ? '#08132A' : '#FCFBF8', overflowY: 'auto' }}>
           {sbSectionHead('Tasks', true)}
@@ -3628,6 +3646,10 @@ Rules:
           {sbRow('projects', 'All projects', projNavItems.length)}
           {projNavItems.map(sbItemRow)}
           {sbAddRow('New project', () => { setSurface('projects'); setOpenItemId('new'); })}
+          {sbSectionHead('Company')}
+          {sbRow('rocks', 'Rocks', rockNavItems.length)}
+          {rockNavItems.map(sbItemRow)}
+          {sbAddRow('New rock', () => { setSurface('rocks'); setOpenItemId('new'); })}
         </div>
       );
 
@@ -3823,7 +3845,7 @@ Rules:
                   {navSidebar}
                   <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                     {surface !== 'my' ? (
-                      <ProjectsSurface kind={surface === 'ctc' ? 'ctc_file' : 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} hideSidebar openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
+                      <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} hideSidebar openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
                     ) : view !== 'list' ? (
                       <React.Fragment>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
@@ -3880,7 +3902,7 @@ Rules:
               ) : (
                 /* ── Mobile: single column, no sidebar — title dropdown switches surfaces ── */
                 surface !== 'my' ? (
-                  <ProjectsSurface kind={surface === 'ctc' ? 'ctc_file' : 'project'} dark={dark} user={user} team={team} titleNode={surfaceTitle} openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
+                  <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={surfaceTitle} openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
                 ) : view !== 'list' ? (
                   <React.Fragment>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>

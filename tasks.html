@@ -3346,6 +3346,51 @@ Rules:
       );
     }
 
+    // Reusable Kanban board — takes an arbitrary task array + callbacks so it
+    // works both for My Tasks' own list and for a Project/CTC File/Rock's tasks
+    // (ProjectsSurface). Real HTML5 drag-and-drop between status columns; drop
+    // calls onDrop(taskId, newStatus) so the caller decides how to persist it.
+    function TaskBoard({ items, dark, onOpen, onContextMenu, onDrop, showSource }) {
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', gold = dark ? '#C9A45A' : '#AD832F';
+      const [dragId, setDragId] = useState(null);
+      const [overCol, setOverCol] = useState(null);
+      return (
+        <div style={{ display: 'flex', gap: 12, padding: '14px 18px', overflowX: 'auto', flex: 1, minHeight: 0 }}>
+          {TASK_STATUS.map(col => {
+            const colItems = items.filter(t => t.status === col.id);
+            return (
+              <div key={col.id}
+                onDragOver={(e) => { e.preventDefault(); setOverCol(col.id); }}
+                onDragLeave={() => setOverCol(o => o === col.id ? null : o)}
+                onDrop={(e) => { e.preventDefault(); setOverCol(null); if (dragId != null && onDrop) onDrop(dragId, col.id); setDragId(null); }}
+                style={{ width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column', background: overCol === col.id ? (dark ? 'rgba(201,164,90,.08)' : '#FAF4E8') : 'transparent', borderRadius: 8, transition: 'background .12s', padding: 2 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 4px', marginBottom: 8 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: col.color, flexShrink: 0 }} />
+                  <span style={{ fontSize: '0.7rem', fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{col.label}</span>
+                  <span style={{ fontSize: '0.66rem', color: sub, marginLeft: 'auto' }}>{colItems.length}</span>
+                </div>
+                {colItems.map(t => (
+                  <div key={t.id} draggable onDragStart={(e) => { setDragId(t.id); e.dataTransfer.effectAllowed = 'move'; }} onDragEnd={() => setDragId(null)}
+                    onClick={() => onOpen(t)} onContextMenu={(e) => onContextMenu && onContextMenu(e, t)}
+                    style={{ background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '9px 10px', marginBottom: 8, cursor: 'grab', opacity: dragId === t.id ? 0.4 : 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                      <div style={{ flex: 1, minWidth: 0, fontSize: '0.78rem', color: ink, fontFamily: C.fontSans, lineHeight: 1.35 }}>{t.title}</div>
+                      {t.is_milestone && <i className="ti ti-flag-3-filled" style={{ fontSize: 12, color: gold, flexShrink: 0 }} />}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                      {showSource && t._projectName && <span style={{ fontSize: '0.6rem', fontWeight: 500, padding: '2.5px 7px', borderRadius: 4, background: dark ? 'rgba(173,131,47,.14)' : '#FAF4E8', border: `1px solid ${dark ? 'rgba(173,131,47,.3)' : '#E7D8B4'}`, color: dark ? '#C9A45A' : '#8C6A24', fontFamily: C.fontSans, whiteSpace: 'nowrap' }}>▲ {t._projectName}</span>}
+                      {t.due_at && <span style={{ fontSize: '0.62rem', color: sub }}>{new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
+                    </div>
+                  </div>
+                ))}
+                {!colItems.length && <div style={{ fontSize: '0.7rem', color: sub, padding: '8px 4px', fontFamily: C.fontSans }}>No tasks.</div>}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
     function TasksScreen({ dark, user, onClose, initialTask }) {
       const [data, setData] = useState({ tasks: [], peopleByTask: {}, projById: {}, labelsByTask: {} });
       const [team, setTeam] = useState([]);
@@ -3389,10 +3434,11 @@ Rules:
       async function reload() {
         setLoading(true);
         const [d, tm] = await Promise.all([TaskDB.loadAll(), ProfileDB.loadAll()]);
-        setData(d);
+        const enriched = { ...d, tasks: d.tasks.map(t => enrich(t, d.projById)) };   // _projectName for the source chip (My Tasks list/kanban/mobile rows)
+        setData(enriched);
         setTeam((tm || []).map(p => ({ id: p.id, name: ((((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User') })));
         setLoading(false);
-        return d;
+        return enriched;
       }
       useEffect(() => { reload(); }, []);
       useEffect(() => { if (view === 'list') { try { const p = JSON.parse(localStorage.getItem(labelKey(user && user.id)) || '[]') || []; const m = {}; p.forEach(x => { m[x.name] = x.color; }); setLabelColors(m); } catch (e) {} } }, [view]);
@@ -3746,39 +3792,12 @@ Rules:
         );
       }
 
-      // Desktop-only Kanban board. Cards open the existing task detail on click —
-      // status changes happen there (same status buttons used everywhere else),
-      // no drag-and-drop in this pass.
-      const kanbanBoard = () => (
-        <div style={{ display: 'flex', gap: 12, padding: '14px 18px', overflowX: 'auto', flex: 1, minHeight: 0 }}>
-          {TASK_STATUS.map(col => {
-            const items = filteredTasks.filter(t => t.status === col.id);
-            return (
-              <div key={col.id} style={{ width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 4px', marginBottom: 8 }}>
-                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: col.color, flexShrink: 0 }} />
-                  <span style={{ fontSize: '0.7rem', fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{col.label}</span>
-                  <span style={{ fontSize: '0.66rem', color: sub, marginLeft: 'auto' }}>{items.length}</span>
-                </div>
-                {items.map(t => (
-                  <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} onContextMenu={(e) => openCtx(e, t)}
-                    style={{ background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '9px 10px', marginBottom: 8, cursor: 'pointer' }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-                      <div style={{ flex: 1, minWidth: 0, fontSize: '0.78rem', color: ink, fontFamily: C.fontSans, lineHeight: 1.35 }}>{t.title}</div>
-                      {milestoneFlag(t, 12)}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-                      {sourceChip(t)}
-                      {t.due_at && <span style={{ fontSize: '0.62rem', color: sub }}>{new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
-                    </div>
-                  </div>
-                ))}
-                {!items.length && <div style={{ fontSize: '0.7rem', color: sub, padding: '8px 4px', fontFamily: C.fontSans }}>No tasks.</div>}
-              </div>
-            );
-          })}
-        </div>
-      );
+      // Kanban board — the shared TaskBoard component, wired to My Tasks' own
+      // list + status persistence. Real drag-and-drop (see TaskBoard above).
+      async function boardDrop(taskId, status) {
+        const t = data.tasks.find(x => x.id === taskId);
+        if (t && t.status !== status) await changeStatus(t, status);
+      }
 
       return (
         <React.Fragment>
@@ -3877,7 +3896,7 @@ Rules:
                         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column' }}>
                           {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
                             : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
-                            : viewMode === 'kanban' ? kanbanBoard()
+                            : viewMode === 'kanban' ? <TaskBoard items={filteredTasks} dark={dark} onOpen={(t) => { setCurrent(t); setView('detail'); }} onContextMenu={openCtx} onDrop={boardDrop} showSource />
                             : (
                               <React.Fragment>
                                 <div style={{ display: 'flex', alignItems: 'center', padding: '8px 18px', fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600, color: sub, borderBottom: `1px solid ${bord}`, gap: 12, fontFamily: C.fontSans }}>

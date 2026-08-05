@@ -16,7 +16,10 @@
 //   (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are injected automatically.)
 //
 // Timing: a new showing defaults next_touch_at = now() → touch 1 on the next
-// run, then +2 days → touch 2 (Day 3), +2 days → touch 3 (Day 5), then done.
+// run (immediate, whatever time the showing was logged), then +24h → touch 2
+// (Day 2), +24h → touch 3 (Day 3), then done. Touches 2 and 3 are clamped to
+// an 8:00 AM–5:00 PM America/Chicago window (touch 1 is not — it's meant to
+// go out right away) — see clampToBusinessWindow below.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -48,6 +51,44 @@ function fill(body: string, s: any): string {
     .replace(/\{\{\s*my_name\s*\}\}/g, myName)
     .replace(/\{\{\s*listing_agent\s*\}\}/g, listingAgent)
     .replace(/\{\{\s*zillow_url\s*\}\}/g, zillowUrl);
+}
+
+// ── America/Chicago business-hours clamp (touches 2 & 3 only) ──────────────
+// The UTC offset for America/Chicago at a given instant — -360 (CST) or -300
+// (CDT) — read via Intl rather than hardcoded, so DST transitions self-correct.
+function centralOffsetMinutes(at: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", timeZoneName: "shortOffset" }).formatToParts(at);
+  const tz = parts.find((p) => p.type === "timeZoneName")?.value || "GMT-6";
+  const m = tz.match(/GMT([+-]\d+)(?::(\d+))?/);
+  const h = m ? parseInt(m[1], 10) : -6;
+  const mins = m && m[2] ? parseInt(m[2], 10) : 0;
+  return h * 60 + (h < 0 ? -mins : mins);
+}
+// The wall-clock date/time `at` reads as in America/Chicago.
+function centralParts(at: Date) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago", hour12: false,
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    }).formatToParts(at).map((p) => [p.type, p.value])
+  );
+  const hour = Number(parts.hour) === 24 ? 0 : Number(parts.hour); // Intl can render midnight as "24"
+  return { y: Number(parts.year), m: Number(parts.month), day: Number(parts.day), hour, minute: Number(parts.minute) };
+}
+// The UTC instant corresponding to a specific America/Chicago wall-clock date+time.
+function centralToUTC(y: number, m: number, day: number, hour: number, minute: number): Date {
+  const guess = new Date(Date.UTC(y, m - 1, day, hour + 6, minute)); // seed assuming CST, then refine
+  const offMin = centralOffsetMinutes(guess);
+  return new Date(Date.UTC(y, m - 1, day, hour, minute) - offMin * 60000);
+}
+// Pushes a candidate send time into the 8:00 AM–5:00 PM Central window: same-day
+// 8:00 AM if it lands before 8am, next-day 8:00 AM if it lands at/after 5pm.
+function clampToBusinessWindow(candidate: Date): Date {
+  const p = centralParts(candidate);
+  if (p.hour >= 8 && p.hour < 17) return candidate;
+  if (p.hour < 8) return centralToUTC(p.y, p.m, p.day, 8, 0);
+  const nextDay = new Date(Date.UTC(p.y, p.m - 1, p.day + 1));
+  return centralToUTC(nextDay.getUTCFullYear(), nextDay.getUTCMonth() + 1, nextDay.getUTCDate(), 8, 0);
 }
 
 Deno.serve(async (req) => {
@@ -138,9 +179,12 @@ Deno.serve(async (req) => {
       status: quoStatus, sent_by_name: "Auto · SFFU",
     });
     const done = touch >= 3;
+    // 24h after this touch, then held to 8am-5pm Central if that lands outside it
+    // (touch 1 itself is never clamped — it's meant to go out immediately).
+    const nextTouchAt = done ? null : clampToBusinessWindow(new Date(Date.now() + 24 * 3600 * 1000));
     const showingUpdate: Record<string, unknown> = {
       touch_count: touch,
-      next_touch_at: done ? null : new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString(),
+      next_touch_at: nextTouchAt ? nextTouchAt.toISOString() : null,
       followup_status: done ? "completed" : "active",
     };
     if (quoConversationId) showingUpdate.quo_conversation_id = quoConversationId;

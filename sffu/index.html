@@ -903,6 +903,7 @@
                 <ShowingRow
                   key={s.id}
                   showing={s}
+                  property={property}
                   user={user}
                   isOpen={openShowingId === s.id}
                   onToggle={(forceOpen) => setOpenShowingId(cur =>
@@ -1014,12 +1015,26 @@
       );
     }
 
-    function ShowingRow({ showing, isOpen = false, onToggle = () => {}, user, onDelete = () => {} }) {
+    function ShowingRow({ showing, property, isOpen = false, onToggle = () => {}, user, onDelete = () => {} }) {
       const [status,       setStatus]       = useState(showing.status);
       const [localThread,  setLocalThread]  = useState(() => SMS_THREADS[showing.id] || []);
       const [threadLoaded, setThreadLoaded] = useState(false);
       const [replyText,    setReplyText]    = useState('');
       const [editing,      setEditing]      = useState(false);
+      // Manual-send template picker — lets a TC pick Day 1/2/3 or the "Reply
+      // Received" template and auto-populate the reply box (pre-filled, still
+      // editable) instead of typing a follow-up text from scratch.
+      const [showTplPicker, setShowTplPicker] = useState(false);
+      const [templates,     setTemplates]     = useState(null); // lazy-loaded: [day1, day2, day3, ack]
+      function openTplPicker() {
+        setShowTplPicker(v => !v);
+        if (!templates) DB.loadTemplates().then(setTemplates);
+      }
+      function pickTemplate(body) {
+        const filled = renderTemplate(body, { agent_name: showing.agent, property_address: showing.propertyAddress }, property, user);
+        setReplyText(filled);
+        setShowTplPicker(false);
+      }
 
       // Load thread from DB when first expanded, then keep it live while open —
       // subscribe to new sms_messages rows so replies (and our own sends) appear
@@ -1230,8 +1245,28 @@
                 <div>
                   <div style={{ fontSize: '0.72rem', color: C.textMuted, marginBottom: 10 }}>{dispOffice}</div>
                   <SmsThread thread={localThread} />
-                  {/* Spacer before reply box */}
-                  <div style={{ marginTop: 20, paddingTop: 14, borderTop: `1px solid ${C.border}` }} />
+                  {/* Reply box header — template picker toggle */}
+                  <div style={{ marginTop: 20, paddingTop: 14, borderTop: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: '0.62rem', fontWeight: 600, color: C.navy, letterSpacing: '0.1em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Reply</span>
+                    <button
+                      onClick={openTplPicker}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', color: showTplPicker ? C.gold : C.textMuted, fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: 4, fontFamily: C.fontSans }}
+                    ><i className="ti ti-message-2" style={{ fontSize: 13 }} />Use a template</button>
+                  </div>
+                  {/* Template picker — pre-fills the reply box; still editable before Send */}
+                  {showTplPicker && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: '8px 0' }}>
+                      {templates
+                        ? SMS_TEMPLATE_DEFAULTS.map((t, i) => (
+                            <button
+                              key={t.touch}
+                              onClick={() => pickTemplate(templates[i])}
+                              style={{ padding: '5px 10px', borderRadius: 20, border: `1px solid ${C.border}`, background: C.surfaceHover, color: C.textPrimary, fontSize: '0.72rem', cursor: 'pointer', fontFamily: C.fontSans }}
+                            >{t.label}</button>
+                          ))
+                        : <span style={{ fontSize: '0.72rem', color: C.textMuted, padding: '5px 0' }}>Loading templates…</span>}
+                    </div>
+                  )}
                   <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
                     <textarea
                       rows={2}

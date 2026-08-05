@@ -1080,6 +1080,36 @@
       );
     }
 
+    // ─── Task list cache (localStorage) ──────────────────────────────
+    // Loading the open-tasks view alone takes ~20s of sequential Zoho calls (1,367
+    // tasks) and the full-history view ~90s+ (22k+) — reloading the page shouldn't
+    // pay that cost every time. Cache the fetched result per view (open vs. full
+    // history are cached separately) and reuse it while fresh; a background timer
+    // re-checks periodically so an open tab doesn't go stale forever either.
+    const TASK_CACHE_TTL_MS = 10 * 60 * 1000; // 10 min
+    const taskCacheKey = (full) => 'tmg_crmtasks_cache_' + (full ? 'full' : 'open');
+    function loadTaskCache(full) {
+      try {
+        const raw = localStorage.getItem(taskCacheKey(full));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !Array.isArray(parsed.tasks) || !parsed.cachedAt) return null;
+        return parsed;
+      } catch (e) { return null; }
+    }
+    function saveTaskCache(full, payload) {
+      try { localStorage.setItem(taskCacheKey(full), JSON.stringify({ ...payload, cachedAt: Date.now() })); }
+      catch (e) { /* quota or serialization failure — just skip caching this round */ }
+    }
+    function agoLabel(ms) {
+      const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+      if (s < 60) return 'just now';
+      const m = Math.round(s / 60);
+      if (m < 60) return m + 'm ago';
+      const h = Math.round(m / 60);
+      return h + 'h ago';
+    }
+
     // ─── Main app ──────────────────────────────────────────────────────
     function App({ user, profile }) {
       const [tasks, setTasks] = useState(null);     // null = loading
@@ -1088,6 +1118,7 @@
       const [capped, setCapped] = useState(false);
       const [includeCompleted, setIncludeCompleted] = useState(false); // off = fast default; on = full history (slow, 20k+ tasks)
       const [loadedSoFar, setLoadedSoFar] = useState(0);
+      const [lastUpdated, setLastUpdated] = useState(null); // ms epoch of the data currently shown — cache hit or fresh fetch
       const [colMap, setColMap] = useState({ type:'Task_Type', trigger:'Trigger' });
       const [extraFields, setExtraFields] = useState([]); // other custom Tasks fields: [{ api_name, label }]
       const [meta, setMeta] = useState({ statusOptions:['Not Started','Deferred','In Progress','Completed','Waiting on someone else'], typeOptions:['Call','Note','Pop-by','Lunch','Email','Meeting'] });
@@ -1098,13 +1129,26 @@
       const [sortDir, setSortDir] = useState('desc');
       const [drawer, setDrawer] = useState(null);    // { mode:'ai'|'create'|'edit', task? } | null
 
-      async function load() {
+      async function load(force) {
+        // Serve from cache when it's fresh — reload/revisit shouldn't re-pay the
+        // ~20s (open) or ~90s+ (full history) fetch cost every time. Refresh button
+        // and the periodic timer below pass force=true to always hit Zoho for real.
+        if (!force && !isDev()) {
+          const cached = loadTaskCache(includeCompleted);
+          if (cached && Date.now() - cached.cachedAt < TASK_CACHE_TTL_MS) {
+            setTasks(cached.tasks); setColMap(cached.colMap); setExtraFields(cached.extraFields);
+            setMeta(cached.meta); setCapped(!!cached.capped); setLastUpdated(cached.cachedAt);
+            setErr(''); setNeedsDeploy(false);
+            return;
+          }
+        }
         setTasks(null); setErr(''); setNeedsDeploy(false);
         if (isDev()) {
           await new Promise(r => setTimeout(r, 350));
           setColMap({ type:'Task_Type', trigger:'Trigger' });
           setExtraFields([]);
           setTasks(DEV_TASKS);
+          setLastUpdated(Date.now());
           return;
         }
         // Resolve this org's custom field api-names (Task Type / Trigger), and pick up
@@ -1112,6 +1156,7 @@
         // isn't blind to org-specific fields beyond this app's fixed baseline.
         let type = 'Task_Type', trigger = 'Trigger';
         let extra = [];
+        let resolvedMeta = null; // captured locally too — `meta` state would still read stale in this same call
         const fres = await callZoho({ action:'get_fields', module:'Tasks' });
         if (fres.ok) {
           const fields = fres.data.fields || [];
@@ -1121,10 +1166,13 @@
           const statusF = fields.find(f => f.api_name === 'Status') || findF(/^status$/i);
           type = typeF?.api_name || type;
           trigger = trigF?.api_name || trigger;
-          setMeta(m => ({
-            statusOptions: (statusF?.picklist_values && statusF.picklist_values.length) ? statusF.picklist_values : m.statusOptions,
-            typeOptions: (typeF?.picklist_values && typeF.picklist_values.length) ? typeF.picklist_values : m.typeOptions,
-          }));
+          setMeta(m => {
+            resolvedMeta = {
+              statusOptions: (statusF?.picklist_values && statusF.picklist_values.length) ? statusF.picklist_values : m.statusOptions,
+              typeOptions: (typeF?.picklist_values && typeF.picklist_values.length) ? typeF.picklist_values : m.typeOptions,
+            };
+            return resolvedMeta;
+          });
           const skip = new Set(['id', type, trigger]);
           extra = fields
             .filter(f => f.custom_field && f.api_name && !skip.has(f.api_name))
@@ -1169,10 +1217,20 @@
           if (more && !pageToken && page >= 10) break;
           page++;
         }
-        setCapped(more && all.length >= CAP);
+        const isCapped = more && all.length >= CAP;
+        setCapped(isCapped);
         setTasks(all);
+        const now = Date.now();
+        setLastUpdated(now);
+        saveTaskCache(includeCompleted, { tasks: all, colMap: { type, trigger }, extraFields: extra, meta: resolvedMeta || meta, capped: isCapped });
       }
       useEffect(() => { load(); }, [includeCompleted]);
+      // Background refresh — keeps the cache warm even if the tab is just left open
+      // (not reloaded), so a revisit later is more likely to find fresh-enough data.
+      useEffect(() => {
+        const id = setInterval(() => load(true), TASK_CACHE_TTL_MS);
+        return () => clearInterval(id);
+      }, [includeCompleted]);
 
       // Write handlers — propose→confirm: a save/create is the user's explicit
       // confirm; delete uses a two-step confirm in the drawer. Dev simulates.
@@ -1189,7 +1247,7 @@
         }
         const action = mode === 'create' ? 'create_record' : 'update_record';
         const res = await callZoho({ action, module:'Tasks', id, record });
-        if (res.ok && !skipReload) await load();
+        if (res.ok && !skipReload) await load(true); // force — the cache would otherwise hide this exact change for up to 10 min
         return { ok:res.ok, error: res.data?.error };
       }
       async function removeTask(id, skipReload) {
@@ -1199,7 +1257,7 @@
           return { ok:true };
         }
         const res = await callZoho({ action:'delete_record', module:'Tasks', id });
-        if (res.ok && !skipReload) await load();
+        if (res.ok && !skipReload) await load(true); // force — same reasoning as writeTask above
         return { ok:res.ok, error: res.data?.error };
       }
 
@@ -1518,7 +1576,7 @@
             const rs = await Promise.all(ids.slice(i, i + BATCH).map(fn));
             rs.forEach(r => (r && r.ok) ? okN++ : errN++);
           }
-          if (okN && !isDev()) await load(); // single refresh after the batch (dev already updated optimistically)
+          if (okN && !isDev()) await load(true); // single forced refresh after the batch (dev already updated optimistically)
           return { okN, errN };
         }
         if (name === 'bulk_update_tasks') {
@@ -1632,7 +1690,7 @@
                 <h1 style={{ fontFamily:C.fontDisplay, fontSize:'1.7rem', fontWeight:600, color:C.navy, lineHeight:1.05 }}>All Tasks</h1>
                 <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>
                   {tasks
-                    ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` + (capped ? ' · truncated — filter to narrow' : '') + (!includeCompleted ? ' · completed hidden' : '')
+                    ? `${view.length} of ${tasks.length} task${tasks.length===1?'':'s'}` + (capped ? ' · truncated — filter to narrow' : '') + (!includeCompleted ? ' · completed hidden' : '') + (lastUpdated ? ' · updated ' + agoLabel(lastUpdated) : '')
                     : `Loading…${loadedSoFar ? ' (' + loadedSoFar.toLocaleString() + ' so far)' : ''}`}
                 </div>
               </div>
@@ -1663,7 +1721,7 @@
                 style={{ ...iconBtn, color:includeCompleted?C.gold:C.navy, borderColor:includeCompleted?C.gold:C.border }}>
                 <i className="ti ti-history" style={{ fontSize:15 }} /> {includeCompleted ? 'Full history' : 'Include completed'}
               </button>
-              <button onClick={load} title="Refresh" style={iconBtn}><i className="ti ti-refresh" style={{ fontSize:15 }} /></button>
+              <button onClick={() => load(true)} title="Refresh (bypasses the cache)" style={iconBtn}><i className="ti ti-refresh" style={{ fontSize:15 }} /></button>
             </div>
           </div>
 

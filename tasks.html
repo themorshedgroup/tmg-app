@@ -3218,7 +3218,7 @@ Rules:
 
       const dtabBar = (
         <div style={{ display: 'flex', gap: 4, padding: wide ? '0 20px' : '0 14px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-          {[['overview', 'Overview'], ['list', 'List'], ['board', 'Board']].map(([id, label]) => (
+          {[['overview', 'Overview'], ['list', 'List'], ['board', 'Board'], ['timeline', 'Timeline']].map(([id, label]) => (
             <div key={id} onClick={() => setDtab(id)} style={{ padding: '9px 12px', fontSize: '0.76rem', color: dtab === id ? ink : sub, fontWeight: dtab === id ? 600 : 400, borderBottom: `2px solid ${dtab === id ? gold : 'transparent'}`, cursor: 'pointer', fontFamily: C.fontSans, marginBottom: -1 }}>{label}</div>
           ))}
         </div>
@@ -3242,6 +3242,7 @@ Rules:
         </div>
       );
       const boardTab = (p) => <TaskBoard items={p._tasks} dark={dark} onOpen={setOpenTask} onDrop={onBoardDrop} showSource={false} />;
+      const timelineTab = (p) => <TaskTimeline items={p._tasks} dark={dark} onOpen={setOpenTask} />;
 
       const detailView = () => {
         const p = current; if (!p) return null;
@@ -3297,7 +3298,7 @@ Rules:
                   {detailFields(p)}
                 </div>
               </div>
-            ) : dtab === 'list' ? listTab(p) : boardTab(p)}
+            ) : dtab === 'list' ? listTab(p) : dtab === 'board' ? boardTab(p) : timelineTab(p)}
           </React.Fragment>
         ) : (
           <React.Fragment>
@@ -3311,7 +3312,7 @@ Rules:
                   {detailFields(p)}
                 </div>
               </div>
-            ) : dtab === 'list' ? listTab(p) : boardTab(p)}
+            ) : dtab === 'list' ? listTab(p) : dtab === 'board' ? boardTab(p) : timelineTab(p)}
           </React.Fragment>
         );
       };
@@ -3485,6 +3486,57 @@ Rules:
               </div>
             );
           })}
+        </div>
+      );
+    }
+
+    // Timeline (Gantt-lite) — a month-grid of colored bars, one row per dated
+    // task. The window is computed from the data (earliest of today/first due
+    // date, spanning at least 3 months, extended to cover the latest due date)
+    // rather than a fixed range, since real due dates won't sit in any one
+    // hardcoded window. Undated tasks are left out (shown nowhere useful on a
+    // date axis) rather than parked at a misleading midpoint.
+    function TaskTimeline({ items, dark, onOpen }) {
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const dated = items.filter(t => t.due_at).slice().sort((a, b) => new Date(a.due_at) - new Date(b.due_at));
+      if (!dated.length) return <div style={{ padding: 24, color: sub, fontSize: '0.82rem', fontFamily: C.fontSans, textAlign: 'center' }}>No dated tasks to place on a timeline.</div>;
+      const today = new Date();
+      const dueDates = dated.map(t => new Date(t.due_at));
+      const start = new Date(Math.min(today, ...dueDates)); start.setDate(1); start.setHours(0, 0, 0, 0);
+      const latest = new Date(Math.max(today, ...dueDates));
+      const monthsSpan = Math.max(3, (latest.getFullYear() - start.getFullYear()) * 12 + (latest.getMonth() - start.getMonth()) + 1);
+      const months = Array.from({ length: monthsSpan }, (_, i) => new Date(start.getFullYear(), start.getMonth() + i, 1));
+      const end = new Date(start.getFullYear(), start.getMonth() + monthsSpan, 1);
+      const totalMs = end - start;
+      return (
+        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 18px 24px' }}>
+          <div style={{ border: `1px solid ${bord}`, borderRadius: 8, overflow: 'hidden', minWidth: 640 }}>
+            <div style={{ display: 'flex', background: dark ? '#08132A' : '#FCFBF8', borderBottom: `1px solid ${bord}` }}>
+              <div style={{ width: 200, flexShrink: 0, padding: '9px 14px', fontSize: '0.6rem', letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, fontFamily: C.fontSans }}>Task</div>
+              <div style={{ flex: 1, display: 'flex' }}>
+                {months.map((m, i) => <div key={i} style={{ flex: 1, padding: '9px 10px', fontSize: '0.6rem', letterSpacing: '0.12em', textTransform: 'uppercase', color: sub, fontWeight: 600, borderLeft: i ? `1px solid ${bord}` : 'none', fontFamily: C.fontSans }}>{m.toLocaleDateString('en-US', { month: 'short' })}</div>)}
+              </div>
+            </div>
+            {dated.map(t => {
+              const due = new Date(t.due_at);
+              const widthMs = 14 * 86400000;
+              const leftMs = Math.max(0, (due - start) - widthMs);
+              const leftPct = (leftMs / totalMs) * 100;
+              const rightMs = Math.min(totalMs, (due - start));
+              const widthPct = Math.max(((rightMs - leftMs) / totalMs) * 100, 3);
+              return (
+                <div key={t.id} style={{ display: 'flex', alignItems: 'center', borderBottom: `1px solid ${bord}` }}>
+                  <div onClick={() => onOpen && onOpen(t)} style={{ width: 200, flexShrink: 0, padding: '10px 14px', fontSize: '0.76rem', color: ink, fontFamily: C.fontSans, cursor: onOpen ? 'pointer' : 'default', display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    {t.is_milestone && <i className="ti ti-flag-3-filled" style={{ fontSize: 11, color: '#AD832F', flexShrink: 0 }} />}
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                  </div>
+                  <div style={{ flex: 1, position: 'relative', height: 38 }}>
+                    <div onClick={() => onOpen && onOpen(t)} style={{ position: 'absolute', top: 8, left: leftPct + '%', width: widthPct + '%', height: 22, borderRadius: 5, background: statusColor(t.status), display: 'flex', alignItems: 'center', padding: '0 8px', color: '#fff', fontSize: '0.62rem', fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', cursor: onOpen ? 'pointer' : 'default' }}>{statusLabel(t.status)}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       );
     }
@@ -3984,6 +4036,7 @@ Rules:
                               <div style={{ display: 'flex', border: `1px solid ${bord}`, borderRadius: 3, overflow: 'hidden' }}>
                                 <div onClick={() => setViewMode('list')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'list' ? C.navy : 'transparent', color: viewMode === 'list' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-list" style={{ fontSize: 12 }} />List</div>
                                 <div onClick={() => setViewMode('kanban')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'kanban' ? C.navy : 'transparent', color: viewMode === 'kanban' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-layout-kanban" style={{ fontSize: 12 }} />Kanban</div>
+                                <div onClick={() => setViewMode('timeline')} style={{ padding: '5px 10px', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, cursor: 'pointer', background: viewMode === 'timeline' ? C.navy : 'transparent', color: viewMode === 'timeline' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 4 }}><i className="ti ti-timeline" style={{ fontSize: 12 }} />Timeline</div>
                               </div>
                               {viewMode === 'list' && colsChip}
                               {labelsBtn}
@@ -3995,6 +4048,7 @@ Rules:
                           {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
                             : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
                             : viewMode === 'kanban' ? <TaskBoard items={filteredTasks} dark={dark} onOpen={(t) => { setCurrent(t); setView('detail'); }} onContextMenu={openCtx} onDrop={boardDrop} showSource />
+                            : viewMode === 'timeline' ? <TaskTimeline items={filteredTasks} dark={dark} onOpen={(t) => { setCurrent(t); setView('detail'); }} />
                             : (
                               <React.Fragment>
                                 <div style={{ display: 'flex', alignItems: 'center', padding: '8px 18px', fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600, color: sub, borderBottom: `1px solid ${bord}`, gap: 12, fontFamily: C.fontSans }}>

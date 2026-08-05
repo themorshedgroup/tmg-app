@@ -2902,6 +2902,7 @@ Rules:
         }
       }
       async function onTaskStatus(task, status) { await TaskDB.update(task.id, task, { status }, user); await refreshContainer(task.id); }
+      async function toggleTaskDone(t) { await onTaskStatus(t, t.status === 'done' ? 'todo' : 'done'); }
       async function onBoardDrop(taskId, status) {
         const t = (current && current._tasks || []).find(x => x.id === taskId);
         if (t && t.status !== status) await onTaskStatus(t, status);
@@ -2959,13 +2960,13 @@ Rules:
       const SORT_OPTS = [['target', 'Target date'], ['name', 'Name'], ['progress', 'Progress'], ['created', 'Recently added']];
       const groupChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); }} style={chipStyle}>Group <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); }} style={chipStyle}>Group: {(GROUP_OPTS.find(([id]) => id === group) || [])[1]} <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
           {groupOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{GROUP_OPTS.map(([id, label]) => ddItem(label, group === id, () => { setGroup(id); setGroupOpen(false); }, id))}</div>}
         </div>
       );
       const sortChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); }} style={chipStyle}>Sort <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); }} style={chipStyle}>Sort: {(SORT_OPTS.find(([id]) => id === sort) || [])[1]} <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
           {sortOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{SORT_OPTS.map(([id, label]) => ddItem(label, sort === id, () => { setSort(id); setSortOpen(false); }, id))}</div>}
         </div>
       );
@@ -3163,9 +3164,14 @@ Rules:
       ); };
       const detailTaskRow = (t) => (
         <div key={t.id} onClick={() => setOpenTask(t)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: `1px solid ${bord}`, cursor: 'pointer' }}>
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: priorityColor(t.priority), flexShrink: 0 }} />
-          <span style={{ flex: 1, minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}{t.is_milestone && <i className="ti ti-flag-3-filled" style={{ fontSize: 11, color: gold, marginLeft: 6 }} />}</span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.68rem', color: sub, flexShrink: 0, fontFamily: C.fontSans }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor(t.status) }} />{statusLabel(t.status)}</span>
+          <div onClick={(e) => { e.stopPropagation(); toggleTaskDone(t); }} title={t.status === 'done' ? 'Mark not done' : 'Mark done'}
+            style={{ width: 16, height: 16, borderRadius: '50%', border: `1.6px solid ${t.status === 'done' ? statusColor('done') : (dark ? 'rgba(255,255,255,.28)' : '#C9C4B5')}`, background: t.status === 'done' ? statusColor('done') : 'transparent', flexShrink: 0, display: 'grid', placeItems: 'center', cursor: 'pointer' }}>
+            {t.status === 'done' && <i className="ti ti-check" style={{ fontSize: 10, color: '#fff' }} />}
+          </div>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: priorityColor(t.priority), flexShrink: 0 }} title={priorityLabel(t.priority)} />
+          {t.is_milestone && <span style={{ color: gold, fontSize: '0.6rem', fontWeight: 600, border: `1px solid ${dark ? 'rgba(201,164,90,.35)' : '#E8D9BC'}`, background: dark ? 'rgba(201,164,90,.14)' : '#F3EBDA', borderRadius: 4, padding: '1px 6px', letterSpacing: '0.04em', flexShrink: 0, whiteSpace: 'nowrap', fontFamily: C.fontSans }}>◆ Milestone</span>}
+          <span style={{ flex: 1, minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+          <span style={{ fontSize: '0.62rem', fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: statusBg(t.status), color: statusColor(t.status), fontFamily: C.fontSans, whiteSpace: 'nowrap', flexShrink: 0 }}>{statusLabel(t.status)}</span>
           <span style={{ width: 60, textAlign: 'right', fontSize: '0.68rem', color: isOverdue(t.due_at) && t.status !== 'done' ? lateColor : sub, fontWeight: isOverdue(t.due_at) && t.status !== 'done' ? 600 : 400, flexShrink: 0, fontFamily: C.fontSans }}>{fmtD(t.due_at)}</span>
         </div>
       );
@@ -3205,8 +3211,11 @@ Rules:
       const taskDetailOverlay = () => (
         <React.Fragment>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-            <i className="ti ti-chevron-left" onClick={() => { setOpenTask(null); setTaskEditing(false); }} style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
-            <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, color: ink }}>{taskEditing ? 'Edit task' : 'Task'}</span>
+            <i className="ti ti-chevron-left" onClick={() => { setOpenTask(null); setTaskEditing(false); }} style={{ fontSize: 16, cursor: 'pointer', color: sub, flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(current && current.name) || KL.plural}</div>
+              <div style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, color: ink }}>{taskEditing ? 'Edit task' : 'Task'}</div>
+            </div>
           </div>
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             {taskEditing
@@ -3580,11 +3589,12 @@ Rules:
       // ── Standalone-only redesign state (My Tasks: list/kanban, columns, search, milestones) ──
       // Never read by the embedded popout — that surface renders the original branch untouched.
       const [viewMode, setViewMode] = useState(() => localStorage.getItem('tmg-tasks-view') || 'list');   // 'list' | 'kanban' (desktop only)
-      const [cols, setCols] = useState(() => { try { const s = JSON.parse(localStorage.getItem('tmg-cols-tasks') || 'null'); return Array.isArray(s) && s.length ? s : ['source', 'status', 'due']; } catch (e) { return ['source', 'status', 'due']; } });
+      const [cols, setCols] = useState(() => { try { const s = JSON.parse(localStorage.getItem('tmg-cols-tasks') || 'null'); return Array.isArray(s) && s.length ? s : ['source', 'status', 'priority', 'due']; } catch (e) { return ['source', 'status', 'priority', 'due']; } });
       useEffect(() => { localStorage.setItem('tmg-tasks-view', viewMode); }, [viewMode]);
       useEffect(() => { localStorage.setItem('tmg-cols-tasks', JSON.stringify(cols)); }, [cols]);
       const [search, setSearch] = useState('');
       const [searchOpen, setSearchOpen] = useState(false);
+      const [quickAddVal, setQuickAddVal] = useState('');
       const [groupOpen, setGroupOpen] = useState(false);
       const [sortOpen, setSortOpen] = useState(false);
       const [colsOpen, setColsOpen] = useState(false);
@@ -3633,6 +3643,23 @@ Rules:
         const fresh = (d.tasks || []).find(x => x.id === task.id);
         setCurrent(fresh || { ...task, status });   // subtasks aren't in the top-level list — fall back to optimistic
       }
+      // Row-level done/undone toggle — a separate hit target from opening the
+      // drawer (rows call this with stopPropagation), same status path as the
+      // drawer's own status buttons and the Kanban board's drag-and-drop.
+      async function toggleDone(t) { await changeStatus(t, t.status === 'done' ? 'todo' : 'done'); }
+      // Quick-add: type + Enter creates a plain To Do/Medium task and keeps focus,
+      // same pattern as the quick-add already on every Project/CTC File/Rock list.
+      async function quickAddMyTask() {
+        const title = quickAddVal.trim(); if (!title) return;
+        await TaskDB.create({ title, status: 'todo', priority: 'medium' }, {}, user);
+        setQuickAddVal('');
+        await reload();
+      }
+      const quickAddRow = (
+        <div style={{ display: 'flex', gap: 8, padding: '10px 18px' }}>
+          <input value={quickAddVal} onChange={e => setQuickAddVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') quickAddMyTask(); }} placeholder="＋ Add a task and press Enter…" style={{ flex: 1, padding: '9px 11px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans }} />
+        </div>
+      );
       const back = () => { if (view === 'form') setView(current ? 'detail' : 'list'); else { setView('list'); setCurrent(null); } };
       const titleText = view === 'form' ? (current ? 'Edit task' : 'New task') : view === 'detail' ? 'Task' : view === 'labels' ? 'Manage labels' : 'Tasks';
       const myLabelsFor = (id) => (data.labelsByTask[id] || []).filter(l => l.user_id === (user && user.id)).map(l => l.label);
@@ -3735,7 +3762,7 @@ Rules:
 
       async function toggleMilestone(t) { await TaskDB.update(t.id, t, { is_milestone: !t.is_milestone }, user); await reload(); }
 
-      const GROUP_OPTS = [['status', 'Status'], ['due', 'Due date'], ['label', 'Label'], ['none', 'None']];
+      const GROUP_OPTS = [['status', 'Status'], ['assignee', 'Assignee'], ['priority', 'Priority'], ['due', 'Due date'], ['project', 'Project / File'], ['label', 'Label'], ['none', 'None']];
       const SORT_OPTS = [['due', 'Due date'], ['priority', 'Priority'], ['title', 'Title'], ['created', 'Recently added']];
       const COLUMN_DEFS = [
         { id: 'source', label: 'Source' }, { id: 'status', label: 'Status' }, { id: 'priority', label: 'Priority' },
@@ -3753,13 +3780,13 @@ Rules:
       );
       const groupChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); setColsOpen(false); }} style={chipStyle}>Group <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); setColsOpen(false); }} style={chipStyle}>Group: {(GROUP_OPTS.find(([id]) => id === sortBy) || [])[1]} <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
           {groupOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{GROUP_OPTS.map(([id, label]) => ddItem(label, sortBy === id, () => { setSortBy(id); setGroupOpen(false); }, id))}</div>}
         </div>
       );
       const sortChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); setColsOpen(false); }} style={chipStyle}>Sort <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); setColsOpen(false); }} style={chipStyle}>Sort: {(SORT_OPTS.find(([id]) => id === thenBy) || [])[1]} <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
           {sortOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{SORT_OPTS.map(([id, label]) => ddItem(label, thenBy === id, () => { setThenBy(id); setSortOpen(false); }, id))}</div>}
         </div>
       );
@@ -3789,6 +3816,22 @@ Rules:
       const sourceChip = (t) => t._projectName ? (
         <span style={{ fontSize: '0.6rem', fontWeight: 500, padding: '2.5px 7px', borderRadius: 4, background: dark ? 'rgba(173,131,47,.14)' : '#FAF4E8', border: `1px solid ${dark ? 'rgba(173,131,47,.3)' : '#E7D8B4'}`, color: dark ? '#C9A45A' : '#8C6A24', fontFamily: C.fontSans, whiteSpace: 'nowrap' }}>▲ {t._projectName}</span>
       ) : null;
+      // Row-level done/undone checkbox — a separate hit target from opening the
+      // drawer, matching Asana/Monday's row anatomy (checkbox toggles, row body opens).
+      const doneCheck = (t, sz) => { const s = sz || 17; return (
+        <div onClick={(e) => { e.stopPropagation(); toggleDone(t); }} title={t.status === 'done' ? 'Mark not done' : 'Mark done'}
+          style={{ width: s, height: s, borderRadius: '50%', border: `1.6px solid ${t.status === 'done' ? statusColor('done') : (dark ? 'rgba(255,255,255,.28)' : '#C9C4B5')}`, background: t.status === 'done' ? statusColor('done') : 'transparent', flexShrink: 0, display: 'grid', placeItems: 'center', cursor: 'pointer' }}>
+          {t.status === 'done' && <i className="ti ti-check" style={{ fontSize: s * 0.62, color: '#fff' }} />}
+        </div>
+      ); };
+      // Tinted-background status pill — used everywhere a task's status needs to
+      // be legible in a row, not just implied by a border color or bare dot.
+      const statusPillEl = (t, sz) => (
+        <span style={{ fontSize: sz || '0.62rem', fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: statusBg(t.status), color: statusColor(t.status), fontFamily: C.fontSans, whiteSpace: 'nowrap', flexShrink: 0 }}>{statusLabel(t.status)}</span>
+      );
+      const milestoneBadge = (
+        <span style={{ color: gold, fontSize: '0.62rem', fontWeight: 600, border: `1px solid ${dark ? 'rgba(201,164,90,.35)' : '#E8D9BC'}`, background: dark ? 'rgba(201,164,90,.14)' : '#F3EBDA', borderRadius: 4, padding: '1px 6px', letterSpacing: '0.04em', flexShrink: 0, whiteSpace: 'nowrap', fontFamily: C.fontSans }}>◆ Milestone</span>
+      );
       const openCtx = (e, t) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, task: t }); };
 
       // Surface switcher dropdown (My Tasks / CTC Files / Projects / Rocks) — the
@@ -3878,10 +3921,15 @@ Rules:
         return (
           <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} onContextMenu={(e) => openCtx(e, t)}
             style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '11px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderLeft: `2.5px solid ${statusColor(t.status)}`, borderRadius: 12, marginBottom: 8, cursor: 'pointer', opacity: t.status === 'done' ? 0.72 : 1 }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority), marginTop: 6 }} title={priorityLabel(t.priority)} />
+            <div style={{ marginTop: 1 }}>{doneCheck(t, 17)}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                {t.is_milestone && milestoneBadge}
+                <span style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 5 }}>
+                {statusPillEl(t)}
+                <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} title={priorityLabel(t.priority)} />
                 {sourceChip(t)}
                 {t.due_at && <span style={{ fontSize: '0.68rem', color: late ? lateColor : sub, fontWeight: late ? 600 : 400, fontFamily: C.fontSans }}>{new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
               </div>
@@ -3900,10 +3948,14 @@ Rules:
         return (
           <div key={t.id} onClick={() => { setCurrent(t); setView('detail'); }} onContextMenu={(e) => openCtx(e, t)}
             style={{ display: 'flex', alignItems: 'center', padding: '9px 18px', borderBottom: `1px solid ${bord}`, gap: 12, cursor: 'pointer' }}>
+            {doneCheck(t, 16)}
             {milestoneFlag(t, 14)}
-            <div style={{ flex: 1, minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</div>
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 7 }}>
+              {t.is_milestone && milestoneBadge}
+              <span style={{ minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+            </div>
             {cols.includes('source') && <div style={{ width: 160, flexShrink: 0 }}>{sourceChip(t) || <span style={{ color: sub, fontSize: '0.72rem' }}>—</span>}</div>}
-            {cols.includes('status') && <div style={{ width: 96, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.7rem', color: sub }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: statusColor(t.status), flexShrink: 0 }} />{statusLabel(t.status)}</div>}
+            {cols.includes('status') && <div style={{ width: 96, flexShrink: 0 }}>{statusPillEl(t)}</div>}
             {cols.includes('priority') && <div style={{ width: 70, flexShrink: 0, fontSize: '0.7rem', color: priorityColor(t.priority) }}>{priorityLabel(t.priority)}</div>}
             {cols.includes('due') && <div style={{ width: 88, flexShrink: 0, textAlign: 'right', fontSize: '0.7rem', color: late ? lateColor : sub, fontWeight: late ? 600 : 400 }}>{t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}</div>}
             {cols.includes('assignee') && <div style={{ width: 110, flexShrink: 0, fontSize: '0.7rem', color: sub, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{assignees.join(', ') || '—'}</div>}
@@ -3943,6 +3995,30 @@ Rules:
               {unlabeled.length > 0 && <div style={{ marginBottom: 16 }}>{groupHead(sub, 'Unlabeled · ' + unlabeled.length)}{unlabeled.slice().sort(byThen).map(rowFn)}</div>}
             </React.Fragment>
           );
+        } else if (sortBy === 'assignee') {
+          const groups = {}; const unassigned = [];
+          active.forEach(t => {
+            const names = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
+            if (!names.length) unassigned.push(t); else names.forEach(n => { (groups[n] = groups[n] || []).push(t); });
+          });
+          const names = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+          body = (
+            <React.Fragment>
+              {names.map(n => <div key={n} style={{ marginBottom: 16 }}>{groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length)}{groups[n].slice().sort(byThen).map(rowFn)}</div>)}
+              {unassigned.length > 0 && <div style={{ marginBottom: 16 }}>{groupHead(sub, 'Unassigned · ' + unassigned.length)}{unassigned.slice().sort(byThen).map(rowFn)}</div>}
+            </React.Fragment>
+          );
+        } else if (sortBy === 'priority') {
+          body = TASK_PRIORITY.slice().sort((a, b) => PRI[a.id] - PRI[b.id]).map(p => {
+            const items = active.filter(t => t.priority === p.id).sort(byThen);
+            if (!items.length) return null;
+            return <div key={p.id} style={{ marginBottom: 16 }}>{groupHead(p.color, priorityLabel(p.id) + ' priority · ' + items.length)}{items.map(rowFn)}</div>;
+          });
+        } else if (sortBy === 'project') {
+          const groups = {};
+          active.forEach(t => { const n = t._projectName || 'No project'; (groups[n] = groups[n] || []).push(t); });
+          const names = Object.keys(groups).sort((a, b) => (a === 'No project') - (b === 'No project') || a.localeCompare(b));
+          body = names.map(n => <div key={n} style={{ marginBottom: 16 }}>{groupHead(n === 'No project' ? sub : (dark ? '#C9A45A' : '#AD832F'), n + ' · ' + groups[n].length)}{groups[n].slice().sort(byThen).map(rowFn)}</div>);
         } else {
           body = TASK_STATUS.filter(col => col.id !== 'done').map(col => {
             const items = active.filter(t => t.status === col.id).sort(byThen);
@@ -4078,6 +4154,7 @@ Rules:
                                   {cols.includes('created') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Created</span>}
                                   {cols.includes('modified') && <span style={{ width: 88, flexShrink: 0, textAlign: 'right' }}>Modified</span>}
                                 </div>
+                                {quickAddRow}
                                 <div style={{ padding: '4px 0 24px' }}>{renderGroupedList(deskRow)}</div>
                               </React.Fragment>
                             )}
@@ -4085,8 +4162,11 @@ Rules:
                         {view !== 'list' && (
                           <TaskDrawer dark={dark} onClose={back}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-                              <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
-                              <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, flex: 1 }}>{titleText}</span>
+                              <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub, flexShrink: 0 }} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(current && current._projectName) || 'My Tasks'}</div>
+                                <div style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink }}>{titleText}</div>
+                              </div>
                               <i className="ti ti-x" onClick={back} aria-label="Close" style={{ fontSize: 15, cursor: 'pointer', color: sub, flexShrink: 0 }} />
                             </div>
                             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>{detailPane}</div>
@@ -4128,7 +4208,7 @@ Rules:
                     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column' }}>
                       {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
                         : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
-                        : <div style={{ padding: '10px 14px 24px' }}>{renderGroupedList(taskRowNew)}</div>}
+                        : <div style={{ padding: '10px 14px 24px' }}>{quickAddRow}{renderGroupedList(taskRowNew)}</div>}
                     </div>
                   </React.Fragment>
                 )

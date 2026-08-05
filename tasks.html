@@ -3246,7 +3246,7 @@ Rules:
 
       const detailView = () => {
         const p = current; if (!p) return null;
-        if (openTask) return taskDetailOverlay();
+        if (openTask && !wide) return taskDetailOverlay();   // mobile: no room for a drawer, full swap like before
         const spine = (
           <React.Fragment>
             <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '0 0 10px', fontFamily: C.fontSans }}>Milestones</div>
@@ -3299,6 +3299,7 @@ Rules:
                 </div>
               </div>
             ) : dtab === 'list' ? listTab(p) : dtab === 'board' ? boardTab(p) : timelineTab(p)}
+            {openTask && <TaskDrawer dark={dark} onClose={() => { setOpenTask(null); setTaskEditing(false); }}>{taskDetailOverlay()}</TaskDrawer>}
           </React.Fragment>
         ) : (
           <React.Fragment>
@@ -3538,6 +3539,27 @@ Rules:
             })}
           </div>
         </div>
+      );
+    }
+
+    // Task detail slide-over — a right-side drawer over a dimmed scrim, so the
+    // list underneath stays visible (and mounted) instead of being replaced.
+    // Desktop-only by design: on a narrow/mobile viewport there's no "list you'd
+    // lose" — the standalone page's existing full-screen push nav stays as-is
+    // there. Escape closes it, matching the rest of the app's overlay patterns.
+    function TaskDrawer({ dark, onClose, children }) {
+      useEffect(() => {
+        const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+      }, [onClose]);
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,13,38,0.32)', zIndex: 90 }} />
+          <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: 'min(560px, 94vw)', background: dark ? '#000D26' : '#FCFBF8', boxShadow: '-14px 0 44px rgba(0,13,38,.22)', zIndex: 91, display: 'flex', flexDirection: 'column' }}>
+            {children}
+          </div>
+        </React.Fragment>
       );
     }
 
@@ -4015,16 +4037,10 @@ Rules:
                   <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                     {surface !== 'my' ? (
                       <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} hideSidebar openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
-                    ) : view !== 'list' ? (
-                      <React.Fragment>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-                          <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
-                          <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink }}>{titleText}</span>
-                        </div>
-                        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>{detailPane}</div>
-                      </React.Fragment>
                     ) : (
                       <React.Fragment>
+                        {/* List/Kanban/Timeline always stays mounted and visible — opening a
+                            task no longer replaces it, it overlays a drawer on top (below). */}
                         <div style={{ padding: '14px 18px 0', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
                           <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, marginBottom: 11, flexWrap: 'wrap' }}>
                             <div>
@@ -4066,6 +4082,16 @@ Rules:
                               </React.Fragment>
                             )}
                         </div>
+                        {view !== 'list' && (
+                          <TaskDrawer dark={dark} onClose={back}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+                              <i className="ti ti-chevron-left" onClick={back} aria-label="Back" style={{ fontSize: 16, cursor: 'pointer', color: sub }} />
+                              <span style={{ fontFamily: C.fontSans, fontSize: 12.5, fontWeight: 600, letterSpacing: '0.03em', color: ink, flex: 1 }}>{titleText}</span>
+                              <i className="ti ti-x" onClick={back} aria-label="Close" style={{ fontSize: 15, cursor: 'pointer', color: sub, flexShrink: 0 }} />
+                            </div>
+                            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>{detailPane}</div>
+                          </TaskDrawer>
+                        )}
                       </React.Fragment>
                     )}
                   </div>

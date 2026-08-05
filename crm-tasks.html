@@ -1084,9 +1084,10 @@
     // Loading the open-tasks view alone takes ~20s of sequential Zoho calls (1,367
     // tasks) and the full-history view ~90s+ (22k+) — reloading the page shouldn't
     // pay that cost every time. Cache the fetched result per view (open vs. full
-    // history are cached separately) and reuse it while fresh; a background timer
-    // re-checks periodically so an open tab doesn't go stale forever either.
-    const TASK_CACHE_TTL_MS = 10 * 60 * 1000; // 10 min
+    // history are cached separately) and reuse it INDEFINITELY on load/reload — no
+    // auto-expiry, no background timer. Only the Refresh button (or making an edit)
+    // forces a real fetch; purely manual, by design (a fixed TTL was tried first —
+    // too short for how this is actually used).
     const taskCacheKey = (full) => 'tmg_crmtasks_cache_' + (full ? 'full' : 'open');
     function loadTaskCache(full) {
       try {
@@ -1102,12 +1103,15 @@
       catch (e) { /* quota or serialization failure — just skip caching this round */ }
     }
     function agoLabel(ms) {
+      // The cache has no expiry now, so this can realistically read in days.
       const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
       if (s < 60) return 'just now';
       const m = Math.round(s / 60);
       if (m < 60) return m + 'm ago';
       const h = Math.round(m / 60);
-      return h + 'h ago';
+      if (h < 24) return h + 'h ago';
+      const d = Math.round(h / 24);
+      return d + 'd ago';
     }
 
     // ─── Main app ──────────────────────────────────────────────────────
@@ -1130,12 +1134,13 @@
       const [drawer, setDrawer] = useState(null);    // { mode:'ai'|'create'|'edit', task? } | null
 
       async function load(force) {
-        // Serve from cache when it's fresh — reload/revisit shouldn't re-pay the
-        // ~20s (open) or ~90s+ (full history) fetch cost every time. Refresh button
-        // and the periodic timer below pass force=true to always hit Zoho for real.
+        // Serve from cache whenever one exists — reload/revisit shouldn't re-pay the
+        // ~20s (open) or ~90s+ (full history) fetch cost. No auto-expiry: only the
+        // Refresh button (or making an edit, elsewhere in this file) passes
+        // force=true to actually hit Zoho again — fully manual, on purpose.
         if (!force && !isDev()) {
           const cached = loadTaskCache(includeCompleted);
-          if (cached && Date.now() - cached.cachedAt < TASK_CACHE_TTL_MS) {
+          if (cached) {
             setTasks(cached.tasks); setColMap(cached.colMap); setExtraFields(cached.extraFields);
             setMeta(cached.meta); setCapped(!!cached.capped); setLastUpdated(cached.cachedAt);
             setErr(''); setNeedsDeploy(false);
@@ -1225,12 +1230,6 @@
         saveTaskCache(includeCompleted, { tasks: all, colMap: { type, trigger }, extraFields: extra, meta: resolvedMeta || meta, capped: isCapped });
       }
       useEffect(() => { load(); }, [includeCompleted]);
-      // Background refresh — keeps the cache warm even if the tab is just left open
-      // (not reloaded), so a revisit later is more likely to find fresh-enough data.
-      useEffect(() => {
-        const id = setInterval(() => load(true), TASK_CACHE_TTL_MS);
-        return () => clearInterval(id);
-      }, [includeCompleted]);
 
       // Write handlers — propose→confirm: a save/create is the user's explicit
       // confirm; delete uses a two-step confirm in the drawer. Dev simulates.

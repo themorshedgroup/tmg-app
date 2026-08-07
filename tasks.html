@@ -2966,21 +2966,24 @@ Rules:
       );
       const GROUP_OPTS = [['none', 'None'], ['status', 'Status'], ['group', 'Group'], ['owner', 'Owner']];
       const SORT_OPTS = [['target', 'Target date'], ['name', 'Name'], ['progress', 'Progress'], ['created', 'Recently added']];
+      // .btn.on ported: border-color gold-soft, color navy, background gold-pale
+      // — shown whenever the chip's selection differs from its default.
+      const chipOn = { borderColor: dark ? 'rgba(201,164,90,.4)' : '#C9A45A', color: ink, background: dark ? 'rgba(201,164,90,.14)' : '#F3EBDA' };
       const groupChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); }} style={chipStyle}>Group: {(GROUP_OPTS.find(([id]) => id === group) || [])[1]} <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); }} style={group !== 'none' ? { ...chipStyle, ...chipOn } : chipStyle}>Group: <span style={{ color: gold, fontWeight: 600 }}>{(GROUP_OPTS.find(([id]) => id === group) || [])[1]}</span> <i className="ti ti-chevron-down" style={{ fontSize: 9, color: sub }} /></div>
           {groupOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{GROUP_OPTS.map(([id, label]) => ddItem(label, group === id, () => { setGroup(id); setGroupOpen(false); }, id))}</div>}
         </div>
       );
       const sortChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); }} style={chipStyle}>Sort: {(SORT_OPTS.find(([id]) => id === sort) || [])[1]} <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); }} style={sort !== 'target' ? { ...chipStyle, ...chipOn } : chipStyle}>Sort: <span style={{ color: gold, fontWeight: 600 }}>{(SORT_OPTS.find(([id]) => id === sort) || [])[1]}</span> <i className="ti ti-chevron-down" style={{ fontSize: 9, color: sub }} /></div>
           {sortOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{SORT_OPTS.map(([id, label]) => ddItem(label, sort === id, () => { setSort(id); setSortOpen(false); }, id))}</div>}
         </div>
       );
       const searchChip = searchOpen
         ? <input autoFocus value={search} onChange={e => setSearch(e.target.value)} onBlur={() => { if (!search) setSearchOpen(false); }} placeholder="Search…" style={{ ...chipStyle, cursor: 'text', width: 130, textTransform: 'none', letterSpacing: 'normal', fontSize: '0.78rem', outline: 'none' }} />
-        : <div onClick={() => setSearchOpen(true)} style={{ ...chipStyle, padding: '5px 6px', color: gold }}><i className="ti ti-search" style={{ fontSize: 13 }} /></div>;
+        : <div onClick={() => setSearchOpen(true)} style={{ ...chipStyle, width: 34, height: 34, padding: 0, justifyContent: 'center' }}><i className="ti ti-search" style={{ fontSize: 13 }} /></div>;
       const newBtn = <button onClick={() => { setCurrent(null); setPview('form'); }} aria-label={'New ' + KL.article} style={{ display: 'flex', alignItems: 'center', gap: 6, background: C.navy, color: '#fff', border: 'none', borderRadius: 22, padding: '8px 16px', fontSize: 13, fontWeight: 500, letterSpacing: '0.02em', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />New</button>;
 
       const avatar = (id, sz) => { const s = sz || 16; return <span style={{ width: s, height: s, borderRadius: '50%', background: C.navy, color: '#fff', fontSize: s * 0.42, display: 'grid', placeItems: 'center', fontWeight: 600, flexShrink: 0 }}>{initialsOf(id)}</span>; };
@@ -3789,24 +3792,27 @@ Rules:
           {label}{active && '✓'}
         </div>
       );
+      // .btn.on ported: border-color gold-soft, color navy, background gold-pale
+      // — shown whenever the chip's selection differs from its default.
+      const chipOn = { borderColor: dark ? 'rgba(201,164,90,.4)' : '#C9A45A', color: ink, background: dark ? 'rgba(201,164,90,.14)' : '#F3EBDA' };
       const groupChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); setColsOpen(false); }} style={chipStyle}>Group: {(GROUP_OPTS.find(([id]) => id === sortBy) || [])[1]} <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          <div onClick={() => { setGroupOpen(o => !o); setSortOpen(false); setColsOpen(false); }} style={sortBy !== 'status' ? { ...chipStyle, ...chipOn } : chipStyle}>Group: <span style={{ color: gold, fontWeight: 600 }}>{(GROUP_OPTS.find(([id]) => id === sortBy) || [])[1]}</span> <i className="ti ti-chevron-down" style={{ fontSize: 9, color: sub }} /></div>
           {groupOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{GROUP_OPTS.map(([id, label]) => ddItem(label, sortBy === id, () => { setSortBy(id); setGroupOpen(false); }, id))}</div>}
         </div>
       );
       const sortChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); setColsOpen(false); }} style={chipStyle}>Sort: {(SORT_OPTS.find(([id]) => id === thenBy) || [])[1]} <i className="ti ti-chevron-down" style={{ fontSize: 9, color: gold }} /></div>
+          <div onClick={() => { setSortOpen(o => !o); setGroupOpen(false); setColsOpen(false); }} style={thenBy !== 'due' ? { ...chipStyle, ...chipOn } : chipStyle}>Sort: <span style={{ color: gold, fontWeight: 600 }}>{(SORT_OPTS.find(([id]) => id === thenBy) || [])[1]}</span> <i className="ti ti-chevron-down" style={{ fontSize: 9, color: sub }} /></div>
           {sortOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>{SORT_OPTS.map(([id, label]) => ddItem(label, thenBy === id, () => { setThenBy(id); setSortOpen(false); }, id))}</div>}
         </div>
       );
       const searchChip = searchOpen
         ? <input autoFocus value={search} onChange={e => setSearch(e.target.value)} onBlur={() => { if (!search) setSearchOpen(false); }} placeholder="Search tasks…" style={{ ...chipStyle, cursor: 'text', width: 130, textTransform: 'none', letterSpacing: 'normal', fontSize: '0.78rem', outline: 'none' }} />
-        : <div onClick={() => setSearchOpen(true)} style={{ ...chipStyle, padding: '5px 6px', color: gold }}><i className="ti ti-search" style={{ fontSize: 13 }} /></div>;
+        : <div onClick={() => setSearchOpen(true)} style={{ ...chipStyle, width: 34, height: 34, padding: 0, justifyContent: 'center' }}><i className="ti ti-search" style={{ fontSize: 13 }} /></div>;
       const colsChip = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setColsOpen(o => !o); setGroupOpen(false); setSortOpen(false); }} style={{ ...chipStyle, padding: '5px 6px', color: gold }} title="Choose columns"><i className="ti ti-adjustments-horizontal" style={{ fontSize: 13 }} /></div>
+          <div onClick={() => { setColsOpen(o => !o); setGroupOpen(false); setSortOpen(false); }} style={{ ...chipStyle, width: 34, height: 34, padding: 0, justifyContent: 'center' }} title="Choose columns"><i className="ti ti-adjustments-horizontal" style={{ fontSize: 13 }} /></div>
           {colsOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>
             <div style={{ fontSize: '0.58rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: sub, padding: '4px 9px 6px' }}>Columns</div>
             {ddItem('Task', true, () => {}, 'task')}
@@ -4135,7 +4141,7 @@ Rules:
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                               {groupChip}{sortChip}{searchChip}
-                              <div style={{ display: 'flex', border: `1px solid ${bord}`, borderRadius: 6, overflow: 'hidden' }}>
+                              <div style={{ display: 'flex', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, overflow: 'hidden' }}>
                                 <div onClick={() => setViewMode('list')} style={{ padding: '7px 13px', fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 400, cursor: 'pointer', background: viewMode === 'list' ? C.navy : 'transparent', color: viewMode === 'list' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-list" style={{ fontSize: 13 }} />List</div>
                                 <div onClick={() => setViewMode('kanban')} style={{ padding: '7px 13px', fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 400, cursor: 'pointer', background: viewMode === 'kanban' ? C.navy : 'transparent', color: viewMode === 'kanban' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-layout-kanban" style={{ fontSize: 13 }} />Board</div>
                                 <div onClick={() => setViewMode('timeline')} style={{ padding: '7px 13px', fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 400, cursor: 'pointer', background: viewMode === 'timeline' ? C.navy : 'transparent', color: viewMode === 'timeline' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-timeline" style={{ fontSize: 13 }} />Timeline</div>

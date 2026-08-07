@@ -2309,8 +2309,9 @@ Rules:
 
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
       const gold = dark ? '#C9A45A' : '#AD832F';
-      const lbl = { fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, margin: '0 0 5px', fontFamily: C.fontSans };
-      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      // Label/input values ported from the prototype's .field .fk / .field input.
+      const lbl = { fontSize: 11, color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, margin: '0 0 5px', fontFamily: C.fontSans };
+      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 14, outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
       const toggle = (arr, set, id) => set(arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]);
       const chips = (arr, set) => (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
@@ -2319,7 +2320,7 @@ Rules:
         </div>
       );
       const sel = (val, set, opts) => { const cur = opts.find(o => o.id === val) || {}; return <select value={val} onChange={e => set(e.target.value)} style={{ ...inp, ...(cur.bg ? { background: cur.bg, color: cur.color, fontWeight: 600 } : {}) }}>{opts.map(o => <option key={o.id} value={o.id} style={o.bg ? { background: o.bg, color: o.color, fontWeight: 600 } : undefined}>{o.label}</option>)}</select>; };
-      const field = (label, node) => <div style={{ marginBottom: 13 }}><div style={lbl}>{label}</div>{node}</div>;
+      const field = (label, node) => <div style={{ marginBottom: 16 }}><div style={lbl}>{label}</div>{node}</div>;
       const addLabel = () => { const v = labelInput.trim(); if (!v) return; setMyLabels(l => l.includes(v) ? l : [...l, v]); setLabelInput(''); };
       const removeLabel = (v) => setMyLabels(l => l.filter(x => x !== v));
       const addOpt = () => setDecisionOptions(o => [...o, { body: '', is_chosen: false }]);
@@ -2447,7 +2448,7 @@ Rules:
             </div>
           ))}
           {/* Details */}
-          {field('Description', <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder="Initial description (auto-filled when generated from AI mode later)" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
+          {field('Description', <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder="Initial description (auto-filled when generated from AI mode later)" style={{ ...inp, minHeight: 80, resize: 'vertical', lineHeight: 1.6 }} />)}
           {field('Context', <textarea value={context} onChange={e => setContext(e.target.value)} rows={2} placeholder="Ongoing updates / notes" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
           {field('Working URL', <input value={workingUrl} onChange={e => setWorkingUrl(e.target.value)} placeholder="https://…" style={inp} />)}
           {field('Email link', <input value={emailLink} onChange={e => setEmailLink(e.target.value)} placeholder="https://… (link to the email)" style={inp} />)}
@@ -2482,8 +2483,8 @@ Rules:
           </div>
           {/* Save / Cancel */}
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-            <button onClick={save} disabled={saving || !title.trim()} style={{ flex: 1, padding: 12, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !title.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (task ? 'Save changes' : 'Create task')}</button>
-            <button onClick={onCancel} style={{ flex: 1, padding: 12, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+            <button onClick={save} disabled={saving || !title.trim()} style={{ flex: 1, padding: '11px 16px', background: C.navy, color: '#fff', border: 'none', borderRadius: 22, fontSize: 13, fontWeight: 500, letterSpacing: '0.02em', cursor: 'pointer', fontFamily: C.fontSans, opacity: !title.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (task ? 'Save changes' : 'Create task')}</button>
+            <button onClick={onCancel} style={{ flex: 1, padding: '11px 16px', background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 22, fontSize: 13, cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
           </div>
         </div>
       );
@@ -2527,11 +2528,14 @@ Rules:
       const nameOf = id => (team.find(m => m.id === id) || {}).name || '—';
       const ppl = role => (people || []).filter(p => p.role === role).map(p => nameOf(p.user_id)).join(', ') || '—';
       const fmt = d => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
-      const row = (k, v) => <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '7px 0', borderBottom: `1px solid ${bord}` }}><span style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, flexShrink: 0 }}>{k}</span><span style={{ fontSize: '0.82rem', color: ink, fontWeight: 500, textAlign: 'right', fontFamily: C.fontSans }}>{v}</span></div>;
+      // Field-row/section-header/caption values ported from the prototype's
+      // .field/.field .fk/.pblock .bh — these constants propagate through
+      // every Details/Dependencies/Decision/Subtasks row below.
+      const row = (k, v) => <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', alignItems: 'center', gap: 8, padding: '11px 0', borderBottom: `1px solid ${bord}`, fontSize: 14 }}><span style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{k}</span><span style={{ color: ink, fontWeight: 500, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 7 }}>{v}</span></div>;
       const kindTag = { system: { t: 'CHANGE', c: '#6B6B6B' }, update: { t: 'UPDATE', c: '#2A6FD4' }, ai: { t: 'AI', c: '#AD832F' } };
-      const secHead = (icon, txt) => <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><i className={`ti ${icon}`} style={{ fontSize: 14, color: gold }} /><span style={{ fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>{txt}</span></div>;
-      const tinp = { padding: '8px 10px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
-      const cap = { fontSize: '0.6rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 4, fontFamily: C.fontSans };
+      const secHead = (icon, txt) => <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 10 }}><i className={`ti ${icon}`} style={{ fontSize: 14, color: gold }} /><span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>{txt}</span></div>;
+      const tinp = { padding: '8px 10px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const cap = { fontSize: 11, color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, marginBottom: 4, fontFamily: C.fontSans };
       const hasDecision = decisionOpts.length > 0 || !!task.decision_question || ppl('decision_maker') !== '—' || !!task.decision_due_at;
       async function addSub() { if (!subTitle.trim() || addingSub) return; setAddingSub(true); try { await TaskDB.createSubtask(task.id, subTitle.trim(), user); setSubTitle(''); setSubs(await TaskDB.loadSubtasks(task.id)); } finally { setAddingSub(false); } }
       // ── Dependencies
@@ -2590,17 +2594,23 @@ Rules:
         </div>
       );
       return (
-        <div style={{ padding: '14px 16px 40px' }}>
-          <div style={{ fontSize: '1.1rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, marginBottom: 6 }}>{task.title}</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-            <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: statusBg(task.status), color: statusColor(task.status), fontFamily: C.fontSans }}>{statusLabel(task.status)}</span>
-            <span style={{ fontSize: '0.66rem', fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: priorityColor(task.priority) + '22', color: priorityColor(task.priority), fontFamily: C.fontSans }}>{priorityLabel(task.priority)}</span>
-            <button onClick={onEdit} style={{ marginLeft: 'auto', fontSize: '0.74rem', fontWeight: 600, color: dark ? '#fff' : C.navy, background: 'none', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 12px', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>
+        <div style={{ padding: '22px 24px 60px' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+            <div style={{ flex: 1, fontSize: 22, fontWeight: 500, color: ink, fontFamily: C.fontSans, lineHeight: 1.3 }}>{task.title}</div>
+            <button onClick={onEdit} style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: sub, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}>Edit</button>
+          </div>
+          {/* Status segmented control — ported from the prototype's .status-seg */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 22 }}>
+            {TASK_STATUS.map(s => { const on = task.status === s.id; return (
+              <button key={s.id} onClick={async () => { await onStatus(s.id); setActivity(await TaskDB.loadActivity(task.id)); }} style={{ padding: '8px 4px', borderRadius: 6, border: `1px solid ${on ? s.border || s.color : bord}`, background: on ? (dark ? s.color + '26' : s.bg) : (dark ? '#0A1730' : '#fff'), color: on ? s.color : sub, fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, cursor: 'pointer', fontFamily: C.fontSans }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: on ? s.color : sub, flexShrink: 0 }} />{s.label}
+              </button>
+            ); })}
           </div>
           {/* Details | Thread tabs */}
           <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
             {[['details', 'Details'], ['thread', 'Thread']].map(([id, label]) => (
-              <button key={id} onClick={() => setDetTab(id)} style={{ flex: 1, padding: '7px 8px', borderRadius: 8, border: `1px solid ${detTab === id ? C.navy : bord}`, background: detTab === id ? C.navy : (dark ? '#0A1730' : '#fff'), color: detTab === id ? '#fff' : sub, fontSize: '0.74rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{label}{id === 'thread' && activity.length ? ' · ' + activity.length : ''}</button>
+              <button key={id} onClick={() => setDetTab(id)} style={{ flex: 1, padding: '7px 8px', borderRadius: 6, border: `1px solid ${detTab === id ? C.navy : bord}`, background: detTab === id ? C.navy : (dark ? '#0A1730' : '#fff'), color: detTab === id ? '#fff' : sub, fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{label}{id === 'thread' && activity.length ? ' · ' + activity.length : ''}</button>
             ))}
           </div>
 
@@ -2613,9 +2623,6 @@ Rules:
               ); })}
             </div>
           )}
-          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
-            {TASK_STATUS.map(s => { const on = task.status === s.id; return <button key={s.id} onClick={async () => { await onStatus(s.id); setActivity(await TaskDB.loadActivity(task.id)); }} style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${on ? s.color : bord}`, background: on ? s.bg : (dark ? '#06101F' : '#fff'), color: on ? s.color : sub, fontSize: '0.72rem', fontWeight: on ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans }}>{s.label}</button>; })}
-          </div>
           {row('Due', fmt(task.due_at))}
           {task.recurrence && task.recurrence !== 'none' ? row('Repeat', recurDesc(task)) : null}
           {row('Project', task._projectName || '—')}
@@ -2662,15 +2669,15 @@ Rules:
           <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${bord}` }}>
             {secHead('ti-subtask', subs.length ? 'Subtasks · ' + subs.length : 'Subtasks')}
             {subs.map(s => (
-              <div key={s.id} onClick={() => onOpenSubtask && onOpenSubtask(s)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 10px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 10, marginBottom: 6, cursor: 'pointer' }}>
+              <div key={s.id} onClick={() => onOpenSubtask && onOpenSubtask(s)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${bord}`, cursor: 'pointer' }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(s.priority) }} />
-                <span style={{ flex: 1, minWidth: 0, fontSize: '0.82rem', color: ink, fontWeight: 500, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: s.status === 'done' ? 'line-through' : 'none' }}>{s.title}</span>
-                <span style={{ fontSize: '0.58rem', fontWeight: 600, padding: '2px 7px', borderRadius: 12, background: statusBg(s.status), color: statusColor(s.status), fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(s.status)}</span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 14, color: s.status === 'done' ? sub : ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: s.status === 'done' ? 'line-through' : 'none' }}>{s.title}</span>
+                <span style={{ fontSize: 11, fontWeight: 500, padding: '3px 9px', borderRadius: 20, background: statusBg(s.status), color: statusColor(s.status), border: `1px solid ${statusColor(s.status)}55`, fontFamily: C.fontSans, flexShrink: 0 }}>{statusLabel(s.status)}</span>
               </div>
             ))}
-            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-              <input value={subTitle} onChange={e => setSubTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addSub(); }} placeholder="Add a subtask…" style={{ ...tinp, flex: 1 }} />
-              <button onClick={addSub} disabled={!subTitle.trim() || addingSub} style={{ padding: '8px 13px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !subTitle.trim() ? 0.5 : 1 }}>Add</button>
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <input value={subTitle} onChange={e => setSubTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addSub(); }} placeholder="Add a subtask…" style={{ ...tinp, flex: 1, padding: '9px 11px' }} />
+              <button onClick={addSub} disabled={!subTitle.trim() || addingSub} style={{ padding: '9px 13px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans, opacity: !subTitle.trim() ? 0.5 : 1 }}>Add</button>
             </div>
           </div>
           </React.Fragment>

@@ -2957,10 +2957,11 @@ Rules:
 
       // ── shared header chips (mirror the My Tasks chip system) ──
       const chipStyle = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 400, padding: '7px 12px', border: `1px solid ${bord}`, borderRadius: 6, background: card, color: sub, whiteSpace: 'nowrap', cursor: 'pointer', fontFamily: C.fontSans };
-      const ddStyle = { position: 'absolute', zIndex: 60, top: '100%', right: 0, background: card, border: `1px solid ${bord}`, borderRadius: 8, boxShadow: '0 12px 32px rgba(0,26,74,0.16)', padding: 6, minWidth: 168, marginTop: 4 };
+      const ddStyle = { position: 'absolute', zIndex: 60, top: '100%', right: 0, background: card, border: `1px solid ${bord}`, borderRadius: 8, boxShadow: '0 12px 32px rgba(0,26,74,0.16)', padding: 6, minWidth: 190, marginTop: 4 };
+      // .menu button ported: 8px/10px padding, 13.5px font, checkmark suffix
       const ddItem = (label, active, onClick, key) => (
-        <div key={key || label} onClick={onClick} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', fontSize: '0.78rem', color: active ? ink : sub, fontWeight: active ? 500 : 400, borderRadius: 5, background: active ? (dark ? 'rgba(255,255,255,0.06)' : '#F7F4EE') : 'none', cursor: 'pointer', fontFamily: C.fontSans }}>
-          <i className="ti ti-check" style={{ fontSize: 12, color: gold, visibility: active ? 'visible' : 'hidden', flexShrink: 0 }} />{label}
+        <div key={key || label} onClick={onClick} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '8px 10px', fontSize: 13.5, color: active ? gold : ink, fontWeight: active ? 500 : 400, borderRadius: 5, cursor: 'pointer', fontFamily: C.fontSans }}>
+          {label}{active && '✓'}
         </div>
       );
       const GROUP_OPTS = [['none', 'None'], ['status', 'Status'], ['group', 'Group'], ['owner', 'Owner']];
@@ -2983,7 +2984,8 @@ Rules:
       const newBtn = <button onClick={() => { setCurrent(null); setPview('form'); }} aria-label={'New ' + KL.article} style={{ display: 'flex', alignItems: 'center', gap: 6, background: C.navy, color: '#fff', border: 'none', borderRadius: 22, padding: '8px 16px', fontSize: 13, fontWeight: 500, letterSpacing: '0.02em', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />New</button>;
 
       const avatar = (id, sz) => { const s = sz || 16; return <span style={{ width: s, height: s, borderRadius: '50%', background: C.navy, color: '#fff', fontSize: s * 0.42, display: 'grid', placeItems: 'center', fontWeight: 600, flexShrink: 0 }}>{initialsOf(id)}</span>; };
-      const statusBadge = (s) => { const m = projStatusMeta(s); return <span style={{ fontSize: '0.58rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: 3, background: dark ? m.bgD : m.bg, color: m.color, fontFamily: C.fontSans }}>{m.label}</span>; };
+      // Matches the prototype's .pill/.stat treatment (e.g. container header's <span class="pill st-done" style="font-size:11px">)
+      const statusBadge = (s) => { const m = projStatusMeta(s); return <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '3px 9px', borderRadius: 20, border: `1px solid ${m.color}55`, background: dark ? m.bgD : m.bg, color: m.color, fontFamily: C.fontSans }}>{m.label}</span>; };
 
       // ── filtering / grouping / sorting ──
       const filtered = search.trim() ? rows.filter(p => (p.name || '').toLowerCase().includes(search.trim().toLowerCase())) : rows;
@@ -3034,42 +3036,43 @@ Rules:
         <div key={p.id} onClick={() => { setCurrent(p); setPview('detail'); setAddTask(''); setAddMs(''); }} style={{ background: card, border: `1px solid ${bord}`, borderRadius: 6, padding: 14, marginBottom: 11, cursor: 'pointer' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 }}>
             {statusBadge(p.status)}
-            {p.group_tag && <span style={{ fontSize: '0.58rem', letterSpacing: '0.1em', color: sub, fontWeight: 500, textTransform: 'uppercase', fontFamily: C.fontSans }}>{p.group_tag}</span>}
+            {p.group_tag && <span style={{ fontSize: 11, letterSpacing: '0.14em', color: sub, fontWeight: 500, textTransform: 'uppercase', fontFamily: C.fontSans }}>{p.group_tag}</span>}
           </div>
-          <div style={{ fontSize: '0.95rem', fontWeight: 600, color: ink, lineHeight: 1.3, marginBottom: p.outcome ? 5 : 10, fontFamily: C.fontSans }}>{p.name}</div>
-          {p.outcome && <div style={{ fontSize: '0.75rem', color: sub, fontWeight: 300, lineHeight: 1.5, marginBottom: 12, fontFamily: C.fontSans }}>{p.outcome}</div>}
+          <div style={{ fontSize: 16, fontWeight: 500, color: ink, lineHeight: 1.3, marginBottom: p.outcome ? 5 : 10, fontFamily: C.fontSans }}>{p.name}</div>
+          {p.outcome && <div style={{ fontSize: 12, color: sub, fontWeight: 300, lineHeight: 1.5, marginBottom: 12, fontFamily: C.fontSans }}>{p.outcome}</div>}
           {p._milestones.slice(0, 4).map(m => { const st = msState(p, m); return (
-            <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '6px 0', fontSize: '0.78rem', color: st === 'next' ? ink : sub, fontWeight: st === 'next' ? 500 : 300, fontFamily: C.fontSans }}>
+            <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '6px 0', fontSize: 12, color: st === 'next' ? ink : sub, fontWeight: st === 'next' ? 400 : 300, fontFamily: C.fontSans }}>
               <span style={mDot(st)} />
-              <span style={{ flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: st === 'done' ? 'none' : 'none' }}>{m.title}</span>
-              <span style={{ fontSize: '0.68rem', color: st === 'done' ? teal : (st === 'next' ? ink : sub) }}>{m.status === 'done' ? 'Done' : fmtD(m.due_at)}</span>
+              <span style={{ flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.title}</span>
+              <span style={{ fontSize: 10, color: st === 'done' ? teal : (st === 'next' ? ink : sub) }}>{m.status === 'done' ? 'Done' : fmtD(m.due_at)}</span>
             </div>
           ); })}
-          <div style={{ height: 2, background: dark ? 'rgba(255,255,255,.09)' : '#EDE7DC', margin: '12px 0 10px', overflow: 'hidden' }}><div style={{ height: '100%', width: p._progress + '%', background: projStatusMeta(p.status).color }} /></div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '0.7rem', color: sub, fontFamily: C.fontSans }}>
+          <div style={{ height: 8, background: bord, borderRadius: 20, margin: '12px 0 10px', overflow: 'hidden' }}><div style={{ height: '100%', width: p._progress + '%', background: `linear-gradient(90deg, ${dark ? '#C9A45A' : '#C9A45A'}, ${dark ? '#AD832F' : '#AD832F'})`, borderRadius: 20 }} /></div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 10.5, color: sub, fontFamily: C.fontSans }}>
             <span>{p._doneMs} of {p._totalMs} milestones</span>
             {p.owner_id ? avatar(p.owner_id, 18) : null}
           </div>
         </div>
       );
 
-      // ── desktop project row ──
+      // ── desktop project row — padding/border ported from the prototype's
+      // shared .row (viewAllProjects() reuses the exact same task-list row class) ──
       const projRow = (p) => (
-        <div key={p.id} onClick={() => { setCurrent(p); setPview('detail'); setAddTask(''); setAddMs(''); }} style={{ display: 'flex', alignItems: 'center', padding: '10px 18px', borderBottom: `1px solid ${bord}`, gap: 12, cursor: 'pointer' }}>
+        <div key={p.id} onClick={() => { setCurrent(p); setPview('detail'); setAddTask(''); setAddMs(''); }} style={{ display: 'flex', alignItems: 'center', padding: '11px 12px', borderBottom: `1px solid ${bord}`, gap: 12, cursor: 'pointer' }}>
           <div style={{ width: 250, flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem', fontWeight: 500, color: ink, fontFamily: C.fontSans }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: projStatusMeta(p.status).color, flexShrink: 0 }} /><span style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</span></div>
-            {p.outcome && <div style={{ fontSize: '0.7rem', color: sub, fontWeight: 300, marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: C.fontSans }}>{p.outcome}</div>}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 500, color: ink, fontFamily: C.fontSans }}><span style={{ width: 7, height: 7, borderRadius: '50%', background: projStatusMeta(p.status).color, flexShrink: 0 }} /><span style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</span></div>
+            {p.outcome && <div style={{ fontSize: 11, color: sub, fontWeight: 300, marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: C.fontSans }}>{p.outcome}</div>}
           </div>
-          <div style={{ flex: 1, minWidth: 0, fontSize: '0.76rem', color: ink, fontFamily: C.fontSans }}>
-            <div style={{ fontSize: '0.56rem', letterSpacing: '0.12em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 3 }}>{projStatusMeta(p.status).label}</div>
+          <div style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: ink, fontFamily: C.fontSans }}>
+            <div style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 3 }}>{projStatusMeta(p.status).label}</div>
             <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>{p._nextMs ? p._nextMs.title + (p._nextMs.due_at ? ' · ' + fmtD(p._nextMs.due_at) : '') : '—'}</span>
           </div>
-          <div style={{ width: 132, flexShrink: 0 }}>
-            <div style={{ height: 2, background: dark ? 'rgba(255,255,255,.09)' : '#EDE7DC', marginBottom: 6, overflow: 'hidden' }}><div style={{ height: '100%', width: p._progress + '%', background: projStatusMeta(p.status).color }} /></div>
-            <div style={{ fontSize: '0.66rem', color: sub, fontFamily: C.fontSans }}>{p._doneMs} of {p._totalMs} milestones</div>
+          <div style={{ width: 150, flexShrink: 0 }}>
+            <div style={{ height: 8, background: bord, borderRadius: 20, marginBottom: 6, overflow: 'hidden' }}><div style={{ height: '100%', width: p._progress + '%', background: `linear-gradient(90deg, #C9A45A, #AD832F)`, borderRadius: 20 }} /></div>
+            <div style={{ fontSize: 10, color: sub, fontFamily: C.fontSans }}>{p._doneMs} of {p._totalMs} milestones</div>
           </div>
-          <div style={{ width: 96, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.72rem', color: sub, fontFamily: C.fontSans }}>{p.owner_id ? <React.Fragment>{avatar(p.owner_id, 16)}{nameOf(p.owner_id).split(' ')[0]}</React.Fragment> : '—'}</div>
-          <div style={{ width: 76, flexShrink: 0, textAlign: 'right', fontSize: '0.72rem', color: isOverdue(p.target_date) ? lateColor : sub, fontWeight: isOverdue(p.target_date) ? 600 : 400, fontFamily: C.fontSans }}>{fmtD(p.target_date)}</div>
+          <div style={{ width: 110, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 10.5, color: sub, fontFamily: C.fontSans }}>{p.owner_id ? <React.Fragment>{avatar(p.owner_id, 16)}{nameOf(p.owner_id).split(' ')[0]}</React.Fragment> : '—'}</div>
+          <div style={{ width: 96, flexShrink: 0, textAlign: 'right', fontSize: 10.5, color: isOverdue(p.target_date) ? lateColor : sub, fontWeight: isOverdue(p.target_date) ? 500 : 400, fontFamily: C.fontSans }}>{fmtD(p.target_date)}</div>
         </div>
       );
 
@@ -3182,20 +3185,21 @@ Rules:
           <span style={{ width: 60, textAlign: 'right', fontSize: '0.68rem', color: isOverdue(t.due_at) && t.status !== 'done' ? lateColor : sub, fontWeight: isOverdue(t.due_at) && t.status !== 'done' ? 600 : 400, flexShrink: 0, fontFamily: C.fontSans }}>{fmtD(t.due_at)}</span>
         </div>
       );
+      // Matches the prototype's .quickadd (padding 10px 12px, 6px radius).
       const addInputs = (
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', gap: 8 }}>
-            <input value={addMs} onChange={e => setAddMs(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { quickAdd(addMs, true); setAddMs(''); } }} placeholder="Add a milestone…" style={{ flex: 1, padding: '8px 10px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.8rem', outline: 'none', fontFamily: C.fontSans }} />
-            <button onClick={() => { quickAdd(addMs, true); setAddMs(''); }} disabled={!addMs.trim()} style={{ padding: '8px 12px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, color: gold, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: addMs.trim() ? 1 : 0.5, display: 'flex', alignItems: 'center', gap: 5 }}><i className="ti ti-flag-3" style={{ fontSize: 12 }} />Milestone</button>
+            <input value={addMs} onChange={e => setAddMs(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { quickAdd(addMs, true); setAddMs(''); } }} placeholder="Add a milestone…" style={{ flex: 1, padding: '10px 12px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 14, outline: 'none', fontFamily: C.fontSans }} />
+            <button onClick={() => { quickAdd(addMs, true); setAddMs(''); }} disabled={!addMs.trim()} style={{ padding: '8px 12px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, color: gold, fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans, opacity: addMs.trim() ? 1 : 0.5, display: 'flex', alignItems: 'center', gap: 5 }}><i className="ti ti-flag-3" style={{ fontSize: 12 }} />Milestone</button>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <input value={addTask} onChange={e => setAddTask(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { quickAdd(addTask, false); setAddTask(''); } }} placeholder="Add a task…" style={{ flex: 1, padding: '8px 10px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.8rem', outline: 'none', fontFamily: C.fontSans }} />
-            <button onClick={() => { quickAdd(addTask, false); setAddTask(''); }} disabled={!addTask.trim()} style={{ padding: '8px 13px', background: C.navy, color: '#fff', border: 'none', borderRadius: 9, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: addTask.trim() ? 1 : 0.5 }}>Add task</button>
+            <input value={addTask} onChange={e => setAddTask(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { quickAdd(addTask, false); setAddTask(''); } }} placeholder="Add a task…" style={{ flex: 1, padding: '10px 12px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 14, outline: 'none', fontFamily: C.fontSans }} />
+            <button onClick={() => { quickAdd(addTask, false); setAddTask(''); }} disabled={!addTask.trim()} style={{ padding: '8px 13px', background: C.navy, color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans, opacity: addTask.trim() ? 1 : 0.5 }}>Add task</button>
           </div>
         </div>
       );
       const detailFields = (p) => {
-        const fld = (k, v) => <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${bord}`, fontSize: '0.72rem', fontFamily: C.fontSans }}><span style={{ color: sub, letterSpacing: '0.05em', textTransform: 'uppercase', fontSize: '0.6rem', fontWeight: 600 }}>{k}</span><span style={{ color: ink, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>{v}</span></div>;
+        const fld = (k, v) => <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: `1px solid ${bord}`, fontSize: 13.5, fontFamily: C.fontSans, gap: 10 }}><span style={{ color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontSize: 11, flexShrink: 0 }}>{k}</span><span style={{ color: ink, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 7, textAlign: 'right' }}>{v}</span></div>;
         return (
           <React.Fragment>
             {fld('Owner', p.owner_id ? <React.Fragment>{avatar(p.owner_id, 16)}{nameOf(p.owner_id)}</React.Fragment> : '—')}
@@ -3229,10 +3233,11 @@ Rules:
         </React.Fragment>
       );
 
+      // Matches the prototype's .vtabs/.vtab exactly.
       const dtabBar = (
-        <div style={{ display: 'flex', gap: 4, padding: wide ? '0 20px' : '0 14px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 2, padding: wide ? '16px 34px 0' : '0 14px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
           {[['overview', 'Overview'], ['list', 'List'], ['board', 'Board'], ['timeline', 'Timeline']].map(([id, label]) => (
-            <div key={id} onClick={() => setDtab(id)} style={{ padding: '9px 12px', fontSize: '0.76rem', color: dtab === id ? ink : sub, fontWeight: dtab === id ? 600 : 400, borderBottom: `2px solid ${dtab === id ? gold : 'transparent'}`, cursor: 'pointer', fontFamily: C.fontSans, marginBottom: -1 }}>{label}</div>
+            <div key={id} onClick={() => setDtab(id)} style={{ padding: '10px 16px', fontSize: 13, color: dtab === id ? ink : sub, fontWeight: dtab === id ? 500 : 400, borderBottom: `2px solid ${dtab === id ? gold : 'transparent'}`, cursor: 'pointer', fontFamily: C.fontSans, marginBottom: -1 }}>{label}</div>
           ))}
         </div>
       );
@@ -3262,39 +3267,39 @@ Rules:
         if (openTask && !wide) return taskDetailOverlay();   // mobile: no room for a drawer, full swap like before
         const spine = (
           <React.Fragment>
-            <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '0 0 10px', fontFamily: C.fontSans }}>Milestones</div>
+            <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '22px 0 8px' }}>Milestones</div>
             {p._milestones.length === 0 && <div style={{ fontSize: '0.76rem', color: sub, fontFamily: C.fontSans, marginBottom: 6 }}>No milestones yet. Add one below, or flag any task as a milestone.</div>}
             <div style={{ paddingLeft: 2 }}>{p._milestones.map((m, i) => spineItem(p, m, i === p._milestones.length - 1))}</div>
           </React.Fragment>
         );
         const tasksBlock = (
           <React.Fragment>
-            <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '18px 0 6px', fontFamily: C.fontSans }}>Open tasks · {p._openTasks.length}</div>
+            <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '22px 0 8px' }}>Open tasks · {p._openTasks.length}</div>
             {p._openTasks.length === 0 ? <div style={{ fontSize: '0.76rem', color: sub, fontFamily: C.fontSans }}>No open tasks.</div> : <div style={{ borderTop: `1px solid ${bord}` }}>{p._openTasks.map(detailTaskRow)}</div>}
             {addInputs}
           </React.Fragment>
         );
         const header = (
-          <div style={{ padding: wide ? '14px 20px 11px' : '12px 14px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: '0.62rem', letterSpacing: '0.12em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 8, fontFamily: C.fontSans, cursor: 'pointer' }} onClick={() => { setPview('list'); setCurrent(null); }}>
+          <div style={{ padding: wide ? '26px 34px 0' : '12px 14px', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 500, marginBottom: 10, fontFamily: C.fontSans, cursor: 'pointer' }} onClick={() => { setPview('list'); setCurrent(null); }}>
               <i className="ti ti-chevron-left" style={{ fontSize: 14, color: gold }} />{KL.plural}
             </div>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: wide ? '1.25rem' : '1.05rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, lineHeight: 1.2 }}>{p.name}</span>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: wide ? 27 : '1.05rem', fontWeight: wide ? 500 : 600, color: ink, fontFamily: C.fontSans, lineHeight: 1.2 }}>{p.name}</span>
                 {statusBadge(p.status)}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={() => setPview('form')} style={{ fontSize: '0.72rem', letterSpacing: '0.05em', padding: '6px 12px', borderRadius: 6, fontWeight: 500, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>
+                <button onClick={() => setPview('form')} style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '7px 12px', borderRadius: 6, fontWeight: 400, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>
               </div>
             </div>
+            {p.outcome && <div style={{ fontSize: 13.5, color: sub, marginBottom: 6, fontFamily: C.fontSans }}>{p.outcome}</div>}
           </div>
         );
         const mainCol = (
-          <div style={{ padding: wide ? '18px 22px' : '14px', flex: 1, minWidth: 0 }}>
-            {p.outcome && <div style={{ fontSize: '0.82rem', color: sub, fontWeight: 300, lineHeight: 1.55, maxWidth: 560, marginBottom: 14, fontFamily: C.fontSans }}>{p.outcome}</div>}
-            <div style={{ height: 2, background: dark ? 'rgba(255,255,255,.09)' : '#EDE7DC', maxWidth: 560, marginBottom: 6, overflow: 'hidden' }}><div style={{ height: '100%', width: p._progress + '%', background: projStatusMeta(p.status).color }} /></div>
-            <div style={{ fontSize: '0.62rem', letterSpacing: '0.08em', color: sub, marginBottom: 18, fontFamily: C.fontSans }}>{p._doneMs} OF {p._totalMs} MILESTONES · {p._progress}%</div>
+          <div style={{ padding: wide ? '18px 34px' : '14px', flex: 1, minWidth: 0 }}>
+            <div style={{ height: 8, background: bord, borderRadius: 20, maxWidth: 560, marginBottom: 8, overflow: 'hidden' }}><div style={{ height: '100%', width: p._progress + '%', background: `linear-gradient(90deg, #C9A45A, #AD832F)`, borderRadius: 20 }} /></div>
+            <div style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', color: sub, marginBottom: 18, fontFamily: C.fontSans }}>{p._doneMs} of {p._totalMs} milestones · {p._progress}% done</div>
             {spine}
             {tasksBlock}
           </div>
@@ -3307,7 +3312,7 @@ Rules:
               <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
                 <div style={{ flex: 1, minWidth: 0, overflowY: 'auto' }}>{mainCol}</div>
                 <div style={{ width: 260, flexShrink: 0, borderLeft: `1px solid ${bord}`, padding: '16px 18px', overflowY: 'auto' }}>
-                  <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 6, fontFamily: C.fontSans }}>Details</div>
+                  <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, marginBottom: 6, fontFamily: C.fontSans }}>Details</div>
                   {detailFields(p)}
                 </div>
               </div>
@@ -3322,7 +3327,7 @@ Rules:
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
                 {mainCol}
                 <div style={{ padding: '0 14px 24px' }}>
-                  <div style={{ fontSize: '0.6rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '8px 0 6px', fontFamily: C.fontSans }}>Details</div>
+                  <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '8px 0 6px', fontFamily: C.fontSans }}>Details</div>
                   {detailFields(p)}
                 </div>
               </div>
@@ -3336,17 +3341,17 @@ Rules:
 
       // ── list header ──
       const listHeader = (
-        <div style={{ padding: wide ? '14px 18px 0' : '12px 14px 0', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, marginBottom: 11, flexWrap: 'wrap' }}>
-            {titleNode ? titleNode(wide ? 17 : 15) : <span style={{ fontSize: wide ? 17 : 15, fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{KL.plural}</span>}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>{groupChip}{sortChip}{searchChip}{newBtn}</div>
+        <div style={{ padding: wide ? '26px 34px 0' : '12px 14px 0', flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: wide ? 'flex-start' : 'flex-end', justifyContent: 'space-between', gap: 16, marginBottom: 6, flexWrap: 'wrap' }}>
+            {titleNode ? titleNode(wide ? undefined : 15) : <span style={{ fontSize: wide ? 27 : 15, fontWeight: wide ? 500 : 600, color: ink, fontFamily: C.fontSans }}>{KL.plural}</span>}
+            <div style={{ display: 'flex', alignItems: 'center', gap: wide ? 8 : 5, flexWrap: 'wrap' }}>{groupChip}{sortChip}{searchChip}{newBtn}</div>
           </div>
         </div>
       );
       // Desktop column header — distinct per surface: CTC is property/deadline/
       // rail/agent/attention, Projects is name+outcome/next milestone/progress/owner/target.
       const theadRow = (
-        <div style={{ display: 'flex', alignItems: 'center', padding: '8px 18px', fontSize: '0.56rem', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600, color: sub, borderBottom: `1px solid ${bord}`, gap: 12, fontFamily: C.fontSans }}>
+        <div style={{ display: 'flex', alignItems: 'center', padding: '0 34px 8px', fontSize: 10.5, letterSpacing: '0.14em', textTransform: 'uppercase', fontWeight: 500, color: sub, borderBottom: `1px solid ${bord}`, gap: 12, fontFamily: C.fontSans }}>
           {isCtc ? (
             <React.Fragment>
               <span style={{ width: 224, flexShrink: 0 }}>Property</span>
@@ -3359,9 +3364,9 @@ Rules:
             <React.Fragment>
               <span style={{ width: 250, flexShrink: 0 }}>{KL.singular} &amp; outcome</span>
               <span style={{ flex: 1 }}>Next milestone</span>
-              <span style={{ width: 132, flexShrink: 0 }}>Progress</span>
-              <span style={{ width: 96, flexShrink: 0 }}>Owner</span>
-              <span style={{ width: 76, flexShrink: 0, textAlign: 'right' }}>Target</span>
+              <span style={{ width: 150, flexShrink: 0 }}>Progress</span>
+              <span style={{ width: 110, flexShrink: 0 }}>Owner</span>
+              <span style={{ width: 96, flexShrink: 0, textAlign: 'right' }}>Target</span>
             </React.Fragment>
           )}
         </div>
@@ -3390,7 +3395,7 @@ Rules:
               <React.Fragment>
                 {listHeader}
                 {theadRow}
-                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 18px 24px' }}>{listBody(wideRowFn, true)}</div>
+                <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 34px 24px' }}>{listBody(wideRowFn, true)}</div>
               </React.Fragment>
             ) : (
               <React.Fragment>
@@ -3415,9 +3420,9 @@ Rules:
       const [saving, setSaving] = useState(false);
       const KL = kindLabel(kind);
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
-      const lbl = { fontSize: '0.62rem', color: sub, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 600, margin: '0 0 5px', fontFamily: C.fontSans };
-      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.86rem', outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
-      const field = (label, node) => <div style={{ marginBottom: 13 }}><div style={lbl}>{label}</div>{node}</div>;
+      const lbl = { fontSize: 11, color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, margin: '0 0 5px', fontFamily: C.fontSans };
+      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 14, outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
+      const field = (label, node) => <div style={{ marginBottom: 16 }}><div style={lbl}>{label}</div>{node}</div>;
 
       async function save() {
         if (!name.trim() || saving) return;
@@ -3450,8 +3455,8 @@ Rules:
               <div style={{ flex: 1 }}>{field('Target', <input type="date" value={targetDate || ''} onChange={e => setTargetDate(e.target.value)} style={inp} />)}</div>
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-              <button onClick={save} disabled={saving || !name.trim()} style={{ flex: 1, padding: 12, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.9rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: !name.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (p.id ? 'Save changes' : ('Create ' + KL.article))}</button>
-              <button onClick={onCancel} style={{ flex: 1, padding: 12, background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 12, fontSize: '0.9rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+              <button onClick={save} disabled={saving || !name.trim()} style={{ flex: 1, padding: '11px 16px', background: C.navy, color: '#fff', border: 'none', borderRadius: 22, fontSize: 13, fontWeight: 500, letterSpacing: '0.02em', cursor: 'pointer', fontFamily: C.fontSans, opacity: !name.trim() ? 0.5 : 1 }}>{saving ? 'Saving…' : (p.id ? 'Save changes' : ('Create ' + KL.article))}</button>
+              <button onClick={onCancel} style={{ flex: 1, padding: '11px 16px', background: 'none', color: sub, border: `1px solid ${bord}`, borderRadius: 22, fontSize: 13, cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
             </div>
             {p.id && <button onClick={async () => { if (!window.confirm('Archive this ' + KL.article + '? It will be hidden from the list.')) return; await ProjectDB.archive(p.id); onArchived(); }} style={{ width: '100%', marginTop: 8, padding: '9px', background: 'none', color: '#C0392B', border: `1px solid #C0392B55`, borderRadius: 8, fontSize: '0.82rem', cursor: 'pointer', fontFamily: C.fontSans }}><i className="ti ti-archive" style={{ marginRight: 6, fontSize: 13 }} />Archive {KL.article}</button>}
           </div>
@@ -3468,7 +3473,7 @@ Rules:
       const [dragId, setDragId] = useState(null);
       const [overCol, setOverCol] = useState(null);
       return (
-        <div style={{ display: 'flex', gap: 12, padding: '14px 18px', overflowX: 'auto', flex: 1, minHeight: 0 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))', gap: 14, padding: '18px 34px', overflowX: 'auto', flex: 1, minHeight: 0, alignContent: 'start' }}>
           {TASK_STATUS.map(col => {
             const colItems = items.filter(t => t.status === col.id);
             return (
@@ -3476,23 +3481,23 @@ Rules:
                 onDragOver={(e) => { e.preventDefault(); setOverCol(col.id); }}
                 onDragLeave={() => setOverCol(o => o === col.id ? null : o)}
                 onDrop={(e) => { e.preventDefault(); setOverCol(null); if (dragId != null && onDrop) onDrop(dragId, col.id); setDragId(null); }}
-                style={{ width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column', background: overCol === col.id ? (dark ? 'rgba(201,164,90,.08)' : '#FAF4E8') : 'transparent', borderRadius: 8, transition: 'background .12s', padding: 2 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 4px', marginBottom: 8 }}>
-                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: col.color, flexShrink: 0 }} />
-                  <span style={{ fontSize: '0.7rem', fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{col.label}</span>
-                  <span style={{ fontSize: '0.66rem', color: sub, marginLeft: 'auto' }}>{colItems.length}</span>
+                style={{ background: overCol === col.id ? (dark ? 'rgba(201,164,90,.1)' : '#F3EBDA') : (dark ? 'rgba(255,255,255,.03)' : 'rgba(255,255,255,.55)'), border: `1px solid ${overCol === col.id ? 'rgba(201,164,90,.5)' : bord}`, borderRadius: 8, padding: 10, minHeight: 200, transition: 'background .12s' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px 12px' }}>
+                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: col.color, flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{col.label}</span>
+                  <span style={{ fontSize: 11, color: sub, marginLeft: 'auto' }}>{colItems.length}</span>
                 </div>
                 {colItems.map(t => (
                   <div key={t.id} draggable onDragStart={(e) => { setDragId(t.id); e.dataTransfer.effectAllowed = 'move'; }} onDragEnd={() => setDragId(null)}
                     onClick={() => onOpen(t)} onContextMenu={(e) => onContextMenu && onContextMenu(e, t)}
-                    style={{ background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '9px 10px', marginBottom: 8, cursor: 'grab', opacity: dragId === t.id ? 0.4 : 1 }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-                      <div style={{ flex: 1, minWidth: 0, fontSize: '0.78rem', color: ink, fontFamily: C.fontSans, lineHeight: 1.35 }}>{t.title}</div>
+                    style={{ background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '11px 12px', marginBottom: 9, boxShadow: '0 1px 2px rgba(0,13,38,.06)', cursor: 'grab', opacity: dragId === t.id ? 0.4 : 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 9 }}>
+                      <div style={{ flex: 1, minWidth: 0, fontSize: 14, color: ink, fontFamily: C.fontSans, lineHeight: 1.35 }}>{t.title}</div>
                       {t.is_milestone && <i className="ti ti-flag-3-filled" style={{ fontSize: 12, color: gold, flexShrink: 0 }} />}
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-                      {showSource && t._projectName && <span style={{ fontSize: '0.6rem', fontWeight: 500, padding: '2.5px 7px', borderRadius: 4, background: dark ? 'rgba(173,131,47,.14)' : '#FAF4E8', border: `1px solid ${dark ? 'rgba(173,131,47,.3)' : '#E7D8B4'}`, color: dark ? '#C9A45A' : '#8C6A24', fontFamily: C.fontSans, whiteSpace: 'nowrap' }}>▲ {t._projectName}</span>}
-                      {t.due_at && <span style={{ fontSize: '0.62rem', color: sub }}>{new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
+                      {showSource && t._projectName ? <span style={{ fontSize: 11, color: sub, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t._projectName}</span> : <span />}
+                      {t.due_at && <span style={{ fontSize: 12, color: sub }}>{new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
                     </div>
                   </div>
                 ))}
@@ -3660,8 +3665,8 @@ Rules:
         await reload();
       }
       const quickAddRow = (
-        <div style={{ display: 'flex', gap: 8, padding: '10px 18px' }}>
-          <input value={quickAddVal} onChange={e => setQuickAddVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') quickAddMyTask(); }} placeholder="＋ Add a task and press Enter…" style={{ flex: 1, padding: '9px 11px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 9, color: ink, fontSize: '0.82rem', outline: 'none', fontFamily: C.fontSans }} />
+        <div style={{ display: 'flex', gap: 8, padding: '12px 0 0' }}>
+          <input value={quickAddVal} onChange={e => setQuickAddVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') quickAddMyTask(); }} placeholder="＋ Add a task and press Enter…" style={{ flex: 1, padding: '10px 12px', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 14, outline: 'none', fontFamily: C.fontSans }} />
         </div>
       );
       const back = () => { if (view === 'form') setView(current ? 'detail' : 'list'); else { setView('list'); setCurrent(null); } };
@@ -3778,10 +3783,10 @@ Rules:
       const filteredTasks = search.trim() ? data.tasks.filter(t => (t.title || '').toLowerCase().includes(search.trim().toLowerCase())) : data.tasks;
 
       const chipStyle = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 400, padding: '7px 12px', border: `1px solid ${bord}`, borderRadius: 6, background: dark ? '#0A1730' : '#fff', color: sub, whiteSpace: 'nowrap', cursor: 'pointer', fontFamily: C.fontSans };
-      const ddStyle = { position: 'absolute', zIndex: 60, top: '100%', right: 0, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, boxShadow: '0 12px 32px rgba(0,26,74,0.16)', padding: 6, minWidth: 168, marginTop: 4 };
+      const ddStyle = { position: 'absolute', zIndex: 60, top: '100%', right: 0, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, boxShadow: '0 12px 32px rgba(0,26,74,0.16)', padding: 6, minWidth: 190, marginTop: 4 };
       const ddItem = (label, active, onClick, key) => (
-        <div key={key || label} onClick={onClick} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px', fontSize: '0.78rem', color: active ? ink : sub, fontWeight: active ? 500 : 400, borderRadius: 5, background: active ? (dark ? 'rgba(255,255,255,0.06)' : '#F7F4EE') : 'none', cursor: 'pointer', fontFamily: C.fontSans }}>
-          <i className="ti ti-check" style={{ fontSize: 12, color: gold, visibility: active ? 'visible' : 'hidden', flexShrink: 0 }} />{label}
+        <div key={key || label} onClick={onClick} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '8px 10px', fontSize: 13.5, color: active ? gold : ink, fontWeight: active ? 500 : 400, borderRadius: 5, cursor: 'pointer', fontFamily: C.fontSans }}>
+          {label}{active && '✓'}
         </div>
       );
       const groupChip = (

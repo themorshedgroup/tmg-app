@@ -6518,25 +6518,41 @@ Rules:
       const [navConfig, setNavConfig] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-nav-config')) || null; } catch { return null; } });
       const saveNavConfig = (cfg) => { setNavConfig(cfg); localStorage.setItem('tmg-nav-config', JSON.stringify(cfg)); };
       const isAdmin = hasAdmin(profile && profile.access);
-      // All possible items the user could see (access-filtered).
-      const defaultNavIds = (appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS).map(t => t.id);
+      // Tasks lives in the main nav, not More (moved 2026-08-10) — kept as its own
+      // item rather than a TABS entry since it needs TASKS_POPOUT_VERSION, which
+      // isn't defined yet at TABS' top-level position in the file.
+      const tasksNavItem = { id: 'tasks', label: 'Tasks', icon: 'ti-checklist', href: 'tasks.html?v=' + TASKS_POPOUT_VERSION };
+      // All possible items the user could see (access-filtered). Tasks was never
+      // gated by appSet before, so it's spliced in after filtering to preserve that.
+      const defaultNavIds = (() => {
+        const base = (appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS).map(t => t.id);
+        return base.filter(id => id !== 'more').concat(['tasks', 'more']);
+      })();
       const allMoreDefs = []
         .concat([{ id: 'guide', label: 'Guide', icon: 'ti-book' }])
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
         .concat([{ id: 'timeoff', label: 'Time Off', icon: 'ti-calendar-off' }])
-        .concat([{ id: 'tasks', label: 'Tasks', icon: 'ti-checklist', href: 'tasks.html?v=' + TASKS_POPOUT_VERSION }])
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', img: 'sffu-icon.png' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
         .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
-      const allItemMap = Object.fromEntries(TABS.concat(allMoreDefs).map(it => [it.id, it]));
+      const allItemMap = Object.fromEntries(TABS.concat(allMoreDefs).concat([tasksNavItem]).map(it => [it.id, it]));
       // Build nav + more from config, falling back to defaults.
       const buildLists = () => {
         if (!navConfig) return { nav: defaultNavIds, more: allMoreDefs.map(m => m.id) };
         const allowed = new Set(defaultNavIds.concat(allMoreDefs.map(m => m.id)));
         const cfgNav = (navConfig.nav || []).filter(id => allowed.has(id));
         const cfgMore = (navConfig.more || []).filter(id => allowed.has(id));
+        // One-time forced migration (2026-08-10): Tasks moves from every team member's
+        // already-saved More placement into the main nav. Gated on tasksMigratedV1 so
+        // it only overrides the OLD saved layout once — after that it's a normal
+        // draggable item again and a deliberate later move back to More sticks.
+        if (!navConfig.tasksMigratedV1) {
+          const i = cfgMore.indexOf('tasks');
+          if (i !== -1) cfgMore.splice(i, 1);
+          if (!cfgNav.includes('tasks')) cfgNav.push('tasks');
+        }
         const placed = new Set(cfgNav.concat(cfgMore));
         // Any new items not in config go to their default list.
         defaultNavIds.forEach(id => { if (!placed.has(id)) cfgNav.push(id); placed.add(id); });
@@ -6548,6 +6564,14 @@ Rules:
       const lists = buildLists();
       const visibleTabs = lists.nav.map(id => allItemMap[id]).filter(Boolean);
       const moreItems = lists.more.map(id => allItemMap[id]).filter(Boolean);
+      // Persist the migration once so it doesn't keep overriding a later, deliberate
+      // move back to More — see buildLists' tasksMigratedV1 check above.
+      useEffect(() => {
+        if (navConfig && !navConfig.tasksMigratedV1) {
+          saveNavConfig({ nav: lists.nav, more: lists.more, tasksMigratedV1: true });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
       // Mark 'more' as locked (can't be moved/dragged).
       const navForSettings = visibleTabs.map(t => t.id === 'more' ? { ...t, locked: true } : t);
       const handleReorderNav = (arr) => saveNavConfig({ nav: arr.map(t => t.id), more: lists.more });

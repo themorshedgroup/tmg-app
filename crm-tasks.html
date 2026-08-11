@@ -201,6 +201,12 @@
       { id:'13', Owner:O, Subject:'A Touch Call: Molly Kinney', Task_Type:'Call', Description:null, Status:'Completed', Due_Date:'2026-06-01', Who_Id:{ name:'Molly Kinney' }, Closed_Time:'2026-06-01T09:00:00-05:00', Trigger:null },
       { id:'15', Owner:O, Subject:'A Touch Call: Morgan Birch', Task_Type:'Call', Description:null, Status:'Completed', Due_Date:'2026-06-10', Who_Id:{ name:'Morgan Birch' }, Closed_Time:'2026-06-10T09:00:00-05:00', Trigger:null },
       { id:'14', Owner:O, Subject:'A Touch Call: Neil Patel', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-20', Who_Id:{ name:'Neil Patel' }, Closed_Time:null, Trigger:null },
+      // Extra August fixtures — a second owner + an EO-prefixed call, so the
+      // Capacity grid has visible current-month data with >1 owner/tier to check.
+      { id:'16', Owner:O, Subject:'B Touch Call: Kelly Ono', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-11', Who_Id:{ name:'Kelly Ono' }, Closed_Time:null, Trigger:null },
+      { id:'17', Owner:O, Subject:'EO Touch Call: Delfo Trombetta', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-11', Who_Id:{ name:'Delfo Trombetta' }, Closed_Time:null, Trigger:null },
+      { id:'18', Owner:{ name:'Brad Ellsworth' }, Subject:'A Touch Call: Jamie Cruz', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-11', Who_Id:{ name:'Jamie Cruz' }, Closed_Time:null, Trigger:null },
+      { id:'19', Owner:{ name:'Brad Ellsworth' }, Subject:'C Touch Call: Sam Rivera', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-14', Who_Id:{ name:'Sam Rivera' }, Closed_Time:null, Trigger:null },
     ];
 
     // ─── Formatting helpers ───────────────────────────────────────────
@@ -792,8 +798,77 @@
       return 'done';
     }
 
-    // Persisted across page reloads/exits — one running thread, saved to this browser
-    // (matches the saved-prompts pattern above: localStorage, no backend/account needed).
+    // ─── Task AI conversations (Supabase) ──────────────────────────────
+    // Mirrors tasks.html's ConvDB (same ai_conversations table, tagged
+    // type:'crm_tasks' so these don't mix with the main AI Chat's threads),
+    // but this panel's `log` already carries richer UI state per turn
+    // (confirm cards, tool activity, tallies) than the plain role/content
+    // shape ai_messages was designed for — so instead of decomposing into
+    // one row per turn, the whole { log, claude } thread is stored as a
+    // single row's JSON content, keyed by conversation_id. No-ops to
+    // 'local-' prefixed ids on localhost/dev, same as tasks.html's ConvDB.
+    const TaskConvDB = {
+      client() { return window.SupabaseAuth?._client || null; },
+      userId()  { return window.SupabaseAuth?._state?.session?.user?.id || null; },
+
+      async list() {
+        if (!this.client()) return [];
+        const { data, error } = await this.client()
+          .from('ai_conversations').select('*').eq('type', 'crm_tasks')
+          .order('pinned', { ascending: false })
+          .order('updated_at', { ascending: false });
+        if (error) { console.error('[TaskConvDB] list:', error.message); return []; }
+        return (data || []).map(r => ({ id: r.id, title: r.title || 'New chat', pinned: !!r.pinned, updatedAt: r.updated_at }));
+      },
+
+      async create() {
+        if (!this.client()) return { id: 'local-' + Date.now(), title: 'New chat', pinned: false };
+        const { data, error } = await this.client().from('ai_conversations')
+          .insert({ user_id: this.userId(), type: 'crm_tasks', title: null }).select().single();
+        if (error) { console.error('[TaskConvDB] create:', error.message); return { id: 'local-' + Date.now(), title: 'New chat', pinned: false }; }
+        return { id: data.id, title: data.title || 'New chat', pinned: false };
+      },
+
+      async rename(id, title) {
+        if (!this.client() || String(id).startsWith('local-')) return;
+        const { error } = await this.client().from('ai_conversations').update({ title, updated_at: new Date().toISOString() }).eq('id', id);
+        if (error) console.error('[TaskConvDB] rename:', error.message);
+      },
+
+      async remove(id) {
+        if (!this.client() || String(id).startsWith('local-')) return;
+        await this.client().from('ai_messages').delete().eq('conversation_id', id);
+        const { error } = await this.client().from('ai_conversations').delete().eq('id', id);
+        if (error) console.error('[TaskConvDB] remove:', error.message);
+      },
+
+      async loadState(id) {
+        if (!this.client() || String(id).startsWith('local-')) return null;
+        const { data, error } = await this.client()
+          .from('ai_messages').select('content').eq('conversation_id', id).limit(1).maybeSingle();
+        if (error) { console.error('[TaskConvDB] loadState:', error.message); return null; }
+        if (!data) return null;
+        try { return JSON.parse(data.content); } catch (e) { return null; }
+      },
+
+      // role:'assistant' is just a valid placeholder — this row is a state
+      // blob, not a real chat turn, so the role value itself is unused.
+      async saveState(id, state) {
+        if (!this.client() || String(id).startsWith('local-')) return;
+        const payload = JSON.stringify(state);
+        const { data, error: selErr } = await this.client()
+          .from('ai_messages').select('id').eq('conversation_id', id).limit(1).maybeSingle();
+        if (selErr) { console.error('[TaskConvDB] saveState select:', selErr.message); return; }
+        const { error } = data
+          ? await this.client().from('ai_messages').update({ content: payload }).eq('id', data.id)
+          : await this.client().from('ai_messages').insert({ conversation_id: id, role: 'assistant', content: payload });
+        if (error) console.error('[TaskConvDB] saveState write:', error.message);
+      },
+    };
+
+    // Legacy single-thread storage (pre-multi-conversation) — read once on
+    // first load to migrate an in-progress thread into a real conversation,
+    // then never written to again.
     const AI_CHAT_KEY = 'tmg_crmtasks_ai_chat';
     function loadSavedChat() {
       try {
@@ -817,13 +892,11 @@
       return { log: safeLog, claude: safeClaude };
     }
     function AIChat({ tasks, colMap, meta, extraFields, onRead, onWrite, onClose, split, showActivity }) {
-      const restoredRef = useRef(null);
-      if (restoredRef.current === null) restoredRef.current = sanitizeRestoredChat(loadSavedChat());
-      const [log, setLog] = useState(() => restoredRef.current.log);
+      const [log, setLog] = useState([]);
       const [input, setInput] = useState('');
       const [busy, setBusy] = useState(false);
-      const claudeRef = useRef(restoredRef.current.claude);
-      const idRef = useRef(restoredRef.current.log.reduce((m, it) => Math.max(m, it.id || 0), 0));
+      const claudeRef = useRef([]);
+      const idRef = useRef(0);
       const resolvers = useRef({});
       const scrollRef = useRef(null);
       const nextId = () => ++idRef.current;
@@ -831,14 +904,86 @@
       const [savedPrompts, setSavedPrompts] = useState(loadPrompts);
       const [showSaved, setShowSaved] = useState(false);
 
-      useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [log, busy]);
-      // Save after every turn so the thread survives closing the panel, reloading, or leaving the page.
+      // ── Conversations: list + which one is open ──
+      const [conversations, setConversations] = useState([]);
+      const [currentConvId, setCurrentConvId] = useState(null); // null = fresh thread, created lazily on first send
+      const [showHistory, setShowHistory] = useState(false);
+      const bootedRef = useRef(false);
+      const creatingRef = useRef(null); // in-flight create() promise, so rapid turns don't create duplicate conversations
+      const refreshConversations = () => TaskConvDB.list().then(setConversations);
+
+      function loadThread(safe) {
+        setLog(safe.log); claudeRef.current = safe.claude; setActivity([]);
+        idRef.current = safe.log.reduce((m, it) => Math.max(m, it.id || 0), 0);
+      }
+      async function openConversation(id) {
+        setShowHistory(false); creatingRef.current = null; setCurrentConvId(id);
+        if (String(id).startsWith('local-')) { loadThread({ log: [], claude: [] }); return; }
+        const state = await TaskConvDB.loadState(id);
+        loadThread(sanitizeRestoredChat(state || { log: [], claude: [] }));
+      }
+      function startNewChat() {
+        creatingRef.current = null; setCurrentConvId(null); setShowHistory(false);
+        loadThread({ log: [], claude: [] });
+      }
+      async function deleteConversation(id, e) {
+        e.stopPropagation();
+        if (!window.confirm('Delete this conversation?')) return;
+        await TaskConvDB.remove(id);
+        if (id === currentConvId) startNewChat();
+        refreshConversations();
+      }
+      async function ensureConv() {
+        if (currentConvId) return currentConvId;
+        if (!creatingRef.current) creatingRef.current = TaskConvDB.create().then(c => { setCurrentConvId(c.id); return c.id; });
+        return creatingRef.current;
+      }
+
+      // Boot once: open the most recent conversation, or migrate the old
+      // single-thread localStorage blob into a real conversation if one
+      // exists, so nobody's in-progress thread disappears on upgrade.
       useEffect(() => {
-        try { localStorage.setItem(AI_CHAT_KEY, JSON.stringify({ log, claude: claudeRef.current })); } catch (e) {}
+        if (bootedRef.current) return; bootedRef.current = true;
+        (async () => {
+          const list = await TaskConvDB.list();
+          setConversations(list);
+          if (list.length) { await openConversation(list[0].id); return; }
+          const legacy = sanitizeRestoredChat(loadSavedChat());
+          if (!legacy.log.length) return;
+          const conv = await TaskConvDB.create();
+          await TaskConvDB.saveState(conv.id, legacy);
+          try { localStorage.removeItem(AI_CHAT_KEY); } catch (e) {}
+          setCurrentConvId(conv.id);
+          loadThread(legacy);
+          refreshConversations();
+        })();
+      }, []);
+
+      useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [log, busy]);
+      // Save the CURRENT thread after every turn — creating its conversation
+      // row on first send if it doesn't have one yet. Starting a new chat
+      // clears claudeRef, so the next message only carries its own thread's
+      // history to the model, not everything that came before.
+      useEffect(() => {
+        if (!log.length) return;
+        (async () => {
+          const convId = await ensureConv();
+          await TaskConvDB.saveState(convId, { log, claude: claudeRef.current });
+          const already = conversations.find(c => c.id === convId);
+          const firstUser = log.find(it => it.type === 'user');
+          if (firstUser && (!already || already.title === 'New chat')) {
+            await TaskConvDB.rename(convId, firstUser.text.replace(/\s+/g, ' ').trim().slice(0, 40) || 'New chat');
+          }
+          refreshConversations();
+        })();
       }, [log]);
-      function clearChat() {
-        setLog([]); claudeRef.current = []; setActivity([]);
-        try { localStorage.removeItem(AI_CHAT_KEY); } catch (e) {}
+      // The header trash icon deletes the OPEN conversation outright (own confirm below,
+      // so the button itself doesn't wrap it in a second confirm).
+      async function clearChat() {
+        if (!currentConvId) { startNewChat(); return; }
+        await TaskConvDB.remove(currentConvId);
+        startNewChat();
+        refreshConversations();
       }
 
       function push(item) { setLog(l => [...l, { id: nextId(), ...item }]); }
@@ -924,7 +1069,30 @@
                 <span style={{ fontSize:'0.66rem', color:C.textMuted }}>· {tasks ? tasks.length : 0} in view</span>
               </div>
               <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-                {log.length > 0 && <button onClick={() => { if (window.confirm('Clear this AI conversation?')) clearChat(); }} title="Clear chat" style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-trash" style={{ fontSize:17 }} /></button>}
+                <button onClick={startNewChat} title="New chat" style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-message-plus" style={{ fontSize:17 }} /></button>
+                <div style={{ position:'relative' }}>
+                  <button onClick={() => setShowHistory(s => !s)} title="Past conversations" style={{ background:'transparent', border:'none', cursor:'pointer', color: showHistory ? C.gold : C.textMuted }}><i className="ti ti-history" style={{ fontSize:17 }} /></button>
+                  {showHistory && (
+                    <React.Fragment>
+                      <div onClick={() => setShowHistory(false)} style={{ position:'fixed', inset:0, zIndex:59 }} />
+                      <div style={{ position:'absolute', top:'calc(100% + 8px)', right:0, width:260, maxHeight:320, overflowY:'auto', background:C.surface, border:'1px solid '+C.border, borderRadius:10, boxShadow:'0 8px 28px rgba(0,26,74,.18)', zIndex:60 }}>
+                        {conversations.length === 0 ? (
+                          <div style={{ padding:'16px', fontSize:'0.78rem', color:C.textMuted, textAlign:'center' }}>No past conversations yet.</div>
+                        ) : conversations.map(c => (
+                          <div key={c.id} onClick={() => openConversation(c.id)}
+                            style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'10px 12px', borderBottom:'1px solid '+C.border, cursor:'pointer', background: c.id === currentConvId ? C.surfaceHover : 'transparent' }}>
+                            <div style={{ minWidth:0 }}>
+                              <div style={{ fontSize:'0.8rem', color:C.textPrimary, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{c.title}</div>
+                              <div style={{ fontSize:'0.68rem', color:C.textMuted }}>{c.updatedAt ? agoLabel(new Date(c.updatedAt).getTime()) : ''}</div>
+                            </div>
+                            <button onClick={(e) => deleteConversation(c.id, e)} title="Delete" style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted, flexShrink:0 }}><i className="ti ti-trash" style={{ fontSize:14 }} /></button>
+                          </div>
+                        ))}
+                      </div>
+                    </React.Fragment>
+                  )}
+                </div>
+                {log.length > 0 && <button onClick={() => { if (window.confirm('Delete this conversation?')) clearChat(); }} title="Delete this conversation" style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-trash" style={{ fontSize:17 }} /></button>}
                 <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
               </div>
             </div>
@@ -1114,6 +1282,120 @@
       return d + 'd ago';
     }
 
+    // ─── Call Capacity grid ─────────────────────────────────────────────
+    // A call's client tier isn't a separate Zoho field — it's a letter prefix
+    // baked into the Subject ("A Touch Call: ...", "EO Touch Call: ..."). Parse
+    // whatever prefix actually appears rather than hardcoding A/B/C/EO, so an
+    // agent-specific tier (like EO) shows up automatically without maintenance,
+    // and anything that doesn't match still counts under "Other" instead of
+    // silently vanishing from the total.
+    function isCallTask(t, colMap) {
+      const type = ((t[colMap.type] || t.Task_Type || '') + '').toLowerCase();
+      return type === 'call' || /touch call/i.test(t.Subject || '');
+    }
+    function callTier(subject) {
+      const m = /^([A-Za-z]{1,3})\s+Touch Call\b/i.exec(subject || '');
+      return m ? m[1].toUpperCase() : 'Other';
+    }
+    const CAP_MON = MON;
+    function CapacityGrid({ tasks, colMap }) {
+      const [anchor, setAnchor] = useState(() => { const d = new Date(); d.setDate(1); return d; });
+      const [openCell, setOpenCell] = useState(null); // { owner, day } | null
+
+      const monthCalls = useMemo(() => {
+        const y = anchor.getFullYear(), m = anchor.getMonth();
+        return (tasks || []).filter(t => isCallTask(t, colMap) && t.Due_Date).filter(t => {
+          const dm = /^(\d{4})-(\d{2})-(\d{2})/.exec(t.Due_Date);
+          if (!dm) return false;
+          return +dm[1] === y && (+dm[2] - 1) === m;
+        }).map(t => ({ ...t, _day: +(/^\d{4}-\d{2}-(\d{2})/.exec(t.Due_Date)[1]), _tier: callTier(t.Subject) }));
+      }, [tasks, colMap, anchor]);
+
+      const byOwner = useMemo(() => {
+        const out = {};
+        for (const t of monthCalls) {
+          const owner = t.Owner?.name || 'Unassigned';
+          (out[owner] = out[owner] || {})[t._day] = (out[owner][t._day] || []).concat(t);
+        }
+        return out;
+      }, [monthCalls]);
+      const owners = useMemo(() => Object.keys(byOwner).sort(), [byOwner]);
+      const daysInMonth = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
+      const monthLabel = CAP_MON[anchor.getMonth()] + ' ' + anchor.getFullYear();
+      const step = (dir) => setAnchor(a => new Date(a.getFullYear(), a.getMonth() + dir, 1));
+
+      const navBtn = { display:'inline-flex', alignItems:'center', justifyContent:'center', width:28, height:28, borderRadius:8, border:'1px solid '+C.border, background:C.surface, color:C.navy, cursor:'pointer' };
+      const cellBase = { minWidth:30, height:34, textAlign:'center', fontFamily:C.fontSans, fontSize:'0.74rem', borderRight:'1px solid '+C.border, borderBottom:'1px solid '+C.border };
+
+      const openCalls = openCell ? (byOwner[openCell.owner]?.[openCell.day] || []) : [];
+      const openTally = {};
+      openCalls.forEach(c => { openTally[c._tier] = (openTally[c._tier] || 0) + 1; });
+
+      return (
+        <div style={{ padding:'18px 22px', height:'100%', overflow:'auto' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:16 }}>
+            <button onClick={() => step(-1)} style={navBtn}><i className="ti ti-chevron-left" style={{ fontSize:15 }} /></button>
+            <div style={{ fontFamily:C.fontDisplay, fontSize:'1.25rem', fontWeight:600, color:C.navy, minWidth:150, textAlign:'center' }}>{monthLabel}</div>
+            <button onClick={() => step(1)} style={navBtn}><i className="ti ti-chevron-right" style={{ fontSize:15 }} /></button>
+            <div style={{ marginLeft:12, fontSize:'0.74rem', color:C.textMuted }}>Total calls per person, per day — click a number for the breakdown.</div>
+          </div>
+
+          {owners.length === 0 ? (
+            <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls due in {monthLabel}.</div>
+          ) : (
+            <div style={{ overflowX:'auto', border:'1px solid '+C.border, borderRadius:10 }}>
+              <div style={{ display:'grid', gridTemplateColumns:'150px repeat(' + daysInMonth + ', minmax(30px,1fr))', minWidth:150 + daysInMonth * 30 }}>
+                <div style={{ ...cellBase, textAlign:'left', padding:'0 10px', fontWeight:700, color:C.navy, background:C.surfaceAlt, borderTop:'1px solid '+C.border, minWidth:150 }}>Person</div>
+                {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => (
+                  <div key={d} style={{ ...cellBase, fontWeight:700, color:C.textMuted, background:C.surfaceAlt, borderTop:'1px solid '+C.border }}>{d}</div>
+                ))}
+                {owners.map(owner => (
+                  <React.Fragment key={owner}>
+                    <div style={{ ...cellBase, textAlign:'left', padding:'0 10px', fontWeight:600, color:C.textPrimary, background:C.surface, minWidth:150 }}>{owner}</div>
+                    {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => {
+                      const calls = byOwner[owner]?.[d] || [];
+                      const n = calls.length;
+                      return (
+                        <div key={d} onClick={() => n && setOpenCell({ owner, day: d })}
+                          style={{ ...cellBase, background:C.surface, color: n ? C.navy : C.textMuted, fontWeight: n ? 700 : 400, cursor: n ? 'pointer' : 'default' }}>
+                          {n || ''}
+                        </div>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {openCell && (
+            <div onClick={() => setOpenCell(null)} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:50, display:'flex', alignItems:'center', justifyContent:'center' }}>
+              <div onClick={e => e.stopPropagation()} style={{ background:C.surface, borderRadius:12, padding:20, width:'min(420px, 90vw)', maxHeight:'80vh', overflow:'auto', boxShadow:'0 12px 40px rgba(0,26,74,.25)' }}>
+                <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', marginBottom:4 }}>
+                  <div style={{ fontFamily:C.fontDisplay, fontSize:'1.1rem', fontWeight:600, color:C.navy }}>{openCell.owner}</div>
+                  <button onClick={() => setOpenCell(null)} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:16 }} /></button>
+                </div>
+                <div style={{ fontSize:'0.78rem', color:C.textMuted, marginBottom:12 }}>{CAP_MON[anchor.getMonth()]} {openCell.day}, {anchor.getFullYear()} — {openCalls.length} call{openCalls.length===1?'':'s'}</div>
+                <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginBottom:14 }}>
+                  {Object.keys(openTally).sort().map(tier => (
+                    <span key={tier} style={{ fontSize:'0.72rem', fontWeight:600, color:C.navy, background:C.surfaceHover, border:'1px solid '+C.border, borderRadius:20, padding:'3px 10px' }}>{tier}: {openTally[tier]}</span>
+                  ))}
+                </div>
+                <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                  {openCalls.map(c => (
+                    <div key={c.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, padding:'8px 10px', border:'1px solid '+C.border, borderRadius:8, background:C.bg }}>
+                      <span style={{ fontSize:'0.82rem', color:C.textPrimary }}>{c.Who_Id?.name || c.Subject}</span>
+                      <span style={{ fontSize:'0.68rem', fontWeight:700, color:C.gold, background:C.goldSoft+'22', borderRadius:20, padding:'2px 9px' }}>{c._tier}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ─── Main app ──────────────────────────────────────────────────────
     function App({ user, profile }) {
       const [tasks, setTasks] = useState(null);     // null = loading
@@ -1132,6 +1414,7 @@
       const [sortKey, setSortKey] = useState('due');
       const [sortDir, setSortDir] = useState('desc');
       const [drawer, setDrawer] = useState(null);    // { mode:'ai'|'create'|'edit', task? } | null
+      const [showCapacity, setShowCapacity] = useState(false); // main content: task table vs. Call Capacity grid
 
       async function load(force) {
         // Serve from cache whenever one exists — reload/revisit shouldn't re-pay the
@@ -1721,6 +2004,10 @@
                 <i className="ti ti-history" style={{ fontSize:15 }} /> {includeCompleted ? 'Full history' : 'Include completed'}
               </button>
               <button onClick={() => load(true)} title="Refresh (bypasses the cache)" style={iconBtn}><i className="ti ti-refresh" style={{ fontSize:15 }} /></button>
+              <button onClick={() => setShowCapacity(v => !v)} title="Call capacity — total calls per person, per day"
+                style={{ ...iconBtn, marginLeft:'auto', color:showCapacity?C.gold:C.navy, borderColor:showCapacity?C.gold:C.border, background:showCapacity?C.gold+'14':C.surface }}>
+                <i className="ti ti-layout-grid" style={{ fontSize:15 }} /> {showCapacity ? 'Task List' : 'Capacity'}
+              </button>
             </div>
           </div>
 
@@ -1738,12 +2025,13 @@
           <div style={{ flex:1, display:'flex', minHeight:0 }}>
           <main style={{ flex:1, overflow:'auto', minHeight:0 }}>
             {tasks === null && <div style={{ padding:40, textAlign:'center' }}><Spinner size={26} /></div>}
-            {tasks && view.length === 0 && !err && (
+            {tasks && showCapacity && <CapacityGrid tasks={tasks} colMap={colMap} />}
+            {tasks && !showCapacity && view.length === 0 && !err && (
               <div style={{ padding:48, textAlign:'center', color:C.textMuted, fontSize:'0.88rem' }}>
                 {tasks.length === 0 ? (needsDeploy ? 'Deploy the function to see tasks.' : 'No tasks found.') : 'No tasks match your filters.'}
               </div>
             )}
-            {tasks && view.length > 0 && (
+            {tasks && !showCapacity && view.length > 0 && (
               <table style={{ borderCollapse:'collapse', width:'100%', minWidth:1280 }}>
                 <thead>
                   <tr>

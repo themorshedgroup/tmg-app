@@ -4797,7 +4797,18 @@ Rules:
       const [dob, setDob] = useState((profile && profile.dob) || '');
       const [pets, setPets] = useState((profile && profile.pets) || []);
       const [saving, setSaving] = useState(false);
+      const [gcalState, setGcalState] = useState('checking'); // checking | connected | disconnected
       useEffect(() => { ProfileDB.loadAll().then(setAllUsers); }, []);
+      // Ported from index.html's ProfilePanel — was missing here entirely, so the
+      // Connect Google Calendar & Tasks card (and its connection status) never
+      // showed on this standalone page's own profile panel.
+      useEffect(() => {
+        let c = false;
+        callCalendar({ action: 'calendars' })
+          .then(({ ok, data }) => { if (!c) setGcalState(ok && Array.isArray(data.calendars) && data.calendars.length ? 'connected' : 'disconnected'); })
+          .catch(() => { if (!c) setGcalState('disconnected'); });
+        return () => { c = true; };
+      }, []);
 
       const email = (me && me.email) || (user && user.email) || '';
       const roleLine = (me && me.title) || '';
@@ -4930,6 +4941,27 @@ Rules:
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Google Calendar & Tasks — standalone card, matches Appearance/etc. below
+                [ported from index.html's ProfilePanel, which this was missing entirely]. */}
+            <div style={{ background: ctrlBg, border: dark ? `1px solid ${panelBorder}` : 'none', boxShadow: dark ? 'none' : '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)', borderRadius: 14, padding: 16, marginTop: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ fontFamily: J, fontSize: '0.72rem', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: ink }}>Google Calendar &amp; Tasks</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 'auto', fontFamily: J, fontSize: 8, fontWeight: 600, letterSpacing: '0.04em', color: gcalState === 'connected' ? presence : keyMuted }}>
+                  <span style={{ width: 5, height: 5, borderRadius: '50%', background: gcalState === 'connected' ? presence : valMuted }} />
+                  {gcalState === 'checking' ? '…' : gcalState === 'connected' ? 'CONNECTED' : 'NOT CONNECTED'}
+                </span>
+              </div>
+              <div style={{ fontFamily: J, fontSize: 10, color: keyMuted, lineHeight: 1.5, marginBottom: 12 }}>
+                {gcalState === 'connected'
+                  ? 'Your Google Calendar shows in the Calendar tab, and your tasks can sync to Google Tasks. The My Tasks email mailbox uses this same connection.'
+                  : 'Connect to see your Google Calendar in the app, sync tasks to Google Tasks, and use the My Tasks email mailbox.'}
+              </div>
+              <button onClick={() => { try { window.SupabaseAuth.connectCalendar(); } catch (e) {} }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, width: '100%', padding: 12, borderRadius: 11, border: `1px solid ${ctrlBorder}`, cursor: 'pointer', fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.04em', background: dark ? '#0A1730' : '#FCFBF8', color: ink }}>
+                <i className="ti ti-brand-google" style={{ fontSize: 14, color: gold }} />
+                {gcalState === 'connected' ? 'Reconnect Google Calendar & Tasks' : 'Connect Google Calendar & Tasks'}
+              </button>
             </div>
 
             {/* ─── below the panel (untouched): Appearance · Chat History · Sign out ─── */}

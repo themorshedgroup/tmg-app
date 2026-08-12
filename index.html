@@ -182,7 +182,7 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docx@9.7.1/dist/index.iife.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 </head>
 <body>
@@ -366,14 +366,43 @@ Continue with TMG Gmail
     function looksLikeFileRequest(text) { return FILE_INTENT_RE.test(text || ''); }
     function hasFileBlock(text) { TMG_FILE_BLOCK_RE.lastIndex = 0; return TMG_FILE_BLOCK_RE.test(text || ''); }
 
+    // Finds a Markdown pipe-table in plain text (the AI's normal way of showing tabular data
+    // when it *doesn't* use the ```tmg-sheet``` fence) and returns its rows — header row first,
+    // separator row dropped — or null if there isn't one. Used by FallbackFileActions below.
+    function findMdTable(text) {
+      const lines = (text || '').split(/\r?\n/);
+      for (let i = 0; i < lines.length - 1; i++) {
+        const head = lines[i].trim(), sep = lines[i + 1].trim();
+        if (!/^\|.*\|$/.test(head)) continue;
+        if (!/^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test(sep)) continue;
+        const rows = [head]; let j = i + 2;
+        while (j < lines.length && /^\|.*\|$/.test(lines[j].trim())) { rows.push(lines[j].trim()); j++; }
+        return rows;
+      }
+      return null;
+    }
+    function csvCell(v) {
+      const s = String(v == null ? '' : v).replace(/\r?\n/g, ' ').trim();
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+    function mdRowsToCsv(rows) {
+      return rows.map(l => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map(csvCell).join(',')).join('\n');
+    }
+
     // Renders AI markdown safely; falls back to plain text if parsing fails
     // or the CDN scripts didn't load, so a formatting bug never blanks a message.
     function MarkdownContent({ text }) {
       const segments = useMemo(() => splitGeneratedBlocks(text), [text]);
       if (segments.length === 1 && segments[0].type === 'md') {
         const html = mdToSafeHtml(segments[0].text);
-        if (html == null) return <span style={{ whiteSpace: 'pre-wrap' }}>{text}</span>;
-        return <div className="md-body" dangerouslySetInnerHTML={{ __html: html }} />;
+        return (
+          <React.Fragment>
+            {html == null
+              ? <span style={{ whiteSpace: 'pre-wrap' }}>{text}</span>
+              : <div className="md-body" dangerouslySetInnerHTML={{ __html: html }} />}
+            <FallbackFileActions text={segments[0].text} />
+          </React.Fragment>
+        );
       }
       return (
         <React.Fragment>
@@ -427,6 +456,41 @@ Continue with TMG Gmail
             <button onClick={download} disabled={busy} style={{ padding: '7px 12px', borderRadius: 9, border: 'none', background: C.navy, color: '#fff', fontSize: '0.76rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: busy ? 0.6 : 1, flexShrink: 0 }}>{busy ? '…' : 'Download'}</button>
           </div>
           {err ? <div style={{ fontSize: '0.7rem', color: C.red, fontFamily: C.fontSans, padding: '0 2px' }}>{err}</div> : null}
+        </div>
+      );
+    }
+
+    // Safety net for replies that clearly deserve a real file but where the model didn't use
+    // the ```tmg-doc/tmg-sheet``` fence (it isn't 100% reliable at remembering custom syntax
+    // mid-conversation) — e.g. it just prints a Markdown table instead. Rather than leaving the
+    // user with plain, un-actionable text, any substantial assistant reply gets a manual
+    // "Download as Word" action, and any reply containing a Markdown table also gets "Download
+    // as Excel" — built straight from what's already on screen, no extra AI call needed.
+    function FallbackFileActions({ text }) {
+      const tableRows = useMemo(() => findMdTable(text), [text]);
+      const worthIt = (text || '').trim().length > 160 || !!tableRows;
+      const [busy, setBusy] = useState(null);
+      const [err, setErr] = useState(null);
+      if (!worthIt) return null;
+      const go = async (kind) => {
+        if (busy) return;
+        setBusy(kind); setErr(null);
+        try {
+          const blob = kind === 'sheet' ? genXlsxBlob(mdRowsToCsv(tableRows)) : await genDocxBlob(text);
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = kind === 'sheet' ? 'TMG-Table.xlsx' : 'TMG-Notes.docx';
+          document.body.appendChild(a); a.click();
+          setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 400);
+        } catch (e) { setErr(e.message || String(e)); }
+        finally { setBusy(null); }
+      };
+      const btnStyle = { padding: '5px 10px', borderRadius: 8, border: `1px solid ${C.border}`, background: 'transparent', color: C.textSecondary, fontSize: '0.68rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans };
+      return (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6 }}>
+          <button onClick={() => go('doc')} disabled={!!busy} style={{ ...btnStyle, opacity: busy ? 0.6 : 1 }}>{busy === 'doc' ? '…' : 'Download as Word'}</button>
+          {tableRows ? <button onClick={() => go('sheet')} disabled={!!busy} style={{ ...btnStyle, opacity: busy ? 0.6 : 1 }}>{busy === 'sheet' ? '…' : 'Download as Excel'}</button> : null}
+          {err ? <span style={{ fontSize: '0.68rem', color: C.red, fontFamily: C.fontSans }}>{err}</span> : null}
         </div>
       );
     }

@@ -215,6 +215,9 @@
       const first = ['Paula','Kevin','Lori','Alden','Rikesh','Arjav','Audrey','Ramya','Aaron','Nirav','Derrick','Irving','Marc','Alicia','Michael','Guarav','Tim','Aimee','Grant','Mike','Evan','Toni','Ben','Jonathan','David','Jason','Jose','Frank','Rajesh','Niel','Trey','Kirk','Miguel','Brian','Monica'];
       const last  = ['Li','Keiptof','Truthseeker','Doyle','Thakrar','Ezekiel','Glenn','Holehonnur','Hurtado','Suraiya','McDonald','Lee','Rowley','Ortiz','Murphy','Kikani','Hamilton','Carpenter','Gurtin','Hardtmeier','Ransome','Jacaruso','Tiggelaar','Hewitt','Farnell','Crawford','Asensio','Barbella','Kalidindi','Chand','Halbert','Ashy','Godinez','Hall','Ostroot'];
       const tiers = ['A','A','A','B','B','C'];               // A-heavy, like the real backlog
+      // Unique per index — repeating a name across two contact ids would make
+      // name-based spot-checks ambiguous (the real key is the contact id).
+      const devName = (i) => first[i % first.length] + ' ' + last[(i * 7) % last.length] + (i >= first.length ? ' ' + Math.floor(i / first.length) : '');
       for (let i = 0; i < 58; i++) {
         const tier = tiers[i % tiers.length];
         const eo = i % 7 === 3;                               // ~1 in 7 tagged EO
@@ -225,15 +228,38 @@
         const ownerName = i % 5 === 1 ? 'Kyle Baird' : i % 5 === 3 ? 'Brad Ellsworth' : 'Tarek Morshed';
         DEV_TASKS.push({
           id: 'dev-od-' + i, Owner: { name: ownerName },
-          Subject: tier + ' Touch Call: ' + first[i % first.length] + ' ' + last[i % last.length],
+          Subject: tier + ' Touch Call: ' + devName(i),
           Task_Type: 'Call',
           Description: eo ? 'EO Member | referral' : null,
           Status: 'Not Started',
           Due_Date: '2026-0' + month + '-' + day,
-          Who_Id: { id: cid, name: first[i % first.length] + ' ' + last[i % last.length] },
+          Who_Id: { id: cid, name: devName(i) },
           Closed_Time: null, Trigger: null,
         });
       }
+      // Give roughly half the seeded contacts a COMPLETED call, so they have a
+      // cadence baseline and the "no baseline" mode filters to a real subset
+      // rather than matching everything.
+      for (let i = 0; i < 58; i += 2) {
+        DEV_TASKS.push({
+          id: 'dev-done-' + i, Owner: O,
+          Subject: 'A Touch Call: ' + devName(i),
+          Task_Type: 'Call', Description: null, Status: 'Completed', Due_Date: '2026-02-10',
+          Who_Id: { id: 'dev-c-' + i, name: devName(i) },
+          Closed_Time: '2026-02-10T09:00:00-06:00', Trigger: null,
+        });
+      }
+      // Kyle's real-world shape: calls with no completed history at all, so
+      // cadence can't be computed and they land on scattered far-out dates.
+      ['Ana Reyes','Bo Tran','Cy Nolan','Dee Patel','Eli Marsh','Fay Okoro','Gil Hansen','Hana Ito'].forEach((n, i) => {
+        DEV_TASKS.push({
+          id: 'dev-nb-' + i, Owner: { name: 'Kyle Baird' },
+          Subject: ['A','B','C'][i % 3] + ' Touch Call: ' + n,
+          Task_Type: 'Call', Description: i === 2 ? 'EO Member' : null, Status: 'Not Started',
+          Due_Date: '2026-' + String(10 + (i % 3)).padStart(2, '0') + '-' + String(4 + i * 3).padStart(2, '0'),
+          Who_Id: { id: 'dev-nb-c-' + i, name: n }, Closed_Time: null, Trigger: null,
+        });
+      });
       // Two spouse pairs — each partner's task points at the other's contact,
       // which is the linkage the packer uses to keep them on the same day.
       [['Michelle','Rowe','Brad','Houston'], ['Samantha','Kohler','Adam','Kohler']].forEach((p, n) => {
@@ -1472,28 +1498,55 @@
       return v && typeof v === 'object' ? (v.id || null) : (v || null);
     }
 
+    // Each contact's most recent COMPLETED call, built from the whole loaded set.
+    // Same definition the cadence checker's `no_prior` uses — kept in one place so
+    // the two can't drift. A contact with no entry here has no baseline to measure
+    // an interval from, so their next call got an arbitrary far-out date; that's
+    // what leaves an agent's calendar thin and scattered.
+    function lastCompletedByContact(tasks, colMap) {
+      const last = {};
+      (tasks || []).forEach(t => {
+        if (!isCallTask(t, colMap) || !/complete/i.test(t.Status || '')) return;
+        const cid = t.Who_Id?.id || t.Who_Id?.name;
+        if (!cid) return;
+        const prev = last[cid];
+        const key = String(t.Closed_Time || t.Due_Date || '');
+        if (!prev || key.localeCompare(String(prev.Closed_Time || prev.Due_Date || '')) > 0) last[cid] = t;
+      });
+      return last;
+    }
+
+    // mode 'overdue'    → Not-Started calls due on/before the cutoff.
+    // mode 'nobaseline' → Not-Started calls whose contact has no completed call
+    //                     to compute cadence from, at ANY due date.
+    function inScopeCalls({ tasks, colMap, cutoff, mode, owner }) {
+      const baseline = mode === 'nobaseline' ? lastCompletedByContact(tasks, colMap) : null;
+      return (tasks || []).filter(t => {
+        if ((t.Status || '') !== 'Not Started') return false;
+        if (!isCallTask(t, colMap)) return false;
+        if (!['A', 'B', 'C', 'EO'].includes(callTier(t.Subject))) return false;
+        if (owner && t.Owner?.name !== owner) return false;
+        if (mode === 'nobaseline') {
+          const cid = t.Who_Id?.id || t.Who_Id?.name;
+          return cid ? !baseline[cid] : true;
+        }
+        return !!t.Due_Date && t.Due_Date <= cutoff;
+      }).sort((a, b) => String(a.Due_Date || '').localeCompare(String(b.Due_Date || '')));
+    }
+
     // Every agent has their own working day, so a schedule is only meaningful
     // for ONE owner at a time — packing several agents into a shared 5-a-day
     // calendar would interleave their lists and cap the whole team at 5.
-    function overdueOwners({ tasks, colMap, cutoff }) {
+    function scopeOwners({ tasks, colMap, cutoff, mode }) {
       const counts = {};
-      (tasks || []).forEach(t => {
-        if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
-        if (!t.Due_Date || t.Due_Date > cutoff) return;
-        if (!['A', 'B', 'C', 'EO'].includes(callTier(t.Subject))) return;
+      inScopeCalls({ tasks, colMap, cutoff, mode }).forEach(t => {
         const o = t.Owner?.name; if (o) counts[o] = (counts[o] || 0) + 1;
       });
       return Object.keys(counts).map(name => ({ name, count: counts[name] })).sort((a, b) => b.count - a.count);
     }
 
-    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner }) {
-      const pool = (tasks || []).filter(t =>
-        (t.Status || '') === 'Not Started' &&
-        isCallTask(t, colMap) &&
-        t.Due_Date && t.Due_Date <= cutoff &&
-        ['A', 'B', 'C', 'EO'].includes(callTier(t.Subject)) &&
-        (!owner || t.Owner?.name === owner)
-      ).sort((a, b) => (a.Due_Date < b.Due_Date ? -1 : a.Due_Date > b.Due_Date ? 1 : 0));
+    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode }) {
+      const pool = inScopeCalls({ tasks, colMap, cutoff, mode, owner });
 
       // Pair spouses: task X names partner P as its spouse origin, and P has
       // their own in-scope task → both should land on the same day.
@@ -1552,7 +1605,8 @@
       const [busy, setBusy] = useState(false);
       const [done, setDone] = useState(null);
 
-      const owners = useMemo(() => overdueOwners({ tasks, colMap, cutoff }), [tasks, colMap, cutoff]);
+      const [mode, setMode] = useState('overdue');
+      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff, mode }), [tasks, colMap, cutoff, mode]);
       // One agent at a time, on purpose. Default to whoever has the biggest
       // backlog so the common case needs no clicks.
       const [owner, setOwner] = useState('');
@@ -1560,8 +1614,8 @@
         if (owners.length && !owners.some(o => o.name === owner)) setOwner(owners[0].name);
       }, [owners]);
 
-      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner }),
-        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner]);
+      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode }),
+        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode]);
 
       async function apply() {
         setBusy(true);
@@ -1581,12 +1635,21 @@
           <div onClick={e => e.stopPropagation()} style={{ background:C.bg, borderRadius:14, width:'min(760px, 96vw)', maxHeight:'92vh', display:'flex', flexDirection:'column', boxShadow:'0 18px 60px rgba(0,26,74,.3)' }}>
             <div style={{ flexShrink:0, padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface, borderRadius:'14px 14px 0 0', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
               <div>
-                <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Reschedule Overdue Calls</div>
-                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{owner || '—'} · {plan.total} overdue · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together</div>
+                <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Reschedule Calls</div>
+                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{owner || '—'} · {plan.total} {mode === 'overdue' ? 'overdue' : 'with no cadence baseline'} · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together</div>
               </div>
               <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
             </div>
 
+            <div style={{ flexShrink:0, padding:'12px 22px 0' }}>
+              <div style={{ display:'inline-flex', border:'1px solid '+C.border, borderRadius:9, overflow:'hidden' }}>
+                {[['overdue','Overdue backlog'], ['nobaseline','No cadence baseline']].map(([m, label]) => (
+                  <button key={m} onClick={() => setMode(m)}
+                    style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer',
+                      background: mode === m ? C.navy : C.surface, color: mode === m ? '#fff' : C.textSecondary }}>{label}</button>
+                ))}
+              </div>
+            </div>
             <div style={{ flexShrink:0, padding:'14px 22px', borderBottom:'1px solid '+C.border, display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end' }}>
               <div>
                 <label style={lbl}>Agent</label>
@@ -1595,11 +1658,15 @@
                   {owners.map(o => <option key={o.name} value={o.name}>{o.name} ({o.count})</option>)}
                 </select>
               </div>
-              <div><label style={lbl}>Overdue on/before</label><input type="date" value={cutoff} onChange={e => setCutoff(e.target.value)} style={fld} /></div>
+              {mode === 'overdue' && <div><label style={lbl}>Overdue on/before</label><input type="date" value={cutoff} onChange={e => setCutoff(e.target.value)} style={fld} /></div>}
               <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
               <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
               <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
-              <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>One agent at a time — each works their own day. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped.</div>
+              <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>
+                {mode === 'nobaseline'
+                  ? 'Calls whose contact has no completed call to measure cadence from — these get arbitrary far-out dates. Packed into real days instead.'
+                  : 'One agent at a time — each works their own day. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped.'}
+              </div>
             </div>
 
             <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>

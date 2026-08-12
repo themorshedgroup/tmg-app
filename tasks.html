@@ -3610,6 +3610,13 @@ Rules:
       const [groupOpen, setGroupOpen] = useState(false);
       const [sortOpen, setSortOpen] = useState(false);
       const [colsOpen, setColsOpen] = useState(false);
+      // Option B toolbar (desktop My Tasks) — Display popover ported from
+      // tmg-toolbar-email-prototype_1.html. dispOpen is the popover itself;
+      // dispSub is which of its rows has an open submenu (only one at a time,
+      // matching the prototype's single openSub value), not the old per-chip
+      // groupOpen/sortOpen/colsOpen above (still used by the untouched mobile row).
+      const [dispOpen, setDispOpen] = useState(false);
+      const [dispSub, setDispSub] = useState(null);   // 'layout' | 'group' | 'sort' | 'cols' | null
       const [completedOpen, setCompletedOpen] = useState(false);
       const [ctxMenu, setCtxMenu] = useState(null);   // { x, y, task }
       // Surface switcher (standalone only): My Tasks | CTC Files | Projects.
@@ -3775,7 +3782,14 @@ Rules:
       async function toggleMilestone(t) { await TaskDB.update(t.id, t, { is_milestone: !t.is_milestone }, user); await reload(); }
 
       const GROUP_OPTS = [['status', 'Status'], ['assignee', 'Assignee'], ['priority', 'Priority'], ['due', 'Due date'], ['project', 'Project / File'], ['label', 'Label'], ['none', 'None']];
-      const SORT_OPTS = [['due', 'Due date'], ['priority', 'Priority'], ['title', 'Title'], ['created', 'Recently added']];
+      // Display popover's Group-by submenu offers exactly the brief's 5 options
+      // [MUST-MATCH] — 'project'/'label' stay valid, resolvable values (an
+      // existing user could already be grouped that way) but aren't offered
+      // going forward, so GROUP_OPTS above is untouched for that lookup.
+      const DISPLAY_GROUP_IDS = ['status', 'assignee', 'priority', 'due', 'none'];
+      // viewMode's internal value is 'kanban' (pre-existing), displayed as "Board".
+      const LAYOUT_LABELS = { list: 'List', kanban: 'Board', timeline: 'Timeline' };
+      const SORT_OPTS = [['created', 'Date created'], ['due', 'Due date'], ['priority', 'Priority'], ['title', 'Alphabetical']];
       // Priority isn't in this list — it's a fixed column, always shown (see deskRow
       // and its header row), not opt-in via the column picker.
       const COLUMN_DEFS = [
@@ -3810,14 +3824,95 @@ Rules:
       const searchChip = searchOpen
         ? <input autoFocus value={search} onChange={e => setSearch(e.target.value)} onBlur={() => { if (!search) setSearchOpen(false); }} placeholder="Search tasks…" style={{ ...chipStyle, cursor: 'text', width: 130, textTransform: 'none', letterSpacing: 'normal', fontSize: '0.78rem', outline: 'none' }} />
         : <div onClick={() => setSearchOpen(true)} style={{ ...chipStyle, width: 34, height: 34, padding: 0, justifyContent: 'center' }}><i className="ti ti-search" style={{ fontSize: 13 }} /></div>;
-      const colsChip = (
+      // colsChip (the old standalone "choose columns" icon) was removed — that
+      // picker now lives inside the Display popover's Columns row below; desktop
+      // no longer has a separate columns icon in the toolbar [acceptance 1.3].
+
+      // ══════════════════════════════════════════════════════════════════════
+      // Option B toolbar (desktop My Tasks) — ported literally from
+      // tmg-toolbar-email-prototype_1.html §.tbar/.iconbtn/.btn/.menu/.submenu.
+      // Toolbar shows exactly: Search, Email, Display, + New [acceptance 1.3].
+      // ══════════════════════════════════════════════════════════════════════
+      const iconBtnStyle = { width: 34, height: 34, border: `1px solid ${bord}`, background: dark ? '#0A1730' : '#fff', borderRadius: 6, display: 'grid', placeItems: 'center', color: sub, position: 'relative', flexShrink: 0 };
+      const linkedEmailCount = 0;   // Feature 2 (email-link data model) not built yet — see brief §2.
+      const emailIconBtn = (
+        <div title="Email — mailbox (coming soon)" style={{ ...iconBtnStyle, cursor: 'default' }}>
+          <i className="ti ti-mail" style={{ fontSize: 15 }} />
+          {linkedEmailCount > 0 && <span style={{ position: 'absolute', top: -6, right: -6, background: gold, color: '#fff', fontSize: 9, minWidth: 16, height: 16, borderRadius: 8, display: 'grid', placeItems: 'center', padding: '0 3px' }}>{linkedEmailCount}</span>}
+        </div>
+      );
+      const dispMenuStyle = { position: 'absolute', top: 42, right: 0, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, boxShadow: '0 8px 28px rgba(0,13,38,.16)', padding: 8, minWidth: 250, zIndex: 30, fontFamily: C.fontSans };
+      const dispSubStyle = { position: 'absolute', top: 0, right: '100%', marginRight: 2, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, boxShadow: '0 8px 28px rgba(0,13,38,.16)', padding: 6, minWidth: 170, zIndex: 31 };
+      const dispMenuLabel = (text) => <div key={'ml-' + text} style={{ fontSize: 10, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, padding: '8px 8px 4px' }}>{text}</div>;
+      const dispDiv = <div style={{ height: 1, background: bord, margin: '6px 2px' }} />;
+      const dispSubBtn = (label, selected, onClick, key) => (
+        <button key={key || label} onClick={onClick} style={{ display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '7px 9px', borderRadius: 5, fontSize: 13, textAlign: 'left', color: selected ? gold : ink, fontWeight: selected ? 500 : 400, fontFamily: C.fontSans }}>
+          {label}{selected && '✓'}
+        </button>
+      );
+      // A clickable Display row (Layout/Group by/Sort by) that opens a submenu flying
+      // out to the left [MUST-MATCH: click, not hover — hover-only fails on touch/keyboard].
+      const dispRow = (label, valueText, subKey, submenuContent) => (
+        <div key={subKey} onClick={(e) => { e.stopPropagation(); setDispSub(s => s === subKey ? null : subKey); }}
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 8, borderRadius: 5, fontSize: 13.5, position: 'relative', cursor: 'pointer', color: ink, fontFamily: C.fontSans }}>
+          <span>{label}</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 5, color: gold, fontWeight: 500, fontSize: 12.5 }}>{valueText} ▸</span>
+          {dispSub === subKey && <div style={dispSubStyle} onClick={e => e.stopPropagation()}>{submenuContent}</div>}
+        </div>
+      );
+      // A static (non-clickable) row — Filter and Labels are stubs for v1 [brief §1.2].
+      const dispStaticRow = (label, valueText) => (
+        <div key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 8, borderRadius: 5, fontSize: 13.5, color: ink, fontFamily: C.fontSans }}>
+          <span>{label}</span><span style={{ color: gold, fontWeight: 500, fontSize: 12.5 }}>{valueText}</span>
+        </div>
+      );
+      const dispActive = sortBy !== 'status' || thenBy !== 'due' || viewMode !== 'list';
+      const displayBtn = (
         <div style={{ position: 'relative' }}>
-          <div onClick={() => { setColsOpen(o => !o); setGroupOpen(false); setSortOpen(false); }} style={{ ...chipStyle, width: 34, height: 34, padding: 0, justifyContent: 'center' }} title="Choose columns"><i className="ti ti-adjustments-horizontal" style={{ fontSize: 13 }} /></div>
-          {colsOpen && <div style={ddStyle} onClick={e => e.stopPropagation()}>
-            <div style={{ fontSize: '0.58rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: sub, padding: '4px 9px 6px' }}>Columns</div>
-            {ddItem('Task', true, () => {}, 'task')}
-            {COLUMN_DEFS.map(c => ddItem(c.label, cols.includes(c.id), () => setCols(cs => cs.includes(c.id) ? cs.filter(x => x !== c.id) : [...cs, c.id]), c.id))}
-          </div>}
+          <div onClick={(e) => { e.stopPropagation(); setDispOpen(o => !o); setDispSub(null); }}
+            style={{ height: 34, padding: '0 12px', border: `1px solid ${dispActive ? (dark ? 'rgba(201,164,90,.4)' : '#C9A45A') : bord}`, borderRadius: 6, fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontFamily: C.fontSans, background: dispActive ? (dark ? 'rgba(201,164,90,.14)' : '#F3EBDA') : (dark ? '#0A1730' : '#fff'), color: dispActive ? ink : sub }}>
+            <i className="ti ti-adjustments-horizontal" style={{ fontSize: 14 }} />Display ▾
+          </div>
+          {dispOpen && (
+            <div style={dispMenuStyle} onClick={e => e.stopPropagation()}>
+              {dispMenuLabel('View')}
+              {/* Internal viewMode value is 'kanban' (pre-existing, also read by
+                  TaskBoard's render check below) — only its on-screen label is "Board". */}
+              {dispRow('Layout', LAYOUT_LABELS[viewMode], 'layout',
+                ['list', 'kanban', 'timeline'].map(m => dispSubBtn(LAYOUT_LABELS[m], viewMode === m, () => { setViewMode(m); setDispOpen(false); setDispSub(null); }, m)))}
+              {dispDiv}
+              {dispMenuLabel('Organize')}
+              {dispRow('Group by', (GROUP_OPTS.find(([id]) => id === sortBy) || [])[1], 'group',
+                GROUP_OPTS.filter(([id]) => DISPLAY_GROUP_IDS.includes(id)).map(([id, label]) => dispSubBtn(label, sortBy === id, () => { setSortBy(id); setDispOpen(false); setDispSub(null); }, id)))}
+              {dispRow('Sort by', (SORT_OPTS.find(([id]) => id === thenBy) || [])[1], 'sort',
+                SORT_OPTS.map(([id, label]) => dispSubBtn(label, thenBy === id, () => { setThenBy(id); setDispOpen(false); setDispSub(null); }, id)))}
+              {dispDiv}
+              {dispStaticRow('Filter', 'None')}
+              {dispStaticRow('Labels', 'Show')}
+              {dispDiv}
+              {/* Not in the prototype (which has no per-column visibility system) — kept
+                  so the existing Source/Assignee/Labels/etc. column toggles aren't lost. */}
+              {dispRow('Columns', 'Choose', 'cols',
+                COLUMN_DEFS.map(c => dispSubBtn(c.label, cols.includes(c.id), () => setCols(cs => cs.includes(c.id) ? cs.filter(x => x !== c.id) : [...cs, c.id]), c.id)))}
+            </div>
+          )}
+        </div>
+      );
+      useEffect(() => {
+        if (!dispOpen) return;
+        const onKey = (e) => { if (e.key === 'Escape') { setDispOpen(false); setDispSub(null); } };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+      }, [dispOpen]);
+      const dispScrim = dispOpen && <div onClick={() => { setDispOpen(false); setDispSub(null); }} style={{ position: 'fixed', inset: 0, zIndex: 29 }} />;
+      // View tabs — moved under the title, left-aligned [brief §1.1]. Plain text, no
+      // icons: the prototype's .vtabs/.vtab in THIS file has none (unlike the earlier
+      // container-detail vtabs elsewhere, which do).
+      const viewTabsRow = (
+        <div style={{ display: 'flex', gap: 2, borderBottom: `1px solid ${bord}`, marginTop: 14 }}>
+          {['list', 'kanban', 'timeline'].map(id => (
+            <div key={id} onClick={() => setViewMode(id)} style={{ padding: '9px 15px', fontSize: 13, color: viewMode === id ? ink : sub, borderBottom: `2px solid ${viewMode === id ? gold : 'transparent'}`, marginBottom: -1, fontWeight: viewMode === id ? 500 : 400, cursor: 'pointer', fontFamily: C.fontSans }}>{LAYOUT_LABELS[id]}</div>
+          ))}
         </div>
       );
 
@@ -4134,23 +4229,20 @@ Rules:
                         {/* List/Kanban/Timeline always stays mounted and visible — opening a
                             task no longer replaces it, it overlays a drawer on top (below). */}
                         <div style={{ padding: '26px 34px 0', flexShrink: 0 }}>
-                          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 6, flexWrap: 'wrap' }}>
+                          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
                             <div>
                               {plainSurfaceTitle()}
                               <div style={{ fontFamily: C.fontSans, fontSize: 13.5, color: sub, marginTop: 3 }}>{dueTodayCount} due today · {overdueCount} overdue · {openCount} open</div>
                             </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                              {groupChip}{sortChip}{searchChip}
-                              <div style={{ display: 'flex', background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, overflow: 'hidden' }}>
-                                <div onClick={() => setViewMode('list')} style={{ padding: '7px 13px', fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 400, cursor: 'pointer', background: viewMode === 'list' ? C.navy : 'transparent', color: viewMode === 'list' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-list" style={{ fontSize: 13 }} />List</div>
-                                <div onClick={() => setViewMode('kanban')} style={{ padding: '7px 13px', fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 400, cursor: 'pointer', background: viewMode === 'kanban' ? C.navy : 'transparent', color: viewMode === 'kanban' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-layout-kanban" style={{ fontSize: 13 }} />Board</div>
-                                <div onClick={() => setViewMode('timeline')} style={{ padding: '7px 13px', fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 400, cursor: 'pointer', background: viewMode === 'timeline' ? C.navy : 'transparent', color: viewMode === 'timeline' ? '#fff' : sub, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-timeline" style={{ fontSize: 13 }} />Timeline</div>
-                              </div>
-                              {viewMode === 'list' && colsChip}
-                              {labelsBtn}
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', position: 'relative' }}>
+                              {searchChip}
+                              {emailIconBtn}
+                              {displayBtn}
                               {newBtn}
+                              {dispScrim}
                             </div>
                           </div>
+                          {viewTabsRow}
                         </div>
                         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column', padding: '14px 34px 0' }}>
                           {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>

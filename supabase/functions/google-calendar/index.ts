@@ -11,10 +11,14 @@
 //   GOOGLE_CLIENT_SECRET = <that client's secret>
 //   (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are injected automatically.)
 //
-// Prereqs: Google Calendar API + Google Tasks API enabled in the Cloud project;
-// the OAuth consent screen includes `.../auth/calendar.events` and
-// `.../auth/tasks`; the app requests both at "Connect"/"Reconnect" with
-// access_type=offline so a refresh token is issued (see supabase.js).
+// Prereqs: Google Calendar API + Google Tasks API + Gmail API enabled in the
+// Cloud project; the OAuth consent screen includes `.../auth/calendar.events`,
+// `.../auth/tasks`, and `.../auth/gmail.readonly`; the app requests all three
+// at "Connect"/"Reconnect" with access_type=offline so a refresh token is
+// issued (see supabase.js). gmail.readonly is a sensitive (not restricted)
+// scope — it may need to show up on the OAuth consent screen's scope list
+// before Google will grant it; if `connect` succeeds but gmail_* calls come
+// back invalid_scope, that's almost always the fix.
 //
 // POST actions:
 //   { action: 'connect', refresh_token }            → store the caller's refresh token
@@ -30,6 +34,16 @@
 //             caller's default Google Tasks list (used by TMG's task auto-sync)
 //   (event = Google resource: { summary, location, description, start, end, attendees, recurrence })
 //   NOTE: `list` also returns hangoutLink, attendeesDetail[], and myResponse per event.
+//
+//   ── My Tasks email mailbox (TMG-Toolbar-and-Email-Brief_1.md Feature 2) ──
+//   { action: 'gmail_threads', q?: string, maxResults?: number }
+//             → recent Gmail threads (default: INBOX, newest first) with
+//               {id, permalink, from, subject, snippet, date}. Read-only
+//               (gmail.readonly) — never sends, archives, or modifies anything.
+//   { action: 'gmail_thread', threadId }
+//             → one thread's messages in full: {id, from, to, date, subject,
+//               bodyText} per message, oldest first — for the task drawer's
+//               Email tab reader.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -177,6 +191,41 @@ async function callerAccessToken(sb: any, userId: string): Promise<{ token?: str
     // Refresh token revoked/expired → user must reconnect (re-sign-in).
     return { err: { status: 412, body: { error: "needs_connect", detail: String((e as any)?.message || e) } } };
   }
+}
+
+// ── Gmail helpers ────────────────────────────────────────────────────────
+// Gmail message bodies are base64url (RFC 4648 §5), not plain base64.
+function b64urlDecode(s: string): string {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64 + "===".slice((b64.length + 3) % 4));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder("utf-8").decode(bytes);
+}
+function gmailHeader(headers: any[], name: string): string {
+  const h = (headers || []).find((x: any) => (x.name || "").toLowerCase() === name.toLowerCase());
+  return h?.value || "";
+}
+// Recursively walk a Gmail message payload for the first text/plain part,
+// falling back to text/html with tags stripped (Gmail can send either, and
+// multipart/alternative nests them under .parts).
+function gmailBodyText(payload: any): string {
+  if (!payload) return "";
+  const mime = payload.mimeType || "";
+  if (mime === "text/plain" && payload.body?.data) return b64urlDecode(payload.body.data);
+  if (Array.isArray(payload.parts)) {
+    for (const p of payload.parts) {
+      const t = gmailBodyText(p);
+      if (t) return t;
+    }
+  }
+  if (mime === "text/html" && payload.body?.data) {
+    return b64urlDecode(payload.body.data).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+  return "";
+}
+// "#all" (not "#inbox") so the link still resolves once a thread is archived.
+function gmailPermalink(threadId: string): string {
+  return "https://mail.google.com/mail/u/0/#all/" + threadId;
 }
 
 Deno.serve(async (req) => {
@@ -517,6 +566,79 @@ Deno.serve(async (req) => {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return json({ error: d?.error?.message || "Team Calendar write failed." }, r.status);
       return json({ ok: true, id: d.id }, 200);
+    }
+
+    // ── Mailbox: recent threads (My Tasks email icon → mailbox pop-out) ──
+    // Read-only — gmail.readonly can't send/archive/modify, so there's no risk
+    // of this action touching the caller's real inbox state [brief §2.6].
+    if (action === "gmail_threads") {
+      const at = await callerAccessToken(sb, auth.userId);
+      if (at.err) return json(at.err.body, at.err.status);
+      const accessToken = at.token!;
+
+      const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/threads");
+      listUrl.searchParams.set("maxResults", String(Math.min(Number(body.maxResults) || 25, 50)));
+      if (typeof body.q === "string" && body.q.trim()) listUrl.searchParams.set("q", body.q.trim());
+      const lr = await fetch(listUrl.toString(), { headers: { Authorization: "Bearer " + accessToken } });
+      const ld = await lr.json().catch(() => ({}));
+      if (!lr.ok) return json({ error: ld?.error?.message || "Gmail list failed." }, lr.status);
+
+      const ids: string[] = (ld.threads || []).map((t: any) => t.id).filter(Boolean);
+      // One metadata fetch per thread (Gmail's list endpoint doesn't return
+      // headers) — fine at mailbox scale (<=50), parallelized.
+      const threads = await Promise.all(ids.map(async (id) => {
+        const tUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/threads/" + encodeURIComponent(id));
+        tUrl.searchParams.set("format", "metadata");
+        tUrl.searchParams.append("metadataHeaders", "From");
+        tUrl.searchParams.append("metadataHeaders", "Subject");
+        tUrl.searchParams.append("metadataHeaders", "Date");
+        const tr = await fetch(tUrl.toString(), { headers: { Authorization: "Bearer " + accessToken } });
+        if (!tr.ok) return null;
+        const td = await tr.json().catch(() => null);
+        const msgs = td?.messages || [];
+        const last = msgs[msgs.length - 1];
+        if (!last) return null;
+        const headers = last.payload?.headers || [];
+        return {
+          id,
+          permalink: gmailPermalink(id),
+          from: gmailHeader(headers, "From"),
+          subject: gmailHeader(headers, "Subject") || "(no subject)",
+          date: gmailHeader(headers, "Date"),
+          snippet: last.snippet || td?.snippet || "",
+          messageId: last.id || null,
+          messageCount: msgs.length,
+        };
+      }));
+      return json({ threads: threads.filter(Boolean) }, 200);
+    }
+
+    // ── Mailbox: one full thread (task drawer's Email tab reader) ──
+    if (action === "gmail_thread") {
+      const at = await callerAccessToken(sb, auth.userId);
+      if (at.err) return json(at.err.body, at.err.status);
+      if (!body.threadId) return json({ error: "Missing threadId." }, 400);
+
+      const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/threads/" + encodeURIComponent(body.threadId));
+      url.searchParams.set("format", "full");
+      const r = await fetch(url.toString(), { headers: { Authorization: "Bearer " + at.token } });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: d?.error?.message || "Gmail thread fetch failed." }, r.status);
+
+      const messages = (d.messages || []).map((m: any) => {
+        const headers = m.payload?.headers || [];
+        return {
+          id: m.id,
+          from: gmailHeader(headers, "From"),
+          to: gmailHeader(headers, "To"),
+          date: gmailHeader(headers, "Date"),
+          subject: gmailHeader(headers, "Subject"),
+          bodyText: gmailBodyText(m.payload),
+          snippet: m.snippet || "",
+        };
+      });
+      const subject = messages.length ? messages[0].subject : "";
+      return json({ thread: { id: d.id, subject, permalink: gmailPermalink(d.id), messages } }, 200);
     }
 
     return json({ error: "Unknown action." }, 400);

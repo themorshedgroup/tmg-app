@@ -51,7 +51,7 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
   }
 
   // Connect Google Calendar + Tasks (read + write) — deliberately SEPARATE from login.
-  // Re-runs Google OAuth requesting the calendar + tasks scopes with offline
+  // Re-runs Google OAuth requesting the calendar + tasks + gmail scopes with offline
   // access, so Google issues a refresh token; init() below captures it and the app
   // stores it once (see connectGoogleCalendar in index.html). Full `calendar` scope
   // (not the narrower `calendar.events`) is required because the app also calls
@@ -60,8 +60,16 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
   // know the id of, NOT enumerating calendars, so calendarList.list always failed
   // with "insufficient authentication scopes" even on a perfectly fresh token.
   // `tasks` covers pushing TMG tasks into Google Tasks (Settings → Google Task
-  // auto-sync). Normal sign-in (signInWithGoogle, above) is left untouched.
-  // NOTE: anyone who connected before this scope changed must hit "Reconnect" once.
+  // auto-sync). `gmail.readonly` powers the My Tasks email mailbox (TMG-Toolbar-
+  // and-Email-Brief_1.md Feature 2) — read + search only, no send scope, since
+  // replies always hand off to Gmail compose rather than sending from the app.
+  // Kept on this SAME connect flow (one consent, one refresh token) rather than a
+  // separate "Connect Gmail" button, matching how Kikos's AI mailbox bundles
+  // gmail scope into its one Google connect flow. Normal sign-in (signInWithGoogle,
+  // above) is left untouched.
+  // NOTE: anyone who connected before this scope changed must hit "Reconnect" once
+  // — including anyone who already connected Calendar before gmail.readonly was
+  // added here, since Google doesn't retroactively grant a scope to an old token.
   async function connectCalendar() {
     try {
       // Mark that the NEXT OAuth redirect is a deliberate calendar-connect, so init()
@@ -78,7 +86,7 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          scopes: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks',
+          scopes: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/gmail.readonly',
           // select_account alongside consent — same 403 org_internal issue as plain sign-in
           // (see signInWithGoogle above): without it, Google silently uses the browser's
           // default Google session, which may not be the @themorshedgroup.com account.

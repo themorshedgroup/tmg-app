@@ -208,6 +208,40 @@
       { id:'18', Owner:{ name:'Brad Ellsworth' }, Subject:'A Touch Call: Jamie Cruz', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-11', Who_Id:{ name:'Jamie Cruz' }, Closed_Time:null, Trigger:null },
       { id:'19', Owner:{ name:'Brad Ellsworth' }, Subject:'C Touch Call: Sam Rivera', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-14', Who_Id:{ name:'Sam Rivera' }, Closed_Time:null, Trigger:null },
     ];
+    // Dev-only overdue backlog, so the reschedule packer can be exercised at
+    // realistic volume: multi-day packing, the weekly EO floor, weekend/holiday
+    // skips, class exhaustion, and spouse pairs riding together.
+    (function seedDevOverdue() {
+      const first = ['Paula','Kevin','Lori','Alden','Rikesh','Arjav','Audrey','Ramya','Aaron','Nirav','Derrick','Irving','Marc','Alicia','Michael','Guarav','Tim','Aimee','Grant','Mike','Evan','Toni','Ben','Jonathan','David','Jason','Jose','Frank','Rajesh','Niel','Trey','Kirk','Miguel','Brian','Monica'];
+      const last  = ['Li','Keiptof','Truthseeker','Doyle','Thakrar','Ezekiel','Glenn','Holehonnur','Hurtado','Suraiya','McDonald','Lee','Rowley','Ortiz','Murphy','Kikani','Hamilton','Carpenter','Gurtin','Hardtmeier','Ransome','Jacaruso','Tiggelaar','Hewitt','Farnell','Crawford','Asensio','Barbella','Kalidindi','Chand','Halbert','Ashy','Godinez','Hall','Ostroot'];
+      const tiers = ['A','A','A','B','B','C'];               // A-heavy, like the real backlog
+      for (let i = 0; i < 58; i++) {
+        const tier = tiers[i % tiers.length];
+        const eo = i % 7 === 3;                               // ~1 in 7 tagged EO
+        const cid = 'dev-c-' + i;
+        const month = 4 + (i % 4);                            // Apr–Jul 2026, all overdue
+        const day = String((i % 27) + 1).padStart(2, '0');
+        DEV_TASKS.push({
+          id: 'dev-od-' + i, Owner: O,
+          Subject: tier + ' Touch Call: ' + first[i % first.length] + ' ' + last[i % last.length],
+          Task_Type: 'Call',
+          Description: eo ? 'EO Member | referral' : null,
+          Status: 'Not Started',
+          Due_Date: '2026-0' + month + '-' + day,
+          Who_Id: { id: cid, name: first[i % first.length] + ' ' + last[i % last.length] },
+          Closed_Time: null, Trigger: null,
+        });
+      }
+      // Two spouse pairs — each partner's task points at the other's contact,
+      // which is the linkage the packer uses to keep them on the same day.
+      [['Michelle','Rowe','Brad','Houston'], ['Samantha','Kohler','Adam','Kohler']].forEach((p, n) => {
+        const aId = 'dev-sp-' + n + 'a', bId = 'dev-sp-' + n + 'b';
+        DEV_TASKS.push(
+          { id:'dev-spt-'+n+'a', Owner:O, Subject:'A Touch Call: '+p[0]+' '+p[1], Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-06-15', Who_Id:{ id:aId, name:p[0]+' '+p[1] }, Closed_Time:null, Trigger:null, Spouse_Origin_ID:bId },
+          { id:'dev-spt-'+n+'b', Owner:O, Subject:'A Touch Call: '+p[2]+' '+p[3], Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-06-15', Who_Id:{ id:bId, name:p[2]+' '+p[3] }, Closed_Time:null, Trigger:null, Spouse_Origin_ID:aId },
+        );
+      });
+    })();
 
     // ─── Formatting helpers ───────────────────────────────────────────
     const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -1396,6 +1430,186 @@
       );
     }
 
+    // ─── Overdue reschedule packer ──────────────────────────────────────
+    // Re-slotting the overdue backlog is ARITHMETIC, not reasoning: day
+    // capacity, class mix, a weekly EO floor, spouses kept together. Doing it
+    // through the AI chat failed badly — its search tool re-queries Zoho and
+    // truncates around ~170 rows, so it never saw the whole backlog (which was
+    // sitting in this page's `tasks` state the entire time) and it invented
+    // task ids to fill the gaps. This runs over the already-loaded tasks, is
+    // fully deterministic, and writes once instead of asking per task.
+    //
+    // US federal holidays, observed. Labor Day is treated as a holiday per TMG.
+    const FED_HOLIDAYS = [
+      '2026-09-07', '2026-10-12', '2026-11-11', '2026-11-26', '2026-12-25',
+      '2027-01-01', '2027-01-18', '2027-02-15', '2027-05-31', '2027-06-18',
+      '2027-07-05', '2027-09-06', '2027-10-11', '2027-11-11', '2027-11-25', '2027-12-24',
+    ];
+    const isoOf = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    const parseISO = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ''); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
+    function isWorkday(d) {
+      const dow = d.getDay();
+      if (dow === 0 || dow === 6) return false;
+      return !FED_HOLIDAYS.includes(isoOf(d));
+    }
+    const nextWorkday = (d) => { const x = new Date(d); while (!isWorkday(x)) x.setDate(x.getDate() + 1); return x; };
+    // Monday-anchored week key, so the "3 EO per week" floor is measured Mon–Sun.
+    function weekKey(d) { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return isoOf(x); }
+
+    // "EO" arrives two ways depending on the agent: as a subject prefix
+    // ("EO Touch Call: …") or as a tag in the description. Accept either.
+    function isEOTask(t) {
+      if (callTier(t.Subject) === 'EO') return true;
+      return /\bEO\b|EO Member/i.test(t.Description || '');
+    }
+    // The org's spouse-origin field is a Tasks custom field whose api_name we
+    // don't hardcode — find it by shape so a rename can't silently break pairing.
+    function spouseOriginOf(t) {
+      const k = Object.keys(t).find(k => /spouse/i.test(k) && /origin|id/i.test(k));
+      const v = k ? t[k] : null;
+      return v && typeof v === 'object' ? (v.id || null) : (v || null);
+    }
+
+    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek }) {
+      const pool = (tasks || []).filter(t =>
+        (t.Status || '') === 'Not Started' &&
+        isCallTask(t, colMap) &&
+        t.Due_Date && t.Due_Date <= cutoff &&
+        ['A', 'B', 'C', 'EO'].includes(callTier(t.Subject))
+      ).sort((a, b) => (a.Due_Date < b.Due_Date ? -1 : a.Due_Date > b.Due_Date ? 1 : 0));
+
+      // Pair spouses: task X names partner P as its spouse origin, and P has
+      // their own in-scope task → both should land on the same day.
+      const byContact = {};
+      pool.forEach(t => { const c = t.Who_Id?.id; if (c && !byContact[c]) byContact[c] = t; });
+      const partnerOf = new Map();
+      pool.forEach(t => { const so = spouseOriginOf(t); const p = so && byContact[so]; if (p && p.id !== t.id) partnerOf.set(t.id, p); });
+
+      // An EO-prefixed call still needs a class home for the 2A/1B/1C mix; it
+      // reads as the lightest touch, so it queues with C.
+      const bucket = { A: [], B: [], C: [] };
+      pool.forEach(t => { const tier = callTier(t.Subject); (bucket[tier] || bucket.C).push(t); });
+      const eoPool = pool.filter(isEOTask);
+
+      const placed = new Set();
+      const firstFree = (arr) => arr.find(t => !placed.has(t.id));
+      const days = [];
+      let cursor = nextWorkday(parseISO(start) || new Date());
+      const eoByWeek = {};
+      let guard = 0;
+
+      while (placed.size < pool.length && guard++ < 400) {
+        const iso = isoOf(cursor), wk = weekKey(cursor);
+        const day = [];
+        const take = (t) => { if (!t || placed.has(t.id)) return false; placed.add(t.id); day.push(t); return true; };
+        const tierCount = (tier) => day.filter(t => (bucket[callTier(t.Subject)] ? callTier(t.Subject) : 'C') === tier).length;
+
+        // Slot 5 first: the weekly EO floor supersedes the class mix until met.
+        if ((eoByWeek[wk] || 0) < eoPerWeek && take(firstFree(eoPool))) eoByWeek[wk] = (eoByWeek[wk] || 0) + 1;
+        while (tierCount('A') < 2 && take(firstFree(bucket.A))) {}
+        if (!tierCount('B')) take(firstFree(bucket.B));
+        if (!tierCount('C')) take(firstFree(bucket.C));
+        // Backfill to capacity once a class runs dry (A first — it's the deepest queue).
+        while (day.length < perDay) {
+          if (!take(firstFree(bucket.A)) && !take(firstFree(bucket.B)) && !take(firstFree(bucket.C))) break;
+        }
+        // Spouses ride along even if it pushes the day over capacity.
+        day.slice().forEach(t => { const p = partnerOf.get(t.id); if (p) take(p); });
+
+        if (!day.length) break;
+        days.push({ date: iso, tasks: day });
+        cursor = nextWorkday(new Date(cursor.setDate(cursor.getDate() + 1)));
+      }
+      // partnerOf holds a link per direction; collapse to unordered pairs so the
+      // count reads as couples, not links.
+      const pairKeys = new Set();
+      partnerOf.forEach((p, id) => pairKeys.add([id, p.id].sort().join('|')));
+      return { days, total: pool.length, placed: placed.size, pairs: pairKeys.size, eoTotal: eoPool.length };
+    }
+
+    function RescheduleOverdue({ tasks, colMap, onApply, onClose }) {
+      const [cutoff, setCutoff] = useState('2026-07-31');
+      const [start, setStart] = useState('2026-08-17');
+      const [perDay, setPerDay] = useState(5);
+      const [eoPerWeek, setEoPerWeek] = useState(3);
+      const [busy, setBusy] = useState(false);
+      const [done, setDone] = useState(null);
+
+      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek }),
+        [tasks, colMap, cutoff, start, perDay, eoPerWeek]);
+
+      async function apply() {
+        setBusy(true);
+        const items = plan.days.flatMap(d => d.tasks.map(t => ({ id: t.id, due_date: d.date })));
+        const res = await onApply(items);
+        setBusy(false);
+        setDone(res && res.ok ? { ok: true, n: res.count || items.length } : { ok: false, error: (res && res.error) || 'Some updates failed.' });
+      }
+
+      const fld = { fontFamily:C.fontSans, fontSize:'0.8rem', padding:'7px 10px', border:'1px solid '+C.border, borderRadius:8, background:C.surface, color:C.textPrimary, outline:'none' };
+      const lbl = { fontSize:'0.68rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.textMuted, marginBottom:5, display:'block' };
+      const tierPill = (tier, eo) => ({ fontSize:'0.62rem', fontWeight:700, borderRadius:20, padding:'1px 7px', flexShrink:0,
+        color: eo ? '#fff' : C.navy, background: eo ? C.gold : (tier === 'A' ? C.goldSoft+'44' : tier === 'B' ? C.blue+'22' : C.border) });
+
+      return (
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.4)', zIndex:60, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background:C.bg, borderRadius:14, width:'min(760px, 96vw)', maxHeight:'92vh', display:'flex', flexDirection:'column', boxShadow:'0 18px 60px rgba(0,26,74,.3)' }}>
+            <div style={{ flexShrink:0, padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface, borderRadius:'14px 14px 0 0', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+              <div>
+                <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Reschedule Overdue Calls</div>
+                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{plan.total} overdue · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together</div>
+              </div>
+              <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
+            </div>
+
+            <div style={{ flexShrink:0, padding:'14px 22px', borderBottom:'1px solid '+C.border, display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end' }}>
+              <div><label style={lbl}>Overdue on/before</label><input type="date" value={cutoff} onChange={e => setCutoff(e.target.value)} style={fld} /></div>
+              <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
+              <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
+              <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
+              <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped.</div>
+            </div>
+
+            <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>
+              {plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No overdue Not-Started calls on or before {cutoff}.</div>}
+              {plan.days.map(d => (
+                <div key={d.date} style={{ marginBottom:12 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
+                    <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
+                    <span style={{ fontSize:'0.68rem', color: d.tasks.length > perDay ? C.amber : C.textMuted }}>{d.tasks.length} call{d.tasks.length===1?'':'s'}{d.tasks.length > perDay ? ' · spouse overflow' : ''}</span>
+                  </div>
+                  <div style={{ display:'grid', gap:4 }}>
+                    {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
+                      <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', border:'1px solid '+C.border, borderRadius:7, background:C.surface }}>
+                        <span style={tierPill(tier, eo)}>{eo ? 'EO' : tier}</span>
+                        <span style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id?.name || t.Subject}</span>
+                        <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
+                      </div>
+                    ); })}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ flexShrink:0, padding:'14px 22px', borderTop:'1px solid '+C.border, background:C.surface, borderRadius:'0 0 14px 14px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
+              <div style={{ fontSize:'0.76rem', color: done ? (done.ok ? C.green : C.red) : C.textMuted }}>
+                {done ? (done.ok ? `✓ Updated ${done.n} tasks in Zoho.` : done.error)
+                      : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available`}
+              </div>
+              <div style={{ display:'flex', gap:10 }}>
+                <button onClick={onClose} style={{ ...iconBtnStatic, color:C.navy }}>Close</button>
+                <button onClick={apply} disabled={busy || !plan.days.length || (done && done.ok)}
+                  style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (busy || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
+                  {busy ? 'Applying…' : `Apply ${plan.placed} date${plan.placed===1?'':'s'}`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    const iconBtnStatic = { display:'inline-flex', alignItems:'center', gap:7, fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:500, color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:9, padding:'8px 13px', cursor:'pointer' };
+
     // ─── Main app ──────────────────────────────────────────────────────
     function App({ user, profile }) {
       const [tasks, setTasks] = useState(null);     // null = loading
@@ -1415,6 +1629,7 @@
       const [sortDir, setSortDir] = useState('desc');
       const [drawer, setDrawer] = useState(null);    // { mode:'ai'|'create'|'edit', task? } | null
       const [showCapacity, setShowCapacity] = useState(false); // main content: task table vs. Call Capacity grid
+      const [showReschedule, setShowReschedule] = useState(false);
 
       async function load(force) {
         // Serve from cache whenever one exists — reload/revisit shouldn't re-pay the
@@ -1980,6 +2195,9 @@
                 <button onClick={() => setDrawer(d => d?.mode === 'ai' ? null : { mode:'ai' })} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background: aiOpen ? C.gold+'22' : C.gold+'0f', fontWeight:600 }}>
                   <i className="ti ti-sparkles" style={{ fontSize:15 }} /> Ask AI
                 </button>
+                <button onClick={() => setShowReschedule(true)} title="Pack the overdue backlog onto upcoming business days" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
+                  <i className="ti ti-calendar-up" style={{ fontSize:15 }} /> Reschedule Overdue
+                </button>
                 <button onClick={() => setDrawer({ mode:'create' })} style={{ ...iconBtn, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
                   <i className="ti ti-plus" style={{ fontSize:15 }} /> Create Task
                 </button>
@@ -2084,6 +2302,12 @@
           </div>
 
           {aiOverlay && <AIChat tasks={view} colMap={colMap} meta={meta} extraFields={extraFields} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
+          {/* Reads the FULL loaded set, not `view` — the backlog shouldn't depend on the active filter. */}
+          {showReschedule && tasks && (
+            <RescheduleOverdue tasks={tasks} colMap={colMap}
+              onApply={(items) => applyAiWrite('bulk_set_due_dates', { items })}
+              onClose={() => setShowReschedule(false)} />
+          )}
           {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
             <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}
               onClose={() => setDrawer(null)} onWrite={writeTask} onDelete={removeTask} />

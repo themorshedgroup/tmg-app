@@ -1874,7 +1874,8 @@
           keep = sorted[0]; removeIds = sorted.slice(1).map(t => t.id);
           reason = 'No Spouse Task signal — kept the earliest-due call';
         }
-        groups.push({ contact: c.name, tasks: c.tasks, keepId: keep ? keep.id : null, removeIds, reason, needsReview });
+        const owner = (keep && keep.Owner?.name) || c.tasks.find(t => t.Owner?.name)?.Owner?.name || '—';
+        groups.push({ contact: c.name, owner, tasks: c.tasks, keepId: keep ? keep.id : null, removeIds, reason, needsReview });
       });
       return groups.sort((a, b) => a.contact.localeCompare(b.contact));
     }
@@ -1922,6 +1923,56 @@
       return out;
     }
 
+    // resolveCoupleTarget alone isn't enough to WRITE dates from — it clamps
+    // any overdue result to today, so a backlog of many overdue couples all
+    // resolve to the same "today" and would collide the moment they're
+    // applied, blowing straight past the per-agent daily call cap the
+    // Reschedule packer enforces. This spreads them across upcoming business
+    // days using the SAME rules (perDay cap, weekends/holidays via
+    // nextWorkday) and the SAME existing-load awareness (counts calls
+    // already on each owner's calendar, not just other alignment pairs), so
+    // Data Health can't disagree with Reschedule Overdue about what a
+    // reasonable day looks like. A couple whose partners have different
+    // owners needs room on BOTH owners' calendars that day.
+    function packSpouseAlignment({ tasks, colMap, spouseLinks, perDay, start }) {
+      const pairs = spouseAlignmentIssues({ tasks, colMap, spouseLinks });
+      if (!pairs.length) return [];
+
+      const load = {};
+      (tasks || []).forEach(t => {
+        if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap) || !t.Due_Date) return;
+        const owner = t.Owner?.name || 'Unassigned';
+        const iso = String(t.Due_Date).slice(0, 10);
+        const k = owner + '|' + iso;
+        load[k] = (load[k] || 0) + 1;
+      });
+      const roomFor = (owner, iso, n) => (load[(owner || 'Unassigned') + '|' + iso] || 0) + n <= perDay;
+      const bump = (owner, iso, n) => { const k = (owner || 'Unassigned') + '|' + iso; load[k] = (load[k] || 0) + n; };
+
+      const floorDate = nextWorkday(parseISO(start) || new Date());
+      // Most-overdue couples get first pick of the earliest open day.
+      const ordered = pairs.slice().sort((p, q) => String(p.target_date || '').localeCompare(String(q.target_date || '')));
+
+      const placed = ordered.map(p => {
+        const sameOwner = p.a.owner && p.a.owner === p.b.owner;
+        let day = nextWorkday(parseISO(p.target_date) || floorDate);
+        if (day < floorDate) day = floorDate;
+        let guard = 0;
+        while (guard++ < 400) {
+          const iso = isoOf(day);
+          const ok = sameOwner ? roomFor(p.a.owner, iso, 2) : (roomFor(p.a.owner, iso, 1) && roomFor(p.b.owner, iso, 1));
+          if (ok) {
+            if (sameOwner) bump(p.a.owner, iso, 2); else { bump(p.a.owner, iso, 1); bump(p.b.owner, iso, 1); }
+            return { ...p, target_date: iso };
+          }
+          day = nextWorkday(new Date(day.setDate(day.getDate() + 1)));
+        }
+        return p; // guard exhausted (extreme backlog) — keep its unpacked date rather than drop it
+      });
+      // Display/apply in date order, not original-mismatch order.
+      return placed.sort((a, b) => String(a.target_date || '').localeCompare(String(b.target_date || '')));
+    }
+
     function DataHealth({ tasks, colMap, onDeleteIds, onSetDates, onClose }) {
       const [tab, setTab] = useState('dupes');
       const [busy, setBusy] = useState(false);
@@ -1955,7 +2006,10 @@
       }, [singleCallKeys.join('|'), refreshNonce]);
       function recheckSpousePairings() { clearSpouseLinksCache(); setRefreshNonce(n => n + 1); }
 
-      const aligns = useMemo(() => spouseAlignmentIssues({ tasks, colMap, spouseLinks }), [tasks, colMap, spouseLinks]);
+      // perDay mirrors Reschedule Overdue's default cap — alignment shares
+      // the same daily-capacity rule, not a separate one.
+      const aligns = useMemo(() => packSpouseAlignment({ tasks, colMap, spouseLinks, perDay: 5, start: todayISO() }), [tasks, colMap, spouseLinks]);
+      const alignDays = useMemo(() => new Set(aligns.map(p => p.target_date)).size, [aligns]);
 
       async function applyDupes() {
         setBusy(true);
@@ -2004,6 +2058,9 @@
                         <span style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</span>
                         <span style={{ fontSize:'0.68rem', color:C.textMuted }}>{g.tasks.length} calls</span>
                       </div>
+                      <div style={{ marginTop:2, display:'flex', alignItems:'center', gap:5, fontSize:'0.72rem', color:C.textMuted }}>
+                        <i className="ti ti-user" style={{ fontSize:13 }} /> Owner — <b style={{ color:C.textSecondary }}>{g.owner}</b>
+                      </div>
                       <div style={{ fontSize:'0.72rem', color:C.textMuted, marginTop:2 }}>{g.reason}</div>
                       <div style={{ marginTop:6, display:'grid', gap:3 }}>
                         {g.tasks.map(t => (
@@ -2022,6 +2079,9 @@
                       {review.map(g => (
                         <div key={g.contact} style={{ ...card, borderColor:C.amber+'66', background:C.amber+'0d' }}>
                           <div style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</div>
+                          <div style={{ marginTop:2, display:'flex', alignItems:'center', gap:5, fontSize:'0.72rem', color:C.textMuted }}>
+                            <i className="ti ti-user" style={{ fontSize:13 }} /> Owner — <b style={{ color:C.textSecondary }}>{g.owner}</b>
+                          </div>
                           <div style={{ fontSize:'0.72rem', color:C.textSecondary, marginTop:2 }}>{g.reason}</div>
                         </div>
                       ))}
@@ -2060,7 +2120,7 @@
                 {done ? (done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error)
                       : tab === 'dupes' ? `${removeAll.length} extra call${removeAll.length===1?'':'s'} to remove${review.length ? ' · ' + review.length + ' need review' : ''}`
                                          : linksLoading ? 'Checking spouse pairings…'
-                                         : `${aligns.length} couple${aligns.length===1?'':'s'} to align`}
+                                         : `${aligns.length} couple${aligns.length===1?'':'s'} to align across ${alignDays} business day${alignDays===1?'':'s'} · ≤5 calls/day per agent`}
               </div>
               <div style={{ display:'flex', gap:10 }}>
                 <button onClick={onClose} style={{ ...iconBtnStatic, color:C.navy }}>Close</button>

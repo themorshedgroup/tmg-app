@@ -269,6 +269,28 @@
           { id:'dev-spt-'+n+'b', Owner:O, Subject:'A Touch Call: '+p[2]+' '+p[3], Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-06-15', Who_Id:{ id:bId, name:p[2]+' '+p[3] }, Closed_Time:null, Trigger:null, Spouse_Origin_ID:aId },
         );
       });
+
+      // Duplicate-detection fixtures — the three resolution paths:
+      DEV_TASKS.push(
+        // (1) No spouse signal at all → falls back to earliest-due.
+        { id:'dev-dup-1a', Owner:O, Subject:'B Touch Call: Nancy Diaz', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-06-20', Who_Id:{ id:'dev-dup-nancy', name:'Nancy Diaz' }, Closed_Time:null, Trigger:null },
+        { id:'dev-dup-1b', Owner:O, Subject:'B Touch Call: Nancy Diaz', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-07-02', Who_Id:{ id:'dev-dup-nancy', name:'Nancy Diaz' }, Closed_Time:null, Trigger:null },
+        // (2) One Spouse Task checked, one not → keep the checked one.
+        { id:'dev-dup-2a', Owner:O, Subject:'A Touch Call: Owen Blake', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-06-18', Who_Id:{ id:'dev-dup-owen', name:'Owen Blake' }, Closed_Time:null, Trigger:null, Spouse_Task_Checkbox:false },
+        { id:'dev-dup-2b', Owner:O, Subject:'A Touch Call: Owen Blake', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-07-25', Who_Id:{ id:'dev-dup-owen', name:'Owen Blake' }, Closed_Time:null, Trigger:null, Spouse_Task_Checkbox:true },
+        // (3) BOTH checked → ambiguous, needs manual review (duplicate contact case).
+        { id:'dev-dup-3a', Owner:O, Subject:'C Touch Call: Priya Chandra', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-06-05', Who_Id:{ id:'dev-dup-priya', name:'Priya Chandra' }, Closed_Time:null, Trigger:null, Spouse_Task_Checkbox:true },
+        { id:'dev-dup-3b', Owner:O, Subject:'C Touch Call: Priya Chandra', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-01', Who_Id:{ id:'dev-dup-priya', name:'Priya Chandra' }, Closed_Time:null, Trigger:null, Spouse_Task_Checkbox:true },
+      );
+
+      // Spouse-alignment fixture — each partner has exactly ONE open call
+      // (no duplicates), but different classes/dates, so they should surface
+      // in the alignment tab with a computed target date.
+      DEV_TASKS.push(
+        { id:'dev-al-1a', Owner:O, Subject:'A Touch Call: Wendy Sato', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-07-10', Who_Id:{ id:'dev-al-wendy', name:'Wendy Sato' }, Closed_Time:null, Trigger:null, Spouse_Origin_ID:'dev-al-carl' },
+        { id:'dev-al-1b', Owner:O, Subject:'C Touch Call: Carl Sato', Task_Type:'Call', Description:null, Status:'Not Started', Due_Date:'2026-08-02', Who_Id:{ id:'dev-al-carl', name:'Carl Sato' }, Closed_Time:null, Trigger:null, Spouse_Origin_ID:'dev-al-wendy' },
+        { id:'dev-al-1c', Owner:O, Subject:'A Touch Call: Wendy Sato (done)', Task_Type:'Call', Description:null, Status:'Completed', Due_Date:'2026-05-26', Who_Id:{ id:'dev-al-wendy', name:'Wendy Sato' }, Closed_Time:'2026-05-26T09:00:00-05:00', Trigger:null },
+      );
     })();
 
     // ─── Formatting helpers ───────────────────────────────────────────
@@ -1709,6 +1731,212 @@
     }
     const iconBtnStatic = { display:'inline-flex', alignItems:'center', gap:7, fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:500, color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:9, padding:'8px 13px', cursor:'pointer' };
 
+    // ─── Duplicate calls + spouse alignment ─────────────────────────────
+    // The "Spouse Task" checkbox is a Tasks custom field whose real api_name
+    // we don't hardcode (same reasoning as spouseOriginOf) — a couple's cadence
+    // is meant to produce ONE shared call with this checked; a duplicate is
+    // caused by (a) an unrelated re-fire with the box unchecked (safe to drop),
+    // or (b) BOTH partners' calls getting checked, which traces back to a
+    // duplicate CONTACT record and can't be resolved by deleting a task.
+    function spouseTaskCheckedOf(t) {
+      const k = Object.keys(t).find(k => /spouse/i.test(k) && /task/i.test(k) && !/origin/i.test(k));
+      return k ? (t[k] === true || t[k] === 'true') : null; // null = field not present on this task
+    }
+
+    function findDuplicateCalls({ tasks, colMap }) {
+      const byContact = {};
+      (tasks || []).forEach(t => {
+        if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
+        const cid = t.Who_Id?.id || t.Who_Id?.name;
+        if (!cid) return;
+        (byContact[cid] = byContact[cid] || { name: t.Who_Id?.name || String(cid), tasks: [] }).tasks.push(t);
+      });
+      const groups = [];
+      Object.values(byContact).forEach(c => {
+        if (c.tasks.length < 2) return;
+        const flags = c.tasks.map(spouseTaskCheckedOf);
+        const checkedIdx = flags.map((v, i) => v === true ? i : -1).filter(i => i >= 0);
+        let keep, removeIds, reason, needsReview = false;
+        if (checkedIdx.length === 1) {
+          keep = c.tasks[checkedIdx[0]];
+          removeIds = c.tasks.filter((_, i) => i !== checkedIdx[0]).map(t => t.id);
+          reason = 'Kept the Spouse Task–checked call';
+        } else if (checkedIdx.length >= 2) {
+          keep = null; removeIds = []; needsReview = true;
+          reason = 'Both calls are Spouse Task–checked — likely a duplicate CONTACT record, needs a manual merge';
+        } else {
+          const sorted = c.tasks.slice().sort((a, b) => String(a.Due_Date || '9999-99-99').localeCompare(String(b.Due_Date || '9999-99-99')));
+          keep = sorted[0]; removeIds = sorted.slice(1).map(t => t.id);
+          reason = 'No Spouse Task signal — kept the earliest-due call';
+        }
+        groups.push({ contact: c.name, tasks: c.tasks, keepId: keep ? keep.id : null, removeIds, reason, needsReview });
+      });
+      return groups.sort((a, b) => a.contact.localeCompare(b.contact));
+    }
+
+    // Couples whose single surviving Not-Started call has drifted apart —
+    // reuses the SAME higher-touch-wins target rule as the AI's couple-cadence
+    // tool (resolveCoupleTarget) so the two never disagree on what "aligned"
+    // means. Only pairs contacts with exactly one open call each — a contact
+    // still showing 2+ belongs to the duplicate list above, not here.
+    function spouseAlignmentIssues({ tasks, colMap }) {
+      const oneCallByContact = {}, countByContact = {};
+      (tasks || []).forEach(t => {
+        if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
+        const cid = t.Who_Id?.id || t.Who_Id?.name;
+        if (!cid) return;
+        countByContact[cid] = (countByContact[cid] || 0) + 1;
+        oneCallByContact[cid] = t;
+      });
+      const lastCompleted = lastCompletedByContact(tasks, colMap);
+      function partnerInfo(cid, name) {
+        const nsCall = countByContact[cid] === 1 ? oneCallByContact[cid] : null;
+        const last = lastCompleted[cid];
+        const cls = nsCall ? parseTouchClass(nsCall.Subject) : null;
+        const ownerName = (nsCall && nsCall.Owner?.name) || (last && last.Owner?.name) || '';
+        const bucket = /tarek/i.test(ownerName) ? 'tarek' : 'other';
+        const lastDate = last ? dateOnly(last.Closed_Time || last.Due_Date) : null;
+        const expected = (cls && lastDate) ? addDaysISO(lastDate, (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls]) : null;
+        return { name, task_id: nsCall ? nsCall.id : null, class: cls, due: nsCall ? nsCall.Due_Date : null, expected_due: expected };
+      }
+      const seen = new Set(), out = [];
+      Object.keys(oneCallByContact).forEach(cid => {
+        if (countByContact[cid] !== 1) return;
+        const t = oneCallByContact[cid];
+        const partnerId = spouseOriginOf(t);
+        if (!partnerId || countByContact[partnerId] !== 1) return;
+        const key = [cid, partnerId].sort().join('|');
+        if (seen.has(key)) return; seen.add(key);
+        const partnerTask = oneCallByContact[partnerId];
+        const A = partnerInfo(cid, t.Who_Id?.name || cid);
+        const B = partnerInfo(partnerId, partnerTask.Who_Id?.name || partnerId);
+        if (A.due && B.due && A.due === B.due) return; // already aligned
+        out.push({ a: A, b: B, target_date: resolveCoupleTarget(A, B) });
+      });
+      return out;
+    }
+
+    function DataHealth({ tasks, colMap, onDeleteIds, onSetDates, onClose }) {
+      const [tab, setTab] = useState('dupes');
+      const [busy, setBusy] = useState(false);
+      const [done, setDone] = useState(null);
+
+      const dupes = useMemo(() => findDuplicateCalls({ tasks, colMap }), [tasks, colMap]);
+      const fixable = dupes.filter(g => !g.needsReview);
+      const review = dupes.filter(g => g.needsReview);
+      const removeAll = fixable.flatMap(g => g.removeIds);
+
+      const aligns = useMemo(() => spouseAlignmentIssues({ tasks, colMap }), [tasks, colMap]);
+
+      async function applyDupes() {
+        setBusy(true);
+        const res = await onDeleteIds(removeAll);
+        setBusy(false);
+        setDone(res && res.ok ? { ok: true, n: res.count || removeAll.length } : { ok: false, error: (res && res.error) || 'Some deletes failed.' });
+      }
+      async function applyAligns() {
+        setBusy(true);
+        const items = aligns.flatMap(p => [p.a.task_id, p.b.task_id].filter(Boolean).map(id => ({ id, due_date: p.target_date })));
+        const res = await onSetDates(items);
+        setBusy(false);
+        setDone(res && res.ok ? { ok: true, n: res.count || items.length } : { ok: false, error: (res && res.error) || 'Some updates failed.' });
+      }
+      function switchTab(t) { setTab(t); setDone(null); }
+
+      const card = { border:'1px solid '+C.border, borderRadius:8, padding:'8px 12px', background:C.surface, marginBottom:6 };
+
+      return (
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.4)', zIndex:60, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background:C.bg, borderRadius:14, width:'min(720px, 96vw)', maxHeight:'92vh', display:'flex', flexDirection:'column', boxShadow:'0 18px 60px rgba(0,26,74,.3)' }}>
+            <div style={{ flexShrink:0, padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface, borderRadius:'14px 14px 0 0', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+              <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Data Health</div>
+              <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
+            </div>
+
+            <div style={{ flexShrink:0, padding:'12px 22px 0' }}>
+              <div style={{ display:'inline-flex', border:'1px solid '+C.border, borderRadius:9, overflow:'hidden' }}>
+                <button onClick={() => switchTab('dupes')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='dupes'?C.navy:C.surface, color: tab==='dupes'?'#fff':C.textSecondary }}>Duplicate calls ({dupes.length})</button>
+                <button onClick={() => switchTab('align')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='align'?C.navy:C.surface, color: tab==='align'?'#fff':C.textSecondary }}>Spouse alignment ({aligns.length})</button>
+              </div>
+            </div>
+
+            <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>
+              {tab === 'dupes' && (
+                <React.Fragment>
+                  {dupes.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No contacts with more than one Not-Started call.</div>}
+                  {fixable.map(g => (
+                    <div key={g.contact} style={card}>
+                      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+                        <span style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</span>
+                        <span style={{ fontSize:'0.68rem', color:C.textMuted }}>{g.tasks.length} calls</span>
+                      </div>
+                      <div style={{ fontSize:'0.72rem', color:C.textMuted, marginTop:2 }}>{g.reason}</div>
+                      <div style={{ marginTop:6, display:'grid', gap:3 }}>
+                        {g.tasks.map(t => (
+                          <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, fontSize:'0.76rem' }}>
+                            <span style={{ fontSize:'0.62rem', fontWeight:700, borderRadius:20, padding:'1px 7px', color:'#fff', background: t.id===g.keepId ? C.green : C.red }}>{t.id===g.keepId ? 'KEEP' : 'REMOVE'}</span>
+                            <span style={{ color:C.textPrimary }}>{fmtDate(t.Due_Date)}</span>
+                            <span style={{ color:C.textMuted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Subject}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {review.length > 0 && (
+                    <div style={{ marginTop:14 }}>
+                      <div style={{ fontSize:'0.68rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.amber, marginBottom:6 }}>Needs manual review ({review.length})</div>
+                      {review.map(g => (
+                        <div key={g.contact} style={{ ...card, borderColor:C.amber+'66', background:C.amber+'0d' }}>
+                          <div style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</div>
+                          <div style={{ fontSize:'0.72rem', color:C.textSecondary, marginTop:2 }}>{g.reason}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </React.Fragment>
+              )}
+              {tab === 'align' && (
+                <React.Fragment>
+                  {aligns.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No spouse pairs with mismatched due dates.</div>}
+                  {aligns.map((p, i) => (
+                    <div key={i} style={card}>
+                      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+                        <span style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{p.a.name} & {p.b.name}</span>
+                        <span style={{ fontSize:'0.68rem', color:C.gold, fontWeight:700 }}>→ {fmtDate(p.target_date)}</span>
+                      </div>
+                      <div style={{ marginTop:4, fontSize:'0.76rem', color:C.textSecondary }}>
+                        {p.a.name}: {p.a.class ? p.a.class+'-touch, ' : ''}due {fmtDate(p.a.due) || '—'} · {p.b.name}: {p.b.class ? p.b.class+'-touch, ' : ''}due {fmtDate(p.b.due) || '—'}
+                      </div>
+                    </div>
+                  ))}
+                </React.Fragment>
+              )}
+            </div>
+
+            <div style={{ flexShrink:0, padding:'14px 22px', borderTop:'1px solid '+C.border, background:C.surface, borderRadius:'0 0 14px 14px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
+              <div style={{ fontSize:'0.76rem', color: done ? (done.ok ? C.green : C.red) : C.textMuted }}>
+                {done ? (done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error)
+                      : tab === 'dupes' ? `${removeAll.length} extra call${removeAll.length===1?'':'s'} to remove${review.length ? ' · ' + review.length + ' need review' : ''}`
+                                         : `${aligns.length} couple${aligns.length===1?'':'s'} to align`}
+              </div>
+              <div style={{ display:'flex', gap:10 }}>
+                <button onClick={onClose} style={{ ...iconBtnStatic, color:C.navy }}>Close</button>
+                {tab === 'dupes'
+                  ? <button onClick={applyDupes} disabled={busy || !removeAll.length || (done && done.ok)}
+                      style={{ ...iconBtnStatic, color:'#fff', background:C.red, borderColor:C.red, fontWeight:600, opacity:(busy || !removeAll.length || (done && done.ok)) ? .5 : 1 }}>
+                      {busy ? 'Deleting…' : `Delete ${removeAll.length} duplicate${removeAll.length===1?'':'s'}`}
+                    </button>
+                  : <button onClick={applyAligns} disabled={busy || !aligns.length || (done && done.ok)}
+                      style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity:(busy || !aligns.length || (done && done.ok)) ? .5 : 1 }}>
+                      {busy ? 'Applying…' : `Align ${aligns.length} couple${aligns.length===1?'':'s'}`}
+                    </button>}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     // ─── Main app ──────────────────────────────────────────────────────
     function App({ user, profile }) {
       const [tasks, setTasks] = useState(null);     // null = loading
@@ -1729,6 +1957,7 @@
       const [drawer, setDrawer] = useState(null);    // { mode:'ai'|'create'|'edit', task? } | null
       const [showCapacity, setShowCapacity] = useState(false); // main content: task table vs. Call Capacity grid
       const [showReschedule, setShowReschedule] = useState(false);
+      const [showDataHealth, setShowDataHealth] = useState(false);
 
       async function load(force) {
         // Serve from cache whenever one exists — reload/revisit shouldn't re-pay the
@@ -2297,6 +2526,9 @@
                 <button onClick={() => setShowReschedule(true)} title="Pack the overdue backlog onto upcoming business days" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
                   <i className="ti ti-calendar-up" style={{ fontSize:15 }} /> Reschedule Overdue
                 </button>
+                <button onClick={() => setShowDataHealth(true)} title="Duplicate calls + spouse date alignment" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
+                  <i className="ti ti-heart-rate-monitor" style={{ fontSize:15 }} /> Data Health
+                </button>
                 <button onClick={() => setDrawer({ mode:'create' })} style={{ ...iconBtn, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
                   <i className="ti ti-plus" style={{ fontSize:15 }} /> Create Task
                 </button>
@@ -2406,6 +2638,12 @@
             <RescheduleOverdue tasks={tasks} colMap={colMap}
               onApply={(items) => applyAiWrite('bulk_set_due_dates', { items })}
               onClose={() => setShowReschedule(false)} />
+          )}
+          {showDataHealth && tasks && (
+            <DataHealth tasks={tasks} colMap={colMap}
+              onDeleteIds={(ids) => applyAiWrite('bulk_delete_tasks', { ids })}
+              onSetDates={(items) => applyAiWrite('bulk_set_due_dates', { items })}
+              onClose={() => setShowDataHealth(false)} />
           )}
           {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
             <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}

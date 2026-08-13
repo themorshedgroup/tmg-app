@@ -31,6 +31,7 @@
       box-sizing: border-box; margin: 0; padding: 0;
       -webkit-tap-highlight-color: transparent;
     }
+    @keyframes spin { to { transform: rotate(360deg); } }
     html, body, #root { height: 100%; width: 100%; overflow: hidden; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif;
@@ -1115,6 +1116,20 @@ Rules:
       const data = await res.json().catch(() => ({}));
       return { ok: res.ok, status: res.status, data };
     }
+    // Zoho PROJECTS — a separate connection/edge function from the CRM one
+    // above (different Zoho product, different portal-scoped OAuth). Only
+    // used for CTC Files linked to a Zoho Projects project (plan: hidden-
+    // wiggling-lamport). Same call shape as callZoho, different endpoint.
+    const ZOHO_PROJECTS_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-projects';
+    async function callZohoProjects(payload) {
+      const res = await fetch(ZOHO_PROJECTS_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    }
     async function searchZohoContacts(query) {
       const { ok, data } = await callZoho({ action: 'search_contacts', query });
       if (!ok) throw new Error(data.error || 'Contact search failed');
@@ -1493,6 +1508,7 @@ Rules:
         await this.setPeople(data.id, people || {});
         await this.addActivity(data.id, 'system', fields.parent_task_id ? 'Subtask created' : 'Task created', user);
         this.syncToGoogleTasks(data, user);
+        this.syncToZohoProjects(data, null, user);
         return data;
       },
 
@@ -1506,6 +1522,58 @@ Rules:
           if (!prof?.calendar_prefs?.autoSyncTasks) return;
           await callCalendar({ action: 'create-task', task: { title: task.title, notes: task.description || undefined, due: task.due_at || undefined } });
         } catch (e) {}
+      },
+
+      // Push a task's synced fields (plan §2.1: title/description/due_at/
+      // priority/status only) to its linked Zoho Projects project — but ONLY
+      // when that project is a CTC file with sync explicitly turned on
+      // (project.zoho_sync_enabled) and already linked to a real Zoho
+      // project. Fire-and-forget like syncToGoogleTasks, called from BOTH
+      // create and update (unlike the Google precedent, which is create-only —
+      // Zoho Projects sync must be genuinely two-way). Failures are logged to
+      // the task's own activity feed instead of vanishing silently, since this
+      // touches live CTC files.
+      async syncToZohoProjects(task, oldTask, user) {
+        const c = this.client(); if (!c || !task.project_id) return;
+        try {
+          const { data: proj } = await c.from('projects')
+            .select('record_type,zoho_sync_enabled,zoho_project_id,zoho_tasklist_id')
+            .eq('id', task.project_id).single();
+          if (!proj || proj.record_type !== 'ctc_file' || !proj.zoho_sync_enabled || !proj.zoho_project_id) return;
+
+          if (!task.zoho_task_id) {
+            if (!proj.zoho_tasklist_id) {
+              await this.addActivity(task.id, 'system', 'Zoho Projects sync skipped — this CTC file has no default tasklist configured yet.', user);
+              return;
+            }
+            const { ok, data } = await callZohoProjects({
+              action: 'create_task', project_id: proj.zoho_project_id, tasklist_id: proj.zoho_tasklist_id,
+              title: task.title, description: task.description || null, due_at: task.due_at || null, priority: task.priority,
+            });
+            if (!ok || !data?.task?.id) { await this.addActivity(task.id, 'system', 'Zoho Projects sync failed — will retry on next poll.', user); return; }
+            await c.from('tasks').update({
+              zoho_task_id: data.task.id, zoho_last_synced_at: new Date().toISOString(),
+              zoho_last_modified_time: data.task.last_modified_time || null,
+            }).eq('id', task.id);
+            return;
+          }
+
+          // Update — only send fields that actually changed (oldTask is null on
+          // create, so this always sends everything the first time an existing
+          // pre-sync task gets its zoho_task_id attached below).
+          const changed = (k) => !oldTask || (oldTask[k] || null) !== (task[k] || null);
+          const payload = { action: 'update_task', project_id: proj.zoho_project_id, task_id: task.zoho_task_id };
+          let any = false;
+          if (changed('title')) { payload.title = task.title; any = true; }
+          if (changed('description')) { payload.description = task.description || null; any = true; }
+          if (changed('due_at')) { payload.due_at = task.due_at || null; any = true; }
+          if (changed('priority')) { payload.priority = task.priority; any = true; }
+          if (changed('status')) { payload.status = task.status; any = true; }
+          if (!any) return;
+          const { ok, data } = await callZohoProjects(payload);
+          if (!ok) { await this.addActivity(task.id, 'system', 'Zoho Projects sync failed — will retry on next poll.', user); return; }
+          await c.from('tasks').update({ zoho_last_synced_at: new Date().toISOString() }).eq('id', task.id);
+        } catch (e) { /* fire-and-forget — a poll cycle will reconcile eventually */ }
       },
 
       async update(id, oldTask, fields, user) {
@@ -1534,6 +1602,7 @@ Rules:
         if (fields.status === 'done' && oldTask.status !== 'done' && oldTask.recurrence && oldTask.recurrence !== 'none') {
           await this.spawnRecurrence({ ...oldTask, ...fields, id }, user);
         }
+        this.syncToZohoProjects({ ...oldTask, ...fields, id }, oldTask, user);
       },
 
       // Spawn the next instance of a recurring task (due date advanced by the interval).
@@ -1826,6 +1895,29 @@ Rules:
           if (Object.keys(p2).length) ({ error } = await c.from('projects').update(p2).eq('id', id));
         }
         if (error) console.error('[ProjectDB] update:', error.message);
+        else this.syncToZoho(id, patch);
+      },
+
+      // Push project-level edits to a linked Zoho Projects project — name and
+      // dates only (plan §2.1). TMG's on_track/at_risk/blocked status is
+      // DELIBERATELY never sent — the two vocabularies don't map cleanly and a
+      // TC's own judgment call on project health shouldn't get silently
+      // relabeled by Zoho's Active/On Hold/Completed states.
+      async syncToZoho(id, patch) {
+        const only = ['name', 'started_at', 'target_date'].filter(k => k in patch);
+        if (!only.length) return;
+        const c = this.client(); if (!c) return;
+        try {
+          const { data: proj } = await c.from('projects')
+            .select('record_type,zoho_sync_enabled,zoho_project_id')
+            .eq('id', id).single();
+          if (!proj || proj.record_type !== 'ctc_file' || !proj.zoho_sync_enabled || !proj.zoho_project_id) return;
+          const payload = { action: 'update_project', project_id: proj.zoho_project_id };
+          if ('name' in patch) payload.name = patch.name;
+          if ('started_at' in patch) payload.start_date = patch.started_at;
+          if ('target_date' in patch) payload.end_date = patch.target_date;
+          await callZohoProjects(payload);
+        } catch (e) { /* fire-and-forget — a poll cycle will reconcile eventually */ }
       },
 
       async archive(id) {
@@ -3103,6 +3195,90 @@ Rules:
       );
     }
 
+    // ─── Link to Zoho Projects (CTC files only) ─────────────────────────
+    // Picks a real Zoho Projects project to tie this CTC file to (plan:
+    // hidden-wiggling-lamport §3.7). Field/task sync only turns on once
+    // zoho_sync_enabled is written — this modal is the one place that flips it.
+    function ZohoLinkModal({ dark, project, onClose, onLinked }) {
+      const [state, setState] = useState('loading');   // 'loading' | 'not_configured' | 'error' | 'list' | 'linking'
+      const [projects, setProjects] = useState([]);
+      const [query, setQuery] = useState('');
+      const [errMsg, setErrMsg] = useState('');
+      const ink = dark ? '#fff' : '#001A4A';
+      const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const bord = dark ? '#152545' : '#E4DFD4';
+
+      useEffect(() => {
+        let on = true;
+        (async () => {
+          const { ok, data } = await callZohoProjects({ action: 'list_projects' });
+          if (!on) return;
+          if (!ok) {
+            if (/not configured/i.test(data.error || '')) setState('not_configured');
+            else { setErrMsg(data.error || 'Could not reach Zoho Projects.'); setState('error'); }
+            return;
+          }
+          setProjects(data.projects || []);
+          setState('list');
+        })();
+        return () => { on = false; };
+      }, []);
+
+      async function link(zp) {
+        setState('linking');
+        try {
+          const tl = await callZohoProjects({ action: 'list_tasklists', project_id: zp.id });
+          let tasklistId = tl.ok && tl.data.tasklists && tl.data.tasklists[0] ? tl.data.tasklists[0].id : null;
+          if (!tasklistId) {
+            const created = await callZohoProjects({ action: 'create_tasklist', project_id: zp.id, name: 'TMG Tasks' });
+            if (created.ok) tasklistId = created.data.id;
+          }
+          await ProjectDB.update(project.id, { zoho_project_id: zp.id, zoho_tasklist_id: tasklistId || null, zoho_sync_enabled: true });
+          onLinked();
+        } catch (e) {
+          setErrMsg('Link failed: ' + (e && e.message ? e.message : e));
+          setState('list');
+        }
+      }
+
+      const filtered = query.trim() ? projects.filter(p => (p.name || '').toLowerCase().includes(query.trim().toLowerCase())) : projects;
+
+      return (
+        <React.Fragment>
+          <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(0,0,0,0.5)' }} />
+          <div style={{ position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 81, maxHeight: '80%', background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: `1px solid ${bord}` }}>
+              <span style={{ fontFamily: C.fontSans, fontSize: 15, fontWeight: 600, color: ink }}>Link to Zoho Projects</span>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 18, display: 'flex' }}><i className="ti ti-x" /></button>
+            </div>
+            <div style={{ padding: 16, overflowY: 'auto' }}>
+              {state === 'loading' && <div style={{ fontFamily: C.fontSans, fontSize: 13.5, color: sub }}>Loading your Zoho Projects…</div>}
+              {state === 'not_configured' && (
+                <div style={{ fontFamily: C.fontSans, fontSize: 13.5, color: sub, lineHeight: 1.6 }}>
+                  Zoho Projects isn't connected yet — an admin needs to set up the connection first (one-time setup, done outside the app). Ask Symon.
+                </div>
+              )}
+              {state === 'error' && <div style={{ fontFamily: C.fontSans, fontSize: 13.5, color: '#9B1C1C' }}>{errMsg}</div>}
+              {state === 'linking' && <div style={{ fontFamily: C.fontSans, fontSize: 13.5, color: sub }}>Linking…</div>}
+              {state === 'list' && (
+                <React.Fragment>
+                  <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="Search Zoho projects…" style={{ width: '100%', padding: '10px 12px', border: `1px solid ${bord}`, borderRadius: 8, background: dark ? '#06101F' : '#fff', color: ink, fontSize: 14, outline: 'none', fontFamily: C.fontSans, marginBottom: 10, boxSizing: 'border-box' }} />
+                  {errMsg && <div style={{ fontFamily: C.fontSans, fontSize: 12.5, color: '#9B1C1C', marginBottom: 8 }}>{errMsg}</div>}
+                  {filtered.length === 0 && <div style={{ fontFamily: C.fontSans, fontSize: 13, color: sub }}>No matching Zoho projects.</div>}
+                  {filtered.map(zp => (
+                    <div key={zp.id} onClick={() => link(zp)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 4px', borderBottom: `1px solid ${bord}`, cursor: 'pointer', fontFamily: C.fontSans, fontSize: 13.5, color: ink }}>
+                      {zp.name}
+                      <i className="ti ti-link" style={{ fontSize: 14, color: C.gold }} />
+                    </div>
+                  ))}
+                </React.Fragment>
+              )}
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // ProjectsSurface — the Tasks → Projects (and → CTC Files) views.
     // Self-contained: list + detail + create/edit form, mobile + desktop.
@@ -3132,6 +3308,7 @@ Rules:
       const [dtab, setDtab] = useState('overview');   // 'overview' | 'list' | 'board'
       const [openTask, setOpenTask] = useState(null);
       const [taskEditing, setTaskEditing] = useState(false);
+      const [zohoLinkOpen, setZohoLinkOpen] = useState(false);   // ctc_file only — see ZohoLinkModal
       useEffect(() => { setDtab('overview'); setOpenTask(null); setTaskEditing(false); }, [current && current.id]);
       const wide = useWide(700);
 
@@ -3458,6 +3635,25 @@ Rules:
           </div>
         </div>
       );
+      // Relative-time label for "Last synced" (no existing helper in this
+      // file covers this — fmtD is absolute-date-only).
+      const timeAgo = (iso) => {
+        if (!iso) return null;
+        const ms = Date.now() - new Date(iso).getTime();
+        if (ms < 60000) return 'just now';
+        const mins = Math.round(ms / 60000);
+        if (mins < 60) return mins + 'm ago';
+        const hrs = Math.round(mins / 60);
+        if (hrs < 24) return hrs + 'h ago';
+        return Math.round(hrs / 24) + 'd ago';
+      };
+      const [syncingNow, setSyncingNow] = useState(false);
+      async function syncNow(p) {
+        setSyncingNow(true);
+        try { await callZohoProjects({ action: 'sync_now', project_id: p.id }); await refreshContainer(); }
+        finally { setSyncingNow(false); }
+      }
+
       const detailFields = (p) => {
         const fld = (k, v) => <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0', borderBottom: `1px solid ${bord}`, fontSize: 13.5, fontFamily: C.fontSans, gap: 10 }}><span style={{ color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontSize: 11, flexShrink: 0 }}>{k}</span><span style={{ color: ink, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 7, textAlign: 'right' }}>{v}</span></div>;
         return (
@@ -3470,6 +3666,17 @@ Rules:
             {fld('Target', <span style={{ color: isOverdue(p.target_date) ? lateColor : ink }}>{fmtD(p.target_date)}</span>)}
             {fld('Tasks', (p._taskCount - p._openTasks.length) + ' / ' + p._taskCount)}
             {fld('Collaborators', p._collaborators.length ? <span style={{ display: 'flex' }}>{p._collaborators.slice(0, 5).map((id, i) => <span key={id} style={{ marginLeft: i ? -5 : 0 }}>{avatar(id, 18)}</span>)}</span> : '—')}
+            {isCtc && p.zoho_project_id && (
+              <React.Fragment>
+                {fld('Zoho Project', <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><i className="ti ti-link" style={{ fontSize: 12, color: gold }} />Linked</span>)}
+                {fld('Last synced', (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {p.zoho_last_synced_at ? timeAgo(p.zoho_last_synced_at) : 'Never'}
+                    <i onClick={() => !syncingNow && syncNow(p)} className={syncingNow ? 'ti ti-loader-2' : 'ti ti-refresh'} title="Sync now" style={{ fontSize: 14, color: gold, cursor: syncingNow ? 'default' : 'pointer', animation: syncingNow ? 'spin 1s linear infinite' : 'none' }} />
+                  </span>
+                ))}
+              </React.Fragment>
+            )}
           </React.Fragment>
         );
       };
@@ -3550,6 +3757,9 @@ Rules:
                 {statusBadge(p.status)}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
+                {isCtc && (p.zoho_project_id
+                  ? <span style={{ fontSize: 12, letterSpacing: '0.04em', padding: '7px 12px', borderRadius: 6, fontWeight: 500, border: `1px solid ${teal}55`, color: teal, background: dark ? 'rgba(15,110,86,.14)' : '#E6F2EC', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-check" style={{ fontSize: 13 }} />Synced with Zoho</span>
+                  : <button onClick={() => setZohoLinkOpen(true)} style={{ fontSize: 12, letterSpacing: '0.04em', padding: '7px 12px', borderRadius: 6, fontWeight: 400, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-link" style={{ fontSize: 13 }} />Link to Zoho Projects</button>)}
                 <button onClick={() => setPview('form')} style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '7px 12px', borderRadius: 6, fontWeight: 400, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>
               </div>
             </div>
@@ -3663,6 +3873,7 @@ Rules:
                 <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 14px 24px' }}>{listBody(isCtc ? ctcCard : projCard, false)}</div>
               </React.Fragment>
             )}
+          {zohoLinkOpen && current && <ZohoLinkModal dark={dark} project={current} onClose={() => setZohoLinkOpen(false)} onLinked={async () => { setZohoLinkOpen(false); await refreshContainer(); }} />}
         </React.Fragment>
       );
     }

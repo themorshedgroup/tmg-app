@@ -424,15 +424,33 @@
     // by label, same as the app's other spouse tools — spouse_links resolves
     // it live). Batched at 60 (the edge action's own cap); dev uses the mock
     // above. Scoped to just the candidate contacts a caller actually needs.
+    //
+    // Results are cached module-wide, keyed by contact id, so re-opening
+    // Data Health / Reschedule doesn't re-hit Zoho for contacts we already
+    // resolved (this lookup was taking minutes on a full backlog). The cache
+    // only grows (a contact's spouse rarely changes) — call
+    // clearSpouseLinksCache() for a manual "check again" refresh.
+    const SPOUSE_LINKS_CACHE = new Map(); // contact id -> {id,name}|null
+    function clearSpouseLinksCache() { SPOUSE_LINKS_CACHE.clear(); }
     async function fetchSpouseLinksFor(keys) {
       const uniq = [...new Set((keys || []).filter(Boolean))];
       if (!uniq.length) return {};
       if (isDev()) return devSpouseLinks(uniq);
       const out = {};
-      for (let i = 0; i < uniq.length; i += 60) {
-        const batch = uniq.slice(i, i + 60);
+      const missing = [];
+      uniq.forEach(k => {
+        if (SPOUSE_LINKS_CACHE.has(k)) out[k] = SPOUSE_LINKS_CACHE.get(k);
+        else missing.push(k);
+      });
+      for (let i = 0; i < missing.length; i += 60) {
+        const batch = missing.slice(i, i + 60);
         const { ok, data } = await callZoho({ action:'spouse_links', contact_ids: batch });
-        if (ok && data && data.links) Object.assign(out, data.links);
+        if (ok && data && data.links) {
+          batch.forEach(k => {
+            const v = data.links.hasOwnProperty(k) ? data.links[k] : null;
+            out[k] = v; SPOUSE_LINKS_CACHE.set(k, v);
+          });
+        }
       }
       return out;
     }
@@ -1406,91 +1424,131 @@
       return m ? m[1].toUpperCase() : 'Other';
     }
     const CAP_MON = MON;
-    function CapacityGrid({ tasks, colMap }) {
+    // Light/heavy load coloring, kept subtle (pastel, low-contrast) per the
+    // user's ask — a quick scan, not something that hurts to look at.
+    // 0 = blank/neutral, 1–4 = pastel amber (light), 5–7 = pastel green
+    // (comfortable), 8+ = pastel red (overloaded).
+    function capacityCellStyle(n) {
+      if (!n) return { background:'transparent', color:C.textMuted };
+      if (n >= 8) return { background:'#FBE3E0', color:'#A5342A' };
+      if (n >= 5) return { background:'#E2F3E8', color:'#1E6B40' };
+      return { background:'#FFF3D6', color:'#8A6100' };
+    }
+
+    // Shows MONTHS_SHOWN months stacked in one continuously-scrollable view
+    // (no per-month "next" clicking) — ◀/▶ shift the whole window by that
+    // many months at once for reaching further back/forward.
+    const CAPACITY_MONTHS_SHOWN = 6;
+    function CapacityGrid({ tasks, colMap, onClose }) {
       const [anchor, setAnchor] = useState(() => { const d = new Date(); d.setDate(1); return d; });
-      const [openCell, setOpenCell] = useState(null); // { owner, day } | null
+      const [openCell, setOpenCell] = useState(null); // { owner, monthKey, monthLabel, day } | null
 
-      const monthCalls = useMemo(() => {
-        const y = anchor.getFullYear(), m = anchor.getMonth();
-        return (tasks || []).filter(t => isCallTask(t, colMap) && t.Due_Date).filter(t => {
+      const months = useMemo(() =>
+        Array.from({ length: CAPACITY_MONTHS_SHOWN }, (_, i) => new Date(anchor.getFullYear(), anchor.getMonth() + i, 1)),
+        [anchor.getTime()]);
+      const rangeLabel = CAP_MON[months[0].getMonth()] + ' ' + months[0].getFullYear() + ' – ' +
+        CAP_MON[months[months.length - 1].getMonth()] + ' ' + months[months.length - 1].getFullYear();
+      const shiftWindow = (dir) => setAnchor(a => new Date(a.getFullYear(), a.getMonth() + dir * CAPACITY_MONTHS_SHOWN, 1));
+
+      const { byMonth, owners } = useMemo(() => {
+        const monthKeys = months.map(m => m.getFullYear() + '-' + String(m.getMonth() + 1).padStart(2, '0'));
+        const out = {}; monthKeys.forEach(k => out[k] = {});
+        const ownerSet = new Set();
+        (tasks || []).forEach(t => {
+          if (!isCallTask(t, colMap) || !t.Due_Date) return;
           const dm = /^(\d{4})-(\d{2})-(\d{2})/.exec(t.Due_Date);
-          if (!dm) return false;
-          return +dm[1] === y && (+dm[2] - 1) === m;
-        }).map(t => ({ ...t, _day: +(/^\d{4}-\d{2}-(\d{2})/.exec(t.Due_Date)[1]), _tier: callTier(t.Subject) }));
-      }, [tasks, colMap, anchor]);
-
-      const byOwner = useMemo(() => {
-        const out = {};
-        for (const t of monthCalls) {
+          if (!dm) return;
+          const key = dm[1] + '-' + dm[2];
+          if (!out.hasOwnProperty(key)) return;
           const owner = t.Owner?.name || 'Unassigned';
-          (out[owner] = out[owner] || {})[t._day] = (out[owner][t._day] || []).concat(t);
-        }
-        return out;
-      }, [monthCalls]);
-      const owners = useMemo(() => Object.keys(byOwner).sort(), [byOwner]);
-      const daysInMonth = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0).getDate();
-      const monthLabel = CAP_MON[anchor.getMonth()] + ' ' + anchor.getFullYear();
-      const step = (dir) => setAnchor(a => new Date(a.getFullYear(), a.getMonth() + dir, 1));
+          const day = +dm[3];
+          ownerSet.add(owner);
+          const rec = { ...t, _tier: callTier(t.Subject) };
+          (out[key][owner] = out[key][owner] || {});
+          (out[key][owner][day] = out[key][owner][day] || []).push(rec);
+        });
+        return { byMonth: out, owners: Array.from(ownerSet).sort() };
+      }, [tasks, colMap, months.map(m => m.getTime()).join(',')]);
 
       const navBtn = { display:'inline-flex', alignItems:'center', justifyContent:'center', width:28, height:28, borderRadius:8, border:'1px solid '+C.border, background:C.surface, color:C.navy, cursor:'pointer' };
-      const cellBase = { minWidth:30, height:34, textAlign:'center', fontFamily:C.fontSans, fontSize:'0.74rem', borderRight:'1px solid '+C.border, borderBottom:'1px solid '+C.border };
+      const cellBase = { minWidth:30, height:34, display:'flex', alignItems:'center', justifyContent:'center', textAlign:'center', fontFamily:C.fontSans, fontSize:'0.74rem', borderRight:'1px solid '+C.border, borderBottom:'1px solid '+C.border };
 
-      const openCalls = openCell ? (byOwner[openCell.owner]?.[openCell.day] || []) : [];
+      const openMonthCalls = openCell ? (byMonth[openCell.monthKey]?.[openCell.owner]?.[openCell.day] || []) : [];
       const openTally = {};
-      openCalls.forEach(c => { openTally[c._tier] = (openTally[c._tier] || 0) + 1; });
+      openMonthCalls.forEach(c => { openTally[c._tier] = (openTally[c._tier] || 0) + 1; });
 
       return (
-        <div style={{ padding:'18px 22px', height:'100%', overflow:'auto' }}>
-          <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:16 }}>
-            <button onClick={() => step(-1)} style={navBtn}><i className="ti ti-chevron-left" style={{ fontSize:15 }} /></button>
-            <div style={{ fontFamily:C.fontDisplay, fontSize:'1.25rem', fontWeight:600, color:C.navy, minWidth:150, textAlign:'center' }}>{monthLabel}</div>
-            <button onClick={() => step(1)} style={navBtn}><i className="ti ti-chevron-right" style={{ fontSize:15 }} /></button>
-            <div style={{ marginLeft:12, fontSize:'0.74rem', color:C.textMuted }}>Total calls per person, per day — click a number for the breakdown.</div>
-          </div>
-
-          {owners.length === 0 ? (
-            <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls due in {monthLabel}.</div>
-          ) : (
-            <div style={{ overflowX:'auto', border:'1px solid '+C.border, borderRadius:10 }}>
-              <div style={{ display:'grid', gridTemplateColumns:'150px repeat(' + daysInMonth + ', minmax(30px,1fr))', minWidth:150 + daysInMonth * 30 }}>
-                <div style={{ ...cellBase, textAlign:'left', padding:'0 10px', fontWeight:700, color:C.navy, background:C.surfaceAlt, borderTop:'1px solid '+C.border, minWidth:150 }}>Person</div>
-                {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => (
-                  <div key={d} style={{ ...cellBase, fontWeight:700, color:C.textMuted, background:C.surfaceAlt, borderTop:'1px solid '+C.border }}>{d}</div>
-                ))}
-                {owners.map(owner => (
-                  <React.Fragment key={owner}>
-                    <div style={{ ...cellBase, textAlign:'left', padding:'0 10px', fontWeight:600, color:C.textPrimary, background:C.surface, minWidth:150 }}>{owner}</div>
-                    {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => {
-                      const calls = byOwner[owner]?.[d] || [];
-                      const n = calls.length;
-                      return (
-                        <div key={d} onClick={() => n && setOpenCell({ owner, day: d })}
-                          style={{ ...cellBase, background:C.surface, color: n ? C.navy : C.textMuted, fontWeight: n ? 700 : 400, cursor: n ? 'pointer' : 'default' }}>
-                          {n || ''}
-                        </div>
-                      );
-                    })}
-                  </React.Fragment>
-                ))}
+        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.4)', zIndex:60, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background:C.bg, borderRadius:14, width:'min(1100px, 97vw)', maxHeight:'92vh', display:'flex', flexDirection:'column', boxShadow:'0 18px 60px rgba(0,26,74,.3)' }}>
+            <div style={{ flexShrink:0, padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface, borderRadius:'14px 14px 0 0', display:'flex', alignItems:'center', justifyContent:'space-between', gap:14, flexWrap:'wrap' }}>
+              <div>
+                <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Call Capacity</div>
+                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>Total calls per person, per day — scroll for later months, click a number for the breakdown.</div>
+              </div>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                <button onClick={() => shiftWindow(-1)} title={'Jump back ' + CAPACITY_MONTHS_SHOWN + ' months'} style={navBtn}><i className="ti ti-chevron-left" style={{ fontSize:15 }} /></button>
+                <div style={{ fontSize:'0.78rem', fontWeight:600, color:C.navy, minWidth:170, textAlign:'center' }}>{rangeLabel}</div>
+                <button onClick={() => shiftWindow(1)} title={'Jump forward ' + CAPACITY_MONTHS_SHOWN + ' months'} style={navBtn}><i className="ti ti-chevron-right" style={{ fontSize:15 }} /></button>
+                <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted, marginLeft:4 }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
               </div>
             </div>
-          )}
+
+            <div style={{ flex:1, overflowY:'auto', padding:'16px 22px' }}>
+              {owners.length === 0 ? (
+                <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls due in {rangeLabel}.</div>
+              ) : months.map(m => {
+                const monthKey = m.getFullYear() + '-' + String(m.getMonth() + 1).padStart(2, '0');
+                const monthLabel = CAP_MON[m.getMonth()] + ' ' + m.getFullYear();
+                const daysInMonth = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+                const monthData = byMonth[monthKey] || {};
+                return (
+                  <div key={monthKey} style={{ marginBottom:22 }}>
+                    <div style={{ fontFamily:C.fontDisplay, fontSize:'1.02rem', fontWeight:600, color:C.navy, marginBottom:8 }}>{monthLabel}</div>
+                    <div style={{ overflowX:'auto', border:'1px solid '+C.border, borderRadius:10 }}>
+                      <div style={{ display:'grid', gridTemplateColumns:'150px repeat(' + daysInMonth + ', minmax(30px,1fr))', minWidth:150 + daysInMonth * 30 }}>
+                        <div style={{ ...cellBase, justifyContent:'flex-start', padding:'0 10px', fontWeight:700, color:C.navy, background:C.surfaceAlt, borderTop:'1px solid '+C.border, minWidth:150 }}>Person</div>
+                        {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => (
+                          <div key={d} style={{ ...cellBase, fontWeight:700, color:C.textMuted, background:C.surfaceAlt, borderTop:'1px solid '+C.border }}>{d}</div>
+                        ))}
+                        {owners.map(owner => (
+                          <React.Fragment key={owner}>
+                            <div style={{ ...cellBase, justifyContent:'flex-start', padding:'0 10px', fontWeight:600, color:C.textPrimary, background:C.surface, minWidth:150 }}>{owner}</div>
+                            {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => {
+                              const calls = monthData[owner]?.[d] || [];
+                              const n = calls.length;
+                              const cs = capacityCellStyle(n);
+                              return (
+                                <div key={d} onClick={() => n && setOpenCell({ owner, monthKey, monthLabel, day: d })}
+                                  style={{ ...cellBase, background:cs.background, color:cs.color, fontWeight: n ? 700 : 400, cursor: n ? 'pointer' : 'default' }}>
+                                  {n || ''}
+                                </div>
+                              );
+                            })}
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
           {openCell && (
-            <div onClick={() => setOpenCell(null)} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:50, display:'flex', alignItems:'center', justifyContent:'center' }}>
+            <div onClick={e => { e.stopPropagation(); setOpenCell(null); }} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.35)', zIndex:70, display:'flex', alignItems:'center', justifyContent:'center' }}>
               <div onClick={e => e.stopPropagation()} style={{ background:C.surface, borderRadius:12, padding:20, width:'min(420px, 90vw)', maxHeight:'80vh', overflow:'auto', boxShadow:'0 12px 40px rgba(0,26,74,.25)' }}>
                 <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', marginBottom:4 }}>
                   <div style={{ fontFamily:C.fontDisplay, fontSize:'1.1rem', fontWeight:600, color:C.navy }}>{openCell.owner}</div>
                   <button onClick={() => setOpenCell(null)} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:16 }} /></button>
                 </div>
-                <div style={{ fontSize:'0.78rem', color:C.textMuted, marginBottom:12 }}>{CAP_MON[anchor.getMonth()]} {openCell.day}, {anchor.getFullYear()} — {openCalls.length} call{openCalls.length===1?'':'s'}</div>
+                <div style={{ fontSize:'0.78rem', color:C.textMuted, marginBottom:12 }}>{openCell.monthLabel} {openCell.day} — {openMonthCalls.length} call{openMonthCalls.length===1?'':'s'}</div>
                 <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginBottom:14 }}>
                   {Object.keys(openTally).sort().map(tier => (
                     <span key={tier} style={{ fontSize:'0.72rem', fontWeight:600, color:C.navy, background:C.surfaceHover, border:'1px solid '+C.border, borderRadius:20, padding:'3px 10px' }}>{tier}: {openTally[tier]}</span>
                   ))}
                 </div>
                 <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                  {openCalls.map(c => (
+                  {openMonthCalls.map(c => (
                     <div key={c.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, padding:'8px 10px', border:'1px solid '+C.border, borderRadius:8, background:C.bg }}>
                       <span style={{ fontSize:'0.82rem', color:C.textPrimary }}>{c.Who_Id?.name || c.Subject}</span>
                       <span style={{ fontSize:'0.68rem', fontWeight:700, color:C.gold, background:C.goldSoft+'22', borderRadius:20, padding:'2px 9px' }}>{c._tier}</span>
@@ -1844,7 +1902,7 @@
         const bucket = /tarek/i.test(ownerName) ? 'tarek' : 'other';
         const lastDate = last ? dateOnly(last.Closed_Time || last.Due_Date) : null;
         const expected = (cls && lastDate) ? addDaysISO(lastDate, (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls]) : null;
-        return { name, task_id: nsCall ? nsCall.id : null, class: cls, due: nsCall ? nsCall.Due_Date : null, expected_due: expected };
+        return { name, task_id: nsCall ? nsCall.id : null, class: cls, due: nsCall ? nsCall.Due_Date : null, expected_due: expected, owner: ownerName || '—' };
       }
       const seen = new Set(), out = [];
       Object.keys(oneCallByContact).forEach(cid => {
@@ -1888,12 +1946,14 @@
       }, [tasks, colMap]);
       const [spouseLinks, setSpouseLinks] = useState({});
       const [linksLoading, setLinksLoading] = useState(false);
+      const [refreshNonce, setRefreshNonce] = useState(0);
       useEffect(() => {
         let cancelled = false;
         setLinksLoading(true);
         fetchSpouseLinksFor(singleCallKeys).then(links => { if (!cancelled) { setSpouseLinks(links); setLinksLoading(false); } });
         return () => { cancelled = true; };
-      }, [singleCallKeys.join('|')]);
+      }, [singleCallKeys.join('|'), refreshNonce]);
+      function recheckSpousePairings() { clearSpouseLinksCache(); setRefreshNonce(n => n + 1); }
 
       const aligns = useMemo(() => spouseAlignmentIssues({ tasks, colMap, spouseLinks }), [tasks, colMap, spouseLinks]);
 
@@ -1922,11 +1982,16 @@
               <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
             </div>
 
-            <div style={{ flexShrink:0, padding:'12px 22px 0' }}>
+            <div style={{ flexShrink:0, padding:'12px 22px 0', display:'flex', alignItems:'center', justifyContent:'space-between', gap:10 }}>
               <div style={{ display:'inline-flex', border:'1px solid '+C.border, borderRadius:9, overflow:'hidden' }}>
                 <button onClick={() => switchTab('dupes')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='dupes'?C.navy:C.surface, color: tab==='dupes'?'#fff':C.textSecondary }}>Duplicate calls ({dupes.length})</button>
                 <button onClick={() => switchTab('align')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='align'?C.navy:C.surface, color: tab==='align'?'#fff':C.textSecondary }}>Spouse alignment ({aligns.length})</button>
               </div>
+              {tab === 'align' && (
+                <button onClick={recheckSpousePairings} disabled={linksLoading} title="Spouse pairings are cached after the first check — use this to re-check against Zoho now" style={{ display:'flex', alignItems:'center', gap:5, fontFamily:C.fontSans, fontSize:'0.72rem', fontWeight:600, color:C.textMuted, background:'none', border:'1px solid '+C.border, borderRadius:8, padding:'6px 10px', cursor: linksLoading?'default':'pointer', opacity: linksLoading?.5:1 }}>
+                  <i className="ti ti-refresh" style={{ fontSize:14 }} /> {linksLoading ? 'Checking…' : 'Re-check pairings'}
+                </button>
+              )}
             </div>
 
             <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>
@@ -1977,6 +2042,13 @@
                       <div style={{ marginTop:4, fontSize:'0.76rem', color:C.textSecondary }}>
                         {p.a.name}: {p.a.class ? p.a.class+'-touch, ' : ''}due {fmtDate(p.a.due) || '—'} · {p.b.name}: {p.b.class ? p.b.class+'-touch, ' : ''}due {fmtDate(p.b.due) || '—'}
                       </div>
+                      <div style={{ marginTop:3, display:'flex', alignItems:'center', gap:6, fontSize:'0.72rem', color:C.textMuted }}>
+                        <i className="ti ti-user" style={{ fontSize:13 }} />
+                        <span>Owner — {p.a.name}: <b style={{ color:C.textSecondary }}>{p.a.owner}</b> · {p.b.name}: <b style={{ color:C.textSecondary }}>{p.b.owner}</b></span>
+                        {p.a.owner !== p.b.owner && p.a.owner !== '—' && p.b.owner !== '—' && (
+                          <span style={{ fontSize:'0.62rem', fontWeight:700, borderRadius:20, padding:'1px 7px', color:'#fff', background:C.amber }}>DIFFERENT AGENTS</span>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </React.Fragment>
@@ -2026,7 +2098,7 @@
       const [sortKey, setSortKey] = useState('due');
       const [sortDir, setSortDir] = useState('desc');
       const [drawer, setDrawer] = useState(null);    // { mode:'ai'|'create'|'edit', task? } | null
-      const [showCapacity, setShowCapacity] = useState(false); // main content: task table vs. Call Capacity grid
+      const [showCapacity, setShowCapacity] = useState(false); // Call Capacity modal
       const [showReschedule, setShowReschedule] = useState(false);
       const [showDataHealth, setShowDataHealth] = useState(false);
 
@@ -2600,6 +2672,9 @@
                 <button onClick={() => setShowDataHealth(true)} title="Duplicate calls + spouse date alignment" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
                   <i className="ti ti-heart-rate-monitor" style={{ fontSize:15 }} /> Data Health
                 </button>
+                <button onClick={() => setShowCapacity(true)} title="Call capacity — total calls per person, per day" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
+                  <i className="ti ti-layout-grid" style={{ fontSize:15 }} /> Capacity
+                </button>
                 <button onClick={() => setDrawer({ mode:'create' })} style={{ ...iconBtn, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
                   <i className="ti ti-plus" style={{ fontSize:15 }} /> Create Task
                 </button>
@@ -2624,10 +2699,6 @@
                 <i className="ti ti-history" style={{ fontSize:15 }} /> {includeCompleted ? 'Full history' : 'Include completed'}
               </button>
               <button onClick={() => load(true)} title="Refresh (bypasses the cache)" style={iconBtn}><i className="ti ti-refresh" style={{ fontSize:15 }} /></button>
-              <button onClick={() => setShowCapacity(v => !v)} title="Call capacity — total calls per person, per day"
-                style={{ ...iconBtn, marginLeft:'auto', color:showCapacity?C.gold:C.navy, borderColor:showCapacity?C.gold:C.border, background:showCapacity?C.gold+'14':C.surface }}>
-                <i className="ti ti-layout-grid" style={{ fontSize:15 }} /> {showCapacity ? 'Task List' : 'Capacity'}
-              </button>
             </div>
           </div>
 
@@ -2645,13 +2716,12 @@
           <div style={{ flex:1, display:'flex', minHeight:0 }}>
           <main style={{ flex:1, overflow:'auto', minHeight:0 }}>
             {tasks === null && <div style={{ padding:40, textAlign:'center' }}><Spinner size={26} /></div>}
-            {tasks && showCapacity && <CapacityGrid tasks={tasks} colMap={colMap} />}
-            {tasks && !showCapacity && view.length === 0 && !err && (
+            {tasks && view.length === 0 && !err && (
               <div style={{ padding:48, textAlign:'center', color:C.textMuted, fontSize:'0.88rem' }}>
                 {tasks.length === 0 ? (needsDeploy ? 'Deploy the function to see tasks.' : 'No tasks found.') : 'No tasks match your filters.'}
               </div>
             )}
-            {tasks && !showCapacity && view.length > 0 && (
+            {tasks && view.length > 0 && (
               <table style={{ borderCollapse:'collapse', width:'100%', minWidth:1280 }}>
                 <thead>
                   <tr>
@@ -2715,6 +2785,9 @@
               onDeleteIds={(ids) => applyAiWrite('bulk_delete_tasks', { ids })}
               onSetDates={(items) => applyAiWrite('bulk_set_due_dates', { items })}
               onClose={() => setShowDataHealth(false)} />
+          )}
+          {showCapacity && tasks && (
+            <CapacityGrid tasks={tasks} colMap={colMap} onClose={() => setShowCapacity(false)} />
           )}
           {(drawer?.mode === 'create' || drawer?.mode === 'edit') && (
             <TaskDrawer mode={drawer.mode} task={drawer.task} meta={meta} colMap={colMap}

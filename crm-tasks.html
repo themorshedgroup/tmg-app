@@ -406,10 +406,34 @@
     ];
     // Dev-only spouse pairs (live uses the Zoho Spouse lookup). Kelly↔Jeremy
     // share a due date (aligned); Molly↔Morgan don't (mismatch) — for demoing.
-    const DEV_SPOUSES = { "Kelly O'rourke":'Jeremy Bell', 'Jeremy Bell':"Kelly O'rourke", 'Molly Kinney':'Morgan Birch', 'Morgan Birch':'Molly Kinney' };
+    const DEV_SPOUSES = {
+      "Kelly O'rourke":'Jeremy Bell', 'Jeremy Bell':"Kelly O'rourke",
+      'Molly Kinney':'Morgan Birch', 'Morgan Birch':'Molly Kinney',
+      // Data Health / Reschedule test pairs, keyed by the synthetic contact ids
+      // those fixtures use (mirrors how live Who_Id.id keys work).
+      'dev-sp-0a':'dev-sp-0b', 'dev-sp-0b':'dev-sp-0a',
+      'dev-sp-1a':'dev-sp-1b', 'dev-sp-1b':'dev-sp-1a',
+      'dev-al-wendy':'dev-al-carl', 'dev-al-carl':'dev-al-wendy',
+    };
     function devSpouseLinks(keys) {
       const out = {};
       keys.forEach(k => { const sp = DEV_SPOUSES[k]; out[k] = sp ? { id: sp, name: sp } : null; });
+      return out;
+    }
+    // The real pairing source: each contact's own Spouse lookup field (found
+    // by label, same as the app's other spouse tools — spouse_links resolves
+    // it live). Batched at 60 (the edge action's own cap); dev uses the mock
+    // above. Scoped to just the candidate contacts a caller actually needs.
+    async function fetchSpouseLinksFor(keys) {
+      const uniq = [...new Set((keys || []).filter(Boolean))];
+      if (!uniq.length) return {};
+      if (isDev()) return devSpouseLinks(uniq);
+      const out = {};
+      for (let i = 0; i < uniq.length; i += 60) {
+        const batch = uniq.slice(i, i + 60);
+        const { ok, data } = await callZoho({ action:'spouse_links', contact_ids: batch });
+        if (ok && data && data.links) Object.assign(out, data.links);
+      }
       return out;
     }
     function devTasksForContacts(keys) {
@@ -1567,15 +1591,22 @@
       return Object.keys(counts).map(name => ({ name, count: counts[name] })).sort((a, b) => b.count - a.count);
     }
 
-    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode }) {
+    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode, spouseLinks }) {
       const pool = inScopeCalls({ tasks, colMap, cutoff, mode, owner });
 
-      // Pair spouses: task X names partner P as its spouse origin, and P has
-      // their own in-scope task → both should land on the same day.
+      // Pair spouses via each contact's real Spouse lookup field (spouseLinks,
+      // fetched live per contact — see fetchSpouseLinksFor); the task-level
+      // spouse-origin field is a fallback for whichever pairs it doesn't cover.
       const byContact = {};
-      pool.forEach(t => { const c = t.Who_Id?.id; if (c && !byContact[c]) byContact[c] = t; });
+      pool.forEach(t => { const c = t.Who_Id?.id || t.Who_Id?.name; if (c && !byContact[c]) byContact[c] = t; });
       const partnerOf = new Map();
-      pool.forEach(t => { const so = spouseOriginOf(t); const p = so && byContact[so]; if (p && p.id !== t.id) partnerOf.set(t.id, p); });
+      pool.forEach(t => {
+        const cid = t.Who_Id?.id || t.Who_Id?.name;
+        const link = spouseLinks && spouseLinks[cid];
+        const partnerKey = (link && link.id) || spouseOriginOf(t);
+        const p = partnerKey && byContact[partnerKey];
+        if (p && p.id !== t.id) partnerOf.set(t.id, p);
+      });
 
       // An EO-prefixed call still needs a class home for the 2A/1B/1C mix; it
       // reads as the lightest touch, so it queues with C.
@@ -1636,8 +1667,22 @@
         if (owners.length && !owners.some(o => o.name === owner)) setOwner(owners[0].name);
       }, [owners]);
 
-      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode }),
-        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode]);
+      // Fetch real spouse pairings only for contacts actually in scope for this
+      // owner/mode/cutoff — keeps it well under the live lookup's batch size.
+      const [spouseLinks, setSpouseLinks] = useState({});
+      const [linksLoading, setLinksLoading] = useState(false);
+      const candidateKeys = useMemo(() =>
+        inScopeCalls({ tasks, colMap, cutoff, mode, owner }).map(t => t.Who_Id?.id || t.Who_Id?.name),
+        [tasks, colMap, cutoff, mode, owner]);
+      useEffect(() => {
+        let cancelled = false;
+        setLinksLoading(true);
+        fetchSpouseLinksFor(candidateKeys).then(links => { if (!cancelled) { setSpouseLinks(links); setLinksLoading(false); } });
+        return () => { cancelled = true; };
+      }, [candidateKeys.join('|')]);
+
+      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode, spouseLinks }),
+        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode, spouseLinks]);
 
       async function apply() {
         setBusy(true);
@@ -1692,8 +1737,9 @@
             </div>
 
             <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>
-              {plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No overdue Not-Started calls on or before {cutoff}.</div>}
-              {plan.days.map(d => (
+              {linksLoading && <div style={{ padding:40, textAlign:'center' }}><Spinner size={20} /></div>}
+              {!linksLoading && plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No overdue Not-Started calls on or before {cutoff}.</div>}
+              {!linksLoading && plan.days.map(d => (
                 <div key={d.date} style={{ marginBottom:12 }}>
                   <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
                     <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
@@ -1715,12 +1761,13 @@
             <div style={{ flexShrink:0, padding:'14px 22px', borderTop:'1px solid '+C.border, background:C.surface, borderRadius:'0 0 14px 14px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
               <div style={{ fontSize:'0.76rem', color: done ? (done.ok ? C.green : C.red) : C.textMuted }}>
                 {done ? (done.ok ? `✓ Updated ${done.n} tasks in Zoho.` : done.error)
+                      : linksLoading ? 'Checking spouse pairings…'
                       : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available`}
               </div>
               <div style={{ display:'flex', gap:10 }}>
                 <button onClick={onClose} style={{ ...iconBtnStatic, color:C.navy }}>Close</button>
-                <button onClick={apply} disabled={busy || !plan.days.length || (done && done.ok)}
-                  style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (busy || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
+                <button onClick={apply} disabled={busy || linksLoading || !plan.days.length || (done && done.ok)}
+                  style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (busy || linksLoading || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
                   {busy ? 'Applying…' : `Apply ${plan.placed} date${plan.placed===1?'':'s'}`}
                 </button>
               </div>
@@ -1779,7 +1826,7 @@
     // tool (resolveCoupleTarget) so the two never disagree on what "aligned"
     // means. Only pairs contacts with exactly one open call each — a contact
     // still showing 2+ belongs to the duplicate list above, not here.
-    function spouseAlignmentIssues({ tasks, colMap }) {
+    function spouseAlignmentIssues({ tasks, colMap, spouseLinks }) {
       const oneCallByContact = {}, countByContact = {};
       (tasks || []).forEach(t => {
         if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
@@ -1803,7 +1850,8 @@
       Object.keys(oneCallByContact).forEach(cid => {
         if (countByContact[cid] !== 1) return;
         const t = oneCallByContact[cid];
-        const partnerId = spouseOriginOf(t);
+        const link = spouseLinks && spouseLinks[cid];
+        const partnerId = (link && link.id) || spouseOriginOf(t);
         if (!partnerId || countByContact[partnerId] !== 1) return;
         const key = [cid, partnerId].sort().join('|');
         if (seen.has(key)) return; seen.add(key);
@@ -1826,7 +1874,28 @@
       const review = dupes.filter(g => g.needsReview);
       const removeAll = fixable.flatMap(g => g.removeIds);
 
-      const aligns = useMemo(() => spouseAlignmentIssues({ tasks, colMap }), [tasks, colMap]);
+      // Spouse alignment only makes sense for contacts with exactly one open
+      // call (2+ belongs in the duplicate tab) — that's also the exact
+      // candidate set to fetch real spouse pairings for.
+      const singleCallKeys = useMemo(() => {
+        const counts = {};
+        (tasks || []).forEach(t => {
+          if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
+          const cid = t.Who_Id?.id || t.Who_Id?.name;
+          if (cid) counts[cid] = (counts[cid] || 0) + 1;
+        });
+        return Object.keys(counts).filter(k => counts[k] === 1);
+      }, [tasks, colMap]);
+      const [spouseLinks, setSpouseLinks] = useState({});
+      const [linksLoading, setLinksLoading] = useState(false);
+      useEffect(() => {
+        let cancelled = false;
+        setLinksLoading(true);
+        fetchSpouseLinksFor(singleCallKeys).then(links => { if (!cancelled) { setSpouseLinks(links); setLinksLoading(false); } });
+        return () => { cancelled = true; };
+      }, [singleCallKeys.join('|')]);
+
+      const aligns = useMemo(() => spouseAlignmentIssues({ tasks, colMap, spouseLinks }), [tasks, colMap, spouseLinks]);
 
       async function applyDupes() {
         setBusy(true);
@@ -1897,7 +1966,8 @@
               )}
               {tab === 'align' && (
                 <React.Fragment>
-                  {aligns.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No spouse pairs with mismatched due dates.</div>}
+                  {linksLoading && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}><Spinner size={20} /></div>}
+                  {!linksLoading && aligns.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No spouse pairs with mismatched due dates.</div>}
                   {aligns.map((p, i) => (
                     <div key={i} style={card}>
                       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
@@ -1917,6 +1987,7 @@
               <div style={{ fontSize:'0.76rem', color: done ? (done.ok ? C.green : C.red) : C.textMuted }}>
                 {done ? (done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error)
                       : tab === 'dupes' ? `${removeAll.length} extra call${removeAll.length===1?'':'s'} to remove${review.length ? ' · ' + review.length + ' need review' : ''}`
+                                         : linksLoading ? 'Checking spouse pairings…'
                                          : `${aligns.length} couple${aligns.length===1?'':'s'} to align`}
               </div>
               <div style={{ display:'flex', gap:10 }}>
@@ -1926,8 +1997,8 @@
                       style={{ ...iconBtnStatic, color:'#fff', background:C.red, borderColor:C.red, fontWeight:600, opacity:(busy || !removeAll.length || (done && done.ok)) ? .5 : 1 }}>
                       {busy ? 'Deleting…' : `Delete ${removeAll.length} duplicate${removeAll.length===1?'':'s'}`}
                     </button>
-                  : <button onClick={applyAligns} disabled={busy || !aligns.length || (done && done.ok)}
-                      style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity:(busy || !aligns.length || (done && done.ok)) ? .5 : 1 }}>
+                  : <button onClick={applyAligns} disabled={busy || linksLoading || !aligns.length || (done && done.ok)}
+                      style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity:(busy || linksLoading || !aligns.length || (done && done.ok)) ? .5 : 1 }}>
                       {busy ? 'Applying…' : `Align ${aligns.length} couple${aligns.length===1?'':'s'}`}
                     </button>}
               </div>

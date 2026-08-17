@@ -1620,37 +1620,57 @@
       return last;
     }
 
-    // mode 'overdue'    → Not-Started calls due on/before the cutoff.
-    // mode 'nobaseline' → Not-Started calls whose contact has no completed call
-    //                     to compute cadence from, at ANY due date.
-    function inScopeCalls({ tasks, colMap, cutoff, mode, owner }) {
-      const baseline = mode === 'nobaseline' ? lastCompletedByContact(tasks, colMap) : null;
-      return (tasks || []).filter(t => {
-        if ((t.Status || '') !== 'Not Started') return false;
-        if (!isCallTask(t, colMap)) return false;
-        if (!['A', 'B', 'C', 'EO'].includes(callTier(t.Subject))) return false;
-        if (owner && t.Owner?.name !== owner) return false;
-        if (mode === 'nobaseline') {
+    // A call needs a fresh date for one of two reasons — OVERDUE (due on/
+    // before the cutoff) or NO BASELINE (its contact has never had a
+    // completed call, so any date it currently has is arbitrary). These used
+    // to be two separate modes you ran one at a time, which meant a
+    // no-baseline C-touch could grab a calendar slot a genuinely overdue
+    // A-touch needed more. They're merged into ONE pool here — which reason
+    // got a call included doesn't matter; packOverdue's existing 2A/1B/1C
+    // mix still decides who actually goes first. Each task is tagged with
+    // `_reason` (overdue / no_baseline / both) purely for display.
+    function inScopeCalls({ tasks, colMap, cutoff, owner }) {
+      const baseline = lastCompletedByContact(tasks, colMap);
+      return (tasks || [])
+        .filter(t => {
+          if ((t.Status || '') !== 'Not Started') return false;
+          if (!isCallTask(t, colMap)) return false;
+          if (!['A', 'B', 'C', 'EO'].includes(callTier(t.Subject))) return false;
+          if (owner && t.Owner?.name !== owner) return false;
           const cid = t.Who_Id?.id || t.Who_Id?.name;
-          return cid ? !baseline[cid] : true;
-        }
-        return !!t.Due_Date && t.Due_Date <= cutoff;
-      }).sort((a, b) => String(a.Due_Date || '').localeCompare(String(b.Due_Date || '')));
+          const noBaseline = cid ? !baseline[cid] : true;
+          const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
+          return noBaseline || overdue;
+        })
+        .map(t => {
+          const cid = t.Who_Id?.id || t.Who_Id?.name;
+          const noBaseline = cid ? !baseline[cid] : true;
+          const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
+          return { ...t, _reason: overdue && noBaseline ? 'both' : overdue ? 'overdue' : 'no_baseline' };
+        })
+        // Overdue leads (more urgent than a plain never-called backlog entry);
+        // within that, most-overdue first. Tier priority is applied later by
+        // packOverdue's own A/B/C bucketing, on top of this ordering.
+        .sort((a, b) => {
+          const ra = a._reason === 'no_baseline' ? 1 : 0, rb = b._reason === 'no_baseline' ? 1 : 0;
+          if (ra !== rb) return ra - rb;
+          return String(a.Due_Date || '9999-99-99').localeCompare(String(b.Due_Date || '9999-99-99'));
+        });
     }
 
     // Every agent has their own working day, so a schedule is only meaningful
     // for ONE owner at a time — packing several agents into a shared 5-a-day
     // calendar would interleave their lists and cap the whole team at 5.
-    function scopeOwners({ tasks, colMap, cutoff, mode }) {
+    function scopeOwners({ tasks, colMap, cutoff }) {
       const counts = {};
-      inScopeCalls({ tasks, colMap, cutoff, mode }).forEach(t => {
+      inScopeCalls({ tasks, colMap, cutoff }).forEach(t => {
         const o = t.Owner?.name; if (o) counts[o] = (counts[o] || 0) + 1;
       });
       return Object.keys(counts).map(name => ({ name, count: counts[name] })).sort((a, b) => b.count - a.count);
     }
 
-    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode, spouseLinks }) {
-      const pool = inScopeCalls({ tasks, colMap, cutoff, mode, owner });
+    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks }) {
+      const pool = inScopeCalls({ tasks, colMap, cutoff, owner });
 
       // Pair spouses via each contact's real Spouse lookup field (spouseLinks,
       // fetched live per contact — see fetchSpouseLinksFor); the task-level
@@ -1705,19 +1725,27 @@
       // count reads as couples, not links.
       const pairKeys = new Set();
       partnerOf.forEach((p, id) => pairKeys.add([id, p.id].sort().join('|')));
-      return { days, total: pool.length, placed: placed.size, pairs: pairKeys.size, eoTotal: eoPool.length };
+      const overdueCount = pool.filter(t => t._reason !== 'no_baseline').length;
+      const noBaselineCount = pool.filter(t => t._reason !== 'overdue').length;
+      return { days, total: pool.length, placed: placed.size, pairs: pairKeys.size, eoTotal: eoPool.length, overdueCount, noBaselineCount };
     }
 
-    function RescheduleOverdue({ tasks, colMap, onApply, onClose }) {
-      const [cutoff, setCutoff] = useState('2026-07-31');
-      const [start, setStart] = useState('2026-08-17');
+    function RescheduleOverdue({ tasks, colMap, onApply, onClose, onGoToDupes }) {
+      const [cutoff, setCutoff] = useState(() => todayISO());
+      const [start, setStart] = useState(() => todayISO());
       const [perDay, setPerDay] = useState(5);
       const [eoPerWeek, setEoPerWeek] = useState(3);
       const [busy, setBusy] = useState(false);
       const [done, setDone] = useState(null);
 
-      const [mode, setMode] = useState('overdue');
-      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff, mode }), [tasks, colMap, cutoff, mode]);
+      // Step 1 (Duplicate calls) must be clean before Step 2 (this) can trust
+      // "one open call per contact" — a contact with 2+ open calls would get
+      // packed twice under two different reasons. Doesn't block on the
+      // needs-review case (a duplicate CONTACT record) since that can't be
+      // fixed from this app at all and shouldn't stall the pipeline forever.
+      const dupeGate = useMemo(() => findDuplicateCalls({ tasks, colMap }).some(g => !g.needsReview), [tasks, colMap]);
+
+      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff }), [tasks, colMap, cutoff]);
       // One agent at a time, on purpose. Default to whoever has the biggest
       // backlog so the common case needs no clicks.
       const [owner, setOwner] = useState('');
@@ -1726,21 +1754,22 @@
       }, [owners]);
 
       // Fetch real spouse pairings only for contacts actually in scope for this
-      // owner/mode/cutoff — keeps it well under the live lookup's batch size.
+      // owner/cutoff — keeps it well under the live lookup's batch size.
       const [spouseLinks, setSpouseLinks] = useState({});
       const [linksLoading, setLinksLoading] = useState(false);
       const candidateKeys = useMemo(() =>
-        inScopeCalls({ tasks, colMap, cutoff, mode, owner }).map(t => t.Who_Id?.id || t.Who_Id?.name),
-        [tasks, colMap, cutoff, mode, owner]);
+        inScopeCalls({ tasks, colMap, cutoff, owner }).map(t => t.Who_Id?.id || t.Who_Id?.name),
+        [tasks, colMap, cutoff, owner]);
       useEffect(() => {
+        if (dupeGate) return; // don't bother fetching until Step 1 is clean
         let cancelled = false;
         setLinksLoading(true);
         fetchSpouseLinksFor(candidateKeys).then(links => { if (!cancelled) { setSpouseLinks(links); setLinksLoading(false); } });
         return () => { cancelled = true; };
-      }, [candidateKeys.join('|')]);
+      }, [candidateKeys.join('|'), dupeGate]);
 
-      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode, spouseLinks }),
-        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, mode, spouseLinks]);
+      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks }),
+        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks]);
 
       async function apply() {
         setBusy(true);
@@ -1761,71 +1790,78 @@
             <div style={{ flexShrink:0, padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface, borderRadius:'14px 14px 0 0', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
               <div>
                 <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Reschedule Calls</div>
-                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>{owner || '—'} · {plan.total} {mode === 'overdue' ? 'overdue' : 'with no cadence baseline'} · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together</div>
+                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>
+                  {owner || '—'} · {plan.total} need a new date ({plan.overdueCount} overdue, {plan.noBaselineCount} no prior cadence) · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together
+                </div>
               </div>
               <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
             </div>
 
-            <div style={{ flexShrink:0, padding:'12px 22px 0' }}>
-              <div style={{ display:'inline-flex', border:'1px solid '+C.border, borderRadius:9, overflow:'hidden' }}>
-                {[['overdue','Overdue backlog'], ['nobaseline','No cadence baseline']].map(([m, label]) => (
-                  <button key={m} onClick={() => setMode(m)}
-                    style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer',
-                      background: mode === m ? C.navy : C.surface, color: mode === m ? '#fff' : C.textSecondary }}>{label}</button>
-                ))}
+            {dupeGate ? (
+              <div style={{ margin:'18px 22px', padding:16, border:'1px solid '+C.amber+'44', background:C.amber+'0d', borderRadius:10 }}>
+                <div style={{ fontSize:'0.86rem', fontWeight:600, color:C.navy, marginBottom:4 }}>Resolve duplicate calls first</div>
+                <div style={{ fontSize:'0.78rem', color:C.textSecondary, lineHeight:1.5, marginBottom:10 }}>
+                  Some contacts still have more than one open call. Rescheduling before that's cleaned up risks packing the same contact twice under two different reasons.
+                </div>
+                <button onClick={onGoToDupes} style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
+                  <i className="ti ti-heart-rate-monitor" style={{ fontSize:15 }} /> Open Data Health
+                </button>
               </div>
-            </div>
-            <div style={{ flexShrink:0, padding:'14px 22px', borderBottom:'1px solid '+C.border, display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end' }}>
-              <div>
-                <label style={lbl}>Agent</label>
-                <select value={owner} onChange={e => setOwner(e.target.value)} style={{ ...fld, cursor:'pointer', maxWidth:200 }}>
-                  {owners.length === 0 && <option value="">No overdue calls</option>}
-                  {owners.map(o => <option key={o.name} value={o.name}>{o.name} ({o.count})</option>)}
-                </select>
-              </div>
-              {mode === 'overdue' && <div><label style={lbl}>Overdue on/before</label><input type="date" value={cutoff} onChange={e => setCutoff(e.target.value)} style={fld} /></div>}
-              <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
-              <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
-              <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
-              <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>
-                {mode === 'nobaseline'
-                  ? 'Calls whose contact has no completed call to measure cadence from — these get arbitrary far-out dates. Packed into real days instead.'
-                  : 'One agent at a time — each works their own day. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped.'}
-              </div>
-            </div>
-
-            <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>
-              {linksLoading && <div style={{ padding:40, textAlign:'center' }}><Spinner size={20} /></div>}
-              {!linksLoading && plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No overdue Not-Started calls on or before {cutoff}.</div>}
-              {!linksLoading && plan.days.map(d => (
-                <div key={d.date} style={{ marginBottom:12 }}>
-                  <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
-                    <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
-                    <span style={{ fontSize:'0.68rem', color: d.tasks.length > perDay ? C.amber : C.textMuted }}>{d.tasks.length} call{d.tasks.length===1?'':'s'}{d.tasks.length > perDay ? ' · spouse overflow' : ''}</span>
+            ) : (
+              <React.Fragment>
+                <div style={{ flexShrink:0, padding:'14px 22px', borderBottom:'1px solid '+C.border, display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end' }}>
+                  <div>
+                    <label style={lbl}>Agent</label>
+                    <select value={owner} onChange={e => setOwner(e.target.value)} style={{ ...fld, cursor:'pointer', maxWidth:200 }}>
+                      {owners.length === 0 && <option value="">No calls need a new date</option>}
+                      {owners.map(o => <option key={o.name} value={o.name}>{o.name} ({o.count})</option>)}
+                    </select>
                   </div>
-                  <div style={{ display:'grid', gap:4 }}>
-                    {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
-                      <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', border:'1px solid '+C.border, borderRadius:7, background:C.surface }}>
-                        <span style={tierPill(tier, eo)}>{eo ? 'EO' : tier}</span>
-                        <span style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id?.name || t.Subject}</span>
-                        <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
-                      </div>
-                    ); })}
+                  <div><label style={lbl}>Treat as overdue on/before</label><input type="date" value={cutoff} onChange={e => setCutoff(e.target.value)} style={fld} /></div>
+                  <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
+                  <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
+                  <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
+                  <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>
+                    One agent at a time — each works their own day. Overdue calls and calls with no prior cadence share ONE calendar fill; A-tier always gets the next open slot first, regardless of which reason brought a call in. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped.
                   </div>
                 </div>
-              ))}
-            </div>
+
+                <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>
+                  {linksLoading && <div style={{ padding:40, textAlign:'center' }}><Spinner size={20} /></div>}
+                  {!linksLoading && plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls need a new date for {owner || 'this agent'}.</div>}
+                  {!linksLoading && plan.days.map(d => (
+                    <div key={d.date} style={{ marginBottom:12 }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
+                        <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
+                        <span style={{ fontSize:'0.68rem', color: d.tasks.length > perDay ? C.amber : C.textMuted }}>{d.tasks.length} call{d.tasks.length===1?'':'s'}{d.tasks.length > perDay ? ' · spouse overflow' : ''}</span>
+                      </div>
+                      <div style={{ display:'grid', gap:4 }}>
+                        {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
+                          <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', border:'1px solid '+C.border, borderRadius:7, background:C.surface }}>
+                            <span style={tierPill(tier, eo)}>{eo ? 'EO' : tier}</span>
+                            <span style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id?.name || t.Subject}</span>
+                            <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
+                            {t._reason !== 'overdue' && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>no prior cadence</span>}
+                          </div>
+                        ); })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </React.Fragment>
+            )}
 
             <div style={{ flexShrink:0, padding:'14px 22px', borderTop:'1px solid '+C.border, background:C.surface, borderRadius:'0 0 14px 14px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
               <div style={{ fontSize:'0.76rem', color: done ? (done.ok ? C.green : C.red) : C.textMuted }}>
                 {done ? (done.ok ? `✓ Updated ${done.n} tasks in Zoho.` : done.error)
+                      : dupeGate ? 'Blocked until duplicate calls are resolved.'
                       : linksLoading ? 'Checking spouse pairings…'
                       : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available`}
               </div>
               <div style={{ display:'flex', gap:10 }}>
                 <button onClick={onClose} style={{ ...iconBtnStatic, color:C.navy }}>Close</button>
-                <button onClick={apply} disabled={busy || linksLoading || !plan.days.length || (done && done.ok)}
-                  style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (busy || linksLoading || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
+                <button onClick={apply} disabled={dupeGate || busy || linksLoading || !plan.days.length || (done && done.ok)}
+                  style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (dupeGate || busy || linksLoading || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
                   {busy ? 'Applying…' : `Apply ${plan.placed} date${plan.placed===1?'':'s'}`}
                 </button>
               </div>
@@ -1973,7 +2009,7 @@
       return placed.sort((a, b) => String(a.target_date || '').localeCompare(String(b.target_date || '')));
     }
 
-    function DataHealth({ tasks, colMap, onDeleteIds, onSetDates, onClose }) {
+    function DataHealth({ tasks, colMap, onDeleteIds, onSetDates, onClose, onGoToReschedule }) {
       const [tab, setTab] = useState('dupes');
       const [busy, setBusy] = useState(false);
       const [done, setDone] = useState(null);
@@ -1982,6 +2018,15 @@
       const fixable = dupes.filter(g => !g.needsReview);
       const review = dupes.filter(g => g.needsReview);
       const removeAll = fixable.flatMap(g => g.removeIds);
+
+      // Alignment is Step 3 — it only makes sense once Step 1 (duplicates)
+      // and Step 2 (Reschedule Overdue's combined overdue/no-baseline pack)
+      // are both clean, or a couple could get "aligned" onto a date that's
+      // itself about to be reshuffled by the backlog pack. `backlogOwners`
+      // reuses the SAME scope Reschedule Overdue uses (today as the cutoff),
+      // so the two can't disagree about what counts as outstanding.
+      const backlogOwners = useMemo(() => scopeOwners({ tasks, colMap, cutoff: todayISO() }), [tasks, colMap]);
+      const alignGate = fixable.length > 0 ? 'dupes' : backlogOwners.length > 0 ? 'backlog' : null;
 
       // Spouse alignment only makes sense for contacts with exactly one open
       // call (2+ belongs in the duplicate tab) — that's also the exact
@@ -1999,16 +2044,17 @@
       const [linksLoading, setLinksLoading] = useState(false);
       const [refreshNonce, setRefreshNonce] = useState(0);
       useEffect(() => {
+        if (alignGate) { setSpouseLinks({}); setLinksLoading(false); return; } // nothing to check until Steps 1-2 are clean
         let cancelled = false;
         setLinksLoading(true);
         fetchSpouseLinksFor(singleCallKeys).then(links => { if (!cancelled) { setSpouseLinks(links); setLinksLoading(false); } });
         return () => { cancelled = true; };
-      }, [singleCallKeys.join('|'), refreshNonce]);
+      }, [singleCallKeys.join('|'), refreshNonce, alignGate]);
       function recheckSpousePairings() { clearSpouseLinksCache(); setRefreshNonce(n => n + 1); }
 
       // perDay mirrors Reschedule Overdue's default cap — alignment shares
       // the same daily-capacity rule, not a separate one.
-      const aligns = useMemo(() => packSpouseAlignment({ tasks, colMap, spouseLinks, perDay: 5, start: todayISO() }), [tasks, colMap, spouseLinks]);
+      const aligns = useMemo(() => alignGate ? [] : packSpouseAlignment({ tasks, colMap, spouseLinks, perDay: 5, start: todayISO() }), [tasks, colMap, spouseLinks, alignGate]);
       const alignDays = useMemo(() => new Set(aligns.map(p => p.target_date)).size, [aligns]);
 
       async function applyDupes() {
@@ -2039,9 +2085,9 @@
             <div style={{ flexShrink:0, padding:'12px 22px 0', display:'flex', alignItems:'center', justifyContent:'space-between', gap:10 }}>
               <div style={{ display:'inline-flex', border:'1px solid '+C.border, borderRadius:9, overflow:'hidden' }}>
                 <button onClick={() => switchTab('dupes')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='dupes'?C.navy:C.surface, color: tab==='dupes'?'#fff':C.textSecondary }}>Duplicate calls ({dupes.length})</button>
-                <button onClick={() => switchTab('align')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='align'?C.navy:C.surface, color: tab==='align'?'#fff':C.textSecondary }}>Spouse alignment ({aligns.length})</button>
+                <button onClick={() => switchTab('align')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='align'?C.navy:C.surface, color: tab==='align'?'#fff':C.textSecondary }}>Spouse alignment {alignGate ? <i className="ti ti-lock" style={{ fontSize:12, marginLeft:2, verticalAlign:'-1px' }} /> : `(${aligns.length})`}</button>
               </div>
-              {tab === 'align' && (
+              {tab === 'align' && !alignGate && (
                 <button onClick={recheckSpousePairings} disabled={linksLoading} title="Spouse pairings are cached after the first check — use this to re-check against Zoho now" style={{ display:'flex', alignItems:'center', gap:5, fontFamily:C.fontSans, fontSize:'0.72rem', fontWeight:600, color:C.textMuted, background:'none', border:'1px solid '+C.border, borderRadius:8, padding:'6px 10px', cursor: linksLoading?'default':'pointer', opacity: linksLoading?.5:1 }}>
                   <i className="ti ti-refresh" style={{ fontSize:14 }} /> {linksLoading ? 'Checking…' : 'Re-check pairings'}
                 </button>
@@ -2089,7 +2135,26 @@
                   )}
                 </React.Fragment>
               )}
-              {tab === 'align' && (
+              {tab === 'align' && alignGate === 'dupes' && (
+                <div style={{ padding:16, border:'1px solid '+C.amber+'44', background:C.amber+'0d', borderRadius:10 }}>
+                  <div style={{ fontSize:'0.86rem', fontWeight:600, color:C.navy, marginBottom:4 }}>Resolve duplicate calls first</div>
+                  <div style={{ fontSize:'0.78rem', color:C.textSecondary, lineHeight:1.5 }}>
+                    A contact with two open calls can't be checked for date alignment yet — switch to the Duplicate calls tab above and clear those first.
+                  </div>
+                </div>
+              )}
+              {tab === 'align' && alignGate === 'backlog' && (
+                <div style={{ padding:16, border:'1px solid '+C.amber+'44', background:C.amber+'0d', borderRadius:10 }}>
+                  <div style={{ fontSize:'0.86rem', fontWeight:600, color:C.navy, marginBottom:4 }}>Clear the backlog first</div>
+                  <div style={{ fontSize:'0.78rem', color:C.textSecondary, lineHeight:1.5, marginBottom:10 }}>
+                    {backlogOwners.length} agent{backlogOwners.length===1?'':'s'} still {backlogOwners.length===1?'has':'have'} overdue or no-cadence calls: {backlogOwners.map(o => `${o.name} (${o.count})`).join(', ')}. Reschedule those first — aligning a couple now could just get undone when that backlog gets packed.
+                  </div>
+                  <button onClick={onGoToReschedule} style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
+                    <i className="ti ti-calendar-up" style={{ fontSize:15 }} /> Open Reschedule Overdue
+                  </button>
+                </div>
+              )}
+              {tab === 'align' && !alignGate && (
                 <React.Fragment>
                   {linksLoading && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}><Spinner size={20} /></div>}
                   {!linksLoading && aligns.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No spouse pairs with mismatched due dates.</div>}
@@ -2119,6 +2184,8 @@
               <div style={{ fontSize:'0.76rem', color: done ? (done.ok ? C.green : C.red) : C.textMuted }}>
                 {done ? (done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error)
                       : tab === 'dupes' ? `${removeAll.length} extra call${removeAll.length===1?'':'s'} to remove${review.length ? ' · ' + review.length + ' need review' : ''}`
+                                         : alignGate === 'dupes' ? 'Blocked until duplicate calls are resolved.'
+                                         : alignGate === 'backlog' ? 'Blocked until the overdue/no-cadence backlog is cleared.'
                                          : linksLoading ? 'Checking spouse pairings…'
                                          : `${aligns.length} couple${aligns.length===1?'':'s'} to align across ${alignDays} business day${alignDays===1?'':'s'} · ≤5 calls/day per agent`}
               </div>
@@ -2838,13 +2905,15 @@
           {showReschedule && tasks && (
             <RescheduleOverdue tasks={tasks} colMap={colMap}
               onApply={(items) => applyAiWrite('bulk_set_due_dates', { items })}
-              onClose={() => setShowReschedule(false)} />
+              onClose={() => setShowReschedule(false)}
+              onGoToDupes={() => { setShowReschedule(false); setShowDataHealth(true); }} />
           )}
           {showDataHealth && tasks && (
             <DataHealth tasks={tasks} colMap={colMap}
               onDeleteIds={(ids) => applyAiWrite('bulk_delete_tasks', { ids })}
               onSetDates={(items) => applyAiWrite('bulk_set_due_dates', { items })}
-              onClose={() => setShowDataHealth(false)} />
+              onClose={() => setShowDataHealth(false)}
+              onGoToReschedule={() => { setShowDataHealth(false); setShowReschedule(true); }} />
           )}
           {showCapacity && tasks && (
             <CapacityGrid tasks={tasks} colMap={colMap} onClose={() => setShowCapacity(false)} />

@@ -1419,8 +1419,13 @@
       const type = ((t[colMap.type] || t.Task_Type || '') + '').toLowerCase();
       return type === 'call' || /touch call/i.test(t.Subject || '');
     }
+    // Not anchored to the start of the subject — real subjects carry prefixes
+    // like "Initial B Touch Call: …" or "Validate A Touch Call" ahead of the
+    // tier letter. \b before the capture keeps this from matching mid-word
+    // (so "Unclassified Touch Call" correctly falls through to 'Other'
+    // instead of grabbing a trailing fragment like "ied").
     function callTier(subject) {
-      const m = /^([A-Za-z]{1,3})\s+Touch Call\b/i.exec(subject || '');
+      const m = /\b([A-Za-z]{1,3})\s+Touch Call\b/i.exec(subject || '');
       return m ? m[1].toUpperCase() : 'Other';
     }
     const CAP_MON = MON;
@@ -1629,13 +1634,19 @@
     // got a call included doesn't matter; packOverdue's existing 2A/1B/1C
     // mix still decides who actually goes first. Each task is tagged with
     // `_reason` (overdue / no_baseline / both) purely for display.
+    //
+    // Scope is Task_Type=Call ONLY (via isCallTask) — the subject's tier
+    // prefix is never a gate for inclusion, only a classifier for which
+    // mix-bucket a call lands in once it's in scope. A call whose subject
+    // doesn't parse a clean tier (callTier → 'Other') still needs a date; it
+    // was being silently dropped here before, which is what caused the app's
+    // backlog count to undercount a real Zoho overdue-calls export.
     function inScopeCalls({ tasks, colMap, cutoff, owner }) {
       const baseline = lastCompletedByContact(tasks, colMap);
       return (tasks || [])
         .filter(t => {
           if ((t.Status || '') !== 'Not Started') return false;
           if (!isCallTask(t, colMap)) return false;
-          if (!['A', 'B', 'C', 'EO'].includes(callTier(t.Subject))) return false;
           if (owner && t.Owner?.name !== owner) return false;
           const cid = t.Who_Id?.id || t.Who_Id?.name;
           const noBaseline = cid ? !baseline[cid] : true;
@@ -1687,7 +1698,10 @@
       });
 
       // An EO-prefixed call still needs a class home for the 2A/1B/1C mix; it
-      // reads as the lightest touch, so it queues with C.
+      // reads as the lightest touch, so it queues with C — same fallback for
+      // a call whose subject carries no tier at all (callTier → 'Other',
+      // e.g. "Unclassified Touch Call: …"). It still gets scheduled, just
+      // without a known priority class of its own.
       const bucket = { A: [], B: [], C: [] };
       pool.forEach(t => { const tier = callTier(t.Subject); (bucket[tier] || bucket.C).push(t); });
       const eoPool = pool.filter(isEOTask);
@@ -2082,12 +2096,13 @@
                         <span style={{ fontSize:'0.68rem', color: d.tasks.length > perDay ? C.amber : C.textMuted }}>{d.tasks.length} call{d.tasks.length===1?'':'s'}{d.tasks.length > perDay ? ' · spouse overflow' : ''}</span>
                       </div>
                       <div style={{ display:'grid', gap:4 }}>
-                        {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
+                        {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t), unclassified = !eo && tier === 'Other'; return (
                           <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', border:'1px solid '+C.border, borderRadius:7, background:C.surface }}>
-                            <span style={tierPill(tier, eo)}>{eo ? 'EO' : tier}</span>
+                            <span style={tierPill(tier, eo)} title={unclassified ? 'Subject has no A/B/C/EO tier prefix — treated as C for scheduling' : undefined}>{eo ? 'EO' : unclassified ? '?' : tier}</span>
                             <span style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id?.name || t.Subject}</span>
                             <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
                             {t._reason !== 'overdue' && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>no prior cadence</span>}
+                            {unclassified && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.textMuted, flexShrink:0 }}>unclassified subject</span>}
                           </div>
                         ); })}
                       </div>

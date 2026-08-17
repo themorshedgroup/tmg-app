@@ -1759,12 +1759,13 @@
     }
 
     function findDuplicateCalls({ tasks, colMap }) {
+      const lastCompleted = lastCompletedByContact(tasks, colMap);
       const byContact = {};
       (tasks || []).forEach(t => {
         if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
         const cid = t.Who_Id?.id || t.Who_Id?.name;
         if (!cid) return;
-        (byContact[cid] = byContact[cid] || { name: t.Who_Id?.name || String(cid), tasks: [] }).tasks.push(t);
+        (byContact[cid] = byContact[cid] || { cid, name: t.Who_Id?.name || String(cid), tasks: [] }).tasks.push(t);
       });
       const groups = [];
       Object.values(byContact).forEach(c => {
@@ -1777,8 +1778,45 @@
           removeIds = c.tasks.filter((_, i) => i !== checkedIdx[0]).map(t => t.id);
           reason = 'Kept the Spouse Task–checked call';
         } else if (checkedIdx.length >= 2) {
-          keep = null; removeIds = []; needsReview = true;
-          reason = 'Both calls are Spouse Task–checked — likely a duplicate CONTACT record, needs a manual merge';
+          // Both are Spouse Task–checked — that alone doesn't mean the
+          // CONTACT is duplicated (a real duplicate contact usually shows up
+          // as the partner ALSO having 2+ open calls; a contact can just have
+          // an unresolved stale checkbox on an older call). Same cadence math
+          // as everywhere else — last COMPLETED call + interval by tier &
+          // owner — resolves which of the checked calls is actually correct:
+          // whichever one's due date lands closest to what that math predicts
+          // wins. This only picks which EXISTING call to keep; the winner's
+          // due date is never touched, so a call that's already on-cadence
+          // (e.g. completed a couple months ago, next one already queued
+          // right on schedule) simply survives as-is — nothing gets
+          // rescheduled here. Falls back to manual review only when there's
+          // no completed-call baseline to compute against at all, which is
+          // the genuinely unresolvable case.
+          const candidates = checkedIdx.map(i => c.tasks[i]);
+          const last = lastCompleted[c.cid];
+          const lastDate = last ? dateOnly(last.Closed_Time || last.Due_Date) : null;
+          let best = null, bestDiff = Infinity;
+          if (lastDate) {
+            candidates.forEach(t => {
+              const cls = parseTouchClass(t.Subject);
+              if (!cls || !t.Due_Date) return;
+              const ownerName = t.Owner?.name || '';
+              const bucket = /tarek/i.test(ownerName) ? 'tarek' : 'other';
+              const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls];
+              const expected = addDaysISO(lastDate, interval);
+              if (!expected) return;
+              const diff = Math.abs(parseISO(expected) - parseISO(t.Due_Date));
+              if (diff < bestDiff) { bestDiff = diff; best = t; }
+            });
+          }
+          if (best) {
+            keep = best;
+            removeIds = c.tasks.filter(t => t.id !== best.id).map(t => t.id);
+            reason = `Both were Spouse Task–checked — kept the one matching cadence (last call ${fmtDate(lastDate)} + interval)`;
+          } else {
+            keep = null; removeIds = []; needsReview = true;
+            reason = 'Both calls are Spouse Task–checked and there’s no completed call to compute cadence from — needs a manual look';
+          }
         } else {
           const sorted = c.tasks.slice().sort((a, b) => String(a.Due_Date || '9999-99-99').localeCompare(String(b.Due_Date || '9999-99-99')));
           keep = sorted[0]; removeIds = sorted.slice(1).map(t => t.id);

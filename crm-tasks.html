@@ -1730,146 +1730,6 @@
       return { days, total: pool.length, placed: placed.size, pairs: pairKeys.size, eoTotal: eoPool.length, overdueCount, noBaselineCount };
     }
 
-    function RescheduleOverdue({ tasks, colMap, onApply, onClose, onGoToDupes }) {
-      const [cutoff, setCutoff] = useState(() => todayISO());
-      const [start, setStart] = useState(() => todayISO());
-      const [perDay, setPerDay] = useState(5);
-      const [eoPerWeek, setEoPerWeek] = useState(3);
-      const [busy, setBusy] = useState(false);
-      const [done, setDone] = useState(null);
-
-      // Step 1 (Duplicate calls) must be clean before Step 2 (this) can trust
-      // "one open call per contact" — a contact with 2+ open calls would get
-      // packed twice under two different reasons. Doesn't block on the
-      // needs-review case (a duplicate CONTACT record) since that can't be
-      // fixed from this app at all and shouldn't stall the pipeline forever.
-      const dupeGate = useMemo(() => findDuplicateCalls({ tasks, colMap }).some(g => !g.needsReview), [tasks, colMap]);
-
-      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff }), [tasks, colMap, cutoff]);
-      // One agent at a time, on purpose. Default to whoever has the biggest
-      // backlog so the common case needs no clicks.
-      const [owner, setOwner] = useState('');
-      useEffect(() => {
-        if (owners.length && !owners.some(o => o.name === owner)) setOwner(owners[0].name);
-      }, [owners]);
-
-      // Fetch real spouse pairings only for contacts actually in scope for this
-      // owner/cutoff — keeps it well under the live lookup's batch size.
-      const [spouseLinks, setSpouseLinks] = useState({});
-      const [linksLoading, setLinksLoading] = useState(false);
-      const candidateKeys = useMemo(() =>
-        inScopeCalls({ tasks, colMap, cutoff, owner }).map(t => t.Who_Id?.id || t.Who_Id?.name),
-        [tasks, colMap, cutoff, owner]);
-      useEffect(() => {
-        if (dupeGate) return; // don't bother fetching until Step 1 is clean
-        let cancelled = false;
-        setLinksLoading(true);
-        fetchSpouseLinksFor(candidateKeys).then(links => { if (!cancelled) { setSpouseLinks(links); setLinksLoading(false); } });
-        return () => { cancelled = true; };
-      }, [candidateKeys.join('|'), dupeGate]);
-
-      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks }),
-        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks]);
-
-      async function apply() {
-        setBusy(true);
-        const items = plan.days.flatMap(d => d.tasks.map(t => ({ id: t.id, due_date: d.date })));
-        const res = await onApply(items);
-        setBusy(false);
-        setDone(res && res.ok ? { ok: true, n: res.count || items.length } : { ok: false, error: (res && res.error) || 'Some updates failed.' });
-      }
-
-      const fld = { fontFamily:C.fontSans, fontSize:'0.8rem', padding:'7px 10px', border:'1px solid '+C.border, borderRadius:8, background:C.surface, color:C.textPrimary, outline:'none' };
-      const lbl = { fontSize:'0.68rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.textMuted, marginBottom:5, display:'block' };
-      const tierPill = (tier, eo) => ({ fontSize:'0.62rem', fontWeight:700, borderRadius:20, padding:'1px 7px', flexShrink:0,
-        color: eo ? '#fff' : C.navy, background: eo ? C.gold : (tier === 'A' ? C.goldSoft+'44' : tier === 'B' ? C.blue+'22' : C.border) });
-
-      return (
-        <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.4)', zIndex:60, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
-          <div onClick={e => e.stopPropagation()} style={{ background:C.bg, borderRadius:14, width:'min(760px, 96vw)', maxHeight:'92vh', display:'flex', flexDirection:'column', boxShadow:'0 18px 60px rgba(0,26,74,.3)' }}>
-            <div style={{ flexShrink:0, padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface, borderRadius:'14px 14px 0 0', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-              <div>
-                <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Reschedule Calls</div>
-                <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>
-                  {owner || '—'} · {plan.total} need a new date ({plan.overdueCount} overdue, {plan.noBaselineCount} no prior cadence) · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together
-                </div>
-              </div>
-              <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
-            </div>
-
-            {dupeGate ? (
-              <div style={{ margin:'18px 22px', padding:16, border:'1px solid '+C.amber+'44', background:C.amber+'0d', borderRadius:10 }}>
-                <div style={{ fontSize:'0.86rem', fontWeight:600, color:C.navy, marginBottom:4 }}>Resolve duplicate calls first</div>
-                <div style={{ fontSize:'0.78rem', color:C.textSecondary, lineHeight:1.5, marginBottom:10 }}>
-                  Some contacts still have more than one open call. Rescheduling before that's cleaned up risks packing the same contact twice under two different reasons.
-                </div>
-                <button onClick={onGoToDupes} style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
-                  <i className="ti ti-heart-rate-monitor" style={{ fontSize:15 }} /> Open Data Health
-                </button>
-              </div>
-            ) : (
-              <React.Fragment>
-                <div style={{ flexShrink:0, padding:'14px 22px', borderBottom:'1px solid '+C.border, display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end' }}>
-                  <div>
-                    <label style={lbl}>Agent</label>
-                    <select value={owner} onChange={e => setOwner(e.target.value)} style={{ ...fld, cursor:'pointer', maxWidth:200 }}>
-                      {owners.length === 0 && <option value="">No calls need a new date</option>}
-                      {owners.map(o => <option key={o.name} value={o.name}>{o.name} ({o.count})</option>)}
-                    </select>
-                  </div>
-                  <div><label style={lbl}>Treat as overdue on/before</label><input type="date" value={cutoff} onChange={e => setCutoff(e.target.value)} style={fld} /></div>
-                  <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
-                  <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
-                  <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
-                  <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>
-                    One agent at a time — each works their own day. Overdue calls and calls with no prior cadence share ONE calendar fill; A-tier always gets the next open slot first, regardless of which reason brought a call in. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped.
-                  </div>
-                </div>
-
-                <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>
-                  {linksLoading && <div style={{ padding:40, textAlign:'center' }}><Spinner size={20} /></div>}
-                  {!linksLoading && plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls need a new date for {owner || 'this agent'}.</div>}
-                  {!linksLoading && plan.days.map(d => (
-                    <div key={d.date} style={{ marginBottom:12 }}>
-                      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
-                        <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
-                        <span style={{ fontSize:'0.68rem', color: d.tasks.length > perDay ? C.amber : C.textMuted }}>{d.tasks.length} call{d.tasks.length===1?'':'s'}{d.tasks.length > perDay ? ' · spouse overflow' : ''}</span>
-                      </div>
-                      <div style={{ display:'grid', gap:4 }}>
-                        {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
-                          <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', border:'1px solid '+C.border, borderRadius:7, background:C.surface }}>
-                            <span style={tierPill(tier, eo)}>{eo ? 'EO' : tier}</span>
-                            <span style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id?.name || t.Subject}</span>
-                            <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
-                            {t._reason !== 'overdue' && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>no prior cadence</span>}
-                          </div>
-                        ); })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </React.Fragment>
-            )}
-
-            <div style={{ flexShrink:0, padding:'14px 22px', borderTop:'1px solid '+C.border, background:C.surface, borderRadius:'0 0 14px 14px', display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 }}>
-              <div style={{ fontSize:'0.76rem', color: done ? (done.ok ? C.green : C.red) : C.textMuted }}>
-                {done ? (done.ok ? `✓ Updated ${done.n} tasks in Zoho.` : done.error)
-                      : dupeGate ? 'Blocked until duplicate calls are resolved.'
-                      : linksLoading ? 'Checking spouse pairings…'
-                      : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available`}
-              </div>
-              <div style={{ display:'flex', gap:10 }}>
-                <button onClick={onClose} style={{ ...iconBtnStatic, color:C.navy }}>Close</button>
-                <button onClick={apply} disabled={dupeGate || busy || linksLoading || !plan.days.length || (done && done.ok)}
-                  style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (dupeGate || busy || linksLoading || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
-                  {busy ? 'Applying…' : `Apply ${plan.placed} date${plan.placed===1?'':'s'}`}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    }
     const iconBtnStatic = { display:'inline-flex', alignItems:'center', gap:7, fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:500, color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:9, padding:'8px 13px', cursor:'pointer' };
 
     // ─── Duplicate calls + spouse alignment ─────────────────────────────
@@ -2009,28 +1869,70 @@
       return placed.sort((a, b) => String(a.target_date || '').localeCompare(String(b.target_date || '')));
     }
 
-    function DataHealth({ tasks, colMap, onDeleteIds, onSetDates, onClose, onGoToReschedule }) {
+    // One popout, three tabs, in order — Duplicates → Backlog → Spouse
+    // alignment. Each step depends on the one before it being clean, so a
+    // later tab shows a "do this first" gate (with a one-click jump back)
+    // instead of pretending to be independent.
+    function CadenceHealth({ tasks, colMap, onDeleteIds, onSetDates, onClose }) {
       const [tab, setTab] = useState('dupes');
       const [busy, setBusy] = useState(false);
       const [done, setDone] = useState(null);
+      function switchTab(t) { setTab(t); setDone(null); }
 
+      // ── Step 1: Duplicate calls ──────────────────────────────────────
       const dupes = useMemo(() => findDuplicateCalls({ tasks, colMap }), [tasks, colMap]);
       const fixable = dupes.filter(g => !g.needsReview);
       const review = dupes.filter(g => g.needsReview);
       const removeAll = fixable.flatMap(g => g.removeIds);
+      const dupesClear = fixable.length === 0; // needs-review cases don't block — can't be fixed from here
 
-      // Alignment is Step 3 — it only makes sense once Step 1 (duplicates)
-      // and Step 2 (Reschedule Overdue's combined overdue/no-baseline pack)
-      // are both clean, or a couple could get "aligned" onto a date that's
-      // itself about to be reshuffled by the backlog pack. `backlogOwners`
-      // reuses the SAME scope Reschedule Overdue uses (today as the cutoff),
-      // so the two can't disagree about what counts as outstanding.
-      const backlogOwners = useMemo(() => scopeOwners({ tasks, colMap, cutoff: todayISO() }), [tasks, colMap]);
-      const alignGate = fixable.length > 0 ? 'dupes' : backlogOwners.length > 0 ? 'backlog' : null;
+      async function applyDupes() {
+        setBusy(true);
+        const res = await onDeleteIds(removeAll);
+        setBusy(false);
+        setDone(res && res.ok ? { ok: true, n: res.count || removeAll.length } : { ok: false, error: (res && res.error) || 'Some deletes failed.' });
+      }
 
-      // Spouse alignment only makes sense for contacts with exactly one open
-      // call (2+ belongs in the duplicate tab) — that's also the exact
-      // candidate set to fetch real spouse pairings for.
+      // ── Step 2: Backlog (overdue + no-cadence, one combined pack) ────
+      const [cutoff, setCutoff] = useState(() => todayISO());
+      const [start, setStart] = useState(() => todayISO());
+      const [perDay, setPerDay] = useState(5);
+      const [eoPerWeek, setEoPerWeek] = useState(3);
+      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff }), [tasks, colMap, cutoff]);
+      const [owner, setOwner] = useState('');
+      useEffect(() => {
+        if (owners.length && !owners.some(o => o.name === owner)) setOwner(owners[0].name);
+      }, [owners]);
+      const backlogCandidateKeys = useMemo(() =>
+        inScopeCalls({ tasks, colMap, cutoff, owner }).map(t => t.Who_Id?.id || t.Who_Id?.name),
+        [tasks, colMap, cutoff, owner]);
+      const [backlogLinks, setBacklogLinks] = useState({});
+      const [backlogLinksLoading, setBacklogLinksLoading] = useState(false);
+      useEffect(() => {
+        if (!dupesClear) return; // don't bother fetching until Step 1 is clean
+        let cancelled = false;
+        setBacklogLinksLoading(true);
+        fetchSpouseLinksFor(backlogCandidateKeys).then(links => { if (!cancelled) { setBacklogLinks(links); setBacklogLinksLoading(false); } });
+        return () => { cancelled = true; };
+      }, [backlogCandidateKeys.join('|'), dupesClear]);
+      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks: backlogLinks }),
+        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, backlogLinks]);
+      // Fixed "today" scope, independent of the tab's adjustable cutoff field —
+      // this is what Step 3's gate checks against, so it can't be fooled by
+      // someone narrowing the cutoff just to make Step 3 unlock.
+      const backlogOwnersAll = useMemo(() => scopeOwners({ tasks, colMap, cutoff: todayISO() }), [tasks, colMap]);
+      const backlogClear = backlogOwnersAll.length === 0;
+
+      async function applyBacklog() {
+        setBusy(true);
+        const items = plan.days.flatMap(d => d.tasks.map(t => ({ id: t.id, due_date: d.date })));
+        const res = await onSetDates(items);
+        setBusy(false);
+        setDone(res && res.ok ? { ok: true, n: res.count || items.length } : { ok: false, error: (res && res.error) || 'Some updates failed.' });
+      }
+
+      // ── Step 3: Spouse alignment (future-drift only) ─────────────────
+      const alignGate = !dupesClear ? 'dupes' : !backlogClear ? 'backlog' : null;
       const singleCallKeys = useMemo(() => {
         const counts = {};
         (tasks || []).forEach(t => {
@@ -2040,29 +1942,21 @@
         });
         return Object.keys(counts).filter(k => counts[k] === 1);
       }, [tasks, colMap]);
-      const [spouseLinks, setSpouseLinks] = useState({});
-      const [linksLoading, setLinksLoading] = useState(false);
+      const [alignLinks, setAlignLinks] = useState({});
+      const [alignLinksLoading, setAlignLinksLoading] = useState(false);
       const [refreshNonce, setRefreshNonce] = useState(0);
       useEffect(() => {
-        if (alignGate) { setSpouseLinks({}); setLinksLoading(false); return; } // nothing to check until Steps 1-2 are clean
+        if (alignGate) { setAlignLinks({}); setAlignLinksLoading(false); return; } // nothing to check until Steps 1-2 are clean
         let cancelled = false;
-        setLinksLoading(true);
-        fetchSpouseLinksFor(singleCallKeys).then(links => { if (!cancelled) { setSpouseLinks(links); setLinksLoading(false); } });
+        setAlignLinksLoading(true);
+        fetchSpouseLinksFor(singleCallKeys).then(links => { if (!cancelled) { setAlignLinks(links); setAlignLinksLoading(false); } });
         return () => { cancelled = true; };
       }, [singleCallKeys.join('|'), refreshNonce, alignGate]);
       function recheckSpousePairings() { clearSpouseLinksCache(); setRefreshNonce(n => n + 1); }
-
-      // perDay mirrors Reschedule Overdue's default cap — alignment shares
-      // the same daily-capacity rule, not a separate one.
-      const aligns = useMemo(() => alignGate ? [] : packSpouseAlignment({ tasks, colMap, spouseLinks, perDay: 5, start: todayISO() }), [tasks, colMap, spouseLinks, alignGate]);
+      const aligns = useMemo(() => alignGate ? [] : packSpouseAlignment({ tasks, colMap, spouseLinks: alignLinks, perDay: 5, start: todayISO() }),
+        [tasks, colMap, alignLinks, alignGate]);
       const alignDays = useMemo(() => new Set(aligns.map(p => p.target_date)).size, [aligns]);
 
-      async function applyDupes() {
-        setBusy(true);
-        const res = await onDeleteIds(removeAll);
-        setBusy(false);
-        setDone(res && res.ok ? { ok: true, n: res.count || removeAll.length } : { ok: false, error: (res && res.error) || 'Some deletes failed.' });
-      }
       async function applyAligns() {
         setBusy(true);
         const items = aligns.flatMap(p => [p.a.task_id, p.b.task_id].filter(Boolean).map(id => ({ id, due_date: p.target_date })));
@@ -2070,26 +1964,36 @@
         setBusy(false);
         setDone(res && res.ok ? { ok: true, n: res.count || items.length } : { ok: false, error: (res && res.error) || 'Some updates failed.' });
       }
-      function switchTab(t) { setTab(t); setDone(null); }
 
       const card = { border:'1px solid '+C.border, borderRadius:8, padding:'8px 12px', background:C.surface, marginBottom:6 };
+      const gateCard = { padding:16, border:'1px solid '+C.amber+'44', background:C.amber+'0d', borderRadius:10 };
+      const fld = { fontFamily:C.fontSans, fontSize:'0.8rem', padding:'7px 10px', border:'1px solid '+C.border, borderRadius:8, background:C.surface, color:C.textPrimary, outline:'none' };
+      const lbl = { fontSize:'0.68rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.textMuted, marginBottom:5, display:'block' };
+      const tierPill = (tier, eo) => ({ fontSize:'0.62rem', fontWeight:700, borderRadius:20, padding:'1px 7px', flexShrink:0,
+        color: eo ? '#fff' : C.navy, background: eo ? C.gold : (tier === 'A' ? C.goldSoft+'44' : tier === 'B' ? C.blue+'22' : C.border) });
+      const tabBtn = (key, active, locked, label) => (
+        <button key={key} onClick={() => switchTab(key)} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: active?C.navy:C.surface, color: active?'#fff':C.textSecondary }}>
+          {label} {locked && <i className="ti ti-lock" style={{ fontSize:12, marginLeft:2, verticalAlign:'-1px' }} />}
+        </button>
+      );
 
       return (
         <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,13,38,.4)', zIndex:60, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
-          <div onClick={e => e.stopPropagation()} style={{ background:C.bg, borderRadius:14, width:'min(720px, 96vw)', maxHeight:'92vh', display:'flex', flexDirection:'column', boxShadow:'0 18px 60px rgba(0,26,74,.3)' }}>
+          <div onClick={e => e.stopPropagation()} style={{ background:C.bg, borderRadius:14, width:'min(800px, 97vw)', maxHeight:'92vh', display:'flex', flexDirection:'column', boxShadow:'0 18px 60px rgba(0,26,74,.3)' }}>
             <div style={{ flexShrink:0, padding:'18px 22px', borderBottom:'1px solid '+C.border, background:C.surface, borderRadius:'14px 14px 0 0', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-              <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Data Health</div>
+              <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Cadence Health</div>
               <button onClick={onClose} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
             </div>
 
-            <div style={{ flexShrink:0, padding:'12px 22px 0', display:'flex', alignItems:'center', justifyContent:'space-between', gap:10 }}>
+            <div style={{ flexShrink:0, padding:'12px 22px 0', display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, flexWrap:'wrap' }}>
               <div style={{ display:'inline-flex', border:'1px solid '+C.border, borderRadius:9, overflow:'hidden' }}>
-                <button onClick={() => switchTab('dupes')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='dupes'?C.navy:C.surface, color: tab==='dupes'?'#fff':C.textSecondary }}>Duplicate calls ({dupes.length})</button>
-                <button onClick={() => switchTab('align')} style={{ fontFamily:C.fontSans, fontSize:'0.76rem', fontWeight:600, padding:'7px 14px', border:'none', cursor:'pointer', background: tab==='align'?C.navy:C.surface, color: tab==='align'?'#fff':C.textSecondary }}>Spouse alignment {alignGate ? <i className="ti ti-lock" style={{ fontSize:12, marginLeft:2, verticalAlign:'-1px' }} /> : `(${aligns.length})`}</button>
+                {tabBtn('dupes', tab==='dupes', false, `1 · Duplicate calls (${dupes.length})`)}
+                {tabBtn('backlog', tab==='backlog', !dupesClear, `2 · Backlog${dupesClear ? ' (' + plan.total + ')' : ''}`)}
+                {tabBtn('align', tab==='align', !!alignGate, `3 · Spouse alignment${alignGate ? '' : ' (' + aligns.length + ')'}`)}
               </div>
               {tab === 'align' && !alignGate && (
-                <button onClick={recheckSpousePairings} disabled={linksLoading} title="Spouse pairings are cached after the first check — use this to re-check against Zoho now" style={{ display:'flex', alignItems:'center', gap:5, fontFamily:C.fontSans, fontSize:'0.72rem', fontWeight:600, color:C.textMuted, background:'none', border:'1px solid '+C.border, borderRadius:8, padding:'6px 10px', cursor: linksLoading?'default':'pointer', opacity: linksLoading?.5:1 }}>
-                  <i className="ti ti-refresh" style={{ fontSize:14 }} /> {linksLoading ? 'Checking…' : 'Re-check pairings'}
+                <button onClick={recheckSpousePairings} disabled={alignLinksLoading} title="Spouse pairings are cached after the first check — use this to re-check against Zoho now" style={{ display:'flex', alignItems:'center', gap:5, fontFamily:C.fontSans, fontSize:'0.72rem', fontWeight:600, color:C.textMuted, background:'none', border:'1px solid '+C.border, borderRadius:8, padding:'6px 10px', cursor: alignLinksLoading?'default':'pointer', opacity: alignLinksLoading?.5:1 }}>
+                  <i className="ti ti-refresh" style={{ fontSize:14 }} /> {alignLinksLoading ? 'Checking…' : 'Re-check pairings'}
                 </button>
               )}
             </div>
@@ -2135,29 +2039,89 @@
                   )}
                 </React.Fragment>
               )}
-              {tab === 'align' && alignGate === 'dupes' && (
-                <div style={{ padding:16, border:'1px solid '+C.amber+'44', background:C.amber+'0d', borderRadius:10 }}>
+
+              {tab === 'backlog' && !dupesClear && (
+                <div style={gateCard}>
                   <div style={{ fontSize:'0.86rem', fontWeight:600, color:C.navy, marginBottom:4 }}>Resolve duplicate calls first</div>
-                  <div style={{ fontSize:'0.78rem', color:C.textSecondary, lineHeight:1.5 }}>
-                    A contact with two open calls can't be checked for date alignment yet — switch to the Duplicate calls tab above and clear those first.
+                  <div style={{ fontSize:'0.78rem', color:C.textSecondary, lineHeight:1.5, marginBottom:10 }}>
+                    Some contacts still have more than one open call. Packing the backlog before that's cleaned up risks packing the same contact twice under two different reasons.
                   </div>
+                  <button onClick={() => switchTab('dupes')} style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
+                    <i className="ti ti-arrow-left" style={{ fontSize:15 }} /> Back to Step 1
+                  </button>
+                </div>
+              )}
+              {tab === 'backlog' && dupesClear && (
+                <React.Fragment>
+                  <div style={{ fontSize:'0.78rem', color:C.textMuted, marginBottom:10 }}>
+                    {owner || '—'} · {plan.total} need a new date ({plan.overdueCount} overdue, {plan.noBaselineCount} no prior cadence) · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together
+                  </div>
+                  <div style={{ display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end', paddingBottom:14, marginBottom:14, borderBottom:'1px solid '+C.border }}>
+                    <div>
+                      <label style={lbl}>Agent</label>
+                      <select value={owner} onChange={e => setOwner(e.target.value)} style={{ ...fld, cursor:'pointer', maxWidth:200 }}>
+                        {owners.length === 0 && <option value="">No calls need a new date</option>}
+                        {owners.map(o => <option key={o.name} value={o.name}>{o.name} ({o.count})</option>)}
+                      </select>
+                    </div>
+                    <div><label style={lbl}>Treat as overdue on/before</label><input type="date" value={cutoff} onChange={e => setCutoff(e.target.value)} style={fld} /></div>
+                    <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
+                    <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
+                    <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
+                    <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>
+                      One agent at a time — each works their own day. Overdue calls and calls with no prior cadence share ONE calendar fill; A-tier always gets the next open slot first, regardless of which reason brought a call in. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped.
+                    </div>
+                  </div>
+
+                  {backlogLinksLoading && <div style={{ padding:40, textAlign:'center' }}><Spinner size={20} /></div>}
+                  {!backlogLinksLoading && plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls need a new date for {owner || 'this agent'}.</div>}
+                  {!backlogLinksLoading && plan.days.map(d => (
+                    <div key={d.date} style={{ marginBottom:12 }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
+                        <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
+                        <span style={{ fontSize:'0.68rem', color: d.tasks.length > perDay ? C.amber : C.textMuted }}>{d.tasks.length} call{d.tasks.length===1?'':'s'}{d.tasks.length > perDay ? ' · spouse overflow' : ''}</span>
+                      </div>
+                      <div style={{ display:'grid', gap:4 }}>
+                        {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
+                          <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', border:'1px solid '+C.border, borderRadius:7, background:C.surface }}>
+                            <span style={tierPill(tier, eo)}>{eo ? 'EO' : tier}</span>
+                            <span style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id?.name || t.Subject}</span>
+                            <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
+                            {t._reason !== 'overdue' && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>no prior cadence</span>}
+                          </div>
+                        ); })}
+                      </div>
+                    </div>
+                  ))}
+                </React.Fragment>
+              )}
+
+              {tab === 'align' && alignGate === 'dupes' && (
+                <div style={gateCard}>
+                  <div style={{ fontSize:'0.86rem', fontWeight:600, color:C.navy, marginBottom:4 }}>Resolve duplicate calls first</div>
+                  <div style={{ fontSize:'0.78rem', color:C.textSecondary, lineHeight:1.5, marginBottom:10 }}>
+                    A contact with two open calls can't be checked for date alignment yet.
+                  </div>
+                  <button onClick={() => switchTab('dupes')} style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
+                    <i className="ti ti-arrow-left" style={{ fontSize:15 }} /> Back to Step 1
+                  </button>
                 </div>
               )}
               {tab === 'align' && alignGate === 'backlog' && (
-                <div style={{ padding:16, border:'1px solid '+C.amber+'44', background:C.amber+'0d', borderRadius:10 }}>
+                <div style={gateCard}>
                   <div style={{ fontSize:'0.86rem', fontWeight:600, color:C.navy, marginBottom:4 }}>Clear the backlog first</div>
                   <div style={{ fontSize:'0.78rem', color:C.textSecondary, lineHeight:1.5, marginBottom:10 }}>
-                    {backlogOwners.length} agent{backlogOwners.length===1?'':'s'} still {backlogOwners.length===1?'has':'have'} overdue or no-cadence calls: {backlogOwners.map(o => `${o.name} (${o.count})`).join(', ')}. Reschedule those first — aligning a couple now could just get undone when that backlog gets packed.
+                    {backlogOwnersAll.length} agent{backlogOwnersAll.length===1?'':'s'} still {backlogOwnersAll.length===1?'has':'have'} overdue or no-cadence calls: {backlogOwnersAll.map(o => `${o.name} (${o.count})`).join(', ')}. Reschedule those first — aligning a couple now could just get undone when that backlog gets packed.
                   </div>
-                  <button onClick={onGoToReschedule} style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
-                    <i className="ti ti-calendar-up" style={{ fontSize:15 }} /> Open Reschedule Overdue
+                  <button onClick={() => switchTab('backlog')} style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600 }}>
+                    <i className="ti ti-arrow-left" style={{ fontSize:15 }} /> Back to Step 2
                   </button>
                 </div>
               )}
               {tab === 'align' && !alignGate && (
                 <React.Fragment>
-                  {linksLoading && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}><Spinner size={20} /></div>}
-                  {!linksLoading && aligns.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No spouse pairs with mismatched due dates.</div>}
+                  {alignLinksLoading && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}><Spinner size={20} /></div>}
+                  {!alignLinksLoading && aligns.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No spouse pairs with mismatched due dates.</div>}
                   {aligns.map((p, i) => (
                     <div key={i} style={card}>
                       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
@@ -2184,22 +2148,34 @@
               <div style={{ fontSize:'0.76rem', color: done ? (done.ok ? C.green : C.red) : C.textMuted }}>
                 {done ? (done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error)
                       : tab === 'dupes' ? `${removeAll.length} extra call${removeAll.length===1?'':'s'} to remove${review.length ? ' · ' + review.length + ' need review' : ''}`
+                                         : tab === 'backlog' ? (!dupesClear ? 'Blocked until duplicate calls are resolved.'
+                                                                : backlogLinksLoading ? 'Checking spouse pairings…'
+                                                                : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available`)
                                          : alignGate === 'dupes' ? 'Blocked until duplicate calls are resolved.'
                                          : alignGate === 'backlog' ? 'Blocked until the overdue/no-cadence backlog is cleared.'
-                                         : linksLoading ? 'Checking spouse pairings…'
+                                         : alignLinksLoading ? 'Checking spouse pairings…'
                                          : `${aligns.length} couple${aligns.length===1?'':'s'} to align across ${alignDays} business day${alignDays===1?'':'s'} · ≤5 calls/day per agent`}
               </div>
               <div style={{ display:'flex', gap:10 }}>
                 <button onClick={onClose} style={{ ...iconBtnStatic, color:C.navy }}>Close</button>
-                {tab === 'dupes'
-                  ? <button onClick={applyDupes} disabled={busy || !removeAll.length || (done && done.ok)}
-                      style={{ ...iconBtnStatic, color:'#fff', background:C.red, borderColor:C.red, fontWeight:600, opacity:(busy || !removeAll.length || (done && done.ok)) ? .5 : 1 }}>
-                      {busy ? 'Deleting…' : `Delete ${removeAll.length} duplicate${removeAll.length===1?'':'s'}`}
-                    </button>
-                  : <button onClick={applyAligns} disabled={busy || linksLoading || !aligns.length || (done && done.ok)}
-                      style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity:(busy || linksLoading || !aligns.length || (done && done.ok)) ? .5 : 1 }}>
-                      {busy ? 'Applying…' : `Align ${aligns.length} couple${aligns.length===1?'':'s'}`}
-                    </button>}
+                {tab === 'dupes' && (
+                  <button onClick={applyDupes} disabled={busy || !removeAll.length || (done && done.ok)}
+                    style={{ ...iconBtnStatic, color:'#fff', background:C.red, borderColor:C.red, fontWeight:600, opacity:(busy || !removeAll.length || (done && done.ok)) ? .5 : 1 }}>
+                    {busy ? 'Deleting…' : `Delete ${removeAll.length} duplicate${removeAll.length===1?'':'s'}`}
+                  </button>
+                )}
+                {tab === 'backlog' && (
+                  <button onClick={applyBacklog} disabled={!dupesClear || busy || backlogLinksLoading || !plan.days.length || (done && done.ok)}
+                    style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (!dupesClear || busy || backlogLinksLoading || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
+                    {busy ? 'Applying…' : `Apply ${plan.placed} date${plan.placed===1?'':'s'}`}
+                  </button>
+                )}
+                {tab === 'align' && (
+                  <button onClick={applyAligns} disabled={!!alignGate || busy || alignLinksLoading || !aligns.length || (done && done.ok)}
+                    style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity:(!!alignGate || busy || alignLinksLoading || !aligns.length || (done && done.ok)) ? .5 : 1 }}>
+                    {busy ? 'Applying…' : `Align ${aligns.length} couple${aligns.length===1?'':'s'}`}
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -2226,8 +2202,7 @@
       const [sortDir, setSortDir] = useState('desc');
       const [drawer, setDrawer] = useState(null);    // { mode:'ai'|'create'|'edit', task? } | null
       const [showCapacity, setShowCapacity] = useState(false); // Call Capacity modal
-      const [showReschedule, setShowReschedule] = useState(false);
-      const [showDataHealth, setShowDataHealth] = useState(false);
+      const [showCadenceHealth, setShowCadenceHealth] = useState(false); // Duplicates → Backlog → Spouse alignment
 
       async function load(force) {
         // Serve from cache whenever one exists — reload/revisit shouldn't re-pay the
@@ -2793,11 +2768,8 @@
                 <button onClick={() => setDrawer(d => d?.mode === 'ai' ? null : { mode:'ai' })} style={{ ...iconBtn, color:C.gold, borderColor:C.gold+'66', background: aiOpen ? C.gold+'22' : C.gold+'0f', fontWeight:600 }}>
                   <i className="ti ti-sparkles" style={{ fontSize:15 }} /> Ask AI
                 </button>
-                <button onClick={() => setShowReschedule(true)} title="Pack the overdue backlog onto upcoming business days" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
-                  <i className="ti ti-calendar-up" style={{ fontSize:15 }} /> Reschedule Overdue
-                </button>
-                <button onClick={() => setShowDataHealth(true)} title="Duplicate calls + spouse date alignment" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
-                  <i className="ti ti-heart-rate-monitor" style={{ fontSize:15 }} /> Data Health
+                <button onClick={() => setShowCadenceHealth(true)} title="Duplicates → backlog → spouse alignment, in order" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
+                  <i className="ti ti-heart-rate-monitor" style={{ fontSize:15 }} /> Cadence Health
                 </button>
                 <button onClick={() => setShowCapacity(true)} title="Call capacity — total calls per person, per day" style={{ ...iconBtn, color:C.navy, fontWeight:600 }}>
                   <i className="ti ti-layout-grid" style={{ fontSize:15 }} /> Capacity
@@ -2901,19 +2873,12 @@
           </div>
 
           {aiOverlay && <AIChat tasks={view} colMap={colMap} meta={meta} extraFields={extraFields} onRead={onRead} onWrite={applyAiWrite} onClose={() => setDrawer(null)} />}
-          {/* Reads the FULL loaded set, not `view` — the backlog shouldn't depend on the active filter. */}
-          {showReschedule && tasks && (
-            <RescheduleOverdue tasks={tasks} colMap={colMap}
-              onApply={(items) => applyAiWrite('bulk_set_due_dates', { items })}
-              onClose={() => setShowReschedule(false)}
-              onGoToDupes={() => { setShowReschedule(false); setShowDataHealth(true); }} />
-          )}
-          {showDataHealth && tasks && (
-            <DataHealth tasks={tasks} colMap={colMap}
+          {/* Reads the FULL loaded set, not `view` — none of these 3 steps should depend on the active filter. */}
+          {showCadenceHealth && tasks && (
+            <CadenceHealth tasks={tasks} colMap={colMap}
               onDeleteIds={(ids) => applyAiWrite('bulk_delete_tasks', { ids })}
               onSetDates={(items) => applyAiWrite('bulk_set_due_dates', { items })}
-              onClose={() => setShowDataHealth(false)}
-              onGoToReschedule={() => { setShowDataHealth(false); setShowReschedule(true); }} />
+              onClose={() => setShowCadenceHealth(false)} />
           )}
           {showCapacity && tasks && (
             <CapacityGrid tasks={tasks} colMap={colMap} onClose={() => setShowCapacity(false)} />

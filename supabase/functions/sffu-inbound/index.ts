@@ -1,7 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────
 // TMG App — Supabase Edge Function: sffu-inbound
-// Receives Quo "incoming message" webhooks: logs the reply to the showing's
-// thread (sms_messages) and STOPS that showing's follow-up sequence.
+// Receives ALL Quo message webhooks for this account — both directions. An
+// inbound reply logs to the showing's thread (sms_messages) and STOPS that
+// showing's follow-up sequence. An outbound delivery-status event (delivered/
+// failed/undelivered) updates the status on the matching sms_messages row so
+// the app can show whether a text actually landed, not just that it was sent.
 // Replaces the old self-hosted n8n "Inbound" workflow.
 //
 // Deploy: Supabase Dashboard → Edge Functions → new function `sffu-inbound`
@@ -94,7 +97,24 @@ Deno.serve(async (req) => {
     const evtType = String(payload?.type || "").toLowerCase();
     const typeSaysOutbound = evtType ? evtType !== "message.received" : false;
     if (typeSaysOutbound) {
-      return json({ ignored: "outbound / status event, not an inbound reply" });
+      // Quo also fires webhooks for OUR OWN outbound sends — delivery-status events
+      // ("message.delivered" / "message.failed" / "message.undelivered" per Quo's docs).
+      // The status we log at send time (sffu-sender / sffu-send) is only ever Quo's
+      // immediate "queued/sent" response; delivery/failure is confirmed later via these
+      // events, so this is the only place that ever finds out a text didn't land. Update
+      // the matching row (by quo_message_id) instead of discarding the event.
+      if (quoId) {
+        const normalized = /fail|undeliver/.test(evtType) ? "failed"
+          : /deliver/.test(evtType) ? "delivered"
+          : null;
+        if (normalized) {
+          const { error: updErr } = await sb
+            .from("sms_messages").update({ status: normalized }).eq("quo_message_id", quoId);
+          if (updErr) console.error("[sffu-inbound] status update failed:", updErr.message);
+          return json({ ok: true, statusUpdate: normalized, quo_message_id: quoId });
+        }
+      }
+      return json({ ignored: "outbound / unrecognized status event, not an inbound reply" });
     }
 
     // Match by Quo's conversationId — NOT phone number. The sending number

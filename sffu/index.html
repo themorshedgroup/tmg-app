@@ -311,6 +311,7 @@
           time: new Date(row.sent_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
           body: row.body,
           sentByName: row.sent_by_name,
+          status: row.status,
         }));
       },
 
@@ -575,6 +576,18 @@
     }
 
     // ─── SMS Thread ───────────────────────────────────────────────────
+    // Delivery status for OUR outbound texts: sms_messages.status starts as whatever Quo's
+    // send response said (queued/sent) and is updated later by the sffu-inbound webhook once
+    // Quo confirms delivered/failed. Anything not yet confirmed shows as "Sent" — provisional,
+    // not a guarantee it landed — which is exactly the gap this label exists to close.
+    const SMS_STATUS_META = {
+      delivered: { label: 'Delivered',     color: C.green },
+      failed:    { label: 'Not delivered', color: C.red },
+      undelivered: { label: 'Not delivered', color: C.red },
+    };
+    function smsStatusMeta(status) {
+      return SMS_STATUS_META[status] || { label: 'Sent', color: C.textMuted };
+    }
     function SmsThread({ thread }) {
       if (!thread.length) return (
         <div style={{ padding: '12px 0 4px', textAlign: 'center', color: C.textMuted, fontSize: '0.8rem' }}>
@@ -585,6 +598,7 @@
         <div style={{ paddingTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
           {thread.map((msg, i) => {
             const isOut = msg.dir === 'out';
+            const sm = isOut ? smsStatusMeta(msg.status) : null;
             return (
               <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: isOut ? 'flex-end' : 'flex-start' }}>
                 <div style={{ fontSize: '0.65rem', color: isOut ? C.gold : C.green, marginBottom: 3, paddingLeft: isOut ? 0 : 2, paddingRight: isOut ? 2 : 0, letterSpacing: '0.04em' }}>
@@ -602,6 +616,11 @@
                 }}>
                   {msg.body}
                 </div>
+                {sm ? (
+                  <div style={{ fontSize: '0.62rem', color: sm.color, marginTop: 3, paddingRight: 2, letterSpacing: '0.03em', fontWeight: 600 }}>
+                    {sm.label}
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -1057,7 +1076,7 @@
             const incoming = {
               id: row.id, dir: row.direction, touch: row.touch_number,
               time: new Date(row.sent_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
-              body: row.body, sentByName: row.sent_by_name,
+              body: row.body, sentByName: row.sent_by_name, status: row.status,
             };
             setLocalThread(t => {
               if (t.some(m => m.id === incoming.id)) return t;             // already have it
@@ -1067,6 +1086,16 @@
               }
               return [...t, incoming];
             });
+          })
+          // Delivery/failure confirmation arrives seconds-to-minutes AFTER the send, as a Quo
+          // webhook that UPDATEs this same row's status (see sffu-inbound) — without this, an
+          // already-open thread would show "Sent" forever even after Quo confirms it failed.
+          .on('postgres_changes', {
+            event: 'UPDATE', schema: 'public', table: 'sms_messages',
+            filter: `showing_id=eq.${showing.id}`,
+          }, (payload) => {
+            const row = payload.new;
+            setLocalThread(t => t.map(m => m.id === row.id ? { ...m, status: row.status } : m));
           })
           .subscribe();
         return () => { client.removeChannel(channel); };

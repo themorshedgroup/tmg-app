@@ -954,6 +954,20 @@ Continue with TMG Gmail
         const { error } = await this.client().from('profiles').update(mapped).eq('id', id);
         if (error) { console.error('[ProfileDB] adminUpdate:', error.message); throw error; }
       },
+
+      // Adds a teammate directly, active from the start — no pending-approval step. Has to go
+      // through the edge function: creating the login account itself needs the service role key,
+      // which can never live in the browser (see admin-create-user for the full mechanism).
+      async adminCreate(fields) {
+        const res = await fetch('https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/admin-create-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+          body: JSON.stringify(fields),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Could not add user');
+        return data;
+      },
     };
 
     // Maps a UI message to Claude API content (string, or blocks when it has attachments).
@@ -2408,9 +2422,66 @@ Rules:
       );
     }
 
+    // Adds a teammate directly, active from the start — skips the normal "sign in once,
+    // wait for approval" flow. Hoisted to a stable top-level component for the same reason
+    // as UserEditor above (avoids remounting / losing field state on every parent re-render).
+    function AddUserForm({ users, refresh, onClose, nameOf, inp, lbl }) {
+      const [email, setEmail] = useState('');
+      const [firstName, setFirstName] = useState('');
+      const [lastName, setLastName] = useState('');
+      const [emp, setEmp] = useState('');
+      const [title, setTitle] = useState('');
+      const [reports, setReports] = useState('');
+      const [assignedTc, setAssignedTc] = useState('');
+      const [roles, setRoles] = useState([]);
+      const [saving, setSaving] = useState(false);
+      const [err, setErr] = useState(null);
+      const isAgent = roles.includes('agent');
+      async function create() {
+        if (!email.trim()) { setErr('Email is required.'); return; }
+        setSaving(true); setErr(null);
+        try {
+          await ProfileDB.adminCreate({
+            email: email.trim(), first_name: firstName || null, last_name: lastName || null,
+            employee_id: emp || null, title, reports_to: reports || null,
+            assigned_tc: isAgent ? (assignedTc || null) : null, access: roles,
+          });
+          await refresh(); onClose();
+        } catch (e) { setErr(e.message || String(e)); }
+        finally { setSaving(false); }
+      }
+      return (
+        <div style={{ padding: '10px 12px', background: C.bg, borderRadius: 10, marginTop: 6, border: `1px dashed ${C.border}` }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <div style={{ gridColumn: 'span 2' }}>
+              <div style={lbl}>Email <span style={{ textTransform: 'none', fontWeight: 400 }}>(their Google sign-in email)</span></div>
+              <input type="email" value={email} onChange={e => setEmail(e.target.value)} style={inp} placeholder="name@themorshedgroup.com" />
+            </div>
+            <div><div style={lbl}>First name</div><input value={firstName} onChange={e => setFirstName(e.target.value)} style={inp} /></div>
+            <div><div style={lbl}>Last name</div><input value={lastName} onChange={e => setLastName(e.target.value)} style={inp} /></div>
+            <div><div style={lbl}>Employee ID</div><input value={emp} onChange={e => setEmp(e.target.value)} style={inp} /></div>
+            <div style={{ display: 'flex', alignItems: 'flex-end' }}><div style={{ fontSize: '0.66rem', color: C.textMuted, fontFamily: C.fontSans, paddingBottom: 9, lineHeight: 1.3 }}>Hire date & time off can be set after they're added</div></div>
+            <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Title</div><input value={title} onChange={e => setTitle(e.target.value)} style={inp} /></div>
+            <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Access <span style={{ textTransform: 'none', fontWeight: 400 }}>(one or more)</span></div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{['admin', 'operations', 'agent', 'tc'].map(a => { const on = roles.includes(a); return <button key={a} type="button" onClick={() => setRoles(on ? roles.filter(r => r !== a) : [...roles, a])} style={{ padding: '6px 10px', borderRadius: 8, border: `1px solid ${on ? C.navy : C.border}`, background: on ? C.navy : C.surface, color: on ? '#fff' : C.textSecondary, fontSize: '0.74rem', fontWeight: on ? 600 : 500, cursor: 'pointer', fontFamily: C.fontSans }}>{ACCESS_LABEL[a]}</button>; })}</div></div>
+            <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Reports to</div><select value={reports} onChange={e => setReports(e.target.value)} style={inp}><option value="">— None —</option>{users.map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>
+            {isAgent && <div style={{ gridColumn: 'span 2' }}><div style={lbl}>Assigned TC</div><select value={assignedTc} onChange={e => setAssignedTc(e.target.value)} style={inp}><option value="">— None —</option>{users.filter(x => toRoles(x.access).includes('tc')).map(x => <option key={x.id} value={x.id}>{nameOf(x)}</option>)}</select></div>}
+          </div>
+          <div style={{ fontSize: '0.68rem', color: C.textMuted, fontFamily: C.fontSans, marginTop: 8, lineHeight: 1.4 }}>
+            Adds them active right away — no pending approval. The first time they tap "Continue with TMG Gmail" using this exact email, they'll go straight into the app.
+          </div>
+          {err ? <div style={{ fontSize: '0.72rem', color: C.red, fontFamily: C.fontSans, marginTop: 6 }}>{err}</div> : null}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button onClick={create} disabled={saving} style={{ flex: 1, padding: '8px', background: C.navy, color: '#fff', border: 'none', borderRadius: 8, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer', fontFamily: C.fontSans }}>{saving ? 'Adding…' : 'Add User'}</button>
+            <button onClick={onClose} style={{ flex: 1, padding: '8px', background: 'none', color: C.textSecondary, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: '0.8rem', cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
     function AdminUsers() {
       const [users, setUsers] = useState([]);
       const [openId, setOpenId] = useState(null);
+      const [adding, setAdding] = useState(false);
       const refresh = () => ProfileDB.loadAll().then(setUsers);
       useEffect(() => { refresh(); }, []);
       const nameOf = (u) => (((u.first_name || '') + ' ' + (u.last_name || '')).trim()) || u.email || 'User';
@@ -2436,11 +2507,17 @@ Rules:
 
       return (
         <div style={CARD}>
-          <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <i className="ti ti-users" style={{ fontSize: 14 }} />Manage Users
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+            <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <i className="ti ti-users" style={{ fontSize: 14 }} />Manage Users
+            </div>
+            <button onClick={() => setAdding(a => !a)} style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, padding: '5px 10px', borderRadius: 8, border: `1px solid ${adding ? C.navy : C.border}`, background: adding ? C.navy : C.surface, color: adding ? '#fff' : C.gold, fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>
+              <i className="ti ti-user-plus" style={{ fontSize: 13 }} />Add User
+            </button>
           </div>
           <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 10, lineHeight: 1.5 }}>Approve new sign-ins and set each person's access, title, employee ID, and reporting line.</div>
-          {pending.length > 0 && <div style={{ fontSize: '0.58rem', fontWeight: 600, color: C.amber, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 2 }}>Pending approval</div>}
+          {adding && <AddUserForm users={users} refresh={refresh} onClose={() => setAdding(false)} nameOf={nameOf} inp={inp} lbl={lbl} />}
+          {pending.length > 0 && <div style={{ fontSize: '0.58rem', fontWeight: 600, color: C.amber, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 2, marginTop: adding ? 12 : 0 }}>Pending approval</div>}
           {pending.map(row)}
           {others.length > 0 && <div style={{ fontSize: '0.58rem', fontWeight: 600, color: C.textMuted, letterSpacing: '0.1em', textTransform: 'uppercase', margin: '12px 0 2px' }}>Team</div>}
           {others.map(row)}

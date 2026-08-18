@@ -1157,8 +1157,13 @@ Rules:
       // Maps the app payload onto the REAL Agent_KPIs module fields (verified against Zoho 2026-06-20).
       // Owner isn't set here — the edge function resolves payload.owner_email to a Zoho user id
       // and sets it server-side (Owner is a Zoho user lookup, not a plain string).
-      const record = { KPI_Date: payload.date || kpiTodayStr() };
-      if (payload.ctc != null && payload.ctc !== '') record.CTC_Hours_2 = Number(payload.ctc);
+      // Field names must match what BOTH entry paths actually produce (KpiInlineForm.review and
+      // the AI ACTION block): kpi_date / ctc_hours / others[].kpi. Reading payload.date or
+      // payload.ctc here silently yields undefined — the date then falls back to today and CTC
+      // is dropped, while formatKpiPreview (which reads the right keys) still shows the user
+      // correct values. That mismatch is why this went unnoticed.
+      const record = { KPI_Date: payload.kpi_date || kpiTodayStr() };
+      if (payload.ctc_hours != null && payload.ctc_hours !== '') record.CTC_Hours_2 = Number(payload.ctc_hours);
 
       // Zoho only has Person_1..10 slots — cap at 10.
       const persons = (payload.persons || []).slice(0, 10);
@@ -1175,9 +1180,9 @@ Rules:
 
       // Other KPIs: 3 slots, and the value must be one of the allowed picklist options.
       (payload.others || []).slice(0, 3).forEach((o, i) => {
-        if (!ALLOWED_OTHER_KPIS.includes(o.label)) return;
+        if (!ALLOWED_OTHER_KPIS.includes(o.kpi)) return;
         const n = i + 1;
-        record['Other_KPI_' + n] = o.label;
+        record['Other_KPI_' + n] = o.kpi;
         if (o.count) record['Other_KPI_' + n + '_Count'] = Number(o.count);
       });
 
@@ -6738,6 +6743,9 @@ Rules:
           try {
             const res = await createAgentKpi(payload);
             content = 'Submitted to Zoho — Agent KPI created' + (res && res.id ? ' (id ' + res.id + ')' : '') + '.\n\n' + preview;
+            // Zoho silently reassigns the record when the submitter can't be matched to a Zoho
+            // user — say so here rather than letting it be found later in the CRM.
+            if (res && res.owner_warning) content += '\n\n⚠️ Owner not set to you: ' + res.owner_warning;
           } catch (e) {
             content = 'Could not submit to Zoho: ' + (e.message || e) + '\n\nHere is what would have been sent:\n\n' + preview;
           }
@@ -6745,7 +6753,19 @@ Rules:
           content = 'Here is your KPI summary (preview — not yet sent to Zoho):\n\n' + preview;
         }
         setMessages(prev => [...prev, { role: 'assistant', content }]);
-        const cid = currentConvId;
+        // The quick "Add KPIs" form never starts a normal chat, so currentConvId is usually null
+        // here — without this, the submitted values (date/CTC/persons/others) existed nowhere but
+        // this screen and vanished on navigation, with no way to check them against Zoho later.
+        // Create a real conversation on the fly so every submission is durably saved.
+        let cid = currentConvId;
+        if (!cid) {
+          try {
+            const conv = await ConvDB.createConversation({ type: 'kpi', workRequest: 'Enter KPI', title: 'KPI — ' + (payload.kpi_date || kpiTodayStr()) });
+            cid = conv.id;
+            setCurrentConvId(cid);
+            refreshConversations();
+          } catch (e) { /* best-effort — the confirmation above still shows on screen either way */ }
+        }
         if (cid) { try { await ConvDB.insertMessage(cid, 'assistant', content); await ConvDB.touchConversation(cid); } catch (e) {} }
       }
 

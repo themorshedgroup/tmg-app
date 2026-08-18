@@ -285,10 +285,17 @@ Deno.serve(async (req) => {
 
       // Owner = whoever is actually logged in, not whoever owns the Zoho connection.
       // Best-effort: if the email doesn't resolve to a Zoho user, Zoho falls back to
-      // its old default (API-connection owner) rather than the create failing.
-      if (typeof body.owner_email === "string" && body.owner_email.trim()) {
-        const ownerId = await resolveZohoOwnerId(sb, conn, accessToken, apiDomain, body.owner_email.trim());
+      // its old default (API-connection owner) rather than the create failing. That
+      // fallback is reported back as owner_warning so a mis-owned record is visible
+      // at submit time instead of being discovered in Zoho weeks later.
+      let ownerWarning: string | null = null;
+      const ownerEmail = typeof body.owner_email === "string" ? body.owner_email.trim() : "";
+      if (ownerEmail) {
+        const ownerId = await resolveZohoOwnerId(sb, conn, accessToken, apiDomain, ownerEmail);
         if (ownerId) record.Owner = { id: ownerId };
+        else ownerWarning = `No Zoho CRM user matches ${ownerEmail}, so Zoho assigned this record to the API connection owner instead. Ask an admin to confirm this person is an active Zoho user with that exact email.`;
+      } else {
+        ownerWarning = "No account email was available for the submitter, so Zoho assigned this record to the API connection owner instead.";
       }
 
       const crmRes = await zohoFetch(
@@ -315,6 +322,7 @@ Deno.serve(async (req) => {
           ok: true,
           id: created?.details?.id || null,
           status: created?.status || "success",
+          owner_warning: ownerWarning,
         },
         200
       );

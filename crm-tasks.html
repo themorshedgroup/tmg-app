@@ -459,6 +459,47 @@
       keys.forEach(k => { out[k] = DEV_TASKS.filter(t => (t.Who_Id && t.Who_Id.name) === k); });
       return out;
     }
+    // Cadence math (duplicate resolution, no-baseline detection, spouse
+    // alignment) reads a contact's LAST COMPLETED call from `lastCompletedByContact`
+    // — but that only sees whatever's in the currently loaded `tasks` state,
+    // and the app's default view excludes Completed tasks entirely (fast
+    // load; "Include completed" is an explicit, slower opt-in). So by
+    // default there's never a completed call to compute FROM, and anything
+    // relying on it looks baseline-less even when the contact has real call
+    // history in Zoho. This fetches just the missing contacts' history live
+    // via `tasks_for_contacts` (already used by the AI's cadence tools) —
+    // scoped to only the contacts that actually came back empty locally,
+    // not a blanket reload. Cached per contact id like the spouse-link fetch.
+    const LAST_COMPLETED_CACHE = new Map(); // contact id -> completed task-like | null
+    function clearLastCompletedCache() { LAST_COMPLETED_CACHE.clear(); }
+    async function fetchLastCompletedFor(keys) {
+      const uniq = [...new Set((keys || []).filter(Boolean))];
+      if (!uniq.length) return {};
+      if (isDev()) return {}; // dev fixtures already carry full history locally
+      const out = {};
+      const missing = [];
+      uniq.forEach(k => {
+        if (LAST_COMPLETED_CACHE.has(k)) out[k] = LAST_COMPLETED_CACHE.get(k);
+        else missing.push(k);
+      });
+      for (let i = 0; i < missing.length; i += 60) {
+        const batch = missing.slice(i, i + 60);
+        const { ok, data } = await callZoho({ action:'tasks_for_contacts', contact_ids: batch });
+        if (ok && data && data.tasks_by_contact) {
+          batch.forEach(cid => {
+            const list = data.tasks_by_contact[cid] || [];
+            let best = null;
+            list.forEach(t => {
+              if (!/complete/i.test(t.Status || '')) return;
+              const key = String(t.Closed_Time || t.Due_Date || '');
+              if (!best || key.localeCompare(String(best.Closed_Time || best.Due_Date || '')) > 0) best = t;
+            });
+            out[cid] = best; LAST_COMPLETED_CACHE.set(cid, best);
+          });
+        }
+      }
+      return out;
+    }
     function ContactPicker({ value, onChange }) {
       const [q, setQ] = useState('');
       const [results, setResults] = useState(null);
@@ -1758,7 +1799,11 @@
       return k ? (t[k] === true || t[k] === 'true') : null; // null = field not present on this task
     }
 
-    function findDuplicateCalls({ tasks, colMap }) {
+    // extraCompleted: contact id -> completed task-like, from fetchLastCompletedFor
+    // — fills in for contacts whose completed history isn't in the loaded
+    // `tasks` state (the default "completed hidden" view never has it at
+    // all). Local wins when present; this only backstops the gaps.
+    function findDuplicateCalls({ tasks, colMap, extraCompleted }) {
       const lastCompleted = lastCompletedByContact(tasks, colMap);
       const byContact = {};
       (tasks || []).forEach(t => {
@@ -1793,7 +1838,7 @@
           // no completed-call baseline to compute against at all, which is
           // the genuinely unresolvable case.
           const candidates = checkedIdx.map(i => c.tasks[i]);
-          const last = lastCompleted[c.cid];
+          const last = lastCompleted[c.cid] || (extraCompleted && extraCompleted[c.cid]) || null;
           const lastDate = last ? dateOnly(last.Closed_Time || last.Due_Date) : null;
           let best = null, bestDiff = Infinity;
           if (lastDate) {
@@ -1932,7 +1977,26 @@
       function switchTab(t) { setTab(t); setDone(null); }
 
       // ── Step 1: Duplicate calls ──────────────────────────────────────
-      const dupes = useMemo(() => findDuplicateCalls({ tasks, colMap }), [tasks, colMap]);
+      // First pass with only the LOCAL completed-call data (whatever's
+      // already in `tasks` — none, by default, since the fast view excludes
+      // Completed tasks entirely). Anything still stuck in manual review
+      // after that gets a scoped, live lookup for just those contacts
+      // before we accept "unresolvable" — see fetchLastCompletedFor.
+      const dupesLocal = useMemo(() => findDuplicateCalls({ tasks, colMap }), [tasks, colMap]);
+      const needsCompletedLookup = useMemo(() => dupesLocal.filter(g => g.needsReview).map(g => g.cid), [dupesLocal]);
+      const [extraCompleted, setExtraCompleted] = useState({});
+      const [completedLoading, setCompletedLoading] = useState(false);
+      const [completedNonce, setCompletedNonce] = useState(0);
+      useEffect(() => {
+        let cancelled = false;
+        if (!needsCompletedLookup.length) { setExtraCompleted({}); setCompletedLoading(false); return; }
+        setCompletedLoading(true);
+        fetchLastCompletedFor(needsCompletedLookup).then(map => { if (!cancelled) { setExtraCompleted(map); setCompletedLoading(false); } });
+        return () => { cancelled = true; };
+      }, [needsCompletedLookup.join('|'), completedNonce]);
+      function recheckCompletedHistory() { clearLastCompletedCache(); setCompletedNonce(n => n + 1); }
+
+      const dupes = useMemo(() => findDuplicateCalls({ tasks, colMap, extraCompleted }), [tasks, colMap, extraCompleted]);
       const fixable = dupes.filter(g => !g.needsReview);
       const review = dupes.filter(g => g.needsReview);
       const removeAll = fixable.flatMap(g => g.removeIds);
@@ -2048,6 +2112,11 @@
                   <i className="ti ti-refresh" style={{ fontSize:14 }} /> {alignLinksLoading ? 'Checking…' : 'Re-check pairings'}
                 </button>
               )}
+              {tab === 'dupes' && review.length > 0 && (
+                <button onClick={recheckCompletedHistory} disabled={completedLoading} title="Completed-call history for a manual-review contact is cached after the first check — use this to re-check against Zoho now" style={{ display:'flex', alignItems:'center', gap:5, fontFamily:C.fontSans, fontSize:'0.72rem', fontWeight:600, color:C.textMuted, background:'none', border:'1px solid '+C.border, borderRadius:8, padding:'6px 10px', cursor: completedLoading?'default':'pointer', opacity: completedLoading?.5:1 }}>
+                  <i className="ti ti-refresh" style={{ fontSize:14 }} /> {completedLoading ? 'Checking…' : 'Re-check call history'}
+                </button>
+              )}
             </div>
 
             <div style={{ flex:1, overflowY:'auto', padding:'14px 22px' }}>
@@ -2077,7 +2146,10 @@
                   ))}
                   {review.length > 0 && (
                     <div style={{ marginTop:14 }}>
-                      <div style={{ fontSize:'0.68rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.amber, marginBottom:6 }}>Needs manual review ({review.length})</div>
+                      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                        <div style={{ fontSize:'0.68rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.amber }}>Needs manual review ({review.length})</div>
+                        {completedLoading && <span style={{ display:'flex', alignItems:'center', gap:5, fontSize:'0.7rem', color:C.textMuted }}><Spinner size={12} /> checking call history…</span>}
+                      </div>
                       {review.map(g => (
                         <div key={g.contact} style={{ ...card, borderColor:C.amber+'66', background:C.amber+'0d' }}>
                           <div style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</div>

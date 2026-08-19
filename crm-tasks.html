@@ -1682,21 +1682,27 @@
     // doesn't parse a clean tier (callTier → 'Other') still needs a date; it
     // was being silently dropped here before, which is what caused the app's
     // backlog count to undercount a real Zoho overdue-calls export.
-    function inScopeCalls({ tasks, colMap, cutoff, owner }) {
+    // extraCompleted: contact id -> completed task-like, from fetchLastCompletedFor
+    // — fills in when the default "completed hidden" view left a contact's
+    // real history invisible to lastCompletedByContact, so "no baseline"
+    // means genuinely never-completed, not just not-currently-loaded. Local
+    // wins when present; this only backstops the gaps.
+    function inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted }) {
       const baseline = lastCompletedByContact(tasks, colMap);
+      const hasBaseline = (cid) => !!(cid && (baseline[cid] || (extraCompleted && extraCompleted[cid])));
       return (tasks || [])
         .filter(t => {
           if ((t.Status || '') !== 'Not Started') return false;
           if (!isCallTask(t, colMap)) return false;
           if (owner && t.Owner?.name !== owner) return false;
           const cid = t.Who_Id?.id || t.Who_Id?.name;
-          const noBaseline = cid ? !baseline[cid] : true;
+          const noBaseline = !hasBaseline(cid);
           const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
           return noBaseline || overdue;
         })
         .map(t => {
           const cid = t.Who_Id?.id || t.Who_Id?.name;
-          const noBaseline = cid ? !baseline[cid] : true;
+          const noBaseline = !hasBaseline(cid);
           const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
           return { ...t, _reason: overdue && noBaseline ? 'both' : overdue ? 'overdue' : 'no_baseline' };
         })
@@ -1721,8 +1727,8 @@
       return Object.keys(counts).map(name => ({ name, count: counts[name] })).sort((a, b) => b.count - a.count);
     }
 
-    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks }) {
-      const pool = inScopeCalls({ tasks, colMap, cutoff, owner });
+    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks, extraCompleted }) {
+      const pool = inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted });
 
       // Pair spouses via each contact's real Spouse lookup field (spouseLinks,
       // fetched live per contact — see fetchSpouseLinksFor); the task-level
@@ -1878,7 +1884,7 @@
     // tool (resolveCoupleTarget) so the two never disagree on what "aligned"
     // means. Only pairs contacts with exactly one open call each — a contact
     // still showing 2+ belongs to the duplicate list above, not here.
-    function spouseAlignmentIssues({ tasks, colMap, spouseLinks }) {
+    function spouseAlignmentIssues({ tasks, colMap, spouseLinks, extraCompleted }) {
       const oneCallByContact = {}, countByContact = {};
       (tasks || []).forEach(t => {
         if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
@@ -1890,7 +1896,7 @@
       const lastCompleted = lastCompletedByContact(tasks, colMap);
       function partnerInfo(cid, name) {
         const nsCall = countByContact[cid] === 1 ? oneCallByContact[cid] : null;
-        const last = lastCompleted[cid];
+        const last = lastCompleted[cid] || (extraCompleted && extraCompleted[cid]) || null;
         const cls = nsCall ? parseTouchClass(nsCall.Subject) : null;
         const ownerName = (nsCall && nsCall.Owner?.name) || (last && last.Owner?.name) || '';
         const bucket = /tarek/i.test(ownerName) ? 'tarek' : 'other';
@@ -1927,8 +1933,8 @@
     // Data Health can't disagree with Reschedule Overdue about what a
     // reasonable day looks like. A couple whose partners have different
     // owners needs room on BOTH owners' calendars that day.
-    function packSpouseAlignment({ tasks, colMap, spouseLinks, perDay, start }) {
-      const pairs = spouseAlignmentIssues({ tasks, colMap, spouseLinks });
+    function packSpouseAlignment({ tasks, colMap, spouseLinks, perDay, start, extraCompleted }) {
+      const pairs = spouseAlignmentIssues({ tasks, colMap, spouseLinks, extraCompleted });
       if (!pairs.length) return [];
 
       const load = {};
@@ -2031,8 +2037,31 @@
         fetchSpouseLinksFor(backlogCandidateKeys).then(links => { if (!cancelled) { setBacklogLinks(links); setBacklogLinksLoading(false); } });
         return () => { cancelled = true; };
       }, [backlogCandidateKeys.join('|'), dupesClear]);
-      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks: backlogLinks }),
-        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, backlogLinks]);
+      // "No baseline" here means "no completed call in the LOCALLY loaded
+      // tasks" — which is always empty by default (completed hidden). A
+      // contact that actually HAS history somewhere Zoho, just not loaded,
+      // would otherwise get wrongly swept into the backlog and rescheduled
+      // even though their real upcoming date is fine. Only the candidates
+      // that come up baseline-less locally get a live, scoped check — same
+      // shared cache/lookup the duplicate-resolution fix uses.
+      const backlogLocalBaseline = useMemo(() => lastCompletedByContact(tasks, colMap), [tasks, colMap]);
+      const backlogNeedsLookup = useMemo(() => {
+        const seen = new Set();
+        return backlogCandidateKeys.filter(cid => cid && !backlogLocalBaseline[cid] && !seen.has(cid) && seen.add(cid));
+      }, [backlogCandidateKeys.join('|'), backlogLocalBaseline]);
+      const [backlogExtraCompleted, setBacklogExtraCompleted] = useState({});
+      const [backlogCompletedLoading, setBacklogCompletedLoading] = useState(false);
+      useEffect(() => {
+        if (!dupesClear) return;
+        let cancelled = false;
+        if (!backlogNeedsLookup.length) { setBacklogExtraCompleted({}); setBacklogCompletedLoading(false); return; }
+        setBacklogCompletedLoading(true);
+        fetchLastCompletedFor(backlogNeedsLookup).then(map => { if (!cancelled) { setBacklogExtraCompleted(map); setBacklogCompletedLoading(false); } });
+        return () => { cancelled = true; };
+      }, [backlogNeedsLookup.join('|'), dupesClear]);
+      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks: backlogLinks, extraCompleted: backlogExtraCompleted }),
+        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, backlogLinks, backlogExtraCompleted]);
+      const backlogBusyLoading = backlogLinksLoading || backlogCompletedLoading;
       // Fixed "today" scope, independent of the tab's adjustable cutoff field —
       // this is what Step 3's gate checks against, so it can't be fooled by
       // someone narrowing the cutoff just to make Step 3 unlock.
@@ -2068,9 +2097,26 @@
         fetchSpouseLinksFor(singleCallKeys).then(links => { if (!cancelled) { setAlignLinks(links); setAlignLinksLoading(false); } });
         return () => { cancelled = true; };
       }, [singleCallKeys.join('|'), refreshNonce, alignGate]);
-      function recheckSpousePairings() { clearSpouseLinksCache(); setRefreshNonce(n => n + 1); }
-      const aligns = useMemo(() => alignGate ? [] : packSpouseAlignment({ tasks, colMap, spouseLinks: alignLinks, perDay: 5, start: todayISO() }),
-        [tasks, colMap, alignLinks, alignGate]);
+      // Same blind spot as the backlog and duplicate-resolution fixes: the
+      // higher-touch-wins date math needs each partner's last COMPLETED
+      // call, which the default view never loads. Scoped live check only
+      // for the couples that came up baseline-less locally.
+      const alignLocalBaseline = useMemo(() => lastCompletedByContact(tasks, colMap), [tasks, colMap]);
+      const alignNeedsLookup = useMemo(() => singleCallKeys.filter(cid => cid && !alignLocalBaseline[cid]), [singleCallKeys.join('|'), alignLocalBaseline]);
+      const [alignExtraCompleted, setAlignExtraCompleted] = useState({});
+      const [alignCompletedLoading, setAlignCompletedLoading] = useState(false);
+      useEffect(() => {
+        if (alignGate) { setAlignExtraCompleted({}); setAlignCompletedLoading(false); return; }
+        let cancelled = false;
+        if (!alignNeedsLookup.length) { setAlignExtraCompleted({}); setAlignCompletedLoading(false); return; }
+        setAlignCompletedLoading(true);
+        fetchLastCompletedFor(alignNeedsLookup).then(map => { if (!cancelled) { setAlignExtraCompleted(map); setAlignCompletedLoading(false); } });
+        return () => { cancelled = true; };
+      }, [alignNeedsLookup.join('|'), alignGate, refreshNonce]);
+      function recheckSpousePairings() { clearSpouseLinksCache(); clearLastCompletedCache(); setRefreshNonce(n => n + 1); }
+      const aligns = useMemo(() => alignGate ? [] : packSpouseAlignment({ tasks, colMap, spouseLinks: alignLinks, perDay: 5, start: todayISO(), extraCompleted: alignExtraCompleted }),
+        [tasks, colMap, alignLinks, alignGate, alignExtraCompleted]);
+      const alignBusyLoading = alignLinksLoading || alignCompletedLoading;
       const alignDays = useMemo(() => new Set(aligns.map(p => p.target_date)).size, [aligns]);
 
       async function applyAligns() {
@@ -2108,8 +2154,8 @@
                 {tabBtn('align', tab==='align', !!alignGate, `3 · Spouse alignment${alignGate ? '' : ' (' + aligns.length + ')'}`)}
               </div>
               {tab === 'align' && !alignGate && (
-                <button onClick={recheckSpousePairings} disabled={alignLinksLoading} title="Spouse pairings are cached after the first check — use this to re-check against Zoho now" style={{ display:'flex', alignItems:'center', gap:5, fontFamily:C.fontSans, fontSize:'0.72rem', fontWeight:600, color:C.textMuted, background:'none', border:'1px solid '+C.border, borderRadius:8, padding:'6px 10px', cursor: alignLinksLoading?'default':'pointer', opacity: alignLinksLoading?.5:1 }}>
-                  <i className="ti ti-refresh" style={{ fontSize:14 }} /> {alignLinksLoading ? 'Checking…' : 'Re-check pairings'}
+                <button onClick={recheckSpousePairings} disabled={alignBusyLoading} title="Spouse pairings + call history are cached after the first check — use this to re-check against Zoho now" style={{ display:'flex', alignItems:'center', gap:5, fontFamily:C.fontSans, fontSize:'0.72rem', fontWeight:600, color:C.textMuted, background:'none', border:'1px solid '+C.border, borderRadius:8, padding:'6px 10px', cursor: alignBusyLoading?'default':'pointer', opacity: alignBusyLoading?.5:1 }}>
+                  <i className="ti ti-refresh" style={{ fontSize:14 }} /> {alignBusyLoading ? 'Checking…' : 'Re-check pairings'}
                 </button>
               )}
               {tab === 'dupes' && review.length > 0 && (
@@ -2197,9 +2243,9 @@
                     </div>
                   </div>
 
-                  {backlogLinksLoading && <div style={{ padding:40, textAlign:'center' }}><Spinner size={20} /></div>}
-                  {!backlogLinksLoading && plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls need a new date for {owner || 'this agent'}.</div>}
-                  {!backlogLinksLoading && plan.days.map(d => (
+                  {backlogBusyLoading && <div style={{ padding:40, textAlign:'center' }}><Spinner size={20} /></div>}
+                  {!backlogBusyLoading && plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls need a new date for {owner || 'this agent'}.</div>}
+                  {!backlogBusyLoading && plan.days.map(d => (
                     <div key={d.date} style={{ marginBottom:12 }}>
                       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
                         <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
@@ -2245,8 +2291,8 @@
               )}
               {tab === 'align' && !alignGate && (
                 <React.Fragment>
-                  {alignLinksLoading && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}><Spinner size={20} /></div>}
-                  {!alignLinksLoading && aligns.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No spouse pairs with mismatched due dates.</div>}
+                  {alignBusyLoading && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}><Spinner size={20} /></div>}
+                  {!alignBusyLoading && aligns.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No spouse pairs with mismatched due dates.</div>}
                   {aligns.map((p, i) => (
                     <div key={i} style={card}>
                       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
@@ -2274,11 +2320,11 @@
                 {done ? (done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error)
                       : tab === 'dupes' ? `${removeAll.length} extra call${removeAll.length===1?'':'s'} to remove${review.length ? ' · ' + review.length + ' need review' : ''}`
                                          : tab === 'backlog' ? (!dupesClear ? 'Blocked until duplicate calls are resolved.'
-                                                                : backlogLinksLoading ? 'Checking spouse pairings…'
+                                                                : backlogBusyLoading ? (backlogCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…')
                                                                 : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available`)
                                          : alignGate === 'dupes' ? 'Blocked until duplicate calls are resolved.'
                                          : alignGate === 'backlog' ? 'Blocked until the overdue/no-cadence backlog is cleared.'
-                                         : alignLinksLoading ? 'Checking spouse pairings…'
+                                         : alignBusyLoading ? (alignCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…')
                                          : `${aligns.length} couple${aligns.length===1?'':'s'} to align across ${alignDays} business day${alignDays===1?'':'s'} · ≤5 calls/day per agent`}
               </div>
               <div style={{ display:'flex', gap:10 }}>
@@ -2290,14 +2336,14 @@
                   </button>
                 )}
                 {tab === 'backlog' && (
-                  <button onClick={applyBacklog} disabled={!dupesClear || busy || backlogLinksLoading || !plan.days.length || (done && done.ok)}
-                    style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (!dupesClear || busy || backlogLinksLoading || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
+                  <button onClick={applyBacklog} disabled={!dupesClear || busy || backlogBusyLoading || !plan.days.length || (done && done.ok)}
+                    style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity: (!dupesClear || busy || backlogBusyLoading || !plan.days.length || (done && done.ok)) ? .5 : 1 }}>
                     {busy ? 'Applying…' : `Apply ${plan.placed} date${plan.placed===1?'':'s'}`}
                   </button>
                 )}
                 {tab === 'align' && (
-                  <button onClick={applyAligns} disabled={!!alignGate || busy || alignLinksLoading || !aligns.length || (done && done.ok)}
-                    style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity:(!!alignGate || busy || alignLinksLoading || !aligns.length || (done && done.ok)) ? .5 : 1 }}>
+                  <button onClick={applyAligns} disabled={!!alignGate || busy || alignBusyLoading || !aligns.length || (done && done.ok)}
+                    style={{ ...iconBtnStatic, color:'#fff', background:C.navy, borderColor:C.navy, fontWeight:600, opacity:(!!alignGate || busy || alignBusyLoading || !aligns.length || (done && done.ok)) ? .5 : 1 }}>
                     {busy ? 'Applying…' : `Align ${aligns.length} couple${aligns.length===1?'':'s'}`}
                   </button>
                 )}

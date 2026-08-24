@@ -711,6 +711,18 @@
     function parseTouchClass(subject) { const m = /(?:^|\b)([ABC])\s*touch/i.exec(subject || ''); return m ? m[1].toUpperCase() : null; }
     function dateOnly(s) { const m = /^(\d{4}-\d{2}-\d{2})/.exec(s || ''); return m ? m[1] : null; }
     function addDaysISO(iso, days) { const base = dateOnly(iso); if (!base) return null; const p = base.split('-').map(Number); const d = new Date(Date.UTC(p[0], p[1] - 1, p[2])); if (isNaN(d)) return null; d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); }
+    // The A/B/C intervals are just fixed day counts, so "last call + interval"
+    // lands on a weekend or federal holiday about 2 days in 7 by construction
+    // — every place that turns that math into an actual expected/target date
+    // runs it through here so cadence never proposes a date nobody's working.
+    // (nextWorkday/isoOf/parseISO are defined further down but hoisted, same
+    // as this function, so the order here doesn't matter.)
+    function cadenceDate(lastIso, days) {
+      const raw = addDaysISO(lastIso, days);
+      if (!raw) return raw;
+      const d = parseISO(raw);
+      return d ? isoOf(nextWorkday(d)) : raw;
+    }
 
     // Touch-class priority for "higher-touch wins": A (most frequent) beats B beats C.
     function touchRank(cls) { return cls === 'A' ? 1 : cls === 'B' ? 2 : cls === 'C' ? 3 : 99; }
@@ -736,6 +748,7 @@
       }
       const today = todayISO();
       if (target && target < today) target = today;                    // overdue → today
+      if (target) { const d = parseISO(target); if (d) target = isoOf(nextWorkday(d)); } // never a weekend/holiday
       return target;
     }
 
@@ -1470,6 +1483,7 @@
       return m ? m[1].toUpperCase() : 'Other';
     }
     const CAP_MON = MON;
+    const DOW_LABEL = ['Sun','M','T','W','Th','F','Sat']; // Date#getDay() index (0=Sun)
     // Light/heavy load coloring, kept subtle (pastel, low-contrast) per the
     // user's ask — a quick scan, not something that hurts to look at.
     // 0 = blank/neutral, 1–4 = pastel amber (light), 5–7 = pastel green
@@ -1552,11 +1566,18 @@
                     <div style={{ fontFamily:C.fontDisplay, fontSize:'1.02rem', fontWeight:600, color:C.navy, marginBottom:8 }}>{monthLabel}</div>
                     <div style={{ overflowX:'auto', border:'1px solid '+C.border, borderRadius:10 }}>
                       <div style={{ display:'grid', gridTemplateColumns:'150px repeat(' + daysInMonth + ', minmax(30px,1fr))', minWidth:150 + daysInMonth * 30 }}>
-                        <div style={{ ...cellBase, justifyContent:'flex-start', padding:'0 10px', fontWeight:700, color:C.navy, background:C.surfaceAlt, borderTop:'1px solid '+C.border, minWidth:150 }}>Person</div>
+                        <div style={{ ...cellBase, height:20, justifyContent:'flex-start', padding:'0 10px', background:C.surfaceAlt, borderTop:'1px solid '+C.border, minWidth:150 }} />
                         {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => {
                           const off = !isWorkday(new Date(m.getFullYear(), m.getMonth(), d));
                           return (
-                            <div key={d} style={{ ...cellBase, fontWeight:700, color:C.textMuted, background: off ? C.border+'55' : C.surfaceAlt, borderTop:'1px solid '+C.border }}>{d}</div>
+                            <div key={'dow'+d} style={{ ...cellBase, height:20, fontSize:'0.6rem', fontWeight:700, color: off ? C.red : C.textMuted, background: off ? C.border+'55' : C.surfaceAlt, borderTop:'1px solid '+C.border }}>{DOW_LABEL[new Date(m.getFullYear(), m.getMonth(), d).getDay()]}</div>
+                          );
+                        })}
+                        <div style={{ ...cellBase, justifyContent:'flex-start', padding:'0 10px', fontWeight:700, color:C.navy, background:C.surfaceAlt, minWidth:150 }}>Person</div>
+                        {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => {
+                          const off = !isWorkday(new Date(m.getFullYear(), m.getMonth(), d));
+                          return (
+                            <div key={d} style={{ ...cellBase, fontWeight:700, color:C.textMuted, background: off ? C.border+'55' : C.surfaceAlt }}>{d}</div>
                           );
                         })}
                         {owners.map(owner => (
@@ -1569,10 +1590,10 @@
                               const off = !isWorkday(new Date(m.getFullYear(), m.getMonth(), d));
                               return (
                                 <div key={d} onClick={() => n && setOpenCell({ owner, monthKey, monthLabel, day: d })}
-                                  title={off && n ? `${n} call${n===1?'':'s'} scheduled on a weekend/holiday` : undefined}
+                                  title={off ? (n ? `${n} call${n===1?'':'s'} scheduled on a weekend/holiday` : 'Weekend/holiday — no calls scheduled') : undefined}
                                   style={{ ...cellBase, position:'relative', background:cs.background, color:cs.color, fontWeight: n ? 700 : 400, cursor: n ? 'pointer' : 'default' }}>
                                   {n || ''}
-                                  {off && n > 0 && <span style={{ position:'absolute', top:1, right:2, fontSize:'0.6rem', fontWeight:800, color:C.red, lineHeight:1 }}>✕</span>}
+                                  {off && <span style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'1.1rem', fontWeight:800, color:C.red, opacity:0.5, pointerEvents:'none' }}>✕</span>}
                                 </div>
                               );
                             })}
@@ -1682,8 +1703,9 @@
 
     // A call needs a fresh date for one of THREE reasons — OVERDUE (due on/
     // before the cutoff), NO BASELINE (its contact has never had a
-    // completed call, so any date it currently has is arbitrary), or
-    // OVERCAPACITY (its date is individually fine, but that day already has
+    // completed call AND it has no due date at all — once it's been given
+    // one, that fact alone doesn't pull it back in; see the filter below),
+    // or OVERCAPACITY (its date is individually fine, but that day already has
     // more calls than the agent can work through — every call sitting there
     // is correct on its own, the DAY is just overloaded). These are merged
     // into ONE pool — which reason got a call included doesn't matter;
@@ -1712,6 +1734,13 @@
       const baseline = lastCompletedByContact(tasks, colMap);
       const hasBaseline = (cid) => !!(cid && (baseline[cid] || (extraCompleted && extraCompleted[cid])));
 
+      // "No baseline" only pulls a call in when it's ALSO missing a due date
+      // — not just because the contact has never completed a call. That
+      // fact never changes, so if it alone kept a call in scope, a call
+      // this tool already gave a perfectly good future date would get
+      // swept right back in on every later run, forever, since nothing
+      // about "no completed call" resolves by giving it a date. Overdue is
+      // unaffected — that's a genuine change in state (today moved past it).
       const overdueOrNoBaseline = (tasks || []).filter(t => {
         if ((t.Status || '') !== 'Not Started') return false;
         if (!isCallTask(t, colMap)) return false;
@@ -1719,7 +1748,7 @@
         const cid = t.Who_Id?.id || t.Who_Id?.name;
         const noBaseline = !hasBaseline(cid);
         const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
-        return noBaseline || overdue;
+        return (noBaseline && !t.Due_Date) || overdue;
       });
 
       // Any day already carrying more than `perDay` calls is over capacity
@@ -1968,7 +1997,7 @@
                 const ownerName = t.Owner?.name || '';
                 const bucket = /tarek/i.test(ownerName) ? 'tarek' : 'other';
                 const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls];
-                const expected = addDaysISO(lastDate, interval);
+                const expected = cadenceDate(lastDate, interval);
                 if (!expected) return;
                 const diff = Math.abs(parseISO(expected) - parseISO(t.Due_Date));
                 if (diff < bestDiff) { bestDiff = diff; best = t; }
@@ -2029,7 +2058,7 @@
         const ownerName = (nsCall && nsCall.Owner?.name) || (last && last.Owner?.name) || '';
         const bucket = /tarek/i.test(ownerName) ? 'tarek' : 'other';
         const lastDate = last ? dateOnly(last.Closed_Time || last.Due_Date) : null;
-        const expected = (cls && lastDate) ? addDaysISO(lastDate, (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls]) : null;
+        const expected = (cls && lastDate) ? cadenceDate(lastDate, (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls]) : null;
         return { name, task_id: nsCall ? nsCall.id : null, class: cls, due: nsCall ? nsCall.Due_Date : null, expected_due: expected, owner: ownerName || '—' };
       }
       const seen = new Set(), out = [];
@@ -2806,7 +2835,7 @@
           const bucket = /tarek/i.test(ownerByContact[id] || '') ? 'tarek' : 'other';
           const cls = nsCall ? parseTouchClass(nsCall.Subject) : null;
           const lastDate = last ? dateOnly(last.Closed_Time || last.Due_Date) : null;
-          const expected = (cls && lastDate) ? addDaysISO(lastDate, (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls]) : null;
+          const expected = (cls && lastDate) ? cadenceDate(lastDate, (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls]) : null;
           const due = nsCall ? (nsCall.Due_Date || null) : null;
           return { name, has_call: !!nsCall, task_id: nsCall ? nsCall.id : null, class: cls, due, last_call: lastDate, expected_due: expected, on_cadence: !!(expected && due === expected), no_prior: !!(nsCall && !last) };
         };
@@ -2861,7 +2890,7 @@
           const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls];
           if (!last) { noPrior.push({ task_id: t.id, subject: t.Subject, contact: t.Who_Id?.name || null, class: cls }); continue; }
           const lastDate = dateOnly(last.Closed_Time || last.Due_Date);
-          const expected = addDaysISO(lastDate, interval);
+          const expected = cadenceDate(lastDate, interval);
           const actual = t.Due_Date || null;
           const rec = { task_id: t.id, subject: t.Subject, contact: t.Who_Id?.name || null, class: cls, owner: ownerName || null, interval_days: interval, last_call: lastDate, expected_due: expected, actual_due: actual };
           if (expected && actual === expected) aligned++; else mismatches.push(rec);

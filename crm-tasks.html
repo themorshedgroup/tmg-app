@@ -311,6 +311,39 @@
       return `${MON[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${String(h).padStart(2,'0')}:${mm} ${ap}`;
     }
 
+    // Deep-links straight to a record's page in Zoho CRM. crm.zoho.com is a
+    // fixed, data-center-neutral gateway — EntityInfo.do resolves the
+    // logged-in user's org server-side and redirects to the real record URL,
+    // so no org id needs to be known/embedded here. Requires the browser to
+    // already be signed into Zoho CRM; otherwise it lands on the login
+    // screen first, then continues through to the record after auth.
+    function zohoRecordUrl(module, id) {
+      // Several call sites pass a "cid" that's really a dedup key — a real
+      // Zoho id when the task has one, else the contact's NAME as a fallback
+      // (t.Who_Id?.id || t.Who_Id?.name). A real Zoho id is always purely
+      // numeric, so reject anything else rather than build a broken link.
+      if (!id || !/^\d+$/.test(String(id))) return null;
+      return `https://crm.zoho.com/crm/EntityInfo.do?module=${module}&id=${encodeURIComponent(id)}`;
+    }
+    // A name/subject rendered as a click-through to its Zoho record — falls
+    // back to plain text when no id is available (e.g. a contact stored on
+    // the task only as a free-text name, with no real Zoho Contact link).
+    // stopPropagation so it doesn't also trigger a parent row's onClick
+    // (e.g. the main table opening its own edit drawer).
+    function ZohoLink({ module, id, children, style }) {
+      const href = zohoRecordUrl(module, id);
+      if (!href) return <span style={style}>{children}</span>;
+      return (
+        <a href={href} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+          title={'Open in Zoho CRM'}
+          style={{ ...style, color: (style && style.color) || C.blue, textDecoration:'none', cursor:'pointer' }}
+          onMouseEnter={e => e.currentTarget.style.textDecoration = 'underline'}
+          onMouseLeave={e => e.currentTarget.style.textDecoration = 'none'}>
+          {children}
+        </a>
+      );
+    }
+
     // ─── Status pill ──────────────────────────────────────────────────
     function statusColor(s) {
       const t = (s || '').toLowerCase();
@@ -529,7 +562,7 @@
         return (
           <div style={{ display:'flex', alignItems:'center', gap:8, padding:'9px 12px', border:'1px solid '+C.border, borderRadius:9, background:C.surfaceAlt }}>
             <i className="ti ti-user" style={{ fontSize:15, color:C.gold }} />
-            <span style={{ flex:1, fontSize:'0.84rem', color:C.navy }}>{value.name}</span>
+            <ZohoLink module="Contacts" id={value.id} style={{ flex:1, fontSize:'0.84rem', color:C.navy }}>{value.name}</ZohoLink>
             <button onClick={() => { onChange(null); setQ(''); setResults(null); }} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:15 }} /></button>
           </div>
         );
@@ -615,7 +648,14 @@
                 <i className={'ti ' + (isEdit ? 'ti-edit' : 'ti-plus')} style={{ fontSize:18, color:C.gold }} />
                 <span style={{ fontFamily:C.fontDisplay, fontSize:'1.5rem', fontWeight:600, color:C.navy }}>{isEdit ? 'Edit Task' : 'New Task'}</span>
               </div>
-              <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
+              <div style={{ display:'flex', alignItems:'center', gap:14 }}>
+                {isEdit && task?.id && (
+                  <ZohoLink module="Tasks" id={task.id} style={{ display:'flex', alignItems:'center', gap:4, fontSize:'0.76rem', fontWeight:600 }}>
+                    Open in Zoho <i className="ti ti-external-link" style={{ fontSize:13 }} />
+                  </ZohoLink>
+                )}
+                <button onClick={onClose} style={{ background:'transparent', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:20 }} /></button>
+              </div>
             </div>
 
             <div style={{ flex:1, overflowY:'auto', padding:'18px 24px' }}>
@@ -1623,7 +1663,11 @@
                 <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
                   {openMonthCalls.map(c => (
                     <div key={c.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, padding:'8px 10px', border:'1px solid '+C.border, borderRadius:8, background:C.bg }}>
-                      <span style={{ fontSize:'0.82rem', color:C.textPrimary }}>{c.Who_Id?.name || c.Subject}</span>
+                      {c.Who_Id?.name ? (
+                        <ZohoLink module="Contacts" id={c.Who_Id?.id} style={{ fontSize:'0.82rem' }}>{c.Who_Id.name}</ZohoLink>
+                      ) : (
+                        <ZohoLink module="Tasks" id={c.id} style={{ fontSize:'0.82rem', color:C.textPrimary }}>{c.Subject}</ZohoLink>
+                      )}
                       <span style={{ fontSize:'0.68rem', fontWeight:700, color:C.gold, background:C.goldSoft+'22', borderRadius:20, padding:'2px 9px' }}>{c._tier}</span>
                     </div>
                   ))}
@@ -2020,7 +2064,7 @@
           reason = 'No Spouse Task signal — kept the earliest-due call';
         }
         const owner = (keep && keep.Owner?.name) || c.tasks.find(t => t.Owner?.name)?.Owner?.name || '—';
-        groups.push({ contact: c.name, owner, tasks: c.tasks, keepId: keep ? keep.id : null, removeIds, reason, needsReview });
+        groups.push({ contact: c.name, cid: c.cid, owner, tasks: c.tasks, keepId: keep ? keep.id : null, removeIds, reason, needsReview });
       });
       return groups.sort((a, b) => a.contact.localeCompare(b.contact));
     }
@@ -2032,7 +2076,7 @@
     function findUnclassifiedCalls({ tasks, colMap }) {
       return (tasks || [])
         .filter(t => (t.Status || '') === 'Not Started' && isCallTask(t, colMap) && isUnclassifiedTask(t))
-        .map(t => ({ id: t.id, contact: t.Who_Id?.name || '—', owner: t.Owner?.name || '—', due: t.Due_Date, subject: t.Subject }))
+        .map(t => ({ id: t.id, cid: t.Who_Id?.id || t.Who_Id?.name, contact: t.Who_Id?.name || '—', owner: t.Owner?.name || '—', due: t.Due_Date, subject: t.Subject }))
         .sort((a, b) => a.contact.localeCompare(b.contact));
     }
 
@@ -2059,7 +2103,7 @@
         const bucket = /tarek/i.test(ownerName) ? 'tarek' : 'other';
         const lastDate = last ? dateOnly(last.Closed_Time || last.Due_Date) : null;
         const expected = (cls && lastDate) ? cadenceDate(lastDate, (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[cls]) : null;
-        return { name, task_id: nsCall ? nsCall.id : null, class: cls, due: nsCall ? nsCall.Due_Date : null, expected_due: expected, owner: ownerName || '—' };
+        return { name, cid, task_id: nsCall ? nsCall.id : null, class: cls, due: nsCall ? nsCall.Due_Date : null, expected_due: expected, owner: ownerName || '—' };
       }
       const seen = new Set(), out = [];
       Object.keys(oneCallByContact).forEach(cid => {
@@ -2360,8 +2404,8 @@
                       {unclassified.map(u => (
                         <div key={u.id} style={{ ...card, display:'flex', alignItems:'center', gap:8 }}>
                           <span style={{ fontSize:'0.62rem', fontWeight:700, borderRadius:20, padding:'1px 7px', color:'#fff', background:C.red, flexShrink:0 }}>REMOVE</span>
-                          <span style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary, flexShrink:0 }}>{u.contact}</span>
-                          <span style={{ fontSize:'0.72rem', color:C.textMuted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', flex:1 }}>{u.subject}</span>
+                          <ZohoLink module="Contacts" id={u.cid} style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary, flexShrink:0 }}>{u.contact}</ZohoLink>
+                          <ZohoLink module="Tasks" id={u.id} style={{ fontSize:'0.72rem', color:C.textMuted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', flex:1 }}>{u.subject}</ZohoLink>
                           <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>{fmtDate(u.due)}</span>
                         </div>
                       ))}
@@ -2370,7 +2414,7 @@
                   {fixable.map(g => (
                     <div key={g.contact} style={card}>
                       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
-                        <span style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</span>
+                        <ZohoLink module="Contacts" id={g.cid} style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</ZohoLink>
                         <span style={{ fontSize:'0.68rem', color:C.textMuted }}>{g.tasks.length} calls</span>
                       </div>
                       <div style={{ marginTop:2, display:'flex', alignItems:'center', gap:5, fontSize:'0.72rem', color:C.textMuted }}>
@@ -2382,7 +2426,7 @@
                           <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, fontSize:'0.76rem' }}>
                             <span style={{ fontSize:'0.62rem', fontWeight:700, borderRadius:20, padding:'1px 7px', color:'#fff', background: t.id===g.keepId ? C.green : C.red }}>{t.id===g.keepId ? 'KEEP' : 'REMOVE'}</span>
                             <span style={{ color:C.textPrimary }}>{fmtDate(t.Due_Date)}</span>
-                            <span style={{ color:C.textMuted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Subject}</span>
+                            <ZohoLink module="Tasks" id={t.id} style={{ color:C.textMuted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Subject}</ZohoLink>
                           </div>
                         ))}
                       </div>
@@ -2396,7 +2440,7 @@
                       </div>
                       {review.map(g => (
                         <div key={g.contact} style={{ ...card, borderColor:C.amber+'66', background:C.amber+'0d' }}>
-                          <div style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</div>
+                          <ZohoLink module="Contacts" id={g.cid} style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{g.contact}</ZohoLink>
                           <div style={{ marginTop:2, display:'flex', alignItems:'center', gap:5, fontSize:'0.72rem', color:C.textMuted }}>
                             <i className="ti ti-user" style={{ fontSize:13 }} /> Owner — <b style={{ color:C.textSecondary }}>{g.owner}</b>
                           </div>
@@ -2454,7 +2498,11 @@
                         {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
                           <div key={t.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', border:'1px solid '+C.border, borderRadius:7, background:C.surface }}>
                             <span style={tierPill(tier, eo)}>{eo ? 'EO' : tier}</span>
-                            <span style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id?.name || t.Subject}</span>
+                            {t.Who_Id?.name ? (
+                              <ZohoLink module="Contacts" id={t.Who_Id?.id} style={{ fontSize:'0.79rem', flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id.name}</ZohoLink>
+                            ) : (
+                              <ZohoLink module="Tasks" id={t.id} style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Subject}</ZohoLink>
+                            )}
                             <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
                             {(t._reason === 'no_baseline' || t._reason === 'both') && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>no prior cadence</span>}
                             {t._reason === 'overcapacity' && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>was on an overloaded day</span>}
@@ -2495,7 +2543,11 @@
                   {aligns.map((p, i) => (
                     <div key={i} style={card}>
                       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-                        <span style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>{p.a.name} & {p.b.name}</span>
+                        <span style={{ fontSize:'0.82rem', fontWeight:600, color:C.textPrimary }}>
+                          <ZohoLink module="Contacts" id={p.a.cid} style={{ fontWeight:600, color:C.textPrimary }}>{p.a.name}</ZohoLink>
+                          {' & '}
+                          <ZohoLink module="Contacts" id={p.b.cid} style={{ fontWeight:600, color:C.textPrimary }}>{p.b.name}</ZohoLink>
+                        </span>
                         <span style={{ fontSize:'0.68rem', color:C.gold, fontWeight:700 }}>→ {fmtDate(p.target_date)}</span>
                       </div>
                       <div style={{ marginTop:4, fontSize:'0.76rem', color:C.textSecondary }}>
@@ -3224,6 +3276,8 @@
                         else if (col.date) content = raw ? fmtDate(raw) : <span style={{ color:C.textMuted }}>—</span>;
                         else if (col.datetime) content = raw ? fmtDateTime(raw) : <span style={{ color:C.textMuted }}>—</span>;
                         else if (!raw) content = <span style={{ color:C.textMuted }}>—</span>;
+                        else if (col.key === 'contact') content = <ZohoLink module="Contacts" id={row.Who_Id?.id}>{raw}</ZohoLink>;
+                        else if (col.key === 'subject') content = <ZohoLink module="Tasks" id={row.id}>{raw}</ZohoLink>;
                         else content = raw;
                         return (
                           <td key={col.key} style={{

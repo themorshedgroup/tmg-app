@@ -1739,6 +1739,22 @@
 
     function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks, extraCompleted }) {
       const pool = inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted });
+      const poolIds = new Set(pool.map(t => t.id));
+
+      // Existing calendar load — this agent's calls NOT in the backlog pool
+      // that already sit on a future date (already-correct cadence, just
+      // untouched by this pack). Without this the packer only sees what IT
+      // is placing and can stack new dates on top of days that are already
+      // full, so the real calendar ends up over perDay the moment the two
+      // are viewed together (what the Capacity grid was showing).
+      const load = {};
+      (tasks || []).forEach(t => {
+        if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap) || !t.Due_Date) return;
+        if (poolIds.has(t.id)) return;
+        if (owner && t.Owner?.name !== owner) return;
+        const iso = String(t.Due_Date).slice(0, 10);
+        load[iso] = (load[iso] || 0) + 1;
+      });
 
       // Pair spouses via each contact's real Spouse lookup field (spouseLinks,
       // fetched live per contact — see fetchSpouseLinksFor); the task-level
@@ -1771,23 +1787,33 @@
       while (placed.size < pool.length && guard++ < 400) {
         const iso = isoOf(cursor), wk = weekKey(cursor);
         const day = [];
+        // Room left today accounts for calls already on this date outside
+        // the pool, not just what's been placed in this loop so far.
+        const roomLeft = () => Math.max(0, perDay - (load[iso] || 0) - day.length);
         const take = (t) => { if (!t || placed.has(t.id)) return false; placed.add(t.id); day.push(t); return true; };
+        const takeIfRoom = (t) => (roomLeft() > 0 ? take(t) : false);
         const tierCount = (tier) => day.filter(t => (bucket[callTier(t.Subject)] ? callTier(t.Subject) : 'C') === tier).length;
 
         // Slot 5 first: the weekly EO floor supersedes the class mix until met.
-        if ((eoByWeek[wk] || 0) < eoPerWeek && take(firstFree(eoPool))) eoByWeek[wk] = (eoByWeek[wk] || 0) + 1;
-        while (tierCount('A') < 2 && take(firstFree(bucket.A))) {}
-        if (!tierCount('B')) take(firstFree(bucket.B));
-        if (!tierCount('C')) take(firstFree(bucket.C));
+        if ((eoByWeek[wk] || 0) < eoPerWeek && takeIfRoom(firstFree(eoPool))) eoByWeek[wk] = (eoByWeek[wk] || 0) + 1;
+        while (tierCount('A') < 2 && takeIfRoom(firstFree(bucket.A))) {}
+        if (!tierCount('B')) takeIfRoom(firstFree(bucket.B));
+        if (!tierCount('C')) takeIfRoom(firstFree(bucket.C));
         // Backfill to capacity once a class runs dry (A first — it's the deepest queue).
-        while (day.length < perDay) {
-          if (!take(firstFree(bucket.A)) && !take(firstFree(bucket.B)) && !take(firstFree(bucket.C))) break;
+        while (roomLeft() > 0) {
+          if (!takeIfRoom(firstFree(bucket.A)) && !takeIfRoom(firstFree(bucket.B)) && !takeIfRoom(firstFree(bucket.C))) break;
         }
-        // Spouses ride along even if it pushes the day over capacity.
+        // Spouses ride along even if it pushes the day over capacity — same
+        // exception whether that capacity is today's placements or the
+        // pre-existing load.
         day.slice().forEach(t => { const p = partnerOf.get(t.id); if (p) take(p); });
 
-        if (!day.length) break;
-        days.push({ date: iso, tasks: day });
+        // A day can come up empty because it's already full of existing
+        // load, not because the pool is exhausted — advance to the next
+        // day instead of stopping (placed.size < pool.length still holds
+        // whenever unplaced pool items remain, since every pool item lives
+        // in one of bucket.A/B/C).
+        if (day.length) days.push({ date: iso, tasks: day });
         cursor = nextWorkday(new Date(cursor.setDate(cursor.getDate() + 1)));
       }
       // partnerOf holds a link per direction; collapse to unordered pairs so the

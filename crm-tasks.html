@@ -738,6 +738,33 @@
       return target;
     }
 
+    // Zoho's Search API (what the default view hits, because of status_not)
+    // paginates by PAGE NUMBER over a server-sorted result set. Nothing
+    // freezes that result set between calls, so any write that changes what
+    // the sort is based on — e.g. applying 188 new Due_Dates from the Backlog
+    // tab, which is immediately followed by a forced reload — can shuffle
+    // records across page boundaries WHILE we're paging. A record that moves
+    // from page 3 to page 2 after page 2 was already fetched gets returned
+    // twice, so the same task lands in `all` more than once.
+    //
+    // That's a real duplicate ROW, not a duplicate task in Zoho — and it's
+    // poisonous downstream: findDuplicateCalls sees one contact with "two"
+    // identical calls (same id, same date, same subject), keeps the first and
+    // marks the rest for removal — but "the rest" is the SAME id it just
+    // kept, so the proposed fix would delete the contact's only real call.
+    // Dedupe by id at both entry points (fresh fetch and cache read) so no
+    // consumer ever sees the same task twice.
+    function dedupeTasksById(list) {
+      const seen = new Set();
+      return (list || []).filter(t => {
+        const id = t && t.id;
+        if (!id) return true;              // no id to key on — keep as-is
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+    }
+
     // ─── Task list cache (localStorage) ──────────────────────────────
     // Loading the open-tasks view alone takes ~20s of sequential Zoho calls (1,367
     // tasks) and the full-history view ~90s+ (22k+) — reloading the page shouldn't
@@ -1244,7 +1271,11 @@
       const lastCompleted = lastCompletedByContact(tasks, colMap);
       const byContact = {};
       const allByContact = {}; // every contact's open calls, incl. singles — needed to look up a partner's call
-      (tasks || []).forEach(t => {
+      // dedupeTasksById guards the load path, but re-apply it here too: this
+      // function's whole output is "which ids to DELETE", so the same task
+      // appearing twice would make it propose deleting the very call it
+      // decided to keep. Cheap insurance against any path that bypasses load().
+      dedupeTasksById(tasks).forEach(t => {
         if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
         if (isUnclassifiedTask(t)) return;
         const cid = t.Who_Id?.id || t.Who_Id?.name;
@@ -1334,7 +1365,14 @@
           reason = 'No Spouse Task signal — kept the earliest-due call';
         }
         const owner = (keep && keep.Owner?.name) || c.tasks.find(t => t.Owner?.name)?.Owner?.name || '—';
-        groups.push({ contact: c.name, cid: c.cid, owner, tasks: c.tasks, keepId: keep ? keep.id : null, removeIds, reason, needsReview });
+        // Invariant: the kept call is never also in the delete list. Every
+        // branch above derives removeIds by excluding `keep`, so this should
+        // hold already — but the cost of it NOT holding is deleting a
+        // contact's only real call, so enforce it rather than trust it.
+        const keepId = keep ? keep.id : null;
+        removeIds = (removeIds || []).filter(id => id && id !== keepId);
+        if (keepId && !removeIds.length && !needsReview) return; // nothing left to remove — not a real duplicate
+        groups.push({ contact: c.name, cid: c.cid, owner, tasks: c.tasks, keepId, removeIds, reason, needsReview });
       });
       return groups.sort((a, b) => a.contact.localeCompare(b.contact));
     }
@@ -1903,7 +1941,10 @@
         if (!force && !isDev()) {
           const cached = loadTaskCache(includeCompleted);
           if (cached) {
-            setTasks(cached.tasks); setColMap(cached.colMap); setExtraFields(cached.extraFields);
+            // Dedupe on the way OUT too, not just on fetch — a cache written
+            // before this fix (or by a concurrent tab) can already hold the
+            // duplicated rows, and this heals it without a manual Refresh.
+            setTasks(dedupeTasksById(cached.tasks)); setColMap(cached.colMap); setExtraFields(cached.extraFields);
             setMeta(cached.meta); setCapped(!!cached.capped); setLastUpdated(cached.cachedAt);
             setErr(''); setNeedsDeploy(false);
             return;
@@ -1972,7 +2013,11 @@
           const res = await callZoho(args);
           if (!res.ok && /unknown action/i.test(res.data?.error || '')) { setNeedsDeploy(true); setTasks([]); return; }
           if (!res.ok) { if (page === 1 && !pageToken) { setErr(res.data?.error || 'Could not load tasks.'); setTasks([]); return; } break; }
-          all = all.concat(res.data.tasks || []);
+          // Dedupe as we accumulate — a shifting result set can hand back a
+          // record we already have (see dedupeTasksById), and `more_records`
+          // keeps paging regardless, so this must happen per page, not once
+          // at the end (the running count below would otherwise overstate).
+          all = dedupeTasksById(all.concat(res.data.tasks || []));
           setLoadedSoFar(all.length);
           if (page === 1 || page % 5 === 0) setTasks(all.slice()); // progressive render — table fills in as it loads, doesn't feel frozen
           more = !!(res.data.info && res.data.info.more_records);

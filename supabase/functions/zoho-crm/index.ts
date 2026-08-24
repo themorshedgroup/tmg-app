@@ -48,6 +48,13 @@ async function authorizeCaller(req: Request) {
   if (!token)
     return { ok: false as const, status: 401, error: "Sign in required." };
 
+  // Server/ops caller: the service-role key itself (never present in browsers) acts as
+  // an admin identity — used for the owner_diagnosis action and ops tooling.
+  const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+  if (svcKey && token === svcKey) {
+    return { ok: true as const, userId: "service", sb, isService: true as const };
+  }
+
   const {
     data: { user },
     error,
@@ -204,16 +211,132 @@ async function resolveZohoOwnerId(
   apiDomain: string,
   email: string
 ): Promise<string | null> {
+  const r = await resolveZohoOwner(sb, conn, accessToken, apiDomain, email, null);
+  return r.id;
+}
+
+// Fetches the org's full Zoho user list (small org — one page). Sanitized fields only.
+async function listZohoUsers(sb: any, conn: any, accessToken: string, apiDomain: string) {
+  const url = `https://${apiDomain}/crm/v6/users?type=AllUsers&per_page=200`;
+  const res = await zohoFetch(sb, conn, accessToken, url, { method: "GET" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false as const, status: res.status, code: data?.code || null, users: [] as any[] };
+  const users = (data?.users || []).map((u: any) => ({
+    id: u.id,
+    full_name: u.full_name || [u.first_name, u.last_name].filter(Boolean).join(" "),
+    email: u.email || "",
+    status: u.status || null,          // "active" / "inactive" / "deleted"
+    confirm: u.confirm ?? null,        // false = invited but never accepted
+    role: u.role?.name || null,
+    profile: u.profile?.name || null,
+  }));
+  return { ok: true as const, status: res.status, users };
+}
+
+// Robust owner resolution with a full trace of what was tried — the trace is what
+// finally makes silent mis-ownership diagnosable instead of a recurring mystery.
+// Strategy 1: Zoho's users/search-by-email endpoint (the original, works for most).
+// Strategy 2: list ALL org users and match the email case-insensitively — catches
+//   users the search endpoint won't return (e.g. unconfirmed or oddly-indexed).
+// Strategy 3 (only if fullName given): exact case-insensitive full-name match,
+//   accepted only when unambiguous (exactly one hit).
+async function resolveZohoOwner(
+  sb: any, conn: any, accessToken: string, apiDomain: string,
+  email: string, fullName: string | null
+): Promise<{ id: string | null; via: string; trace: string[] }> {
+  const trace: string[] = [];
+  const wanted = (email || "").trim().toLowerCase();
   try {
-    const url = `https://${apiDomain}/crm/v6/users/search?email=${encodeURIComponent(email)}`;
-    const res = await zohoFetch(sb, conn, accessToken, url, { method: "GET" });
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => ({}));
-    const u = data?.users?.[0];
-    return u?.id || null;
-  } catch (_) {
-    return null;
+    if (wanted) {
+      const url = `https://${apiDomain}/crm/v6/users/search?email=${encodeURIComponent(wanted)}`;
+      const res = await zohoFetch(sb, conn, accessToken, url, { method: "GET" });
+      const data = await res.json().catch(() => ({}));
+      const hit = data?.users?.[0];
+      trace.push(`search-endpoint: HTTP ${res.status}${data?.code ? " " + data.code : ""}, ${data?.users?.length || 0} match(es)`);
+      if (res.ok && hit?.id) return { id: hit.id, via: "email-search", trace };
+    } else {
+      trace.push("search-endpoint: skipped (no email)");
+    }
+
+    const all = await listZohoUsers(sb, conn, accessToken, apiDomain);
+    trace.push(`all-users: HTTP ${all.status}${(all as any).code ? " " + (all as any).code : ""}, ${all.users.length} user(s) in org`);
+    if (all.ok) {
+      if (wanted) {
+        const byEmail = all.users.find((u: any) => (u.email || "").toLowerCase() === wanted);
+        if (byEmail) {
+          trace.push(`email match in full list: ${byEmail.full_name} (status=${byEmail.status}, confirmed=${byEmail.confirm})`);
+          if (byEmail.status === "active") return { id: byEmail.id, via: "email-list", trace };
+          trace.push("matched user is not active in Zoho — cannot assign records to them");
+          return { id: null, via: "inactive", trace };
+        }
+        trace.push("no email match in full list");
+      }
+      if (fullName) {
+        const want = fullName.trim().toLowerCase();
+        const byName = all.users.filter((u: any) => (u.full_name || "").trim().toLowerCase() === want && u.status === "active");
+        trace.push(`name match "${fullName}": ${byName.length} active hit(s)`);
+        if (byName.length === 1) return { id: byName[0].id, via: "name", trace };
+      }
+    }
+
+    // Scope-free fallback: the users API needs ZohoCRM.users.READ, which this org's
+    // OAuth grant may not include — but every RECORD carries its Owner {id, email,
+    // name}, readable with the module scopes we definitely have. Scan recent records
+    // in a few modules for one owned by (or matching) this person and lift the id.
+    const harvested = await harvestOwnerFromRecords(sb, conn, accessToken, apiDomain, wanted, fullName, trace);
+    if (harvested) return { id: harvested, via: "record-owner", trace };
+  } catch (e) {
+    trace.push("error: " + String((e as any)?.message || e));
   }
+  return { id: null, via: "none", trace };
+}
+
+// Scans up to a few pages of records in owner-diverse modules, building an
+// email→Owner.id (and name→Owner.id) map from record ownership. Returns the id
+// for the wanted email (preferred) or unambiguous full-name match.
+async function harvestOwnerFromRecords(
+  sb: any, conn: any, accessToken: string, apiDomain: string,
+  wantedEmail: string, fullName: string | null, trace: string[]
+): Promise<string | null> {
+  const wantName = (fullName || "").trim().toLowerCase();
+  const byEmail: Record<string, string> = {};
+  const byName: Record<string, Set<string>> = {};
+  for (const moduleName of ["Tasks", "Agent_KPIs", "Contacts"]) {
+    for (let page = 1; page <= 3; page++) {
+      const url = new URL(`https://${apiDomain}/crm/v6/${moduleName}`);
+      url.searchParams.set("fields", "Owner");
+      url.searchParams.set("per_page", "200");
+      url.searchParams.set("page", String(page));
+      url.searchParams.set("sort_by", "Modified_Time");
+      url.searchParams.set("sort_order", "desc");
+      const res = await zohoFetch(sb, conn, accessToken, url.toString(), { method: "GET" });
+      if (res.status === 204) break;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { trace.push(`harvest ${moduleName} p${page}: HTTP ${res.status} ${data?.code || ""}`); break; }
+      for (const rec of data?.data || []) {
+        const o = rec?.Owner;
+        if (!o?.id) continue;
+        const em = (o.email || "").toLowerCase();
+        const nm = (o.name || "").trim().toLowerCase();
+        if (em && !byEmail[em]) byEmail[em] = o.id;
+        if (nm) { (byName[nm] = byName[nm] || new Set()).add(o.id); }
+      }
+      if (!data?.info?.more_records) break;
+    }
+    // Stop early once we have what we came for.
+    if (wantedEmail && byEmail[wantedEmail]) break;
+  }
+  trace.push(`harvest: ${Object.keys(byEmail).length} distinct owner email(s) seen across records`);
+  if (wantedEmail && byEmail[wantedEmail]) {
+    trace.push(`harvest matched email → owner of existing records`);
+    return byEmail[wantedEmail];
+  }
+  if (wantName && byName[wantName] && byName[wantName].size === 1) {
+    trace.push(`harvest matched full name "${fullName}" unambiguously`);
+    return [...byName[wantName]][0];
+  }
+  if (wantName && byName[wantName] && byName[wantName].size > 1) trace.push(`harvest name "${fullName}" ambiguous (${byName[wantName].size} ids)`);
+  return null;
 }
 
 // ── Load the single org Zoho connection row ───────────────────────────
@@ -290,10 +413,18 @@ Deno.serve(async (req) => {
       // at submit time instead of being discovered in Zoho weeks later.
       let ownerWarning: string | null = null;
       const ownerEmail = typeof body.owner_email === "string" ? body.owner_email.trim() : "";
-      if (ownerEmail) {
-        const ownerId = await resolveZohoOwnerId(sb, conn, accessToken, apiDomain, ownerEmail);
-        if (ownerId) record.Owner = { id: ownerId };
-        else ownerWarning = `No Zoho CRM user matches ${ownerEmail}, so Zoho assigned this record to the API connection owner instead. Ask an admin to confirm this person is an active Zoho user with that exact email.`;
+      // The submitter's profile name enables the unambiguous-name fallback when their
+      // TMG login email doesn't match their Zoho user email exactly.
+      let callerName: string | null = null;
+      if (auth.userId && auth.userId !== "service") {
+        const { data: callerProf } = await sb
+          .from("profiles").select("first_name, last_name").eq("id", auth.userId).maybeSingle();
+        if (callerProf) callerName = [callerProf.first_name, callerProf.last_name].filter(Boolean).join(" ") || null;
+      }
+      if (ownerEmail || callerName) {
+        const resolved = await resolveZohoOwner(sb, conn, accessToken, apiDomain, ownerEmail, callerName);
+        if (resolved.id) record.Owner = { id: resolved.id };
+        else ownerWarning = `Could not match you to a Zoho CRM user (tried email "${ownerEmail || "—"}"${callerName ? ` and name "${callerName}"` : ""}), so Zoho assigned this record to the API connection owner instead. Detail: ${resolved.trace.join(" → ")}`;
       } else {
         ownerWarning = "No account email was available for the submitter, so Zoho assigned this record to the API connection owner instead.";
       }
@@ -326,6 +457,32 @@ Deno.serve(async (req) => {
         },
         200
       );
+    }
+
+    // ── Owner diagnosis (ops/admin only) ────────────────────────────
+    // Returns the org's Zoho user directory (sanitized) plus a full resolution
+    // trace for each given email/name pair — the tool that ends the "records
+    // keep getting assigned to the wrong owner and nobody can see why" loop.
+    if (action === "owner_diagnosis") {
+      if (!(auth as any).isService) {
+        // Non-service callers must be active admins.
+        const { data: prof } = await sb.from("profiles").select("access").eq("id", auth.userId).maybeSingle();
+        const roles = Array.isArray(prof?.access) ? prof.access : [];
+        if (!roles.includes("admin")) return json({ error: "Admin access required." }, 403);
+      }
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+      const all = await listZohoUsers(sb, conn, accessToken, apiDomain);
+      const checks: any[] = [];
+      const targets = Array.isArray(body.targets) ? body.targets.slice(0, 20) : [];
+      for (const t of targets) {
+        const email = typeof t?.email === "string" ? t.email : "";
+        const name = typeof t?.name === "string" ? t.name : null;
+        const r = await resolveZohoOwner(sb, conn, accessToken, apiDomain, email, name);
+        checks.push({ email, name, resolved_id: r.id, via: r.via, trace: r.trace });
+      }
+      return json({ ok: true, zoho_users: all.users, checks }, 200);
     }
 
     // ── Search contacts by name (fuzzy) ─────────────────────────────

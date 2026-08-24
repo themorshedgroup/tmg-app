@@ -406,6 +406,11 @@ Deno.serve(async (req) => {
       const apiDomain = conn.api_domain || "www.zohoapis.com";
       const moduleName = conn.module_api_name || "Agent_KPIs";
 
+      // Submitting through the app IS the agreement — stamp the module's consent
+      // picklist ("You agree that once it's saved, it can't be edited") the same way
+      // Zoho's own form does, so app records don't sit blank on this field.
+      record.You_agree_that_once_it_s_saved_it_can_t_be_edited = "Yes";
+
       // Owner = whoever is actually logged in, not whoever owns the Zoho connection.
       // Best-effort: if the email doesn't resolve to a Zoho user, Zoho falls back to
       // its old default (API-connection owner) rather than the create failing. That

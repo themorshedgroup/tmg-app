@@ -1553,9 +1553,12 @@
                     <div style={{ overflowX:'auto', border:'1px solid '+C.border, borderRadius:10 }}>
                       <div style={{ display:'grid', gridTemplateColumns:'150px repeat(' + daysInMonth + ', minmax(30px,1fr))', minWidth:150 + daysInMonth * 30 }}>
                         <div style={{ ...cellBase, justifyContent:'flex-start', padding:'0 10px', fontWeight:700, color:C.navy, background:C.surfaceAlt, borderTop:'1px solid '+C.border, minWidth:150 }}>Person</div>
-                        {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => (
-                          <div key={d} style={{ ...cellBase, fontWeight:700, color:C.textMuted, background:C.surfaceAlt, borderTop:'1px solid '+C.border }}>{d}</div>
-                        ))}
+                        {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => {
+                          const off = !isWorkday(new Date(m.getFullYear(), m.getMonth(), d));
+                          return (
+                            <div key={d} style={{ ...cellBase, fontWeight:700, color:C.textMuted, background: off ? C.border+'55' : C.surfaceAlt, borderTop:'1px solid '+C.border }}>{d}</div>
+                          );
+                        })}
                         {owners.map(owner => (
                           <React.Fragment key={owner}>
                             <div style={{ ...cellBase, justifyContent:'flex-start', padding:'0 10px', fontWeight:600, color:C.textPrimary, background:C.surface, minWidth:150 }}>{owner}</div>
@@ -1563,10 +1566,13 @@
                               const calls = monthData[owner]?.[d] || [];
                               const n = calls.length;
                               const cs = capacityCellStyle(n);
+                              const off = !isWorkday(new Date(m.getFullYear(), m.getMonth(), d));
                               return (
                                 <div key={d} onClick={() => n && setOpenCell({ owner, monthKey, monthLabel, day: d })}
-                                  style={{ ...cellBase, background:cs.background, color:cs.color, fontWeight: n ? 700 : 400, cursor: n ? 'pointer' : 'default' }}>
+                                  title={off && n ? `${n} call${n===1?'':'s'} scheduled on a weekend/holiday` : undefined}
+                                  style={{ ...cellBase, position:'relative', background:cs.background, color:cs.color, fontWeight: n ? 700 : 400, cursor: n ? 'pointer' : 'default' }}>
                                   {n || ''}
+                                  {off && n > 0 && <span style={{ position:'absolute', top:1, right:2, fontSize:'0.6rem', fontWeight:800, color:C.red, lineHeight:1 }}>✕</span>}
                                 </div>
                               );
                             })}
@@ -1674,15 +1680,17 @@
       return last;
     }
 
-    // A call needs a fresh date for one of two reasons — OVERDUE (due on/
-    // before the cutoff) or NO BASELINE (its contact has never had a
-    // completed call, so any date it currently has is arbitrary). These used
-    // to be two separate modes you ran one at a time, which meant a
-    // no-baseline C-touch could grab a calendar slot a genuinely overdue
-    // A-touch needed more. They're merged into ONE pool here — which reason
-    // got a call included doesn't matter; packOverdue's existing 2A/1B/1C
-    // mix still decides who actually goes first. Each task is tagged with
-    // `_reason` (overdue / no_baseline / both) purely for display.
+    // A call needs a fresh date for one of THREE reasons — OVERDUE (due on/
+    // before the cutoff), NO BASELINE (its contact has never had a
+    // completed call, so any date it currently has is arbitrary), or
+    // OVERCAPACITY (its date is individually fine, but that day already has
+    // more calls than the agent can work through — every call sitting there
+    // is correct on its own, the DAY is just overloaded). These are merged
+    // into ONE pool — which reason got a call included doesn't matter;
+    // packOverdue's existing 2A/1B/1C mix still decides who actually goes
+    // first, with overcapacity calls picked up last (they're not urgent,
+    // just poorly spread). Each task is tagged with `_reason` purely for
+    // display.
     //
     // Scope is Task_Type=Call ONLY (via isCallTask) — the subject's tier
     // prefix is never a gate for inclusion, only a classifier for which
@@ -1696,31 +1704,67 @@
     // real history invisible to lastCompletedByContact, so "no baseline"
     // means genuinely never-completed, not just not-currently-loaded. Local
     // wins when present; this only backstops the gaps.
-    function inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted }) {
+    // perDay: when given, turns on overcapacity detection (grouped by
+    // owner+date so it works whether or not a single `owner` filter is
+    // applied below). Omit it (e.g. for the duplicate-calls scan) to skip
+    // that pass entirely.
+    function inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted, perDay }) {
       const baseline = lastCompletedByContact(tasks, colMap);
       const hasBaseline = (cid) => !!(cid && (baseline[cid] || (extraCompleted && extraCompleted[cid])));
-      return (tasks || [])
-        .filter(t => {
-          if ((t.Status || '') !== 'Not Started') return false;
-          if (!isCallTask(t, colMap)) return false;
-          if (isUnclassifiedTask(t)) return false;
-          if (owner && t.Owner?.name !== owner) return false;
-          const cid = t.Who_Id?.id || t.Who_Id?.name;
-          const noBaseline = !hasBaseline(cid);
-          const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
-          return noBaseline || overdue;
-        })
+
+      const overdueOrNoBaseline = (tasks || []).filter(t => {
+        if ((t.Status || '') !== 'Not Started') return false;
+        if (!isCallTask(t, colMap)) return false;
+        if (isUnclassifiedTask(t)) return false;
+        const cid = t.Who_Id?.id || t.Who_Id?.name;
+        const noBaseline = !hasBaseline(cid);
+        const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
+        return noBaseline || overdue;
+      });
+
+      // Any day already carrying more than `perDay` calls is over capacity
+      // even when every call on it is individually correct. The lowest-
+      // priority calls on that day become the candidates to move — C-tier
+      // first, then B-tier, A-tier only as a last resort. EO calls are
+      // never bumped; they carry their own weekly-floor guarantee.
+      let overcapacity = [];
+      if (perDay) {
+        const inPool = new Set(overdueOrNoBaseline.map(t => t.id));
+        const byOwnerDate = {};
+        (tasks || []).forEach(t => {
+          if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap) || isUnclassifiedTask(t)) return;
+          if (inPool.has(t.id) || !t.Due_Date) return;
+          const k = (t.Owner?.name || 'Unassigned') + '|' + String(t.Due_Date).slice(0, 10);
+          (byOwnerDate[k] = byOwnerDate[k] || []).push(t);
+        });
+        const tierRank = { A:3, B:2, C:1 };
+        Object.values(byOwnerDate).forEach(list => {
+          if (list.length <= perDay) return;
+          const bumpable = list.filter(t => !isEOTask(t));
+          const excess = list.length - perDay;
+          if (excess <= 0 || !bumpable.length) return;
+          const sorted = bumpable.slice().sort((a, b) =>
+            (tierRank[callTier(a.Subject)] || 0) - (tierRank[callTier(b.Subject)] || 0) ||
+            String(b.Due_Date || '').localeCompare(String(a.Due_Date || '')));
+          sorted.slice(0, Math.min(excess, sorted.length)).forEach(t => overcapacity.push(t));
+        });
+      }
+
+      return overdueOrNoBaseline.concat(overcapacity)
+        .filter(t => !owner || t.Owner?.name === owner)
         .map(t => {
           const cid = t.Who_Id?.id || t.Who_Id?.name;
           const noBaseline = !hasBaseline(cid);
           const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
-          return { ...t, _reason: overdue && noBaseline ? 'both' : overdue ? 'overdue' : 'no_baseline' };
+          const reason = overdue && noBaseline ? 'both' : overdue ? 'overdue' : noBaseline ? 'no_baseline' : 'overcapacity';
+          return { ...t, _reason: reason };
         })
-        // Overdue leads (more urgent than a plain never-called backlog entry);
-        // within that, most-overdue first. Tier priority is applied later by
-        // packOverdue's own A/B/C bucketing, on top of this ordering.
+        // Overdue leads (most urgent), then no-baseline, then overcapacity
+        // (least urgent — its date was fine, the day just needs thinning).
+        // Tier priority is applied later by packOverdue's own A/B/C bucketing.
         .sort((a, b) => {
-          const ra = a._reason === 'no_baseline' ? 1 : 0, rb = b._reason === 'no_baseline' ? 1 : 0;
+          const rank = { overdue:0, both:0, no_baseline:1, overcapacity:2 };
+          const ra = rank[a._reason] ?? 1, rb = rank[b._reason] ?? 1;
           if (ra !== rb) return ra - rb;
           return String(a.Due_Date || '9999-99-99').localeCompare(String(b.Due_Date || '9999-99-99'));
         });
@@ -1729,16 +1773,16 @@
     // Every agent has their own working day, so a schedule is only meaningful
     // for ONE owner at a time — packing several agents into a shared 5-a-day
     // calendar would interleave their lists and cap the whole team at 5.
-    function scopeOwners({ tasks, colMap, cutoff }) {
+    function scopeOwners({ tasks, colMap, cutoff, perDay }) {
       const counts = {};
-      inScopeCalls({ tasks, colMap, cutoff }).forEach(t => {
+      inScopeCalls({ tasks, colMap, cutoff, perDay }).forEach(t => {
         const o = t.Owner?.name; if (o) counts[o] = (counts[o] || 0) + 1;
       });
       return Object.keys(counts).map(name => ({ name, count: counts[name] })).sort((a, b) => b.count - a.count);
     }
 
     function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks, extraCompleted }) {
-      const pool = inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted });
+      const pool = inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted, perDay });
       const poolIds = new Set(pool.map(t => t.id));
 
       // Existing calendar load — this agent's calls NOT in the backlog pool
@@ -1813,16 +1857,20 @@
         // day instead of stopping (placed.size < pool.length still holds
         // whenever unplaced pool items remain, since every pool item lives
         // in one of bucket.A/B/C).
-        if (day.length) days.push({ date: iso, tasks: day });
+        // projected = the full day total once this plan is applied — pre-
+        // existing load plus what's newly placed here — so it can be shown
+        // and color-coded the same way the Capacity grid reads a day.
+        if (day.length) days.push({ date: iso, tasks: day, projected: (load[iso] || 0) + day.length });
         cursor = nextWorkday(new Date(cursor.setDate(cursor.getDate() + 1)));
       }
       // partnerOf holds a link per direction; collapse to unordered pairs so the
       // count reads as couples, not links.
       const pairKeys = new Set();
       partnerOf.forEach((p, id) => pairKeys.add([id, p.id].sort().join('|')));
-      const overdueCount = pool.filter(t => t._reason !== 'no_baseline').length;
-      const noBaselineCount = pool.filter(t => t._reason !== 'overdue').length;
-      return { days, total: pool.length, placed: placed.size, pairs: pairKeys.size, eoTotal: eoPool.length, overdueCount, noBaselineCount };
+      const overdueCount = pool.filter(t => t._reason === 'overdue' || t._reason === 'both').length;
+      const noBaselineCount = pool.filter(t => t._reason === 'no_baseline' || t._reason === 'both').length;
+      const overcapacityCount = pool.filter(t => t._reason === 'overcapacity').length;
+      return { days, total: pool.length, placed: placed.size, pairs: pairKeys.size, eoTotal: eoPool.length, overdueCount, noBaselineCount, overcapacityCount };
     }
 
     const iconBtnStatic = { display:'inline-flex', alignItems:'center', gap:7, fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:500, color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:9, padding:'8px 13px', cursor:'pointer' };
@@ -2128,14 +2176,14 @@
       const [start, setStart] = useState(() => todayISO());
       const [perDay, setPerDay] = useState(5);
       const [eoPerWeek, setEoPerWeek] = useState(3);
-      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff }), [tasks, colMap, cutoff]);
+      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff, perDay }), [tasks, colMap, cutoff, perDay]);
       const [owner, setOwner] = useState('');
       useEffect(() => {
         if (owners.length && !owners.some(o => o.name === owner)) setOwner(owners[0].name);
       }, [owners]);
       const backlogCandidateKeys = useMemo(() =>
-        inScopeCalls({ tasks, colMap, cutoff, owner }).map(t => t.Who_Id?.id || t.Who_Id?.name),
-        [tasks, colMap, cutoff, owner]);
+        inScopeCalls({ tasks, colMap, cutoff, owner, perDay }).map(t => t.Who_Id?.id || t.Who_Id?.name),
+        [tasks, colMap, cutoff, owner, perDay]);
       const [backlogLinks, setBacklogLinks] = useState({});
       const [backlogLinksLoading, setBacklogLinksLoading] = useState(false);
       useEffect(() => {
@@ -2173,7 +2221,7 @@
       // Fixed "today" scope, independent of the tab's adjustable cutoff field —
       // this is what Step 3's gate checks against, so it can't be fooled by
       // someone narrowing the cutoff just to make Step 3 unlock.
-      const backlogOwnersAll = useMemo(() => scopeOwners({ tasks, colMap, cutoff: todayISO() }), [tasks, colMap]);
+      const backlogOwnersAll = useMemo(() => scopeOwners({ tasks, colMap, cutoff: todayISO(), perDay }), [tasks, colMap, perDay]);
       const backlogClear = backlogOwnersAll.length === 0;
 
       async function applyBacklog() {
@@ -2345,7 +2393,7 @@
               {tab === 'backlog' && dupesClear && (
                 <React.Fragment>
                   <div style={{ fontSize:'0.78rem', color:C.textMuted, marginBottom:10 }}>
-                    {owner || '—'} · {plan.total} need a new date ({plan.overdueCount} overdue, {plan.noBaselineCount} no prior cadence) · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together
+                    {owner || '—'} · {plan.total} need a new date ({plan.overdueCount} overdue, {plan.noBaselineCount} no prior cadence{plan.overcapacityCount ? ', ' + plan.overcapacityCount + ' on an overloaded day' : ''}) · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together
                   </div>
                   <div style={{ display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end', paddingBottom:14, marginBottom:14, borderBottom:'1px solid '+C.border }}>
                     <div>
@@ -2360,17 +2408,18 @@
                     <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
                     <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
                     <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>
-                      One agent at a time — each works their own day. Overdue calls and calls with no prior cadence share ONE calendar fill; A-tier always gets the next open slot first, regardless of which reason brought a call in. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped.
+                      One agent at a time — each works their own day. Overdue calls, calls with no prior cadence, and calls stuck on an already-overloaded day all share ONE calendar fill; A-tier always gets the next open slot first, regardless of which reason brought a call in. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped. The count next to each date is the PROJECTED total for that day — existing calls plus what's placed here — so you can see it's actually within capacity before applying.
                     </div>
                   </div>
 
                   {backlogBusyLoading && <div style={{ padding:40, textAlign:'center' }}><Spinner size={20} /></div>}
                   {!backlogBusyLoading && plan.days.length === 0 && <div style={{ padding:40, textAlign:'center', color:C.textMuted, fontSize:'0.86rem' }}>No calls need a new date for {owner || 'this agent'}.</div>}
-                  {!backlogBusyLoading && plan.days.map(d => (
+                  {!backlogBusyLoading && plan.days.map(d => { const cs = capacityCellStyle(d.projected); return (
                     <div key={d.date} style={{ marginBottom:12 }}>
                       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
                         <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
-                        <span style={{ fontSize:'0.68rem', color: d.tasks.length > perDay ? C.amber : C.textMuted }}>{d.tasks.length} call{d.tasks.length===1?'':'s'}{d.tasks.length > perDay ? ' · spouse overflow' : ''}</span>
+                        <span style={{ fontSize:'0.66rem', fontWeight:700, borderRadius:20, padding:'1px 8px', background:cs.background || C.surfaceAlt, color:cs.background ? cs.color : C.textMuted }}>{d.projected} that day</span>
+                        <span style={{ fontSize:'0.68rem', color:C.textMuted }}>({d.tasks.length} new{d.tasks.length > perDay ? ' · spouse overflow' : ''})</span>
                       </div>
                       <div style={{ display:'grid', gap:4 }}>
                         {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
@@ -2378,12 +2427,13 @@
                             <span style={tierPill(tier, eo)}>{eo ? 'EO' : tier}</span>
                             <span style={{ fontSize:'0.79rem', color:C.textPrimary, flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.Who_Id?.name || t.Subject}</span>
                             <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
-                            {t._reason !== 'overdue' && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>no prior cadence</span>}
+                            {(t._reason === 'no_baseline' || t._reason === 'both') && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>no prior cadence</span>}
+                            {t._reason === 'overcapacity' && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>was on an overloaded day</span>}
                           </div>
                         ); })}
                       </div>
                     </div>
-                  ))}
+                  ); })}
                 </React.Fragment>
               )}
 

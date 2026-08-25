@@ -832,6 +832,70 @@
       return { background:'#FFF3D6', color:'#8A6100' };
     }
 
+    // ─── Projected cadence occupancy ─────────────────────────────────
+    // A booked call is not the end of a contact's cadence — once it is made,
+    // the NEXT touch lands `interval` days later, and the one after that
+    // `interval` days after THAT. The grid only ever counted calls that
+    // already exist as Zoho tasks, which is why months far enough out looked
+    // wide open when in reality the cadence rolls straight into them.
+    //
+    // One chain per CONTACT (seeded from their LAST booked call, not every
+    // call) so a contact with two calls on the board can't be counted twice.
+    //
+    // A contact whose last call is already OVERDUE is not projected at all.
+    // Their next touch date genuinely isn't knowable yet — it depends on when
+    // the backlog gets re-slotted. Chaining them from their stale date sprays
+    // hops across months that have already passed, and chaining them from
+    // today stacks every overdue contact onto the same single future day,
+    // which reads as a huge fake spike. Both are worse than saying nothing,
+    // so they're counted and reported instead (`unprojected`) with a nudge to
+    // reschedule them in Cadence Health first.
+    //
+    // EO and unclassified calls project nothing: they have no interval to
+    // measure against (see CALL_INTERVALS).
+    const PROJECTION_MAX_HOPS = 60;
+    const EMPTY_PROJECTION = { byDate: {}, unprojected: 0 };
+    function projectCadence(tasks, colMap, endIso) {
+      const today = todayISO();
+      const latest = new Map(); // contact key -> seed for that contact's chain
+      (tasks || []).forEach(t => {
+        if (!isCallTask(t, colMap) || !t.Due_Date) return;
+        if (/completed/i.test(t.Status || '')) return;
+        const tier = callTier(t.Subject);
+        if (!CALL_INTERVALS.other[tier]) return;
+        const iso = dateOnly(t.Due_Date);
+        if (!iso) return;
+        const key = (t.Who_Id && (t.Who_Id.id || t.Who_Id.name)) || t.id;
+        const prev = latest.get(key);
+        if (!prev || iso > prev.iso) latest.set(key, {
+          iso, tier,
+          owner: (t.Owner && t.Owner.name) || 'Unassigned',
+          name: (t.Who_Id && t.Who_Id.name) || t.Subject,
+          cid: (t.Who_Id && t.Who_Id.id) || null,
+        });
+      });
+      const out = {}; // monthKey -> owner -> day -> [{ name, tier, cid, hop }]
+      let unprojected = 0;
+      latest.forEach(seed => {
+        const bucket = /tarek/i.test(seed.owner) ? 'tarek' : 'other';
+        const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[seed.tier];
+        if (!interval) return;
+        if (seed.iso < today) { unprojected++; return; }
+        let cur = seed.iso;
+        for (let hop = 1; hop <= PROJECTION_MAX_HOPS; hop++) {
+          cur = cadenceDate(cur, interval);
+          if (!cur || cur > endIso) break;
+          const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(cur);
+          if (!dm) break;
+          const mk = dm[1] + '-' + dm[2], day = +dm[3];
+          const byOwner = (out[mk] = out[mk] || {});
+          const byDay = (byOwner[seed.owner] = byOwner[seed.owner] || {});
+          (byDay[day] = byDay[day] || []).push({ name: seed.name, tier: seed.tier, cid: seed.cid, hop });
+        }
+      });
+      return { byDate: out, unprojected };
+    }
+
     // Shows MONTHS_SHOWN months stacked in one continuously-scrollable view
     // (no per-month "next" clicking) — ◀/▶ shift the whole window by that
     // many months at once for reaching further back/forward.
@@ -839,6 +903,7 @@
     function CapacityGrid({ tasks, colMap, onClose }) {
       const [anchor, setAnchor] = useState(() => { const d = new Date(); d.setDate(1); return d; });
       const [openCell, setOpenCell] = useState(null); // { owner, monthKey, monthLabel, day } | null
+      const [showProjected, setShowProjected] = useState(true);
 
       const months = useMemo(() =>
         Array.from({ length: CAPACITY_MONTHS_SHOWN }, (_, i) => new Date(anchor.getFullYear(), anchor.getMonth() + i, 1)),
@@ -847,7 +912,7 @@
         CAP_MON[months[months.length - 1].getMonth()] + ' ' + months[months.length - 1].getFullYear();
       const shiftWindow = (dir) => setAnchor(a => new Date(a.getFullYear(), a.getMonth() + dir * CAPACITY_MONTHS_SHOWN, 1));
 
-      const { byMonth, owners } = useMemo(() => {
+      const { byMonth, bookedOwners } = useMemo(() => {
         const monthKeys = months.map(m => m.getFullYear() + '-' + String(m.getMonth() + 1).padStart(2, '0'));
         const out = {}; monthKeys.forEach(k => out[k] = {});
         const ownerSet = new Set();
@@ -864,13 +929,36 @@
           (out[key][owner] = out[key][owner] || {});
           (out[key][owner][day] = out[key][owner][day] || []).push(rec);
         });
-        return { byMonth: out, owners: Array.from(ownerSet).sort() };
+        return { byMonth: out, bookedOwners: Array.from(ownerSet).sort() };
       }, [tasks, colMap, months.map(m => m.getTime()).join(',')]);
+
+      // Last day of the last visible month — the chain stops there rather than
+      // running forever.
+      const endIso = useMemo(() => {
+        const last = months[months.length - 1];
+        return isoOf(new Date(last.getFullYear(), last.getMonth() + 1, 0));
+      }, [months.map(m => m.getTime()).join(',')]);
+      const projection = useMemo(
+        () => showProjected ? projectCadence(tasks, colMap, endIso) : EMPTY_PROJECTION,
+        [tasks, colMap, endIso, showProjected]);
+      const projected = projection.byDate;
+      // Rows are driven by this list, so it has to include anyone with PROJECTED
+      // load too — not just people with a booked call inside the visible window.
+      // Without the union, paging forward into months that have nothing booked yet
+      // (exactly what this feature exists to expose) throws every projection away
+      // and shows "No calls due", which is the opposite of the truth. With
+      // projections switched off this collapses back to the booked-only list.
+      const owners = useMemo(() => {
+        const set = new Set(bookedOwners);
+        Object.keys(projected).forEach(mk => Object.keys(projected[mk]).forEach(o => set.add(o)));
+        return Array.from(set).sort();
+      }, [bookedOwners, projected]);
 
       const navBtn = { display:'inline-flex', alignItems:'center', justifyContent:'center', width:28, height:28, borderRadius:8, border:'1px solid '+C.border, background:C.surface, color:C.navy, cursor:'pointer' };
       const cellBase = { minWidth:30, height:34, display:'flex', alignItems:'center', justifyContent:'center', textAlign:'center', fontFamily:C.fontSans, fontSize:'0.74rem', borderRight:'1px solid '+C.border, borderBottom:'1px solid '+C.border };
 
       const openMonthCalls = openCell ? (byMonth[openCell.monthKey]?.[openCell.owner]?.[openCell.day] || []) : [];
+      const openProjected = openCell ? (projected[openCell.monthKey]?.[openCell.owner]?.[openCell.day] || []) : [];
       const openTally = {};
       openMonthCalls.forEach(c => { openTally[c._tier] = (openTally[c._tier] || 0) + 1; });
 
@@ -881,6 +969,17 @@
               <div>
                 <div style={{ fontFamily:C.fontDisplay, fontSize:'1.4rem', fontWeight:600, color:C.navy }}>Call Capacity</div>
                 <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:2 }}>Total calls per person, per day — scroll for later months, click a number for the breakdown.</div>
+                <label style={{ display:'inline-flex', alignItems:'center', gap:6, marginTop:8, fontSize:'0.72rem', color:C.textSecondary, cursor:'pointer', userSelect:'none' }}>
+                  <input type="checkbox" checked={showProjected} onChange={e => setShowProjected(e.target.checked)} style={{ accentColor:C.navy, cursor:'pointer' }} />
+                  Show projected cadence
+                  <span style={{ fontSize:'0.62rem', fontWeight:700, color:C.navy, opacity:0.38, border:'1px solid '+C.border, borderRadius:4, padding:'1px 5px' }}>+n</span>
+                  <span style={{ color:C.textMuted }}>= where each contact’s next touch lands once the calls before it are made</span>
+                </label>
+                {showProjected && projection.unprojected > 0 && (
+                  <div style={{ fontSize:'0.7rem', color:C.amber, marginTop:5 }}>
+                    {projection.unprojected} contact{projection.unprojected === 1 ? '' : 's'} can’t be projected — their last call is already overdue, so there’s no date to count forward from. Reschedule them in Cadence Health and they’ll appear here.
+                  </div>
+                )}
               </div>
               <div style={{ display:'flex', alignItems:'center', gap:10 }}>
                 <button onClick={() => shiftWindow(-1)} title={'Jump back ' + CAPACITY_MONTHS_SHOWN + ' months'} style={navBtn}><i className="ti ti-chevron-left" style={{ fontSize:15 }} /></button>
@@ -922,14 +1021,22 @@
                             <div style={{ ...cellBase, justifyContent:'flex-start', padding:'0 10px', fontWeight:600, color:C.textPrimary, background:C.surface, minWidth:150 }}>{owner}</div>
                             {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(d => {
                               const calls = monthData[owner]?.[d] || [];
-                              const n = calls.length;
+                              const proj = projected[monthKey]?.[owner]?.[d] || [];
+                              const n = calls.length, p = proj.length;
                               const cs = capacityCellStyle(n);
                               const off = !isWorkday(new Date(m.getFullYear(), m.getMonth(), d));
+                              // Booked calls keep the solid load colour. A day with nothing
+                              // booked but cadence heading for it gets a faint wash instead —
+                              // it isn't real load yet, it just isn't as free as a blank cell
+                              // makes it look.
+                              const bg = n ? cs.background : (p ? 'rgba(0,26,74,0.05)' : 'transparent');
+                              const openable = n || p;
                               return (
-                                <div key={d} onClick={() => n && setOpenCell({ owner, monthKey, monthLabel, day: d })}
-                                  title={off ? (n ? `${n} call${n===1?'':'s'} scheduled on a weekend/holiday` : 'Weekend/holiday — no calls scheduled') : undefined}
-                                  style={{ ...cellBase, position:'relative', background:cs.background, color:cs.color, fontWeight: n ? 700 : 400, cursor: n ? 'pointer' : 'default' }}>
-                                  {n || ''}
+                                <div key={d} onClick={() => openable && setOpenCell({ owner, monthKey, monthLabel, day: d })}
+                                  title={[n ? n + ' booked' : 'nothing booked', p ? p + ' projected by cadence' : '', (n && p) ? (n + p) + ' total' : '', off ? 'weekend/holiday' : ''].filter(Boolean).join('  ·  ')}
+                                  style={{ ...cellBase, position:'relative', gap:2, background:bg, color:cs.color, fontWeight: n ? 700 : 400, cursor: openable ? 'pointer' : 'default' }}>
+                                  {n ? <span>{n}</span> : null}
+                                  {p ? <span style={{ fontSize:'0.6rem', fontWeight:700, color:C.navy, opacity:0.38 }}>{n ? '+' : ''}{p}</span> : null}
                                   {off && <span style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'1.1rem', fontWeight:800, color:C.red, opacity:0.5, pointerEvents:'none' }}>✕</span>}
                                 </div>
                               );
@@ -951,7 +1058,7 @@
                   <div style={{ fontFamily:C.fontDisplay, fontSize:'1.1rem', fontWeight:600, color:C.navy }}>{openCell.owner}</div>
                   <button onClick={() => setOpenCell(null)} style={{ background:'none', border:'none', cursor:'pointer', color:C.textMuted }}><i className="ti ti-x" style={{ fontSize:16 }} /></button>
                 </div>
-                <div style={{ fontSize:'0.78rem', color:C.textMuted, marginBottom:12 }}>{openCell.monthLabel} {openCell.day} — {openMonthCalls.length} call{openMonthCalls.length===1?'':'s'}</div>
+                <div style={{ fontSize:'0.78rem', color:C.textMuted, marginBottom:12 }}>{openCell.monthLabel} {openCell.day} — {openMonthCalls.length} booked{openProjected.length ? ' · ' + openProjected.length + ' projected' : ''}</div>
                 <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginBottom:14 }}>
                   {Object.keys(openTally).sort().map(tier => (
                     <span key={tier} style={{ fontSize:'0.72rem', fontWeight:600, color:C.navy, background:C.surfaceHover, border:'1px solid '+C.border, borderRadius:20, padding:'3px 10px' }}>{tier}: {openTally[tier]}</span>
@@ -969,6 +1076,20 @@
                     </div>
                   ))}
                 </div>
+                {openProjected.length > 0 && (
+                  <div style={{ marginTop:16 }}>
+                    <div style={{ fontSize:'0.7rem', fontWeight:700, letterSpacing:'0.05em', textTransform:'uppercase', color:C.textMuted }}>Projected by cadence ({openProjected.length})</div>
+                    <div style={{ fontSize:'0.72rem', color:C.textMuted, margin:'4px 0 8px', lineHeight:1.5 }}>Not on the board yet — this is where each contact’s next touch lands if the calls before it happen on time.</div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                      {openProjected.map((c, i) => (
+                        <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, padding:'8px 10px', border:'1px dashed '+C.border, borderRadius:8, background:C.bg, opacity:0.75 }}>
+                          <ZohoLink module="Contacts" id={c.cid} style={{ fontSize:'0.82rem', color:C.textPrimary }}>{c.name}</ZohoLink>
+                          <span style={{ fontSize:'0.68rem', fontWeight:700, color:C.textMuted, background:C.surfaceHover, borderRadius:20, padding:'2px 9px' }}>{c.tier}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

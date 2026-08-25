@@ -35,11 +35,17 @@ Deno.serve(async (req) => {
   const sb = serviceClient();
   if (!sb) return json({ error: "server not configured" }, 500);
 
-  // Require a signed-in user (their session token).
+  // Require a signed-in user (their session token). The service-role key acts as an
+  // ops identity for the read-only diagnostic below.
   const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
-  const { data: ures } = await sb.auth.getUser(token);
-  if (!ures?.user) return json({ error: "unauthorized" }, 401);
-  const senderName = ures.user.user_metadata?.full_name || ures.user.email || "TMG";
+  const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+  const isService = !!svcKey && token === svcKey;
+  let senderName = "TMG";
+  if (!isService) {
+    const { data: ures } = await sb.auth.getUser(token);
+    if (!ures?.user) return json({ error: "unauthorized" }, 401);
+    senderName = ures.user.user_metadata?.full_name || ures.user.email || "TMG";
+  }
 
   const QUO_KEY = Deno.env.get("QUO_API_KEY");
   const QUO_FROM = Deno.env.get("QUO_FROM_NUMBER");
@@ -47,6 +53,39 @@ Deno.serve(async (req) => {
 
   let payload: any = {};
   try { payload = await req.json(); } catch (_) { /* ignore */ }
+
+  // Read-only Quo health probe (ops/service only): checks whether the stored API key
+  // and from-number are still valid WITHOUT sending anything. Exists because send
+  // failures surface as a bare "Quo send failed" with the real reason discarded.
+  if (isService && payload.diag === true) {
+    const out: any = { from_number_len: QUO_FROM.length };
+    try {
+      const r = await fetch("https://api.quo.com/v1/phone-numbers", {
+        headers: { "Authorization": QUO_KEY },
+      });
+      const bodyText = await r.text();
+      let parsed: any = null; try { parsed = JSON.parse(bodyText); } catch (_) {}
+      const nums = (parsed?.data || []).map((n: any) => n?.number || n?.phoneNumber || null).filter(Boolean);
+      out.phone_numbers_probe = { status: r.status, numbers: nums, raw: nums.length ? undefined : bodyText.slice(0, 300) };
+      out.from_number_listed = nums.includes(QUO_FROM);
+    } catch (e) { out.phone_numbers_probe = { error: String((e as any)?.message || e) }; }
+    // Optional live-send probe: attempts ONE real send to the given number (ops
+    // passes their own line) and returns Quo's full response — the only way to see
+    // the true rejection reason when sends fail.
+    if (typeof payload.diag_send_to === "string" && /^\+1\d{10}$/.test(payload.diag_send_to)) {
+      try {
+        const sr = await fetch("https://api.quo.com/v1/messages", {
+          method: "POST",
+          headers: { "Authorization": QUO_KEY, "Content-Type": "application/json" },
+          body: JSON.stringify({ from: QUO_FROM, to: [payload.diag_send_to], content: "TMG SFFU diagnostic test — please ignore." }),
+        });
+        const st = await sr.text();
+        out.send_probe = { status: sr.status, body: st.slice(0, 500) };
+      } catch (e) { out.send_probe = { error: String((e as any)?.message || e) }; }
+    }
+    return json({ ok: true, diag: out });
+  }
+  if (isService) return json({ error: "service caller may only run diag" }, 403);
   const showingId = payload.showing_id;
   const body = (payload.body || "").toString().trim();
   if (!showingId || !body) return json({ error: "missing showing_id or body" }, 400);

@@ -854,6 +854,10 @@
     // EO and unclassified calls project nothing: they have no interval to
     // measure against (see CALL_INTERVALS).
     const PROJECTION_MAX_HOPS = 60;
+    // Projected load reads as diagonal hatching rather than a flat tint — a
+    // pattern says "predicted, not booked" at a glance, and it layers over the
+    // solid load colours without muddying them the way another wash would.
+    const PROJECTION_HATCH = 'repeating-linear-gradient(45deg, rgba(0,26,74,0.13) 0, rgba(0,26,74,0.13) 1.5px, transparent 1.5px, transparent 6px)';
     const EMPTY_PROJECTION = { byDate: {}, unprojected: 0 };
     function projectCadence(tasks, colMap, endIso) {
       const today = todayISO();
@@ -972,7 +976,10 @@
                 <label style={{ display:'inline-flex', alignItems:'center', gap:6, marginTop:8, fontSize:'0.72rem', color:C.textSecondary, cursor:'pointer', userSelect:'none' }}>
                   <input type="checkbox" checked={showProjected} onChange={e => setShowProjected(e.target.checked)} style={{ accentColor:C.navy, cursor:'pointer' }} />
                   Show projected cadence
-                  <span style={{ fontSize:'0.62rem', fontWeight:700, color:C.navy, opacity:0.38, border:'1px solid '+C.border, borderRadius:4, padding:'1px 5px' }}>+n</span>
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:0, border:'1px solid '+C.border, borderRadius:4, overflow:'hidden' }}>
+                    <span style={{ width:16, height:16, background:PROJECTION_HATCH, display:'block' }} />
+                    <span style={{ fontSize:'0.62rem', fontWeight:700, color:C.navy, opacity:0.38, padding:'1px 5px' }}>+n</span>
+                  </span>
                   <span style={{ color:C.textMuted }}>= where each contact’s next touch lands once the calls before it are made</span>
                 </label>
                 {showProjected && projection.unprojected > 0 && (
@@ -1029,7 +1036,8 @@
                               // booked but cadence heading for it gets a faint wash instead —
                               // it isn't real load yet, it just isn't as free as a blank cell
                               // makes it look.
-                              const bg = n ? cs.background : (p ? 'rgba(0,26,74,0.05)' : 'transparent');
+                              const base = n ? cs.background : 'transparent';
+                              const bg = p ? (PROJECTION_HATCH + ', ' + base) : base;
                               const openable = n || p;
                               return (
                                 <div key={d} onClick={() => openable && setOpenCell({ owner, monthKey, monthLabel, day: d })}

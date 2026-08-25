@@ -4978,14 +4978,194 @@ Rules:
       });
     }
 
-    function CallsTab({ dark, ownerName }) {
+    // ─── Call capacity: cadence math + projection ────────────────────
+    //  Ported verbatim (same constants, same rules) from /crm-tasks so the
+    //  numbers on this tab and the numbers on the CRM Capacity grid can never
+    //  disagree. Touch-call cadence = expected gap in days from one call to the
+    //  next, by the CONTACT owner and the touch class. Tarek runs a longer
+    //  cadence than everyone else.
+    const CALL_INTERVALS = { tarek: { A: 45, B: 90, C: 120 }, other: { A: 30, B: 60, C: 90 } };
+    const cParse = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ''); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
+    const cDateOnly = (s) => { const m = /^(\d{4}-\d{2}-\d{2})/.exec(s || ''); return m ? m[1] : null; };
+    function cAddDays(iso, days) {
+      const b = cDateOnly(iso); if (!b) return null;
+      const p = b.split('-').map(Number);
+      const d = new Date(Date.UTC(p[0], p[1] - 1, p[2])); if (isNaN(d)) return null;
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    }
+    // The A/B/C intervals are fixed day counts, so "last call + interval" lands
+    // on a weekend or holiday about 2 days in 7 by construction. Every date the
+    // cadence produces goes through here so nothing is ever projected onto a
+    // day nobody is working.
+    function cCadenceDate(iso, days) {
+      const raw = cAddDays(iso, days); if (!raw) return raw;
+      const d = cParse(raw);
+      return d ? cIso(cNextWorkday(d)) : raw;
+    }
+
+    // A booked call is not the end of a contact's cadence — once it's made the
+    // NEXT touch lands `interval` days later, and so on. Counting only calls
+    // that exist as Zoho tasks today makes future months look wide open when
+    // the cadence is already rolling into them. One chain per CONTACT, seeded
+    // from their LAST booked call, so a contact with two calls on the board
+    // isn't counted twice.
+    //
+    // A contact whose last call is overdue or sits on a weekend/holiday is not
+    // projected at all — that date is about to be re-slotted, so the next touch
+    // genuinely isn't knowable. They're counted as `unprojected` and reported
+    // instead. EO and unclassified calls have no interval, so they project
+    // nothing.
+    const CALL_PROJECTION_MAX_HOPS = 60;
+    function projectCallCadence(calls, endIso, todayIso) {
+      const latest = new Map();
+      (calls || []).forEach(t => {
+        if (!t.Due_Date || /completed/i.test(t.Status || '')) return;
+        const tier = callTier(t.Subject);
+        if (!CALL_INTERVALS.other[tier]) return;
+        const key = t.cid || t.cname || t.id;
+        const prev = latest.get(key);
+        if (!prev || t.Due_Date > prev.iso) latest.set(key, { iso: t.Due_Date, tier, owner: t.owner, name: t.cname || t.Subject, cid: t.cid });
+      });
+      const out = {};          // owner -> 'YYYY-MM-DD' -> [{ name, tier, cid }]
+      let unprojected = 0;
+      latest.forEach(seed => {
+        const bucket = /tarek/i.test(seed.owner || '') ? 'tarek' : 'other';
+        const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[seed.tier];
+        if (!interval) return;
+        const seedDate = cParse(seed.iso);
+        if (seed.iso < todayIso || !seedDate || !cIsWorkday(seedDate)) { unprojected++; return; }
+        let cur = seed.iso;
+        for (let hop = 1; hop <= CALL_PROJECTION_MAX_HOPS; hop++) {
+          cur = cCadenceDate(cur, interval);
+          if (!cur || cur > endIso) break;
+          const byOwner = (out[seed.owner] = out[seed.owner] || {});
+          (byOwner[cur] = byOwner[cur] || []).push({ name: seed.name, tier: seed.tier, cid: seed.cid });
+        }
+      });
+      return { byOwner: out, unprojected };
+    }
+
+    // Same load bands /crm-tasks uses: 0 blank, 1-4 light, 5-7 comfortable, 8+
+    // overloaded. Kept pastel — this is meant to be scanned, not to shout.
+    function capTone(n, dark) {
+      if (!n) return { bg: 'transparent', fg: dark ? 'rgba(255,255,255,0.35)' : '#B4B2A9' };
+      if (n >= 8) return dark ? { bg: 'rgba(248,113,113,0.22)', fg: '#F87171' } : { bg: '#FBE3E0', fg: '#A5342A' };
+      if (n >= 5) return dark ? { bg: 'rgba(93,202,165,0.18)', fg: '#5DCAA5' } : { bg: '#E2F3E8', fg: '#1E6B40' };
+      return dark ? { bg: 'rgba(201,164,90,0.20)', fg: '#C9A45A' } : { bg: '#FFF3D6', fg: '#8A6100' };
+    }
+    // Projected load reads as diagonal hatching, not another flat tint — a
+    // pattern says "predicted, not booked" without muddying the load colour
+    // underneath it.
+    const capHatch = (dark) => dark
+      ? 'repeating-linear-gradient(45deg, rgba(201,164,90,0.20) 0, rgba(201,164,90,0.20) 1.5px, transparent 1.5px, transparent 6px)'
+      : 'repeating-linear-gradient(45deg, rgba(0,26,74,0.13) 0, rgba(0,26,74,0.13) 1.5px, transparent 1.5px, transparent 6px)';
+
+    const CAL_MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const CAL_DOW = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+    // ─── Team-wide open calls (capacity source) ──────────────────────
+    //  The per-day search the call list uses is capped at 200 rows and can't
+    //  page, which is fine for one day but useless for a whole month. So the
+    //  Capacity view pulls the org's OPEN tasks through list_tasks the same way
+    //  /crm-tasks does — page-number paging, Completed excluded server-side —
+    //  then keeps only the calls. It's ~10 sequential requests, so it loads
+    //  once on demand and is cached; there's a Refresh for when it's stale.
+    const CALL_ORG_KEY = 'tmg-calls-org-v1';
+    function loadOrgCache() {
+      try {
+        const p = JSON.parse(localStorage.getItem(CALL_ORG_KEY) || 'null');
+        if (!p || !Array.isArray(p.calls) || !p.cachedAt) return null;
+        return p;
+      } catch (e) { return null; }
+    }
+    function saveOrgCache(payload) {
+      try { localStorage.setItem(CALL_ORG_KEY, JSON.stringify({ ...payload, cachedAt: Date.now() })); }
+      catch (e) { /* quota — just skip caching this round */ }
+    }
+    function callAgo(ms) {
+      const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+      if (s < 60) return 'just now';
+      const m = Math.round(s / 60); if (m < 60) return m + 'm ago';
+      const h = Math.round(m / 60); if (h < 24) return h + 'h ago';
+      return Math.round(h / 24) + 'd ago';
+    }
+    // Zoho's Search API (which list_tasks uses whenever status_not is set)
+    // never hands back a page_token and stops returning rows past ~2,000, so
+    // page 11+ comes back empty even while more_records is still true. That
+    // ceiling is real and shared with /crm-tasks — surfaced as `capped` rather
+    // than quietly showing a short month.
+    const ORG_PAGE_CEILING = 10;
+    async function fetchOrgOpenCalls(typeField, onProgress) {
+      let all = [], page = 1, token = null, more = true, capped = false;
+      while (more) {
+        const args = {
+          action: 'list_tasks', per_page: 200, status_not: 'Completed',
+          fields: ['Owner', 'Subject', 'Status', 'Due_Date', 'Who_Id', typeField].filter(Boolean),
+        };
+        if (token) args.page_token = token; else args.page = page;
+        const res = await callZoho(args);
+        if (!res.ok) {
+          if (page === 1 && !token) throw new Error((res.data && res.data.error) || 'Could not load team calls.');
+          break;
+        }
+        all = all.concat((res.data && res.data.tasks) || []);
+        onProgress && onProgress(all.length);
+        more = !!(res.data.info && res.data.info.more_records);
+        token = (res.data.info && res.data.info.next_page_token) || null;
+        if (more && !token && page >= ORG_PAGE_CEILING) { capped = true; break; }
+        page++;
+      }
+      // The paged result set isn't frozen between requests, so the same record
+      // can arrive on two pages — dedupe before anything counts them.
+      const seen = new Set();
+      const calls = [];
+      all.forEach(t => {
+        if (!t || !t.id || seen.has(t.id)) return;
+        seen.add(t.id);
+        if (!isCallTask(t, typeField)) return;
+        calls.push({
+          id: t.id,
+          Subject: t.Subject || '',
+          Status: t.Status || '',
+          Due_Date: (t.Due_Date || '').slice(0, 10),
+          owner: (t.Owner && t.Owner.name) || 'Unassigned',
+          cid: (t.Who_Id && t.Who_Id.id) || null,
+          cname: (t.Who_Id && t.Who_Id.name) || '',
+        });
+      });
+      return { calls, capped };
+    }
+    // Preview fixture — localhost has no Zoho connection.
+    function devOrgCalls() {
+      const owners = ['Tarek Morshed', 'Kyle Baird', 'Brett Sanders'];
+      const names = ['Steve Johnson', 'Jonathan Hewitt', 'Nick Spiller', 'Courtney Gill', 'Adriana Culling', 'Daksha Patel', 'Chris Gober', 'Ariana Hall', 'Jeremy Bell', 'Michael Beeler', 'Melissa Hudgens', 'Grant Hudgens'];
+      const tiers = ['A', 'B', 'C', 'EO'];
+      const out = [];
+      const start = new Date(); start.setDate(1);
+      for (let i = 0; i < 260; i++) {
+        const d = new Date(start); d.setDate(d.getDate() + (i * 3) % 90);
+        const k = i % names.length, tier = tiers[i % tiers.length];
+        out.push({
+          id: 'dev-org-' + i, Subject: tier + ' Touch Call: ' + names[k], Status: 'Not Started',
+          Due_Date: cIso(cNextWorkday(d)), owner: owners[i % owners.length],
+          cid: '5500000000000' + String(1000 + k), cname: names[k],
+        });
+      }
+      return out;
+    }
+
+    function CallsTab({ dark, ownerName, isAdmin }) {
       const J = "'Jost', sans-serif";
+      const [view, setView] = useState('list');       // 'list' | 'capacity' (admin only)
+      const [agent, setAgent] = useState('');         // '' = all agents; otherwise an owner name
+      const [collapsed, setCollapsed] = useState({}); // owner -> true, in the grouped "all agents" list
       const [day, setDay] = useState('today');
       const [briefOpen, setBriefOpen] = useState(() => localStorage.getItem('tmg-coach-open') !== 'false');
       useEffect(() => { localStorage.setItem('tmg-coach-open', briefOpen ? 'true' : 'false'); }, [briefOpen]);
 
       const [buckets, setBuckets] = useState(null);   // { yesterday:[], today:[], tomorrow:[] } | null while loading
-      const [overdue, setOverdue] = useState(null);   // { count, capped } | null
+      const [overdue, setOverdue] = useState(null);   // { list, count, capped } | null
       const [clipped, setClipped] = useState({});     // per-bucket "Zoho page was full" flag
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState(false);
@@ -5003,18 +5183,27 @@ Rules:
         return { yesterday: cIso(cPrevWorkday(p)), today: cIso(t), tomorrow: cIso(cNextWorkday(n)) };
       }, []);
 
-      // Only this agent's calls. myName falls back to 'Me' when the profile has
-      // no name — filtering on that would substring-match real names like
-      // "Mel", so we'd rather show nothing and say why.
-      const owner = (ownerName && ownerName !== 'Me' && ownerName.trim()) ? ownerName.trim() : '';
+      // An agent sees only their own calls. myName falls back to 'Me' when the
+      // profile has no name — filtering on that would substring-match real
+      // names like "Mel", so we'd rather show nothing and say why.
+      // An ADMIN gets the whole team: the same queries run WITHOUT the owner
+      // filter (the edge function applies that filter to the page it fetched,
+      // so dropping it costs nothing extra), and the picking happens here.
+      const myOwner = (ownerName && ownerName !== 'Me' && ownerName.trim()) ? ownerName.trim() : '';
+      const team = !!isAdmin;
 
       async function load() {
-        if (!owner) { setBuckets({ yesterday: [], today: [], tomorrow: [] }); setOverdue({ count: 0, capped: false }); return; }
+        if (!team && !myOwner) { setBuckets({ yesterday: [], today: [], tomorrow: [] }); setOverdue({ list: [], count: 0, capped: false }); return; }
         setBusy(true); setErr('');
         if (callsIsDev()) {
           await new Promise(r => setTimeout(r, 250));
-          setBuckets({ yesterday: devCalls(dates.yesterday, 6, 0), today: devCalls(dates.today, 5, 3), tomorrow: devCalls(dates.tomorrow, 4, 6) });
-          setOverdue({ count: 188, capped: false });
+          const stamp = (list, o) => list.map(t => ({ ...t, Owner: { name: o } }));
+          const spread = (iso, n, seed) => team
+            ? stamp(devCalls(iso, n, seed), 'Tarek Morshed').concat(stamp(devCalls(iso, Math.max(1, n - 2), seed + 4), 'Kyle Baird'))
+            : stamp(devCalls(iso, n, seed), myOwner || 'Me');
+          setBuckets({ yesterday: spread(dates.yesterday, 6, 0), today: spread(dates.today, 5, 3), tomorrow: spread(dates.tomorrow, 4, 6) });
+          const od = spread(dates.yesterday, 8, 2);
+          setOverdue({ list: od, count: od.length, capped: false });
           setBusy(false);
           return;
         }
@@ -5026,7 +5215,8 @@ Rules:
           // calls out client-side rather than showing an error.
           const run = async (useType) => {
             const q = (extra) => callZoho(Object.assign(
-              { action: 'search_tasks', per_page: 200, owner },
+              { action: 'search_tasks', per_page: 200 },
+              team ? {} : { owner: myOwner },
               useType ? { type: 'Call', type_field: typeField } : {},
               extra
             ));
@@ -5044,19 +5234,36 @@ Rules:
           const norm = (r) => ((r.data && r.data.tasks) || []).filter(t => isCallTask(t, typeField));
           const full = (r) => ((r.data && r.data.tasks) || []).length >= 200;
           setBuckets({ yesterday: norm(res[0]), today: norm(res[1]), tomorrow: norm(res[2]) });
-          // Zoho's search API caps a response at 200 rows and the owner filter is
-          // applied to that page, so a full page means the day may be clipped.
-          // Say so rather than quietly showing a short list.
+          // Zoho's search API caps a response at 200 rows, so a full page means
+          // the day may be clipped. Say so rather than quietly showing a short list.
           setClipped({ yesterday: full(res[0]), today: full(res[1]), tomorrow: full(res[2]) });
-          setOverdue({ count: norm(res[3]).length, capped: ((res[3].data && res[3].data.tasks) || []).length >= 200 });
+          const od = norm(res[3]);
+          setOverdue({ list: od, count: od.length, capped: ((res[3].data && res[3].data.tasks) || []).length >= 200 });
         } catch (e) {
           setErr((e && e.message) || String(e));
           setBuckets({ yesterday: [], today: [], tomorrow: [] });
         } finally { setBusy(false); }
       }
-      useEffect(() => { load(); }, [owner]);
+      useEffect(() => { load(); }, [myOwner, team]);
 
-      const shown = buckets ? (buckets[day] || []) : null;
+      const ownerOf = (t) => (t.Owner && t.Owner.name) || 'Unassigned';
+
+      // The agent picker is built from the people who actually own calls in
+      // Zoho — not from the TMG staff list — so the names always match what
+      // the owner filter is comparing against, and nobody with calls is
+      // missing from the dropdown.
+      const agents = useMemo(() => {
+        if (!team) return [];
+        const set = new Set();
+        if (buckets) ['yesterday', 'today', 'tomorrow'].forEach(k => (buckets[k] || []).forEach(t => set.add(ownerOf(t))));
+        if (overdue && overdue.list) overdue.list.forEach(t => set.add(ownerOf(t)));
+        return Array.from(set).sort();
+      }, [team, buckets, overdue]);
+
+      const mine = (list) => (agent ? (list || []).filter(t => ownerOf(t) === agent) : (list || []));
+      const shown = buckets ? mine(buckets[day] || []) : null;
+      const overdueShown = overdue ? mine(overdue.list || []).length : 0;
+
       const shownKey = shown ? shown.map(t => (t.Who_Id && t.Who_Id.id) || '').join(',') : '';
       useEffect(() => {
         if (!shownKey) return;
@@ -5127,24 +5334,91 @@ Rules:
       // matching the priority order the CRM cadence packer uses.
       const RANK = { A: 0, B: 1, C: 2, EO: 3, Other: 4 };
       const brief = useMemo(() => {
-        const list = (buckets && buckets.today) || [];
         if (!buckets) return [];
+        const list = mine(buckets.today || []);
+        const who = agent ? agent.split(' ')[0] + ' has' : team ? 'The team has' : '';
         const lines = [];
         const mix = {};
         list.forEach(t => { const g = callTier(t.Subject); mix[g] = (mix[g] || 0) + 1; });
         const mixTxt = ['A', 'B', 'C', 'EO'].filter(g => mix[g]).map(g => mix[g] + ' ' + g).join(' · ');
         const openList = list.filter(t => !/completed/i.test(t.Status || ''));
-        if (!list.length) lines.push('No calls on the board for today.');
-        else lines.push(list.length + ' call' + (list.length === 1 ? '' : 's') + ' today' + (mixTxt ? ' — ' + mixTxt : '') + '. ' + (list.length - openList.length) + ' already logged.');
+        if (!list.length) lines.push(who ? who + ' no calls on the board for today.' : 'No calls on the board for today.');
+        else lines.push((who ? who + ' ' : '') + list.length + ' call' + (list.length === 1 ? '' : 's') + ' today' + (mixTxt ? ' — ' + mixTxt : '') + '. ' + (list.length - openList.length) + ' already logged.');
         const top = openList.slice().sort((a, b) => (RANK[callTier(a.Subject)] ?? 9) - (RANK[callTier(b.Subject)] ?? 9))[0];
-        if (top) lines.push('Start with ' + ((top.Who_Id && top.Who_Id.name) || top.Subject) + ' — ' + callTier(top.Subject) + ' touch.');
-        if (overdue && overdue.count) lines.push(overdue.count + (overdue.capped ? '+' : '') + ' call' + (overdue.count === 1 ? '' : 's') + ' still overdue. Clear the oldest tier-A ones first.');
+        if (top) lines.push('Start with ' + ((top.Who_Id && top.Who_Id.name) || top.Subject) + ' — ' + callTier(top.Subject) + ' touch' + (team && !agent ? ' (' + ownerOf(top) + ')' : '') + '.');
+        if (overdueShown) lines.push(overdueShown + (overdue && overdue.capped ? '+' : '') + ' call' + (overdueShown === 1 ? '' : 's') + ' still overdue. Clear the oldest tier-A ones first.');
         return lines;
-      }, [buckets, overdue]);
+      }, [buckets, overdue, agent, team]);
 
       const botMsg = (t, key) => <div key={key} style={{ alignSelf: 'flex-start', marginRight: '8%', background: dark ? '#0A1E44' : '#F3EBDA', color: dark ? '#fff' : '#001A4A', borderRadius: '8px 8px 8px 2px', padding: '6px 8px', fontFamily: J, fontSize: 8, lineHeight: 1.45 }}>{t}</div>;
 
-      const todayCount = buckets ? (buckets.today || []).length : null;
+      const todayCount = buckets ? mine(buckets.today || []).length : null;
+
+      // One call row, shared by the flat list and the per-agent groups.
+      const callRow = (t, last) => {
+        const grade = callTier(t.Subject);
+        const cname = (t.Who_Id && t.Who_Id.name) || t.Subject || 'Unknown';
+        const cid = t.Who_Id && t.Who_Id.id;
+        const av = toneOf(grade), bd = badgeOf(grade), st = statusInfo(statusOf(t));
+        // `undefined` = not looked up yet, `null` = looked up and the contact
+        // genuinely has no number on file — they read differently.
+        const looked = !cid || (cid in phones);
+        const phone = cid ? phones[cid] : null;
+        const href = zohoContactUrl(cid);
+        return (
+          <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: av.bg, color: av.col, fontFamily: J, fontSize: 11, fontWeight: 600 }}>{initials(cname)}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {href
+                ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ display: 'block', fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cname}</a>
+                : <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cname}</div>}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                <i className={`ti ${st.icon}`} style={{ fontSize: 11, color: st.col }} />
+                <span style={{ fontFamily: J, fontSize: 8, color: st.num }}>{phone || (looked ? 'No number' : '…')}</span>
+                {team && !agent && <span style={{ fontFamily: J, fontSize: 8, color: mutedCol }}>· {ownerOf(t)}</span>}
+              </div>
+            </div>
+            <div style={{ width: 16, height: 16, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: bd.bg, color: bd.col, fontFamily: J, fontSize: 8, fontWeight: 700 }}>{grade === 'Other' ? '?' : grade}</div>
+            {phone
+              ? <a href={'tel:' + String(phone).replace(/[^\d+]/g, '')} style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, background: callBtnBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none' }}>
+                  <i className="ti ti-phone" style={{ fontSize: 12 }} />
+                </a>
+              : <div style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, background: navInBg, color: navInCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <i className="ti ti-phone-off" style={{ fontSize: 12 }} />
+                </div>}
+          </div>
+        );
+      };
+
+      // With "All agents" picked, the day's calls are grouped under a tappable
+      // per-agent header — that's the drop-down-per-agent view, without having
+      // to switch the picker back and forth to see who is carrying what.
+      const groupedRows = () => {
+        const by = {};
+        (shown || []).forEach(t => { const o = ownerOf(t); (by[o] = by[o] || []).push(t); });
+        const names = Object.keys(by).sort();
+        return names.map(o => {
+          const list = by[o];
+          const shut = !!collapsed[o];
+          const od = overdue ? (overdue.list || []).filter(t => ownerOf(t) === o).length : 0;
+          return (
+            <div key={o}>
+              <div onClick={() => setCollapsed(c => ({ ...c, [o]: !shut }))}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 14px', cursor: 'pointer', background: dark ? '#0A1730' : '#F9F7F4', borderBottom: `1px solid ${rowBord}`, position: 'sticky', top: 0, zIndex: 1 }}>
+                <i className={`ti ti-chevron-${shut ? 'right' : 'down'}`} style={{ fontSize: 12, color: mutedCol }} />
+                <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{o}</span>
+                {od > 0 && <span style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: dark ? '#F87171' : '#9B1C1C' }}>{od} overdue</span>}
+                <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: addCol, background: addBg, borderRadius: 20, padding: '2px 8px' }}>{list.length}</span>
+              </div>
+              {!shut && list.map((t, i) => callRow(t, i === list.length - 1))}
+            </div>
+          );
+        });
+      };
+
+      // Agent picker — drives the call list, and Capacity builds the same
+      // control off its own (wider) owner list.
+      const agentPicker = <AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={agents} />;
 
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -5152,13 +5426,39 @@ Rules:
           <div style={{ background: bannerBg, padding: '9px 16px', textAlign: 'center', flexShrink: 0 }}>
             <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#fff' }}>
               {buckets === null
-                ? 'Loading your calls…'
-                : (todayCount + ' today' + (overdue && overdue.count ? '  ·  ' + overdue.count + (overdue.capped ? '+' : '') + ' overdue' : ''))}
+                ? 'Loading calls…'
+                : (todayCount + ' today' + (overdueShown ? '  ·  ' + overdueShown + (overdue && overdue.capped ? '+' : '') + ' overdue' : '') + (team ? '  ·  ' + (agent || 'All agents') : ''))}
             </span>
           </div>
+
+          {/* Admin sub-tabs — agents keep the single-purpose call list */}
+          {team && (
+            <div style={{ display: 'flex', background: dark ? '#040C1C' : '#FCFBF8', borderBottom: `1px solid ${coachBord}`, flexShrink: 0 }}>
+              {[['list', 'Call List'], ['capacity', 'Capacity']].map(([id, label]) => {
+                const on = view === id;
+                return (
+                  <div key={id} onClick={() => setView(id)} style={{
+                    flex: 1, textAlign: 'center', cursor: 'pointer',
+                    fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, textTransform: 'uppercase',
+                    padding: '9px 4px 8px',
+                    color: on ? (dark ? '#C9A45A' : '#001A4A') : (dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9'),
+                    borderBottom: `2px solid ${on ? (dark ? '#C9A45A' : '#AD832F') : 'transparent'}`,
+                    marginBottom: -1,
+                  }}>{label}</div>
+                );
+              })}
+            </div>
+          )}
+
+          {team && view === 'capacity' ? (
+            <CapacityView dark={dark} agent={agent} setAgent={setAgent} agents={agents} />
+          ) : (
+          <React.Fragment>
           {/* Header */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '9px 14px 7px', flexShrink: 0 }}>
-            <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Call List</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '9px 14px 7px', gap: 10, flexShrink: 0 }}>
+            {team
+              ? agentPicker
+              : <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Call List</div>}
             <button onClick={() => !busy && load()} disabled={busy} title="Refresh from Zoho" style={{ width: 24, height: 24, borderRadius: '50%', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1, background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
               <i className="ti ti-refresh" style={{ fontSize: 12 }} />
             </button>
@@ -5167,7 +5467,7 @@ Rules:
           <div style={{ margin: '0 14px 10px', borderRadius: 10, overflow: 'hidden', display: 'flex', flexShrink: 0 }}>
             {['yesterday', 'today', 'tomorrow'].map(d => {
               const on = day === d;
-              const n = buckets ? (buckets[d] || []).length : null;
+              const n = buckets ? mine(buckets[d] || []).length : null;
               return (
                 <button key={d} onClick={() => setDay(d)} style={{
                   flex: 1, padding: '6px 4px', textAlign: 'center', border: 'none', cursor: 'pointer',
@@ -5181,43 +5481,10 @@ Rules:
           <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
             {err && <div style={{ padding: '14px', fontFamily: J, fontSize: 9, color: dark ? '#F87171' : '#9B1C1C' }}>{err}</div>}
             {!err && buckets === null && <div style={{ padding: '20px 14px', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>Loading…</div>}
-            {!err && buckets !== null && !owner && <div style={{ padding: '20px 14px', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>Add your first and last name in your profile to see your calls.</div>}
-            {!err && buckets !== null && owner && shown.length === 0 && <div style={{ padding: '20px 14px', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>No calls scheduled for {day}.</div>}
+            {!err && buckets !== null && !team && !myOwner && <div style={{ padding: '20px 14px', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>Add your first and last name in your profile to see your calls.</div>}
+            {!err && buckets !== null && (team || myOwner) && shown.length === 0 && <div style={{ padding: '20px 14px', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>No calls scheduled for {day}{agent ? ' — ' + agent : ''}.</div>}
             {!err && clipped[day] && <div style={{ padding: '7px 14px', fontFamily: J, fontSize: 8, color: dark ? '#F87171' : '#9B1C1C' }}>Zoho returned a full page for this day — the list may be incomplete. Check /crm-tasks for the full view.</div>}
-            {!err && buckets !== null && shown.map((t, i) => {
-              const grade = callTier(t.Subject);
-              const cname = (t.Who_Id && t.Who_Id.name) || t.Subject || 'Unknown';
-              const cid = t.Who_Id && t.Who_Id.id;
-              const av = toneOf(grade), bd = badgeOf(grade), st = statusInfo(statusOf(t));
-              // `undefined` = not looked up yet, `null` = looked up and the
-              // contact genuinely has no number on file — they read differently.
-              const looked = !cid || (cid in phones);
-              const phone = cid ? phones[cid] : null;
-              const href = zohoContactUrl(cid);
-              const last = i === shown.length - 1;
-              return (
-                <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
-                  <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: av.bg, color: av.col, fontFamily: J, fontSize: 11, fontWeight: 600 }}>{initials(cname)}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {href
-                      ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ display: 'block', fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cname}</a>
-                      : <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cname}</div>}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                      <i className={`ti ${st.icon}`} style={{ fontSize: 11, color: st.col }} />
-                      <span style={{ fontFamily: J, fontSize: 8, color: st.num }}>{phone || (looked ? 'No number' : '…')}</span>
-                    </div>
-                  </div>
-                  <div style={{ width: 16, height: 16, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: bd.bg, color: bd.col, fontFamily: J, fontSize: 8, fontWeight: 700 }}>{grade === 'Other' ? '?' : grade}</div>
-                  {phone
-                    ? <a href={'tel:' + String(phone).replace(/[^\d+]/g, '')} style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, background: callBtnBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none' }}>
-                        <i className="ti ti-phone" style={{ fontSize: 12 }} />
-                      </a>
-                    : <div style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, background: navInBg, color: navInCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <i className="ti ti-phone-off" style={{ fontSize: 12 }} />
-                      </div>}
-                </div>
-              );
-            })}
+            {!err && buckets !== null && (team && !agent ? groupedRows() : shown.map((t, i) => callRow(t, i === shown.length - 1)))}
           </div>
           {/* Call Brief — derived from the real list, no model in the loop */}
           <div style={{ flexShrink: 0, background: coachBg, borderTop: `1px solid ${coachBord}` }}>
@@ -5232,10 +5499,292 @@ Rules:
             </div>
             {briefOpen && (
               <div style={{ padding: '7px 12px 9px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {brief.length ? brief.map((l, i) => botMsg(l, 'b' + i)) : botMsg('Loading your board…', 'b0')}
+                {brief.length ? brief.map((l, i) => botMsg(l, 'b' + i)) : botMsg('Loading the board…', 'b0')}
               </div>
             )}
           </div>
+          </React.Fragment>
+          )}
+        </div>
+      );
+    }
+
+    // ─── Call Capacity (admin) ───────────────────────────────────────
+    //  The phone-sized counterpart to the /crm-tasks Capacity grid: same load
+    //  bands, same ✕ on non-working days, same projected-cadence hatching — but
+    //  one month at a time in a 7-column calendar instead of a wide
+    //  person × day matrix, because that grid can't be read on a phone.
+    // The picker is one control shared by both views, so switching agents on
+    // the call list keeps the same person selected in Capacity and back again.
+    function AgentPicker({ dark, agent, setAgent, agents }) {
+      return (
+        <select value={agent} onChange={e => setAgent(e.target.value)}
+          style={{ flex: 1, minWidth: 0, fontFamily: "'Jost', sans-serif", fontSize: 9, fontWeight: 600, color: dark ? '#FFFFFF' : '#001A4A', background: dark ? '#040C1C' : '#FFFFFF', border: `1px solid ${dark ? '#0D1E3A' : '#EDE7DC'}`, borderRadius: 8, padding: '6px 8px', cursor: 'pointer' }}>
+          <option value="">All agents{agents.length ? ' (' + agents.length + ')' : ''}</option>
+          {agents.map(a => <option key={a} value={a}>{a}</option>)}
+        </select>
+      );
+    }
+
+    function CapacityView({ dark, agent, setAgent, agents }) {
+      const J = "'Jost', sans-serif";
+      const [calls, setCalls] = useState(null);       // trimmed org-wide open calls | null while loading
+      const [capped, setCapped] = useState(false);
+      const [cachedAt, setCachedAt] = useState(null);
+      const [progress, setProgress] = useState(0);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [anchor, setAnchor] = useState(() => { const d = new Date(); d.setDate(1); return d; });
+      const [showProjected, setShowProjected] = useState(true);
+      const [openDay, setOpenDay] = useState(null);   // 'YYYY-MM-DD' | null
+
+      const headTitle = dark ? '#FFFFFF' : '#001A4A';
+      const mutedCol  = dark ? 'rgba(255,255,255,0.4)' : '#888888';
+      const bord      = dark ? '#0D1E3A' : '#EDE7DC';
+      const surfaceBg = dark ? '#040C1C' : '#FFFFFF';
+      const addBg     = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+      const addCol    = dark ? '#C9A45A' : '#AD832F';
+      const redCol    = dark ? '#F87171' : '#9B1C1C';
+
+      async function load(force) {
+        setErr('');
+        if (!force) {
+          const c = loadOrgCache();
+          if (c) { setCalls(c.calls); setCapped(!!c.capped); setCachedAt(c.cachedAt); return; }
+        }
+        setBusy(true); setProgress(0);
+        if (callsIsDev()) {
+          await new Promise(r => setTimeout(r, 400));
+          const d = devOrgCalls();
+          setCalls(d); setCapped(false); setCachedAt(Date.now()); setBusy(false);
+          return;
+        }
+        try {
+          const typeField = await resolveTaskTypeField();
+          const { calls: got, capped: cap } = await fetchOrgOpenCalls(typeField, setProgress);
+          setCalls(got); setCapped(cap); setCachedAt(Date.now());
+          saveOrgCache({ calls: got, capped: cap });
+        } catch (e) {
+          setErr((e && e.message) || String(e));
+          setCalls([]);
+        } finally { setBusy(false); }
+      }
+      useEffect(() => { load(false); }, []);
+
+      const todayIso = useMemo(() => cIso(new Date()), []);
+      const year = anchor.getFullYear(), month = anchor.getMonth();
+      const monthKey = year + '-' + String(month + 1).padStart(2, '0');
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      const endIso = cIso(new Date(year, month + 1, 0));
+
+      // Everyone who owns an open call, so the picker in this view lists the
+      // whole roster rather than only whoever happens to have a call this month.
+      const owners = useMemo(() => Array.from(new Set((calls || []).map(c => c.owner))).sort(), [calls]);
+      const pickable = useMemo(() => Array.from(new Set((agents || []).concat(owners))).sort(), [agents, owners]);
+
+      const booked = useMemo(() => {
+        const out = {};   // owner -> iso -> [call]
+        (calls || []).forEach(c => {
+          if (!c.Due_Date) return;
+          const byOwner = (out[c.owner] = out[c.owner] || {});
+          (byOwner[c.Due_Date] = byOwner[c.Due_Date] || []).push(c);
+        });
+        return out;
+      }, [calls]);
+
+      const projection = useMemo(
+        () => showProjected ? projectCallCadence(calls, endIso, todayIso) : { byOwner: {}, unprojected: 0 },
+        [calls, endIso, todayIso, showProjected]);
+
+      const monthTotals = useMemo(() => {
+        const inMonth = (iso) => iso && iso.slice(0, 7) === monthKey;
+        return owners.map(o => {
+          const b = Object.keys(booked[o] || {}).filter(inMonth).reduce((n, k) => n + booked[o][k].length, 0);
+          const pm = projection.byOwner[o] || {};
+          const p = Object.keys(pm).filter(inMonth).reduce((n, k) => n + pm[k].length, 0);
+          return { owner: o, booked: b, projected: p };
+        }).sort((a, b) => (b.booked + b.projected) - (a.booked + a.projected));
+      }, [owners, booked, projection, monthKey]);
+
+      const dayBooked = (iso) => (agent ? ((booked[agent] || {})[iso] || []) : []);
+      const dayProjected = (iso) => (agent ? ((projection.byOwner[agent] || {})[iso] || []) : []);
+
+      const navBtn = { width: 26, height: 26, borderRadius: '50%', border: 'none', cursor: 'pointer', background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
+      const lead = new Date(year, month, 1).getDay();   // blank cells before the 1st
+      const cells = Array.from({ length: lead }, () => null).concat(Array.from({ length: daysInMonth }, (_, i) => i + 1));
+
+      const openList = openDay ? dayBooked(openDay) : [];
+      const openProj = openDay ? dayProjected(openDay) : [];
+      const openTally = {};
+      openList.forEach(c => { const t = callTier(c.Subject); openTally[t] = (openTally[t] || 0) + 1; });
+
+      return (
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {/* Agent + month controls */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px 6px', flexShrink: 0 }}>
+            <AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={pickable} />
+            <button onClick={() => !busy && load(true)} disabled={busy} title="Refresh from Zoho" style={{ ...navBtn, opacity: busy ? 0.5 : 1 }}>
+              <i className="ti ti-refresh" style={{ fontSize: 12 }} />
+            </button>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, padding: '2px 14px 8px', flexShrink: 0 }}>
+            <button onClick={() => setAnchor(new Date(year, month - 1, 1))} style={navBtn}><i className="ti ti-chevron-left" style={{ fontSize: 13 }} /></button>
+            <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: headTitle, minWidth: 118, textAlign: 'center' }}>{CAL_MON[month]} {year}</div>
+            <button onClick={() => setAnchor(new Date(year, month + 1, 1))} style={navBtn}><i className="ti ti-chevron-right" style={{ fontSize: 13 }} /></button>
+          </div>
+
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '0 14px 14px' }}>
+            {err && <div style={{ padding: '14px 0', fontFamily: J, fontSize: 9, color: redCol }}>{err}</div>}
+            {!err && calls === null && (
+              <div style={{ padding: '28px 0', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>
+                Loading the team's open calls…{progress ? ' ' + progress.toLocaleString() + ' so far' : ''}
+              </div>
+            )}
+            {!err && calls !== null && (
+              <React.Fragment>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 9, fontFamily: J, fontSize: 8, color: mutedCol, cursor: 'pointer', userSelect: 'none' }}>
+                  <input type="checkbox" checked={showProjected} onChange={e => setShowProjected(e.target.checked)} style={{ accentColor: dark ? '#C9A45A' : '#001A4A', cursor: 'pointer', width: 12, height: 12 }} />
+                  <span style={{ width: 14, height: 14, background: capHatch(dark), border: `1px solid ${bord}`, borderRadius: 3, display: 'inline-block', flexShrink: 0 }} />
+                  Show where each contact's next touch lands
+                </label>
+                {capped && (
+                  <div style={{ fontFamily: J, fontSize: 8, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>
+                    Zoho stops paging open tasks at 2,000 records, so the months below may be missing calls. /crm-tasks hits the same ceiling.
+                  </div>
+                )}
+                {showProjected && projection.unprojected > 0 && (
+                  <div style={{ fontFamily: J, fontSize: 8, color: addCol, marginBottom: 8, lineHeight: 1.5 }}>
+                    {projection.unprojected} contact{projection.unprojected === 1 ? '' : 's'} can't be projected — their last call is overdue or lands on a weekend/holiday, so there's no reliable date to count forward from. Reschedule them in Cadence Health on /crm-tasks.
+                  </div>
+                )}
+
+                {!agent ? (
+                  /* No agent picked — the month at a glance, per person. */
+                  monthTotals.length === 0
+                    ? <div style={{ padding: '24px 0', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>No open calls found.</div>
+                    : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.14em', textTransform: 'uppercase', color: mutedCol, marginBottom: 2 }}>Tap a person for their calendar</div>
+                        {monthTotals.map(r => {
+                          return (
+                            <div key={r.owner} onClick={() => setAgent(r.owner)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 11px', border: `1px solid ${bord}`, borderRadius: 10, background: surfaceBg, cursor: 'pointer' }}>
+                              <div style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.owner}</div>
+                              <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: headTitle, background: dark ? '#0A1E44' : '#F5F2EE', borderRadius: 20, padding: '3px 9px' }}>{r.booked} booked</span>
+                              {r.projected > 0 && <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: mutedCol, background: capHatch(dark), border: `1px solid ${bord}`, borderRadius: 20, padding: '3px 9px' }}>+{r.projected}</span>}
+                              <i className="ti ti-chevron-right" style={{ fontSize: 13, color: mutedCol, flexShrink: 0 }} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )
+                ) : (
+                  /* One agent — the month as a calendar. Capped in width so the
+                     day cells stay square-ish and readable on a wide screen
+                     instead of stretching into billboards. */
+                  <div style={{ maxWidth: 420, margin: '0 auto' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3, marginBottom: 4 }}>
+                      {CAL_DOW.map((d, i) => (
+                        <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: 8, fontWeight: 700, color: (i === 0 || i === 6) ? redCol : mutedCol }}>{d}</div>
+                      ))}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
+                      {cells.map((d, i) => {
+                        if (d === null) return <div key={'b' + i} />;
+                        const iso = monthKey + '-' + String(d).padStart(2, '0');
+                        const n = dayBooked(iso).length;
+                        const p = dayProjected(iso).length;
+                        const off = !cIsWorkday(new Date(year, month, d));
+                        const tone = capTone(n, dark);
+                        // Booked calls keep the solid load colour. A day with
+                        // nothing booked but cadence heading for it gets the
+                        // hatch only — it isn't real load yet, it just isn't as
+                        // free as a blank cell makes it look.
+                        const base = n ? tone.bg : 'transparent';
+                        const bg = p ? (capHatch(dark) + ', ' + base) : base;
+                        const openable = n || p;
+                        return (
+                          <div key={iso} onClick={() => openable && setOpenDay(iso)} style={{
+                            position: 'relative', aspectRatio: '1 / 1', minHeight: 34, borderRadius: 7,
+                            border: `1px solid ${iso === todayIso ? (dark ? '#C9A45A' : '#001A4A') : bord}`,
+                            background: bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                            cursor: openable ? 'pointer' : 'default',
+                          }}>
+                            <div style={{ position: 'absolute', top: 2, left: 4, fontFamily: J, fontSize: 7, fontWeight: 600, color: off ? redCol : mutedCol }}>{d}</div>
+                            {n ? <span style={{ fontFamily: J, fontSize: 12, fontWeight: 700, color: tone.fg, lineHeight: 1 }}>{n}</span> : null}
+                            {p ? <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, color: headTitle, opacity: 0.45, lineHeight: 1.4 }}>{n ? '+' : ''}{p}</span> : null}
+                            {off && <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, fontWeight: 800, color: redCol, opacity: 0.42, pointerEvents: 'none' }}>✕</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 12, fontFamily: J, fontSize: 8, color: mutedCol }}>
+                      {[['1–4', 1], ['5–7', 5], ['8+', 8]].map(([lab, n]) => {
+                        const t = capTone(n, dark);
+                        return <span key={lab} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><span style={{ width: 11, height: 11, borderRadius: 3, background: t.bg, border: `1px solid ${bord}`, display: 'inline-block' }} />{lab} calls</span>;
+                      })}
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><span style={{ color: redCol, fontWeight: 800 }}>✕</span> weekend / holiday</span>
+                    </div>
+                  </div>
+                )}
+                {cachedAt && <div style={{ marginTop: 12, fontFamily: J, fontSize: 8, color: mutedCol, textAlign: 'center' }}>Team calls loaded {callAgo(cachedAt)}{calls ? ' · ' + calls.length.toLocaleString() + ' open' : ''}</div>}
+              </React.Fragment>
+            )}
+          </div>
+
+          {/* Day breakdown */}
+          {openDay && (
+            <div onClick={() => setOpenDay(null)} style={{ position: 'fixed', inset: 0, zIndex: 60, background: 'rgba(0,13,38,0.35)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+              <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '16px 16px calc(18px + env(safe-area-inset-bottom))', maxHeight: '78vh', overflowY: 'auto' }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 3 }}>
+                  <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: headTitle }}>{agent}</div>
+                  <button onClick={() => setOpenDay(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 15 }} /></button>
+                </div>
+                <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 10 }}>
+                  {CAL_MON[month]} {Number(openDay.slice(8))} — {openList.length} booked{openProj.length ? ' · ' + openProj.length + ' projected' : ''}
+                </div>
+                {Object.keys(openTally).length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 11 }}>
+                    {Object.keys(openTally).sort().map(t => (
+                      <span key={t} style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: addCol, background: addBg, borderRadius: 20, padding: '2px 9px' }}>{t}: {openTally[t]}</span>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {openList.map(c => {
+                    const href = zohoContactUrl(c.cid);
+                    const label = c.cname || c.Subject;
+                    return (
+                      <div key={c.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 10px', border: `1px solid ${bord}`, borderRadius: 8 }}>
+                        {href
+                          ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, textDecoration: 'none', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</a>
+                          : <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>}
+                        <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: addCol, background: addBg, borderRadius: 20, padding: '2px 8px', flexShrink: 0 }}>{callTier(c.Subject)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {openProj.length > 0 && (
+                  <div style={{ marginTop: 13 }}>
+                    <div style={{ fontFamily: J, fontSize: 8, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: mutedCol }}>Projected by cadence ({openProj.length})</div>
+                    <div style={{ fontFamily: J, fontSize: 8, color: mutedCol, margin: '3px 0 7px', lineHeight: 1.5 }}>Not on the board yet — this is where each contact's next touch lands if the calls before it happen on time.</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {openProj.map((c, i) => {
+                        const href = zohoContactUrl(c.cid);
+                        return (
+                          <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 10px', border: `1px dashed ${bord}`, borderRadius: 8, opacity: 0.8 }}>
+                            {href
+                              ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ fontFamily: J, fontSize: 10, color: headTitle, textDecoration: 'none', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</a>
+                              : <span style={{ fontFamily: J, fontSize: 10, color: headTitle, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>}
+                            <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: mutedCol, background: dark ? '#040C1C' : '#F5F2EE', borderRadius: 20, padding: '2px 8px', flexShrink: 0 }}>{c.tier}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       );
     }
@@ -7560,7 +8109,7 @@ Rules:
               );
             })()}
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
-            {activeTab === 'calls' && <CallsTab dark={dark} ownerName={myName} />}
+            {activeTab === 'calls' && <CallsTab dark={dark} ownerName={myName} isAdmin={isAdmin} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'deals' && <DealsTab />}
             {activeTab === 'more' && (

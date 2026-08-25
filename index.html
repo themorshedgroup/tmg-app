@@ -1127,8 +1127,12 @@ Rules:
     // Phase A: every flow only PREVIEWS what would be sent — no network call.
     const KPI_LIVE = true;
     const KPI_OPTIONS = ['Touch Call', 'Follow Up Call', 'Notes', 'Hotzone Action/s', 'Pop-by', 'Lunch'];
-    const OTHER_KPI_OPTIONS = ['—']; // placeholder — real Zoho "Other KPI" picklist TBD (Phase B)
-    const MAX_KPI_PERSONS = 25;
+    // Zoho's Agent_KPIs module has exactly 10 Person slots and 3 Other-KPI slots.
+    // These caps MUST match Zoho: the form used to allow 25 people and 5 other
+    // KPIs, and everything past the real slot count was silently dropped at
+    // write time while the confirmation screen still listed it back as saved.
+    const MAX_KPI_PERSONS = 10;
+    const MAX_OTHER_KPIS = 3;
     const kpiTodayStr = () => { const t = new Date(); return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0'); };
 
     const ZOHO_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-crm';
@@ -1158,12 +1162,26 @@ Rules:
       if (!ok) throw new Error(data.error || 'Could not create contact');
       return data;
     }
-    // Valid picklist options for the "Other KPI" fields — Zoho rejects any other value.
-    const ALLOWED_OTHER_KPIS = [
-      'Agent Recruiting for Tarek', 'Agent Training for Tarek', 'EO Work for Brad',
-      'Networking Event for Brett', 'Generate Clients/Relationships', 'Open House',
-      'Pre-Hotzone Action', 'Professional Development',
-    ];
+    // Valid options for the "Other KPI" fields come from ZOHO, live — never a
+    // hardcoded copy. A hardcoded list was here before and had silently gone
+    // stale: it held things like "Networking Event for Brett" while the real
+    // Zoho picklist says "Networking Event", so every submission was thrown
+    // away by the exact-string check below and the agent was still told
+    // "Submitted". Reading the picklist from the module itself can't drift,
+    // and it means editing the options in Zoho is enough — no code change.
+    let OTHER_KPI_CACHE = null;
+    async function fetchOtherKpiOptions() {
+      if (OTHER_KPI_CACHE) return OTHER_KPI_CACHE;
+      const { ok, data } = await callZoho({ action: 'get_fields', module: 'Agent_KPIs' });
+      if (!ok) throw new Error((data && data.error) || 'Could not load the Other KPI options from Zoho.');
+      const f = (data.fields || []).find(x => x.api_name === 'Other_KPI_1');
+      // Zoho includes its own "-None-" placeholder in the picklist — that's the
+      // empty state, not a real KPI, so it never belongs in the chooser.
+      const opts = ((f && f.picklist_values) || []).filter(v => v && !/^-?\s*none\s*-?$/i.test(v));
+      if (!opts.length) throw new Error('Zoho returned no options for Other KPI 1.');
+      OTHER_KPI_CACHE = opts;
+      return opts;
+    }
     async function createAgentKpi(payload) {
       // Maps the app payload onto the REAL Agent_KPIs module fields (verified against Zoho 2026-06-20).
       // Owner isn't set here — the edge function resolves payload.owner_email to a Zoho user id
@@ -1176,8 +1194,13 @@ Rules:
       const record = { KPI_Date: payload.kpi_date || kpiTodayStr() };
       if (payload.ctc_hours != null && payload.ctc_hours !== '') record.CTC_Hours_2 = Number(payload.ctc_hours);
 
-      // Zoho only has Person_1..10 slots — cap at 10.
-      const persons = (payload.persons || []).slice(0, 10);
+      // Zoho only has Person_1..10 slots. This used to silently .slice(0, 10)
+      // and drop the rest — refuse instead, so nobody is told "Submitted" for
+      // people that were never written.
+      const persons = payload.persons || [];
+      if (persons.length > MAX_KPI_PERSONS) {
+        throw new Error(`Zoho has only ${MAX_KPI_PERSONS} person slots per KPI entry, but this has ${persons.length}. Split it across two entries.`);
+      }
       for (let i = 0; i < persons.length; i++) {
         const p = persons[i], n = i + 1;
         // Applicable KPIs is a MULTI-SELECT picklist → send an array of the exact option strings.
@@ -1189,13 +1212,30 @@ Rules:
         if (p.contact_id) record['Person_' + n + '_Name'] = { id: p.contact_id };
       }
 
-      // Other KPIs: 3 slots, and the value must be one of the allowed picklist options.
-      (payload.others || []).slice(0, 3).forEach((o, i) => {
-        if (!ALLOWED_OTHER_KPIS.includes(o.kpi)) return;
-        const n = i + 1;
-        record['Other_KPI_' + n] = o.kpi;
-        if (o.count) record['Other_KPI_' + n + '_Count'] = Number(o.count);
-      });
+      // Other KPIs: 3 slots, each value must be a real Zoho picklist option.
+      // Anything unrecognised or over the slot count is REFUSED loudly — the
+      // old code silently `return`ed past bad values and sliced off extras,
+      // which is exactly how a logged "Networking" entry disappeared while
+      // the agent was shown a success message listing it.
+      const others = (payload.others || []).filter(o => o && o.kpi);
+      if (others.length) {
+        if (others.length > MAX_OTHER_KPIS) {
+          throw new Error(`Zoho has only ${MAX_OTHER_KPIS} Other KPI slots, but this has ${others.length}.`);
+        }
+        const allowedOthers = await fetchOtherKpiOptions();
+        const bad = others.filter(o => !allowedOthers.includes(o.kpi));
+        if (bad.length) {
+          throw new Error(
+            `Not a valid Other KPI in Zoho: ${bad.map(o => '"' + o.kpi + '"').join(', ')}. ` +
+            `Valid options are: ${allowedOthers.join(', ')}.`
+          );
+        }
+        others.forEach((o, i) => {
+          const n = i + 1;
+          record['Other_KPI_' + n] = o.kpi;
+          if (o.count) record['Other_KPI_' + n + '_Count'] = Number(o.count);
+        });
+      }
 
       const { ok, data } = await callZoho({ action: 'create_agent_kpi', record, owner_email: payload.owner_email || null });
       if (!ok) throw new Error(data.error || 'Failed to create Agent KPI');
@@ -1219,7 +1259,11 @@ Map each activity to one or more of these six KPI types (a person CAN have sever
 "Touch Call", "Follow Up Call", "Notes", "Hotzone Action/s", "Pop-by", "Lunch".
 Hints: "call"/"called" -> "Touch Call" (use "Follow Up Call" only if they say follow-up); "note"/"left a note" -> "Notes"; "popped by"/"drop by" -> "Pop-by"; "lunch" -> "Lunch"; "hotzone"/"door-knock" -> "Hotzone Action/s".
 
-Also capture: kpi_date ("YYYY-MM-DD"; resolve a relative leading date like "today"/"yesterday"; default to today if none); ctc_hours (a number) only if CTC / call-time hours are mentioned; "others" = activities that fit none of the six, as {kpi, count}. Names are FREE TEXT — record them exactly as written; do NOT match them to any contact list (that happens later). Up to 25 people.
+Also capture: kpi_date ("YYYY-MM-DD"; resolve a relative leading date like "today"/"yesterday"; default to today if none); ctc_hours (a number) only if CTC / call-time hours are mentioned; "others" = activities that fit none of the six, as {kpi, count}. Names are FREE TEXT — record them exactly as written; do NOT match them to any contact list (that happens later). At most 10 people per entry (Zoho has 10 slots) — if the note lists more, say so and ask them to split it into two entries.
+
+OTHER KPIs — the "kpi" value MUST be copied EXACTLY, character for character, from this list (it is a fixed Zoho picklist; anything else is rejected):
+{{OTHER_KPI_OPTIONS}}
+At most 3 other KPIs per entry. If an activity doesn't fit the six per-person types AND doesn't match one of the options above, do NOT invent a value — mention it in your reply and leave it out of the payload.
 
 HOTZONE RULE: if a person has "Hotzone Action/s" but no number is given, you MUST ask how many before submitting (one short question), ending with ACTION:{"type":"NONE","payload":{}}.
 
@@ -3133,8 +3177,19 @@ Rules:
         const ps = (seed.persons || []).map(p => ({ name: p.name || '', kpis: (p.kpis || []).slice(), hotzone: p.hotzone_count == null ? '' : String(p.hotzone_count) }));
         return ps.length ? ps : [{ name: '', kpis: [], hotzone: '' }];
       });
-      const [others, setOthers] = useState(() => (seed.others || []).map(o => ({ kpi: o.kpi || OTHER_KPI_OPTIONS[0], count: o.count == null ? '' : String(o.count) })));
+      const [others, setOthers] = useState(() => (seed.others || []).map(o => ({ kpi: o.kpi || '', count: o.count == null ? '' : String(o.count) })));
       const [showOthers, setShowOthers] = useState((seed.others || []).length > 0);
+      // The Other-KPI chooser is only as good as Zoho's own picklist, so load
+      // it rather than shipping a copy that can go stale (see fetchOtherKpiOptions).
+      const [otherOpts, setOtherOpts] = useState(null);   // null = still loading
+      const [otherOptsErr, setOtherOptsErr] = useState('');
+      useEffect(() => {
+        let cancelled = false;
+        fetchOtherKpiOptions()
+          .then(o => { if (!cancelled) setOtherOpts(o); })
+          .catch(e => { if (!cancelled) { setOtherOpts([]); setOtherOptsErr(e.message || String(e)); } });
+        return () => { cancelled = true; };
+      }, []);
 
       const bord = dark ? '#152545' : C.border;
       const txt = dark ? '#fff' : C.navy;
@@ -3155,7 +3210,7 @@ Rules:
       const addPerson = () => setPersons(ps => ps.length < MAX_KPI_PERSONS ? [...ps, { name: '', kpis: [], hotzone: '' }] : ps);
       const removePerson = i => setPersons(ps => ps.filter((_, j) => j !== i));
       const updateOther = (i, k, v) => setOthers(os => os.map((o, j) => j === i ? { ...o, [k]: v } : o));
-      const addOther = () => { setShowOthers(true); setOthers(os => os.length < 5 ? [...os, { kpi: OTHER_KPI_OPTIONS[0], count: '' }] : os); };
+      const addOther = () => { setShowOthers(true); setOthers(os => os.length < MAX_OTHER_KPIS ? [...os, { kpi: '', count: '' }] : os); };
       const removeOther = i => setOthers(os => os.filter((_, j) => j !== i));
 
       function review() {
@@ -3165,7 +3220,20 @@ Rules:
           ...(p.kpis.includes('Hotzone Action/s') ? { hotzone_count: Number(p.hotzone) || 0 } : {}),
         }));
         if (!clean.length) { alert('Add at least one person with a name and a KPI.'); return; }
-        const cleanOthers = others.filter(o => o.kpi && o.kpi !== '—' && o.count !== '').map(o => ({ kpi: o.kpi, count: Number(o.count) || 0 }));
+        // A person typed without a KPI ticked (or a KPI ticked with no name)
+        // used to be dropped here without a word — say so instead.
+        const droppedPeople = persons.filter(p => (p.name.trim() || p.kpis.length) && !(p.name.trim() && p.kpis.length));
+        if (droppedPeople.length) {
+          alert(`${droppedPeople.length} person row${droppedPeople.length === 1 ? '' : 's'} ${droppedPeople.length === 1 ? 'is' : 'are'} incomplete — each needs BOTH a name and at least one KPI ticked. Fill them in or remove them.`);
+          return;
+        }
+        // Same for a half-filled Other KPI: refuse rather than quietly discard.
+        const partialOthers = others.filter(o => (o.kpi || o.count !== '') && !(o.kpi && o.count !== ''));
+        if (partialOthers.length) {
+          alert('Every Other KPI needs both an option chosen and a count. Fill them in or remove the row.');
+          return;
+        }
+        const cleanOthers = others.filter(o => o.kpi && o.count !== '').map(o => ({ kpi: o.kpi, count: Number(o.count) || 0 }));
         onReview({ owner: ownerName, kpi_date: kpiDate, ctc_hours: ctcHours === '' ? null : Number(ctcHours), persons: clean, others: cleanOthers });
       }
 
@@ -3199,14 +3267,25 @@ Rules:
           {showOthers && (
             <div>
               <div style={sectionLbl}>Other KPIs</div>
+              {otherOpts === null && <div style={{ fontSize: '0.76rem', color: sub, marginBottom: 8 }}>Loading options from Zoho…</div>}
+              {otherOptsErr && (
+                <div style={{ fontSize: '0.76rem', color: '#B91C1C', marginBottom: 8, lineHeight: 1.45 }}>
+                  Couldn’t load the Other KPI list from Zoho, so these can’t be submitted right now: {otherOptsErr}
+                </div>
+              )}
               {others.map((o, i) => (
                 <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                  <div style={{ flex: 2 }}><select value={o.kpi} onChange={e => updateOther(i, 'kpi', e.target.value)} style={inp}>{OTHER_KPI_OPTIONS.map(x => <option key={x} value={x}>{x}</option>)}</select></div>
+                  <div style={{ flex: 2 }}>
+                    <select value={o.kpi} onChange={e => updateOther(i, 'kpi', e.target.value)} style={inp} disabled={!otherOpts || !otherOpts.length}>
+                      <option value="">— Choose —</option>
+                      {(otherOpts || []).map(x => <option key={x} value={x}>{x}</option>)}
+                    </select>
+                  </div>
                   <div style={{ flex: 1 }}><input type="number" min="0" value={o.count} onChange={e => updateOther(i, 'count', e.target.value)} style={inp} placeholder="Count" /></div>
                   <button onClick={() => removeOther(i)} style={removeBtn}><i className="ti ti-trash" /></button>
                 </div>
               ))}
-              {others.length < 5 && <button onClick={addOther} style={ghostBtn}><i className="ti ti-plus" />Add other KPI</button>}
+              {others.length < MAX_OTHER_KPIS && <button onClick={addOther} style={ghostBtn}><i className="ti ti-plus" />Add other KPI</button>}
             </div>
           )}
 
@@ -7298,10 +7377,16 @@ Rules:
       }
 
       // Enter KPI — arm the paste-a-note parser (mirrors the task-pill arm), seeding the input.
-      function startKpiNote() {
+      async function startKpiNote() {
         setKpiFlow(null); setCalBrief(null);
         setTaskInstruction(null);
-        setKpiInstruction(KPI_NOTE_INSTRUCTION);
+        // Splice Zoho's live Other-KPI picklist into the instruction. Without the
+        // exact strings the model invents near-misses ("Networking" for
+        // "Networking Event"), which the writer then refuses.
+        let opts = [];
+        try { opts = await fetchOtherKpiOptions(); } catch (e) { /* fall through — writer still validates */ }
+        setKpiInstruction(KPI_NOTE_INSTRUCTION.replace('{{OTHER_KPI_OPTIONS}}',
+          opts.length ? opts.map(o => '- ' + o).join('\n') : '(could not load the list from Zoho — do NOT output any "others"; mention them in your reply instead)'));
         setInput('KPI: ');
         setTimeout(() => { const el = document.querySelector('.tmg-ai-input'); if (el) { el.focus(); try { const n = el.value.length; el.setSelectionRange(n, n); } catch (e) {} } }, 30);
       }

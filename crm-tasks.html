@@ -842,13 +842,13 @@
     // One chain per CONTACT (seeded from their LAST booked call, not every
     // call) so a contact with two calls on the board can't be counted twice.
     //
-    // A contact whose last call is already OVERDUE is not projected at all.
-    // Their next touch date genuinely isn't knowable yet — it depends on when
-    // the backlog gets re-slotted. Chaining them from their stale date sprays
-    // hops across months that have already passed, and chaining them from
-    // today stacks every overdue contact onto the same single future day,
-    // which reads as a huge fake spike. Both are worse than saying nothing,
-    // so they're counted and reported instead (`unprojected`) with a nudge to
+    // A contact whose last call is already OVERDUE, or sits on a weekend or
+    // holiday, is not projected at all. Either way that date is about to be
+    // re-slotted, so the next touch genuinely isn't knowable yet. Chaining
+    // from a stale date sprays hops across months that have already passed,
+    // and chaining from today stacks every such contact onto the same single
+    // future day as a fake spike. Both are worse than saying nothing, so
+    // they're counted and reported instead (`unprojected`) with a nudge to
     // reschedule them in Cadence Health first.
     //
     // EO and unclassified calls project nothing: they have no interval to
@@ -884,7 +884,8 @@
         const bucket = /tarek/i.test(seed.owner) ? 'tarek' : 'other';
         const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[seed.tier];
         if (!interval) return;
-        if (seed.iso < today) { unprojected++; return; }
+        const seedDate = parseISO(seed.iso);
+        if (seed.iso < today || !seedDate || !isWorkday(seedDate)) { unprojected++; return; }
         let cur = seed.iso;
         for (let hop = 1; hop <= PROJECTION_MAX_HOPS; hop++) {
           cur = cadenceDate(cur, interval);
@@ -898,6 +899,26 @@
         }
       });
       return { byDate: out, unprojected };
+    }
+
+    // The projection as flat calendar load: 'Owner|YYYY-MM-DD' -> count. This
+    // is what lets the backlog packer treat a day the cadence is already
+    // heading for as occupied, instead of only counting calls that happen to
+    // exist as tasks today.
+    function projectedLoadMap(tasks, colMap, endIso) {
+      const { byDate } = projectCadence(tasks, colMap, endIso);
+      const out = {};
+      Object.keys(byDate).forEach(mk => {
+        const byOwner = byDate[mk];
+        Object.keys(byOwner).forEach(o => {
+          const byDay = byOwner[o];
+          Object.keys(byDay).forEach(d => {
+            const k = o + '|' + mk + '-' + String(d).padStart(2, '0');
+            out[k] = (out[k] || 0) + byDay[d].length;
+          });
+        });
+      });
+      return out;
     }
 
     // Shows MONTHS_SHOWN months stacked in one continuously-scrollable view
@@ -984,7 +1005,7 @@
                 </label>
                 {showProjected && projection.unprojected > 0 && (
                   <div style={{ fontSize:'0.7rem', color:C.amber, marginTop:5 }}>
-                    {projection.unprojected} contact{projection.unprojected === 1 ? '' : 's'} can’t be projected — their last call is already overdue, so there’s no date to count forward from. Reschedule them in Cadence Health and they’ll appear here.
+                    {projection.unprojected} contact{projection.unprojected === 1 ? '' : 's'} can’t be projected — their last call is overdue or lands on a weekend/holiday, so there’s no reliable date to count forward from. Reschedule them in Cadence Health and they’ll appear here.
                   </div>
                 )}
               </div>
@@ -1128,6 +1149,9 @@
       return !FED_HOLIDAYS.includes(isoOf(d));
     }
     const nextWorkday = (d) => { const x = new Date(d); while (!isWorkday(x)) x.setDate(x.getDate() + 1); return x; };
+    // A due date that lands on a weekend or federal holiday — nobody is
+    // making that call, so it's backlog whether or not it has come and gone.
+    const isOffDayIso = (v) => { const d = parseISO(v); return !!d && !isWorkday(d); };
     // Monday-anchored week key, so the "3 EO per week" floor is measured Mon–Sun.
     function weekKey(d) { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return isoOf(x); }
 
@@ -1200,7 +1224,7 @@
     // owner+date so it works whether or not a single `owner` filter is
     // applied below). Omit it (e.g. for the duplicate-calls scan) to skip
     // that pass entirely.
-    function inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted, perDay }) {
+    function inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted, perDay, projLoad }) {
       const baseline = lastCompletedByContact(tasks, colMap);
       const hasBaseline = (cid) => !!(cid && (baseline[cid] || (extraCompleted && extraCompleted[cid])));
 
@@ -1218,7 +1242,7 @@
         const cid = t.Who_Id?.id || t.Who_Id?.name;
         const noBaseline = !hasBaseline(cid);
         const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
-        return (noBaseline && !t.Due_Date) || overdue;
+        return (noBaseline && !t.Due_Date) || overdue || isOffDayIso(t.Due_Date);
       });
 
       // Any day already carrying more than `perDay` calls is over capacity
@@ -1226,6 +1250,11 @@
       // priority calls on that day become the candidates to move — C-tier
       // first, then B-tier, A-tier only as a last resort. EO calls are
       // never bumped; they carry their own weekly-floor guarantee.
+      // Projected cadence counts as real load here: a Monday holding 5 booked
+      // calls with 8 more heading for it is overloaded, even though nothing
+      // about the 5 looks wrong. This is what breaks up a weekday pile-up
+      // (e.g. an agent who marks everything complete on Mondays, so every
+      // next-touch lands back on a Monday) instead of leaving it to compound.
       let overcapacity = [];
       if (perDay) {
         const inPool = new Set(overdueOrNoBaseline.map(t => t.id));
@@ -1237,10 +1266,12 @@
           (byOwnerDate[k] = byOwnerDate[k] || []).push(t);
         });
         const tierRank = { A:3, B:2, C:1 };
-        Object.values(byOwnerDate).forEach(list => {
-          if (list.length <= perDay) return;
+        Object.keys(byOwnerDate).forEach(k => {
+          const list = byOwnerDate[k];
+          const projected = (projLoad && projLoad[k]) || 0;
+          if (list.length + projected <= perDay) return;
           const bumpable = list.filter(t => !isEOTask(t));
-          const excess = list.length - perDay;
+          const excess = list.length + projected - perDay;
           if (excess <= 0 || !bumpable.length) return;
           const sorted = bumpable.slice().sort((a, b) =>
             (tierRank[callTier(a.Subject)] || 0) - (tierRank[callTier(b.Subject)] || 0) ||
@@ -1255,14 +1286,19 @@
           const cid = t.Who_Id?.id || t.Who_Id?.name;
           const noBaseline = !hasBaseline(cid);
           const overdue = !!t.Due_Date && t.Due_Date <= cutoff;
-          const reason = overdue && noBaseline ? 'both' : overdue ? 'overdue' : noBaseline ? 'no_baseline' : 'overcapacity';
-          return { ...t, _reason: reason };
+          const offday = isOffDayIso(t.Due_Date);
+          const reason = overdue && noBaseline ? 'both' : overdue ? 'overdue'
+            : noBaseline ? 'no_baseline' : offday ? 'offday' : 'overcapacity';
+          return { ...t, _reason: reason, _offday: offday };
         })
-        // Overdue leads (most urgent), then no-baseline, then overcapacity
-        // (least urgent — its date was fine, the day just needs thinning).
-        // Tier priority is applied later by packOverdue's own A/B/C bucketing.
+        // Overdue and weekend/holiday calls lead — both have to move now, one
+        // because it's late and one because nobody is working that day. Then
+        // no-baseline, then overcapacity (least urgent — its date was fine,
+        // the day just needs thinning). Tier priority is applied later by
+        // packOverdue's own A/B/C bucketing, which is what ends up dropping
+        // C-tier calls down the queue when a day can't fit everything.
         .sort((a, b) => {
-          const rank = { overdue:0, both:0, no_baseline:1, overcapacity:2 };
+          const rank = { overdue:0, both:0, offday:0, no_baseline:1, overcapacity:2 };
           const ra = rank[a._reason] ?? 1, rb = rank[b._reason] ?? 1;
           if (ra !== rb) return ra - rb;
           return String(a.Due_Date || '9999-99-99').localeCompare(String(b.Due_Date || '9999-99-99'));
@@ -1272,16 +1308,16 @@
     // Every agent has their own working day, so a schedule is only meaningful
     // for ONE owner at a time — packing several agents into a shared 5-a-day
     // calendar would interleave their lists and cap the whole team at 5.
-    function scopeOwners({ tasks, colMap, cutoff, perDay }) {
+    function scopeOwners({ tasks, colMap, cutoff, perDay, projLoad }) {
       const counts = {};
-      inScopeCalls({ tasks, colMap, cutoff, perDay }).forEach(t => {
+      inScopeCalls({ tasks, colMap, cutoff, perDay, projLoad }).forEach(t => {
         const o = t.Owner?.name; if (o) counts[o] = (counts[o] || 0) + 1;
       });
       return Object.keys(counts).map(name => ({ name, count: counts[name] })).sort((a, b) => b.count - a.count);
     }
 
-    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks, extraCompleted }) {
-      const pool = inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted, perDay });
+    function packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks, extraCompleted, projLoad }) {
+      const pool = inScopeCalls({ tasks, colMap, cutoff, owner, extraCompleted, perDay, projLoad });
       const poolIds = new Set(pool.map(t => t.id));
 
       // Existing calendar load — this agent's calls NOT in the backlog pool
@@ -1297,6 +1333,18 @@
         if (owner && t.Owner?.name !== owner) return;
         const iso = String(t.Due_Date).slice(0, 10);
         load[iso] = (load[iso] || 0) + 1;
+      });
+
+      // Projected cadence load for this agent, keyed by date. A day the
+      // cadence is already heading for isn't free just because no task exists
+      // on it yet — placing the backlog there only moves the pile-up forward.
+      const projByIso = {};
+      if (projLoad) Object.keys(projLoad).forEach(k => {
+        const i = k.indexOf('|');
+        if (i < 0) return;
+        if (owner && k.slice(0, i) !== owner) return;
+        const iso = k.slice(i + 1);
+        projByIso[iso] = (projByIso[iso] || 0) + projLoad[k];
       });
 
       // Pair spouses via each contact's real Spouse lookup field (spouseLinks,
@@ -1327,12 +1375,12 @@
       const eoByWeek = {};
       let guard = 0;
 
-      while (placed.size < pool.length && guard++ < 400) {
+      while (placed.size < pool.length && guard++ < 900) {
         const iso = isoOf(cursor), wk = weekKey(cursor);
         const day = [];
         // Room left today accounts for calls already on this date outside
         // the pool, not just what's been placed in this loop so far.
-        const roomLeft = () => Math.max(0, perDay - (load[iso] || 0) - day.length);
+        const roomLeft = () => Math.max(0, perDay - (load[iso] || 0) - (projByIso[iso] || 0) - day.length);
         const take = (t) => { if (!t || placed.has(t.id)) return false; placed.add(t.id); day.push(t); return true; };
         const takeIfRoom = (t) => (roomLeft() > 0 ? take(t) : false);
         const tierCount = (tier) => day.filter(t => (bucket[callTier(t.Subject)] ? callTier(t.Subject) : 'C') === tier).length;
@@ -1359,7 +1407,7 @@
         // projected = the full day total once this plan is applied — pre-
         // existing load plus what's newly placed here — so it can be shown
         // and color-coded the same way the Capacity grid reads a day.
-        if (day.length) days.push({ date: iso, tasks: day, projected: (load[iso] || 0) + day.length });
+        if (day.length) days.push({ date: iso, tasks: day, booked: load[iso] || 0, proj: projByIso[iso] || 0, projected: (load[iso] || 0) + (projByIso[iso] || 0) + day.length });
         cursor = nextWorkday(new Date(cursor.setDate(cursor.getDate() + 1)));
       }
       // partnerOf holds a link per direction; collapse to unordered pairs so the
@@ -1369,7 +1417,8 @@
       const overdueCount = pool.filter(t => t._reason === 'overdue' || t._reason === 'both').length;
       const noBaselineCount = pool.filter(t => t._reason === 'no_baseline' || t._reason === 'both').length;
       const overcapacityCount = pool.filter(t => t._reason === 'overcapacity').length;
-      return { days, total: pool.length, placed: placed.size, pairs: pairKeys.size, eoTotal: eoPool.length, overdueCount, noBaselineCount, overcapacityCount };
+      const offdayCount = pool.filter(t => t._offday).length;
+      return { days, total: pool.length, placed: placed.size, pairs: pairKeys.size, eoTotal: eoPool.length, overdueCount, noBaselineCount, overcapacityCount, offdayCount };
     }
 
     const iconBtnStatic = { display:'inline-flex', alignItems:'center', gap:7, fontFamily:C.fontSans, fontSize:'0.8rem', fontWeight:500, color:C.navy, background:C.surface, border:'1px solid '+C.border, borderRadius:9, padding:'8px 13px', cursor:'pointer' };
@@ -1685,14 +1734,26 @@
       const [start, setStart] = useState(() => todayISO());
       const [perDay, setPerDay] = useState(5);
       const [eoPerWeek, setEoPerWeek] = useState(3);
-      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff, perDay }), [tasks, colMap, cutoff, perDay]);
+      // Days the cadence is already heading for are treated as occupied, so the
+      // backlog doesn't get stacked onto them — otherwise this just moves the
+      // pile-up into the future instead of clearing it. Two years of runway
+      // covers anything the packer can reach.
+      const [countProjected, setCountProjected] = useState(true);
+      const projLoad = useMemo(
+        // Clearing the date field makes `start` '' and addDaysISO return null,
+        // which would leave every chain unbounded (a null horizon never
+        // compares greater). Nothing downstream can act on those phantom
+        // dates, but there's no reason to compute them — fall back to today.
+        () => countProjected ? projectedLoadMap(tasks, colMap, addDaysISO(start, 730) || addDaysISO(todayISO(), 730)) : null,
+        [tasks, colMap, start, countProjected]);
+      const owners = useMemo(() => scopeOwners({ tasks, colMap, cutoff, perDay, projLoad }), [tasks, colMap, cutoff, perDay, projLoad]);
       const [owner, setOwner] = useState('');
       useEffect(() => {
         if (owners.length && !owners.some(o => o.name === owner)) setOwner(owners[0].name);
       }, [owners]);
       const backlogCandidateKeys = useMemo(() =>
-        inScopeCalls({ tasks, colMap, cutoff, owner, perDay }).map(t => t.Who_Id?.id || t.Who_Id?.name),
-        [tasks, colMap, cutoff, owner, perDay]);
+        inScopeCalls({ tasks, colMap, cutoff, owner, perDay, projLoad }).map(t => t.Who_Id?.id || t.Who_Id?.name),
+        [tasks, colMap, cutoff, owner, perDay, projLoad]);
       const [backlogLinks, setBacklogLinks] = useState({});
       const [backlogLinksLoading, setBacklogLinksLoading] = useState(false);
       useEffect(() => {
@@ -1724,13 +1785,13 @@
         fetchLastCompletedFor(backlogNeedsLookup).then(map => { if (!cancelled) { setBacklogExtraCompleted(map); setBacklogCompletedLoading(false); } });
         return () => { cancelled = true; };
       }, [backlogNeedsLookup.join('|'), dupesClear]);
-      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks: backlogLinks, extraCompleted: backlogExtraCompleted }),
-        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, backlogLinks, backlogExtraCompleted]);
+      const plan = useMemo(() => packOverdue({ tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, spouseLinks: backlogLinks, extraCompleted: backlogExtraCompleted, projLoad }),
+        [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, backlogLinks, backlogExtraCompleted, projLoad]);
       const backlogBusyLoading = backlogLinksLoading || backlogCompletedLoading;
       // Fixed "today" scope, independent of the tab's adjustable cutoff field —
       // this is what Step 3's gate checks against, so it can't be fooled by
       // someone narrowing the cutoff just to make Step 3 unlock.
-      const backlogOwnersAll = useMemo(() => scopeOwners({ tasks, colMap, cutoff: todayISO(), perDay }), [tasks, colMap, perDay]);
+      const backlogOwnersAll = useMemo(() => scopeOwners({ tasks, colMap, cutoff: todayISO(), perDay, projLoad }), [tasks, colMap, perDay, projLoad]);
       const backlogClear = backlogOwnersAll.length === 0;
 
       async function applyBacklog() {
@@ -1902,7 +1963,8 @@
               {tab === 'backlog' && dupesClear && (
                 <React.Fragment>
                   <div style={{ fontSize:'0.78rem', color:C.textMuted, marginBottom:10 }}>
-                    {owner || '—'} · {plan.total} need a new date ({plan.overdueCount} overdue, {plan.noBaselineCount} no prior cadence{plan.overcapacityCount ? ', ' + plan.overcapacityCount + ' on an overloaded day' : ''}) · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together
+                    {owner || '—'} · {plan.total} need a new date ({plan.overdueCount} overdue, {plan.noBaselineCount} no prior cadence{plan.offdayCount ? ', ' + plan.offdayCount + ' on a weekend/holiday' : ''}{plan.overcapacityCount ? ', ' + plan.overcapacityCount + ' on an overloaded day' : ''}) · {plan.days.length} business days · {plan.pairs} spouse pair{plan.pairs===1?'':'s'} kept together
+                    {plan.placed < plan.total ? ' · ⚠ only ' + plan.placed + ' could be placed — widen the window or raise Per day' : ''}
                   </div>
                   <div style={{ display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end', paddingBottom:14, marginBottom:14, borderBottom:'1px solid '+C.border }}>
                     <div>
@@ -1916,8 +1978,12 @@
                     <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
                     <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
                     <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
+                    <label style={{ display:'inline-flex', alignItems:'center', gap:6, alignSelf:'flex-end', paddingBottom:8, fontSize:'0.74rem', color:C.textSecondary, cursor:'pointer', userSelect:'none' }}>
+                      <input type="checkbox" checked={countProjected} onChange={e => setCountProjected(e.target.checked)} style={{ accentColor:C.navy, cursor:'pointer' }} />
+                      Count projected cadence as load
+                    </label>
                     <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 200px' }}>
-                      One agent at a time — each works their own day. Overdue calls, calls with no prior cadence, and calls stuck on an already-overloaded day all share ONE calendar fill; A-tier always gets the next open slot first, regardless of which reason brought a call in. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped. The count next to each date is the PROJECTED total for that day — existing calls plus what's placed here — so you can see it's actually within capacity before applying.
+                      One agent at a time — each works their own day. Four things share ONE calendar fill: overdue calls, calls sitting on a weekend or holiday, calls with no prior cadence, and calls stuck on an already-overloaded day. Overdue and weekend/holiday calls are placed first; A-tier always gets the next open slot, so C-tier is what slides when a day can't fit everything. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped. With “count projected cadence” on, a day is also treated as occupied by the next touches the cadence is already heading for — that's what stops the backlog being re-stacked onto the same weekday it came off. The count next to each date is the full projected total: existing calls, projected touches, and what's placed here.
                     </div>
                   </div>
 
@@ -1928,7 +1994,11 @@
                       <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
                         <span style={{ fontFamily:C.fontSans, fontSize:'0.78rem', fontWeight:700, color:C.navy }}>{fmtDate(d.date)}</span>
                         <span style={{ fontSize:'0.66rem', fontWeight:700, borderRadius:20, padding:'1px 8px', background:cs.background || C.surfaceAlt, color:cs.background ? cs.color : C.textMuted }}>{d.projected} that day</span>
-                        <span style={{ fontSize:'0.68rem', color:C.textMuted }}>({d.tasks.length} new{d.tasks.length > perDay ? ' · spouse overflow' : ''})</span>
+                        <span style={{ fontSize:'0.68rem', color:C.textMuted }}>({[
+                          d.tasks.length + ' new',
+                          d.booked ? d.booked + ' booked' : '',
+                          d.proj ? d.proj + ' projected' : '',
+                        ].filter(Boolean).join(' · ')}{d.tasks.length > perDay ? ' · spouse overflow' : ''})</span>
                       </div>
                       <div style={{ display:'grid', gap:4 }}>
                         {d.tasks.map(t => { const tier = callTier(t.Subject), eo = isEOTask(t); return (
@@ -1942,6 +2012,7 @@
                             <span style={{ fontSize:'0.68rem', color:C.textMuted, flexShrink:0 }}>was {fmtDate(t.Due_Date)}</span>
                             {(t._reason === 'no_baseline' || t._reason === 'both') && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>no prior cadence</span>}
                             {t._reason === 'overcapacity' && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.amber, flexShrink:0 }}>was on an overloaded day</span>}
+                            {t._offday && <span style={{ fontSize:'0.62rem', fontWeight:600, color:C.red, flexShrink:0 }}>was on a weekend/holiday</span>}
                           </div>
                         ); })}
                       </div>

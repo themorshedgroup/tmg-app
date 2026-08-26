@@ -1,15 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────
 // TMG App — Supabase Edge Function: zoho-projects-poll
 // Zoho Projects → TMG pull direction (plan: hidden-wiggling-lamport §4).
-// Cron-invoked every 15 min (pg_cron), same shape as sffu-sender: a shared
-// CRON_SECRET header authenticates the caller instead of a user session.
+// Cron-invoked every 5 min (pg_cron), same overall shape as sffu-sender: a
+// shared-secret header authenticates the caller instead of a user session.
+// Uses its OWN secret (ZOHO_POLL_CRON_SECRET), deliberately NOT sffu-sender's
+// CRON_SECRET — keeps the two cron jobs fully independent so a rotation or
+// issue on one never touches the other.
 //
-// Deploy: Supabase Dashboard → Edge Functions → new function `zoho-projects-poll`
-//   Paste this whole file, then click Deploy. Leave "Verify JWT" OFF — auth
-//   is the CRON_SECRET check below, not a Supabase session (there is no user).
+// Deploy: `supabase functions deploy zoho-projects-poll --no-verify-jwt`.
+//   Leave "Verify JWT" OFF — auth is the secret check below, not a Supabase
+//   session (there is no user).
 //
-// Secrets (Dashboard → Edge Functions → Manage secrets):
-//   CRON_SECRET          = same long random string as the pg_cron job sends
+// Secrets:
+//   ZOHO_POLL_CRON_SECRET = long random string, only this function + its
+//                            pg_cron job (migration 20260826_...) know it
 //   ZOHO_CLIENT_ID        = same Zoho API client as zoho-projects/zoho-crm
 //   ZOHO_CLIENT_SECRET
 //   (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are injected automatically.)
@@ -112,7 +116,7 @@ function mapZohoTask(t: any) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
 
-  const secret = Deno.env.get("CRON_SECRET") || "";
+  const secret = Deno.env.get("ZOHO_POLL_CRON_SECRET") || "";
   const auth = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
   if (!secret || auth !== secret) return json({ error: "unauthorized" }, 401);
 
@@ -234,9 +238,12 @@ Deno.serve(async (req) => {
 });
 
 // Rate-limit math (plan §4): Zoho Projects allows 100 calls/2 min per token.
-// This function makes exactly 1 list_tasks call per linked CTC file, plus at
+// This function makes exactly 1 list_tasks call per linked project, plus at
 // most 1 extra update_task call per task that resolves TMG-wins in a
-// conflict (rare). At a 15-minute cron interval, up to ~100 linked CTC files
-// can poll safely in one cycle without risking Zoho's 30-minute lockout.
-// If the number of linked files grows well past that, lengthen the interval
-// (or batch projects across multiple cron ticks) rather than shortening it.
+// conflict (rare). The limit is a burst ceiling PER RUN, not a function of
+// cron frequency — running every 5 min instead of 15 doesn't add risk on its
+// own, since each run still fires the same one-call-per-linked-project burst.
+// Up to ~100 linked projects can poll safely in a single cycle without
+// risking Zoho's 30-minute lockout. If linked-project count grows well past
+// that, lengthen the interval (or batch across multiple ticks) rather than
+// shortening it further.

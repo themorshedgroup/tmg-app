@@ -1460,6 +1460,12 @@ Rules:
       rock:     { plural: 'Rocks',     singular: 'Rock',     article: 'rock',    groupLabel: 'Quarter', groupPlaceholder: 'e.g. Q3 2026',                 namePlaceholder: 'e.g. Close $12M in new brokerage volume' },
     };
     const kindLabel = (kind) => KIND_LABEL[kind] || KIND_LABEL.project;
+    // Which project kinds may link to a Zoho Projects project (plan: hidden-
+    // wiggling-lamport, extended 2026-08-14 to cover regular Projects like
+    // "Accountability", not just CTC files). Rocks stay excluded — a quarterly
+    // goal isn't shaped like a Zoho project the way a CTC file or a standing
+    // "Accountability"/role project is.
+    const ZOHO_SYNCABLE_KINDS = ['ctc_file', 'project'];
 
     const TaskDB = {
       client() { return window.SupabaseAuth?._client || null; },
@@ -1544,7 +1550,7 @@ Rules:
           const { data: proj } = await c.from('projects')
             .select('record_type,zoho_sync_enabled,zoho_project_id,zoho_tasklist_id')
             .eq('id', task.project_id).single();
-          if (!proj || proj.record_type !== 'ctc_file' || !proj.zoho_sync_enabled || !proj.zoho_project_id) return;
+          if (!proj || !ZOHO_SYNCABLE_KINDS.includes(proj.record_type) || !proj.zoho_sync_enabled || !proj.zoho_project_id) return;
 
           if (!task.zoho_task_id) {
             if (!proj.zoho_tasklist_id) {
@@ -1916,7 +1922,7 @@ Rules:
           const { data: proj } = await c.from('projects')
             .select('record_type,zoho_sync_enabled,zoho_project_id')
             .eq('id', id).single();
-          if (!proj || proj.record_type !== 'ctc_file' || !proj.zoho_sync_enabled || !proj.zoho_project_id) return;
+          if (!proj || !ZOHO_SYNCABLE_KINDS.includes(proj.record_type) || !proj.zoho_sync_enabled || !proj.zoho_project_id) return;
           const payload = { action: 'update_project', project_id: proj.zoho_project_id };
           if ('name' in patch) payload.name = patch.name;
           if ('started_at' in patch) payload.start_date = patch.started_at;
@@ -3291,6 +3297,7 @@ Rules:
     // ══════════════════════════════════════════════════════════════════════
     function ProjectsSurface({ kind, dark, user, team, titleNode, hideSidebar, openId, onOpenIdConsumed }) {
       const isCtc = kind === 'ctc_file';
+      const zohoSyncable = ZOHO_SYNCABLE_KINDS.includes(kind);   // ctc_file + project (e.g. "Accountability") — not rock
       const KL = kindLabel(kind);
       const [rows, setRows] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -3671,7 +3678,7 @@ Rules:
             {fld('Target', <span style={{ color: isOverdue(p.target_date) ? lateColor : ink }}>{fmtD(p.target_date)}</span>)}
             {fld('Tasks', (p._taskCount - p._openTasks.length) + ' / ' + p._taskCount)}
             {fld('Collaborators', p._collaborators.length ? <span style={{ display: 'flex' }}>{p._collaborators.slice(0, 5).map((id, i) => <span key={id} style={{ marginLeft: i ? -5 : 0 }}>{avatar(id, 18)}</span>)}</span> : '—')}
-            {isCtc && p.zoho_project_id && (
+            {zohoSyncable && p.zoho_project_id && (
               <React.Fragment>
                 {fld('Zoho Project', <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><i className="ti ti-link" style={{ fontSize: 12, color: gold }} />Linked</span>)}
                 {fld('Last synced', (
@@ -3762,7 +3769,7 @@ Rules:
                 {statusBadge(p.status)}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
-                {isCtc && (p.zoho_project_id
+                {zohoSyncable && (p.zoho_project_id
                   ? <span style={{ fontSize: 12, letterSpacing: '0.04em', padding: '7px 12px', borderRadius: 6, fontWeight: 500, border: `1px solid ${teal}55`, color: teal, background: dark ? 'rgba(15,110,86,.14)' : '#E6F2EC', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-check" style={{ fontSize: 13 }} />Synced with Zoho</span>
                   : <button onClick={() => setZohoLinkOpen(true)} style={{ fontSize: 12, letterSpacing: '0.04em', padding: '7px 12px', borderRadius: 6, fontWeight: 400, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-link" style={{ fontSize: 13 }} />Link to Zoho Projects</button>)}
                 <button onClick={() => setPview('form')} style={{ fontSize: 12, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '7px 12px', borderRadius: 6, fontWeight: 400, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: 'pointer', fontFamily: C.fontSans }}>Edit</button>

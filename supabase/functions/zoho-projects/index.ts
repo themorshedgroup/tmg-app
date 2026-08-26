@@ -484,10 +484,12 @@ Deno.serve(async (req) => {
     if (action === "sync_now") {
       const localProjectId = (body.project_id || "").toString().trim();
       if (!localProjectId) return json({ error: "Missing project_id." }, 400);
+      // record_type gate matches ZOHO_SYNCABLE_KINDS in tasks.html — ctc_file
+      // + project (e.g. "Accountability"), not rock.
       const { data: proj } = await sb.from("projects")
         .select("id,name,zoho_project_id,zoho_last_synced_at")
-        .eq("id", localProjectId).eq("record_type", "ctc_file").single();
-      if (!proj || !proj.zoho_project_id) return json({ error: "This CTC file isn't linked to a Zoho project." }, 400);
+        .eq("id", localProjectId).in("record_type", ["ctc_file", "project"]).single();
+      if (!proj || !proj.zoho_project_id) return json({ error: "This project isn't linked to a Zoho project." }, 400);
 
       const u = new URL(`${portalBase}/projects/${proj.zoho_project_id}/tasks/`);
       if (proj.zoho_last_synced_at) u.searchParams.set("last_modified_time", proj.zoho_last_synced_at);

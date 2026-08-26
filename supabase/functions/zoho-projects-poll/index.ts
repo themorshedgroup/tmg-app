@@ -131,11 +131,13 @@ Deno.serve(async (req) => {
   const zFetch = (url: string, init: RequestInit = {}) =>
     fetch(url, { ...init, headers: { ...(init.headers || {}), Authorization: "Zoho-oauthtoken " + accessToken } });
 
-  // Only opted-in CTC files, one list_tasks call each (plan §4 rate-limit design).
+  // Only opted-in CTC files + regular Projects (e.g. "Accountability"), one
+  // list_tasks call each (plan §4 rate-limit design). Rocks excluded — matches
+  // ZOHO_SYNCABLE_KINDS in tasks.html.
   const { data: projects } = await sb
     .from("projects")
     .select("id,name,zoho_project_id,zoho_last_synced_at")
-    .eq("record_type", "ctc_file")
+    .in("record_type", ["ctc_file", "project"])
     .eq("zoho_sync_enabled", true)
     .eq("archived", false)
     .not("zoho_project_id", "is", null);

@@ -5062,6 +5062,24 @@ Rules:
     const LOG_MAX_TASKS = 20;
     const activitySubject = (type, contactName) => type + ': ' + String(contactName || '').trim();
 
+    // The log sheet offers exactly these four, in this order. It still reads
+    // Zoho's live Task Type picklist for the VALUE it writes — that string is
+    // what the report groups by, so it must be Zoho's own, never one typed
+    // here — and these patterns only decide which of Zoho's options are
+    // offered. Matching is loose so a rename like "Pop By" or "Note" still
+    // resolves; anything the picklist genuinely doesn't have is called out in
+    // the sheet rather than silently missing.
+    //
+    // Hotzone is the one that requires a count: a hotzone push is a batch, and
+    // the number is the whole point of logging it. That mirrors the daily KPI
+    // form, which also refuses to submit hotzone without being told how many.
+    const LOG_ACTIVITIES = [
+      { key: 'notes',   label: 'Notes',          match: /^notes?\b/i,            requireCount: false },
+      { key: 'hotzone', label: 'Hotzone Action', match: /hot\s*-?\s*zone/i,      requireCount: true  },
+      { key: 'popby',   label: 'Pop-by',         match: /^pop[\s-]?by/i,         requireCount: false },
+      { key: 'lunch',   label: 'Lunch',          match: /^lunch\b/i,             requireCount: false },
+    ];
+
     // callZoho REJECTS on a transport failure rather than returning
     // { ok:false } — and an agent on cellular is exactly where that happens.
     // Left unwrapped inside a Promise.all it takes the whole batch down, so the
@@ -5881,22 +5899,42 @@ Rules:
       const redCol    = dark ? '#F87171' : '#9B1C1C';
       const goBg      = dark ? '#AD832F' : '#001A4A';
 
-      // The row IS the call, so call types are never things to log here.
-      const options = ((meta && meta.options) || []).filter(o => !/call/i.test(o));
-      const items = Object.keys(sel).filter(k => sel[k] > 0).map(type => ({ type, count: sel[type] }));
+      // Each offered activity paired with the real picklist string Zoho will
+      // store. Call types can never appear here anyway — the row IS the call.
+      const picklist = ((meta && meta.options) || []).filter(o => !/call/i.test(o));
+      const offered = LOG_ACTIVITIES
+        .map(a => ({ ...a, type: picklist.find(o => a.match.test(o)) }))
+        .filter(a => a.type);
+      const absent = LOG_ACTIVITIES.filter(a => !picklist.some(o => a.match.test(o)));
+
+      const chosen = offered.filter(a => sel[a.type] !== undefined);
+      // A required-count row sits at '' until a number is typed — checked, but
+      // not yet loggable.
+      const unfilled = chosen.filter(a => !(Number(sel[a.type]) > 0));
+      const items = chosen.filter(a => Number(sel[a.type]) > 0).map(a => ({ type: a.type, count: Number(sel[a.type]) }));
       const total = items.reduce((n, it) => n + it.count, 0);
       const overCap = total > LOG_MAX_TASKS;
+      const canAdd = !!items.length && !unfilled.length && !overCap;
 
-      function toggle(type) {
-        setSel(s => { const n = { ...s }; if (n[type]) delete n[type]; else n[type] = 1; return n; });
+      function toggle(a) {
+        setSel(s => {
+          const n = { ...s };
+          // `!== undefined`, not truthiness — '' is a checked-but-empty
+          // required row, and treating it as unchecked would re-add it.
+          if (n[a.type] !== undefined) delete n[a.type];
+          else n[a.type] = a.requireCount ? '' : 1;
+          return n;
+        });
       }
-      function setCount(type, v) {
-        const n = Math.max(1, Math.min(LOG_MAX_TASKS, parseInt(v, 10) || 1));
-        setSel(s => ({ ...s, [type]: n }));
+      function setCount(a, v) {
+        const digits = String(v == null ? '' : v).replace(/[^\d]/g, '');
+        if (!digits) { setSel(s => ({ ...s, [a.type]: a.requireCount ? '' : 1 })); return; }
+        const n = Math.max(1, Math.min(LOG_MAX_TASKS, parseInt(digits, 10)));
+        setSel(s => ({ ...s, [a.type]: n }));
       }
 
       async function submit() {
-        if (busy || !items.length || overCap) return;   // double-submit guard
+        if (busy || !canAdd) return;   // double-submit guard, and no writing a half-filled row
         setBusy(true); setErr('');
         try {
           const res = await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: cIso(new Date()), ownerId });
@@ -5940,24 +5978,35 @@ Rules:
 
             {loadErr && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5, marginBottom: 10 }}>Couldn't load the activity list from Zoho, so nothing can be logged right now: {loadErr}</div>}
             {!loadErr && !meta && <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, padding: '14px 0' }}>Loading the activity list from Zoho…</div>}
-            {!loadErr && meta && options.length === 0 && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>Zoho's Task Type list has nothing on it besides call types, so there's nothing to log here.</div>}
+            {!loadErr && meta && offered.length === 0 && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>Zoho's Task Type list has none of Notes, Hotzone Action, Pop-by or Lunch on it, so there's nothing to log here.</div>}
 
-            {!loadErr && meta && options.length > 0 && (
+            {!loadErr && meta && offered.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {options.map(type => {
-                  const on = !!sel[type];
+                {offered.map(a => {
+                  const on = sel[a.type] !== undefined;
+                  const needs = on && a.requireCount && !(Number(sel[a.type]) > 0);
                   return (
-                    <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 11px', border: `1px solid ${on ? addCol : bord}`, borderRadius: 10, background: on ? addBg : fieldBg }}>
-                      <div onClick={() => toggle(type)} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <div key={a.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 11px', border: `1px solid ${needs ? redCol : on ? addCol : bord}`, borderRadius: 10, background: on ? addBg : fieldBg }}>
+                      <div onClick={() => toggle(a)} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                         <i className={`ti ti-${on ? 'square-check' : 'square'}`} style={{ fontSize: 16, color: on ? addCol : mutedCol, flexShrink: 0 }} />
-                        <span style={{ fontFamily: J, fontSize: 10, fontWeight: on ? 600 : 500, color: headTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{type}</span>
+                        <span style={{ fontFamily: J, fontSize: 10, fontWeight: on ? 600 : 500, color: headTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.type}</span>
+                        {needs && <span style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: redCol, flexShrink: 0 }}>how many?</span>}
                       </div>
-                      <input type="number" min="1" max={LOG_MAX_TASKS} value={on ? sel[type] : ''} disabled={!on}
-                        onChange={e => setCount(type, e.target.value)}
-                        style={{ width: 52, textAlign: 'center', fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, background: on ? (dark ? '#040C1C' : '#FFFFFF') : 'transparent', border: `1px solid ${on ? bord : 'transparent'}`, borderRadius: 8, padding: '6px 4px', flexShrink: 0 }} />
+                      <input type="number" inputMode="numeric" min="1" max={LOG_MAX_TASKS}
+                        value={on ? sel[a.type] : ''} disabled={!on} placeholder={needs ? '?' : ''}
+                        onChange={e => setCount(a, e.target.value)}
+                        style={{ width: 52, textAlign: 'center', fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, background: on ? (dark ? '#040C1C' : '#FFFFFF') : 'transparent', border: `1px solid ${needs ? redCol : on ? bord : 'transparent'}`, borderRadius: 8, padding: '6px 4px', flexShrink: 0 }} />
                     </div>
                   );
                 })}
+                {/* Said out loud rather than just missing from the list — if
+                    Zoho's picklist doesn't carry one of the four, that's a
+                    Zoho Setup fix, not a mystery. */}
+                {absent.length > 0 && (
+                  <div style={{ fontFamily: J, fontSize: 8, color: addCol, lineHeight: 1.5, marginTop: 2 }}>
+                    Not in Zoho's Task Type list, so {absent.length === 1 ? 'it is' : 'they are'} not offered: {absent.map(a => a.label).join(', ')}. Add {absent.length === 1 ? 'it' : 'them'} in Zoho Setup and {absent.length === 1 ? 'it' : 'they'} will appear here.
+                  </div>
+                )}
               </div>
             )}
 
@@ -5974,13 +6023,14 @@ Rules:
                 ))}
               </div>
             )}
+            {unfilled.length > 0 && <div style={{ marginTop: 8, fontFamily: J, fontSize: 8, color: redCol, lineHeight: 1.5 }}>{unfilled.map(a => a.type).join(' and ')} needs a number before {unfilled.length === 1 ? 'it' : 'they'} can be logged.</div>}
             {overCap && <div style={{ marginTop: 8, fontFamily: J, fontSize: 8, color: redCol, lineHeight: 1.5 }}>That's {total} tasks in one go. Keep it to {LOG_MAX_TASKS} or fewer.</div>}
             {err && <div style={{ marginTop: 8, fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>{err}</div>}
 
             <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
               <button onClick={onClose} disabled={busy} style={{ ...btn, background: fieldBg, color: headTitle, border: `1px solid ${bord}` }}>Cancel</button>
-              <button onClick={submit} disabled={busy || !items.length || overCap}
-                style={{ ...btn, background: goBg, color: '#fff', opacity: (busy || !items.length || overCap) ? 0.45 : 1, cursor: (busy || !items.length || overCap) ? 'default' : 'pointer' }}>
+              <button onClick={submit} disabled={busy || !canAdd}
+                style={{ ...btn, background: goBg, color: '#fff', opacity: (busy || !canAdd) ? 0.45 : 1, cursor: (busy || !canAdd) ? 'default' : 'pointer' }}>
                 {busy ? 'Adding…' : ('Add' + (total ? ' ' + total : ''))}
               </button>
             </div>

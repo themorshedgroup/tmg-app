@@ -4931,13 +4931,6 @@ Rules:
     const zohoContactUrl = (id) => (id && /^\d+$/.test(String(id)))
       ? 'https://crm.zoho.com/crm/EntityInfo.do?module=Contacts&id=' + encodeURIComponent(id) : null;
 
-    // Zoho Tasks don't carry the contact's phone number, and there's no bulk
-    // contacts-by-id action — so numbers are fetched one at a time and kept in
-    // localStorage. Phone numbers rarely change, so that's a one-time cost per
-    // contact rather than a cost per visit.
-    const CALL_PHONE_KEY = 'tmg-call-phones';
-    function loadPhoneCache() { try { return JSON.parse(localStorage.getItem(CALL_PHONE_KEY) || '{}') || {}; } catch (e) { return {}; } }
-    function savePhoneCache(m) { try { localStorage.setItem(CALL_PHONE_KEY, JSON.stringify(m)); } catch (e) {} }
 
     // The "Task Type" field is a custom field, so its api-name is org-specific.
     // Resolve it once and cache for a day (same discovery /crm-tasks does).
@@ -4976,6 +4969,172 @@ Rules:
           Who_Id: { id: '55000000000000' + String(100 + k), name: names[k] },
         };
       });
+    }
+
+    // Zoho stores phone numbers however they were typed. Display them as
+    // 512-555-1234 when it really is a US 10-digit number (or 11 with a
+    // leading 1), and print anything else back verbatim rather than mangling
+    // an extension or an international number. The tel: link always uses the
+    // RAW value, never this.
+    function formatPhone(raw) {
+      const s = String(raw || '').trim();
+      if (!s) return s;
+      const d = s.replace(/\D/g, '');
+      const ten = (d.length === 11 && d[0] === '1') ? d.slice(1) : d;
+      if (ten.length !== 10) return s;
+      return ten.slice(0, 3) + '-' + ten.slice(3, 6) + '-' + ten.slice(6);
+    }
+
+    // Per-contact detail (phone, email, spouse) for the call list. A NEW key,
+    // deliberately not the old tmg-call-phones one: every device already holds
+    // that as { id: "512-555-1234" }, so widening it in place would make every
+    // existing entry read as a string where the code now expects an object.
+    const CALL_CONTACT_KEY = 'tmg-call-contacts-v1';
+    function loadContactCache() { try { const m = JSON.parse(localStorage.getItem(CALL_CONTACT_KEY) || '{}'); return (m && typeof m === 'object') ? m : {}; } catch (e) { return {}; } }
+    function saveContactCache(m) { try { localStorage.setItem(CALL_CONTACT_KEY, JSON.stringify(m)); } catch (e) {} }
+
+    // What was logged against a given call, so the row can show a ribbon.
+    // Device-local on purpose: reading it back from Zoho means two GETs per
+    // contact through an unfiltered 50-row related list, which is far too
+    // expensive to pay on every paint. Pruned at 30 days so it can't grow
+    // without bound.
+    const CALL_LOGGED_KEY = 'tmg-call-logged-v1';
+    function loadLoggedCache() {
+      try {
+        const m = JSON.parse(localStorage.getItem(CALL_LOGGED_KEY) || '{}') || {};
+        const cut = Date.now() - 30 * 86400000;
+        let changed = false;
+        Object.keys(m).forEach(k => { if (!m[k] || !m[k].at || m[k].at < cut) { delete m[k]; changed = true; } });
+        if (changed) { try { localStorage.setItem(CALL_LOGGED_KEY, JSON.stringify(m)); } catch (e) {} }
+        return m;
+      } catch (e) { return {}; }
+    }
+    function saveLoggedCache(m) { try { localStorage.setItem(CALL_LOGGED_KEY, JSON.stringify(m)); } catch (e) {} }
+
+    // Zoho Reports tallies the Tasks module BY TASK TYPE, and those types ARE
+    // the KPIs — so the type written on a task is literally the number that
+    // shows up in the report. That makes a hardcoded list unacceptable (the
+    // Other-KPI list made exactly that mistake and went stale silently): the
+    // options come live from Zoho's own picklist, cached for a day.
+    const TASK_TYPES_KEY = 'tmg-task-types-v1';
+    async function resolveTaskTypes() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(TASK_TYPES_KEY) || 'null');
+        if (raw && raw.api && Array.isArray(raw.options) && raw.options.length && (Date.now() - raw.at) < 86400000) return raw;
+      } catch (e) {}
+      const stash = (out) => { try { localStorage.setItem(TASK_TYPES_KEY, JSON.stringify(out)); } catch (e) {} return out; };
+      if (callsIsDev()) return stash({ api: 'Task_Type', options: ['Call', 'Notes', 'Hotzone Action', 'Pop-by', 'Lunch', 'Email', 'Meeting'], at: Date.now() });
+      const { ok, data } = await callZoho({ action: 'get_fields', module: 'Tasks' });
+      if (!ok) throw new Error((data && data.error) || 'Could not read the Task Type list from Zoho.');
+      const f = (data.fields || []).find(x => /task\s*type/i.test(x.field_label || ''));
+      if (!f || !f.api_name) throw new Error('Zoho has no "Task Type" field on Tasks.');
+      const options = (f.picklist_values || []).filter(v => v && !/^-?\s*none\s*-?$/i.test(v));
+      if (!options.length) throw new Error('Zoho returned no Task Type options.');
+      return stash({ api: f.api_name, options, at: Date.now() });
+    }
+
+    // Any write from this tab makes three caches wrong at once: this page's own
+    // team-calls pull and BOTH of /crm-tasks's caches — and those two never
+    // expire on their own. Clearing them is the only thing stopping the CRM
+    // page from showing a call as still open for days after it was closed here.
+    function bustTaskCaches() {
+      ['tmg-calls-org-v1', 'tmg_crmtasks_cache_open', 'tmg_crmtasks_cache_full']
+        .forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
+    }
+
+    async function setTaskStatus(id, status) {
+      if (callsIsDev()) { await new Promise(r => setTimeout(r, 260)); return; }
+      const { ok, data } = await safeZoho({ action: 'update_record', module: 'Tasks', id, record: { Status: status } });
+      if (!ok) throw new Error((data && data.error) || 'Zoho would not update that task.');
+      bustTaskCaches();
+    }
+
+    // Logging 5 of something creates 5 task rows, because that is how the Zoho
+    // report counts them — one row per activity, grouped by Task Type. There is
+    // no count field on a task to put a 5 into.
+    //
+    // Who_Id goes out as { id } (the shape create_agent_kpi already proves Zoho
+    // accepts for a lookup in this org). /crm-tasks's create drawer sends a bare
+    // id string instead, and nobody has verified which one this org's Tasks
+    // module actually takes — so the FIRST create is a probe: if it's rejected
+    // we retry that one with the bare string and use whichever shape stuck for
+    // the rest. One request to find out, not N.
+    const LOG_MAX_TASKS = 20;
+    const activitySubject = (type, contactName) => type + ': ' + String(contactName || '').trim();
+
+    // callZoho REJECTS on a transport failure rather than returning
+    // { ok:false } — and an agent on cellular is exactly where that happens.
+    // Left unwrapped inside a Promise.all it takes the whole batch down, so the
+    // siblings that DID land in Zoho are never counted, never cache-busted and
+    // never shown — and the obvious retry writes every one of them a second
+    // time. Since Zoho Reports tallies Tasks rows by Task Type, those duplicates
+    // become inflated KPI numbers. Every write below goes through this.
+    async function safeZoho(payload) {
+      try { return await callZoho(payload); }
+      catch (e) { return { ok: false, network: true, data: { error: 'No connection — ' + ((e && e.message) || String(e)) } }; }
+    }
+
+    // Logging 5 of something creates 5 task rows, because that is how the Zoho
+    // report counts them — one row per activity, grouped by Task Type. There is
+    // no count field on a task to put a 5 into.
+    //
+    // Who_Id goes out as { id } (the shape create_agent_kpi already proves Zoho
+    // accepts for a lookup in this org). /crm-tasks's create drawer sends a bare
+    // id string instead, and nobody has verified which one this org's Tasks
+    // module actually takes — so the FIRST create is a probe: if Zoho REFUSES it
+    // we retry that one with the bare string and use whichever shape stuck for
+    // the rest. A network failure is never retried that way, because the record
+    // may well have landed and a retry would duplicate it.
+    async function createActivityTasks({ items, typeField, contact, dateIso, ownerId }) {
+      const jobs = [];
+      (items || []).forEach(it => { for (let i = 0; i < it.count; i++) jobs.push(it.type); });
+      if (!jobs.length) return { made: 0, byType: [] };
+      if (jobs.length > LOG_MAX_TASKS) throw new Error('That would create ' + jobs.length + ' tasks at once. Keep it to ' + LOG_MAX_TASKS + ' or fewer.');
+      if (callsIsDev()) { await new Promise(r => setTimeout(r, 420)); return { made: jobs.length, byType: (items || []).map(it => ({ type: it.type, count: it.count })) }; }
+
+      let whoShape = 'object';
+      const build = (type) => {
+        const rec = { Subject: activitySubject(type, contact.name), Status: 'Completed', Due_Date: dateIso };
+        if (typeField) rec[typeField] = type;
+        if (contact.id) rec.Who_Id = (whoShape === 'object') ? { id: contact.id } : contact.id;
+        // The call's own owner IS the agent, so copying it off the source task
+        // credits the right person without needing the users.READ scope this
+        // org's Zoho grant doesn't have. Left unset, Zoho assigns every task to
+        // the API connection owner instead.
+        if (ownerId) rec.Owner = { id: ownerId };
+        return rec;
+      };
+
+      // Tallied BY TYPE rather than just counted, so a run that dies halfway can
+      // say exactly which rows landed and the caller can retry only the rest.
+      const landed = {};
+      const madeCount = () => Object.keys(landed).reduce((n, k) => n + landed[k], 0);
+      const byType = () => Object.keys(landed).map(type => ({ type, count: landed[type] }));
+      const stop = (msg) => {
+        if (madeCount()) bustTaskCaches();
+        const err = new Error(msg);
+        err.partial = { made: madeCount(), byType: byType() };
+        throw err;
+      };
+      const post = (type) => safeZoho({ action: 'create_record', module: 'Tasks', record: build(type) }).then(r => ({ type, r }));
+
+      let first = await post(jobs[0]);
+      if (!first.r.ok && !first.r.network && contact.id) { whoShape = 'string'; first = await post(jobs[0]); }
+      if (!first.r.ok) stop((first.r.data && first.r.data.error) || 'Zoho would not create that task.');
+      landed[jobs[0]] = 1;
+
+      const rest = jobs.slice(1);
+      for (let i = 0; i < rest.length; i += 4) {
+        const res = await Promise.all(rest.slice(i, i + 4).map(post));
+        res.forEach(x => { if (x.r.ok) landed[x.type] = (landed[x.type] || 0) + 1; });
+        const bad = res.find(x => !x.r.ok);
+        // Partial success is reported as partial success — never as a clean
+        // "done" for work Zoho refused, and never as a bare error that hides
+        // the rows it already wrote.
+        if (bad) stop('Created ' + madeCount() + ' of ' + jobs.length + ', then it stopped: ' + ((bad.r.data && bad.r.data.error) || 'unknown error'));
+      }
+      bustTaskCaches();
+      return { made: jobs.length, byType: byType() };
     }
 
     // ─── Call capacity: cadence math + projection ────────────────────
@@ -5169,9 +5328,27 @@ Rules:
       const [clipped, setClipped] = useState({});     // per-bucket "Zoho page was full" flag
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState(false);
-      const [phones, setPhones] = useState(loadPhoneCache);
-      const phonesRef = useRef(phones);
-      useEffect(() => { phonesRef.current = phones; }, [phones]);
+      const [contacts, setContacts] = useState(loadContactCache);
+      const contactsRef = useRef(contacts);
+      useEffect(() => { contactsRef.current = contacts; }, [contacts]);
+      const [logged, setLogged] = useState(loadLoggedCache);   // taskId -> { at, items:[{type,count}] }
+      const [rowBusy, setRowBusy] = useState({});              // taskId -> true while a write is in flight
+      const [rowErr, setRowErr] = useState({});                // taskId -> message, shown on the row itself
+      const [sheet, setSheet] = useState(null);                // { task, contact } | null — the + popup
+
+      // A phone PWA sits on this tab for days at a time, so "today" cannot be
+      // frozen at mount — it would quietly come to mean yesterday, and this
+      // value now decides the Due_Date stamped on tasks written to Zoho, not
+      // just what the tab displays. Re-checked whenever the app comes back to
+      // the foreground, and on a slow timer for a phone left awake.
+      const [dayStamp, setDayStamp] = useState(() => cIso(new Date()));
+      useEffect(() => {
+        const check = () => { const now = cIso(new Date()); setDayStamp(d => (d === now ? d : now)); };
+        const onVis = () => { if (!document.hidden) check(); };
+        document.addEventListener('visibilitychange', onVis);
+        const iv = setInterval(check, 300000);
+        return () => { document.removeEventListener('visibilitychange', onVis); clearInterval(iv); };
+      }, []);
 
       // "Yesterday"/"Tomorrow" mean the previous/next WORKDAY, not the raw
       // calendar day — otherwise the tab is empty every Monday, since cadence
@@ -5181,7 +5358,7 @@ Rules:
         const p = new Date(t); p.setDate(p.getDate() - 1);
         const n = new Date(t); n.setDate(n.getDate() + 1);
         return { yesterday: cIso(cPrevWorkday(p)), today: cIso(t), tomorrow: cIso(cNextWorkday(n)) };
-      }, []);
+      }, [dayStamp]);
 
       // An agent sees only their own calls. myName falls back to 'Me' when the
       // profile has no name — filtering on that would substring-match real
@@ -5194,10 +5371,13 @@ Rules:
 
       async function load() {
         if (!team && !myOwner) { setBuckets({ yesterday: [], today: [], tomorrow: [] }); setOverdue({ list: [], count: 0, capped: false }); return; }
-        setBusy(true); setErr('');
+        setBusy(true); setErr(''); setRowErr({});
         if (callsIsDev()) {
           await new Promise(r => setTimeout(r, 250));
-          const stamp = (list, o) => list.map(t => ({ ...t, Owner: { name: o } }));
+          // Namespaced ids: both owners' fixtures come off the same generator,
+          // so without this they collide and a write meant for one row patches
+          // two. Real Zoho ids are unique.
+          const stamp = (list, o) => list.map(t => ({ ...t, id: t.id + '-' + o.split(' ')[0].toLowerCase(), Owner: { name: o, id: '5500000000009' + String(o.length) } }));
           const spread = (iso, n, seed) => team
             ? stamp(devCalls(iso, n, seed), 'Tarek Morshed').concat(stamp(devCalls(iso, Math.max(1, n - 2), seed + 4), 'Kyle Baird'))
             : stamp(devCalls(iso, n, seed), myOwner || 'Me');
@@ -5244,7 +5424,7 @@ Rules:
           setBuckets({ yesterday: [], today: [], tomorrow: [] });
         } finally { setBusy(false); }
       }
-      useEffect(() => { load(); }, [myOwner, team]);
+      useEffect(() => { load(); }, [myOwner, team, dates.today]);
 
       const ownerOf = (t) => (t.Owner && t.Owner.name) || 'Unassigned';
 
@@ -5267,30 +5447,125 @@ Rules:
       const shownKey = shown ? shown.map(t => (t.Who_Id && t.Who_Id.id) || '').join(',') : '';
       useEffect(() => {
         if (!shownKey) return;
-        const need = Array.from(new Set(shownKey.split(',').filter(id => id && !(id in phonesRef.current))));
-        if (!need.length) return;
+        const cache = contactsRef.current;
+        const ids = Array.from(new Set(shownKey.split(',').filter(Boolean)));
+        // Two independent gaps, tracked separately. A cached entry that is
+        // missing `detail` was never successfully looked up; one missing the
+        // `spouse` KEY was never asked about a spouse. Both matter, because a
+        // stored null is indistinguishable from a real answer and this cache is
+        // never re-checked otherwise — one flaky moment would blank a contact's
+        // phone, email or spouse on that device permanently.
+        const needDetail = ids.filter(id => !cache[id] || !cache[id].detail);
+        const needSpouse = ids.filter(id => !cache[id] || !('spouse' in cache[id]));
+        if (!needDetail.length && !needSpouse.length) return;
         let dead = false;
+        const merge = (out) => setContacts(p => {
+          const m = { ...p };
+          Object.keys(out).forEach(id => { if (out[id]) m[id] = Object.assign({}, m[id], out[id]); });
+          saveContactCache(m);
+          return m;
+        });
         if (callsIsDev()) {
           const out = {};
-          need.forEach((id, i) => { out[id] = i % 5 === 4 ? null : '512-' + String(200 + i) + '-' + String(1000 + i * 37).slice(0, 4); });
-          setPhones(p => Object.assign({}, p, out));
+          ids.forEach((id, i) => { out[id] = {
+            detail: true,
+            phone: i % 5 === 4 ? null : String(5122000000 + i * 3737),
+            email: i % 4 === 3 ? null : 'contact' + i + '@example.com',
+            spouse: i % 3 === 0 ? { id: '55000000000009' + String(100 + i), name: 'Pat Example' } : null,
+          }; });
+          merge(out);
           return;
         }
         (async () => {
-          const out = {};
-          for (let i = 0; i < need.length; i += 6) {
-            const batch = need.slice(i, i + 6);
-            const got = await Promise.all(batch.map(async id => {
-              try { const r = await callZoho({ action: 'get_contact', id }); return [id, (r.ok && r.data.contact && r.data.contact.phone) || null]; }
-              catch (e) { return [id, null]; }
+          // Spouse is one request per 60 contacts (the action's own cap), not a
+          // per-contact fan-out — and it is PAGED rather than truncated, so
+          // contact 61 is actually asked about instead of being recorded as
+          // having no spouse forever.
+          for (let i = 0; i < needSpouse.length; i += 60) {
+            const chunk = needSpouse.slice(i, i + 60);
+            try {
+              const r = await callZoho({ action: 'spouse_links', contact_ids: chunk });
+              if (dead) return;
+              // Only write the spouse key for a chunk Zoho actually answered.
+              if (r.ok && r.data && r.data.links) {
+                const out = {};
+                chunk.forEach(id => { out[id] = { spouse: r.data.links[id] || null }; });
+                merge(out);
+              }
+            } catch (e) { /* leave this chunk unasked so a later visit retries it */ }
+            if (dead) return;
+          }
+          for (let i = 0; i < needDetail.length; i += 6) {
+            const got = await Promise.all(needDetail.slice(i, i + 6).map(async id => {
+              try {
+                // phone AND email off the same call — email was already being
+                // fetched here and thrown away.
+                const r = await callZoho({ action: 'get_contact', id });
+                if (!r.ok) return [id, null];
+                const c = (r.data && r.data.contact) || null;
+                return [id, { detail: true, phone: (c && c.phone) || null, email: (c && c.email) || null }];
+              } catch (e) { return [id, null]; }   // a failure caches NOTHING, so it is retried
             }));
             if (dead) return;
-            got.forEach(([id, ph]) => { out[id] = ph; });
+            // Persisted per batch, not once at the end: switching day tabs
+            // mid-fetch used to throw away everything already looked up.
+            const out = {}; got.forEach(([id, v]) => { out[id] = v; });
+            merge(out);
           }
-          setPhones(p => { const m = Object.assign({}, p, out); savePhoneCache(m); return m; });
         })();
         return () => { dead = true; };
       }, [shownKey]);
+
+      // ── Writes ────────────────────────────────────────────────────
+      // The day queries carry no status filter, so a completed call correctly
+      // STAYS on the list and just changes state — patching in place is both
+      // cheaper and more correct than re-running four searches. The overdue
+      // query DOES filter on status, so its list has to be patched too or the
+      // header count contradicts the rows underneath it.
+      function patchTask(task, status) {
+        setBuckets(b => {
+          if (!b) return b;
+          const n = {};
+          ['yesterday', 'today', 'tomorrow'].forEach(k => { n[k] = (b[k] || []).map(t => t.id === task.id ? { ...t, Status: status } : t); });
+          return n;
+        });
+        setOverdue(o => {
+          if (!o) return o;
+          const wasOverdue = (task.Due_Date || '').slice(0, 10) < dates.today;
+          let list = (o.list || []).filter(t => t.id !== task.id);
+          if (!/completed/i.test(status) && wasOverdue) list = list.concat([{ ...task, Status: status }]);
+          return { ...o, list, count: list.length };
+        });
+      }
+
+      async function toggleDone(t) {
+        if (rowBusy[t.id]) return;   // double-tap guard, keyed per row so two calls can still be worked at once
+        const next = /completed/i.test(t.Status || '') ? 'Not Started' : 'Completed';
+        setRowBusy(b => ({ ...b, [t.id]: true }));
+        setRowErr(e => { const n = { ...e }; delete n[t.id]; return n; });
+        try {
+          await setTaskStatus(t.id, next);
+          patchTask(t, next);
+        } catch (e) {
+          // Never a silent success: the row keeps its old state and says why.
+          setRowErr(er => ({ ...er, [t.id]: (e && e.message) || String(e) }));
+        } finally {
+          setRowBusy(b => { const n = { ...b }; delete n[t.id]; return n; });
+        }
+      }
+
+      function onLogged(task, items) {
+        setLogged(m => {
+          const prev = m[task.id];
+          // Logging twice on one call adds up rather than replacing, so the
+          // ribbon matches what actually went into Zoho.
+          const merged = {};
+          ((prev && prev.items) || []).concat(items).forEach(it => { merged[it.type] = (merged[it.type] || 0) + it.count; });
+          const next = { ...m, [task.id]: { at: Date.now(), items: Object.keys(merged).map(type => ({ type, count: merged[type] })) } };
+          saveLoggedCache(next);
+          return next;
+        });
+      }
 
       const bannerBg   = dark ? '#0A1E44' : '#001A4A';
       const headTitle  = dark ? '#FFFFFF' : '#001A4A';
@@ -5355,37 +5630,86 @@ Rules:
       const todayCount = buckets ? mine(buckets.today || []).length : null;
 
       // One call row, shared by the flat list and the per-agent groups.
+      // Layout: name + tags (tier, spouse) on the first line, phone + email on
+      // the second, then the log ribbon. Controls on the right are done / log /
+      // dial — the tier moved OFF the right edge, since it describes the person,
+      // not the button next to it.
       const callRow = (t, last) => {
         const grade = callTier(t.Subject);
         const cname = (t.Who_Id && t.Who_Id.name) || t.Subject || 'Unknown';
         const cid = t.Who_Id && t.Who_Id.id;
         const av = toneOf(grade), bd = badgeOf(grade), st = statusInfo(statusOf(t));
         // `undefined` = not looked up yet, `null` = looked up and the contact
-        // genuinely has no number on file — they read differently.
-        const looked = !cid || (cid in phones);
-        const phone = cid ? phones[cid] : null;
+        // genuinely has nothing on file — they read differently.
+        const info = (cid && contacts[cid]) || null;
+        const looked = !cid || !!(info && info.detail);
+        const phone = info && info.phone;
+        const email = info && info.email;
+        const spouse = info && info.spouse;
         const href = zohoContactUrl(cid);
+        const spouseHref = spouse && zohoContactUrl(spouse.id);
+        const done = /completed/i.test(t.Status || '');
+        const busyRow = !!rowBusy[t.id];
+        const mark = logged[t.id];
+        const problem = rowErr[t.id];
+        const ctrl = { width: 26, height: 26, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', padding: 0, cursor: 'pointer' };
         return (
-          <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: last ? 'none' : `1px solid ${rowBord}` }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: av.bg, color: av.col, fontFamily: J, fontSize: 11, fontWeight: 600 }}>{initials(cname)}</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              {href
-                ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ display: 'block', fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cname}</a>
-                : <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cname}</div>}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                <i className={`ti ${st.icon}`} style={{ fontSize: 11, color: st.col }} />
-                <span style={{ fontFamily: J, fontSize: 8, color: st.num }}>{phone || (looked ? 'No number' : '…')}</span>
-                {team && !agent && <span style={{ fontFamily: J, fontSize: 8, color: mutedCol }}>· {ownerOf(t)}</span>}
+          <div key={t.id} style={{ padding: '8px 14px', borderBottom: last ? 'none' : `1px solid ${rowBord}`, opacity: busyRow ? 0.55 : 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: av.bg, color: av.col, fontFamily: J, fontSize: 11, fontWeight: 600 }}>{initials(cname)}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {/* Name + contact tags. Wraps rather than truncating the tags
+                    away, so the tier is never the thing that gets cut off. */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                  {href
+                    ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, textDecoration: done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cname}</a>
+                    : <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, textDecoration: done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cname}</span>}
+                  <span title={'Client classification: ' + (grade === 'Other' ? 'not classified' : grade)}
+                    style={{ fontFamily: J, fontSize: 8, fontWeight: 700, lineHeight: 1, padding: '3px 6px', borderRadius: 20, background: bd.bg, color: bd.col, flexShrink: 0 }}>
+                    {grade === 'Other' ? 'No class' : grade}
+                  </span>
+                  {spouse && spouse.name && (
+                    spouseHref
+                      ? <a href={spouseHref} target="_blank" rel="noopener noreferrer" title={'Spouse: ' + spouse.name} style={{ fontFamily: J, fontSize: 8, fontWeight: 600, lineHeight: 1, padding: '3px 6px', borderRadius: 20, background: navInBg, color: mutedCol, textDecoration: 'none', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3, maxWidth: 140, overflow: 'hidden', whiteSpace: 'nowrap' }}><i className="ti ti-heart" style={{ fontSize: 9 }} />{spouse.name}</a>
+                      : <span title={'Spouse: ' + spouse.name} style={{ fontFamily: J, fontSize: 8, fontWeight: 600, lineHeight: 1, padding: '3px 6px', borderRadius: 20, background: navInBg, color: mutedCol, flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3 }}><i className="ti ti-heart" style={{ fontSize: 9 }} />{spouse.name}</span>
+                  )}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 3, minWidth: 0 }}>
+                  <i className={`ti ${st.icon}`} style={{ fontSize: 11, color: st.col, flexShrink: 0 }} />
+                  <span style={{ fontFamily: J, fontSize: 8, color: st.num, flexShrink: 0 }}>{phone ? formatPhone(phone) : (looked ? 'No number' : '…')}</span>
+                  {email && <a href={'mailto:' + email} style={{ fontFamily: J, fontSize: 8, color: mutedCol, textDecoration: 'none', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {email}</a>}
+                  {team && !agent && <span style={{ fontFamily: J, fontSize: 8, color: mutedCol, flexShrink: 0 }}>· {ownerOf(t)}</span>}
+                </div>
               </div>
+              <button onClick={() => toggleDone(t)} disabled={busyRow}
+                title={done ? 'Mark as not started again' : 'Mark this call completed in Zoho'}
+                style={{ ...ctrl, background: done ? (dark ? 'rgba(93,202,165,0.22)' : '#E2F3E8') : navInBg, color: done ? (dark ? '#5DCAA5' : '#0F6E56') : navInCol, cursor: busyRow ? 'default' : 'pointer' }}>
+                <i className={`ti ti-${busyRow ? 'loader-2' : 'check'}`} style={{ fontSize: 14 }} />
+              </button>
+              <button onClick={() => cid && setSheet({ task: t, contact: { id: cid, name: cname } })} disabled={!cid}
+                title={cid ? 'Log other activity for this contact' : 'This task has no contact attached, so there is nothing to log against'}
+                style={{ ...ctrl, background: addBg, color: addCol, opacity: cid ? 1 : 0.4, cursor: cid ? 'pointer' : 'default' }}>
+                <i className="ti ti-plus" style={{ fontSize: 14 }} />
+              </button>
+              {phone
+                ? <a href={'tel:' + String(phone).replace(/[^\d+]/g, '')} title="Call" style={{ ...ctrl, background: callBtnBg, color: '#fff', textDecoration: 'none' }}>
+                    <i className="ti ti-phone" style={{ fontSize: 12 }} />
+                  </a>
+                : <div style={{ ...ctrl, background: navInBg, color: navInCol, cursor: 'default' }}>
+                    <i className="ti ti-phone-off" style={{ fontSize: 12 }} />
+                  </div>}
             </div>
-            <div style={{ width: 16, height: 16, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: bd.bg, color: bd.col, fontFamily: J, fontSize: 8, fontWeight: 700 }}>{grade === 'Other' ? '?' : grade}</div>
-            {phone
-              ? <a href={'tel:' + String(phone).replace(/[^\d+]/g, '')} style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, background: callBtnBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none' }}>
-                  <i className="ti ti-phone" style={{ fontSize: 12 }} />
-                </a>
-              : <div style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, background: navInBg, color: navInCol, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <i className="ti ti-phone-off" style={{ fontSize: 12 }} />
-                </div>}
+            {mark && mark.items && mark.items.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginTop: 6, marginLeft: 44, padding: '4px 8px', borderRadius: 7, background: done ? (dark ? 'rgba(93,202,165,0.12)' : '#F0F8F3') : navInBg }}>
+                <i className="ti ti-checks" style={{ fontSize: 11, color: dark ? '#5DCAA5' : '#0F6E56' }} />
+                {mark.items.map(it => (
+                  <span key={it.type} style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: headTitle, background: dark ? '#0A1E44' : '#FFFFFF', border: `1px solid ${dark ? '#0D1E3A' : '#EDE7DC'}`, borderRadius: 20, padding: '2px 7px' }}>{it.count} {it.type}</span>
+                ))}
+              </div>
+            )}
+            {problem && (
+              <div style={{ marginTop: 6, marginLeft: 44, fontFamily: J, fontSize: 8, color: dark ? '#F87171' : '#9B1C1C', lineHeight: 1.5 }}>{problem}</div>
+            )}
           </div>
         );
       };
@@ -5505,6 +5829,162 @@ Rules:
           </div>
           </React.Fragment>
           )}
+          {sheet && (
+            <LogActivitySheet
+              dark={dark}
+              task={sheet.task}
+              contact={sheet.contact}
+              ownerId={(sheet.task.Owner && sheet.task.Owner.id) || null}
+              onLogged={(items) => onLogged(sheet.task, items)}
+              onError={(msg) => setRowErr(e => ({ ...e, [sheet.task.id]: msg }))}
+              onClose={() => setSheet(null)}
+            />
+          )}
+        </div>
+      );
+    }
+
+    // ─── Log activity (the + on a call row) ──────────────────────────
+    //  Logs the OTHER things an agent did for this contact. Each one becomes
+    //  its own Zoho task — Completed, dated today, attached to the same
+    //  contact — because the Zoho report tallies the Tasks module by Task Type
+    //  and counts rows. "5 hotzone actions" is therefore 5 rows, not one row
+    //  carrying a 5.
+    //
+    //  The list of activities is NOT hardcoded. It is this org's live Task Type
+    //  picklist with the call types removed (the row itself is the call), so a
+    //  type added in Zoho Setup shows up here on its own.
+    function LogActivitySheet({ dark, task, contact, ownerId, onLogged, onError, onClose }) {
+      const J = "'Jost', sans-serif";
+      const [meta, setMeta] = useState(null);       // { api, options } | null while loading
+      const [loadErr, setLoadErr] = useState('');
+      const [sel, setSel] = useState({});           // type -> count
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+
+      useEffect(() => {
+        let dead = false;
+        (async () => {
+          try { const m = await resolveTaskTypes(); if (!dead) setMeta(m); }
+          catch (e) { if (!dead) setLoadErr((e && e.message) || String(e)); }
+        })();
+        return () => { dead = true; };
+      }, []);
+
+      const headTitle = dark ? '#FFFFFF' : '#001A4A';
+      const mutedCol  = dark ? 'rgba(255,255,255,0.4)' : '#888888';
+      const bord      = dark ? '#0D1E3A' : '#EDE7DC';
+      const panelBg   = dark ? '#0A1730' : '#FFFFFF';
+      const fieldBg   = dark ? '#040C1C' : '#FCFBF8';
+      const addBg     = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+      const addCol    = dark ? '#C9A45A' : '#AD832F';
+      const redCol    = dark ? '#F87171' : '#9B1C1C';
+      const goBg      = dark ? '#AD832F' : '#001A4A';
+
+      // The row IS the call, so call types are never things to log here.
+      const options = ((meta && meta.options) || []).filter(o => !/call/i.test(o));
+      const items = Object.keys(sel).filter(k => sel[k] > 0).map(type => ({ type, count: sel[type] }));
+      const total = items.reduce((n, it) => n + it.count, 0);
+      const overCap = total > LOG_MAX_TASKS;
+
+      function toggle(type) {
+        setSel(s => { const n = { ...s }; if (n[type]) delete n[type]; else n[type] = 1; return n; });
+      }
+      function setCount(type, v) {
+        const n = Math.max(1, Math.min(LOG_MAX_TASKS, parseInt(v, 10) || 1));
+        setSel(s => ({ ...s, [type]: n }));
+      }
+
+      async function submit() {
+        if (busy || !items.length || overCap) return;   // double-submit guard
+        setBusy(true); setErr('');
+        try {
+          const res = await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: cIso(new Date()), ownerId });
+          onLogged((res.byType && res.byType.length) ? res.byType : items);
+          onClose();
+        } catch (e) {
+          // Whatever DID land is recorded on the row and subtracted from the
+          // selection, so the obvious next tap writes only the remainder
+          // instead of duplicating rows Zoho already has. Inflated task rows
+          // are inflated KPI numbers, so this matters more than tidiness.
+          const p = e && e.partial;
+          if (p && p.made) {
+            onLogged(p.byType);
+            setSel(sl => {
+              const n = { ...sl };
+              p.byType.forEach(it => { const left = (n[it.type] || 0) - it.count; if (left > 0) n[it.type] = left; else delete n[it.type]; });
+              return n;
+            });
+          }
+          const msg = (e && e.message) || String(e);
+          setErr(msg);
+          onError && onError(msg);   // also surfaced on the row, in case this sheet is gone
+        } finally { setBusy(false); }
+      }
+
+      const btn = { flex: 1, padding: '10px 0', borderRadius: 10, border: 'none', fontFamily: J, fontSize: 10, fontWeight: 600, cursor: 'pointer' };
+
+      return (
+        <div onClick={() => { if (!busy) onClose(); }} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,13,38,0.35)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '16px 16px calc(18px + env(safe-area-inset-bottom))', maxHeight: '82vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 2 }}>
+              <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: headTitle }}>Log activity</div>
+              {/* Dismissal is blocked while a write is in flight — the same
+                  guard Cancel has. Unmounting mid-write used to throw the
+                  result away, success or failure. */}
+              <button onClick={onClose} disabled={busy} style={{ background: 'none', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.4 : 1, color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 15 }} /></button>
+            </div>
+            <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 12, lineHeight: 1.5 }}>
+              For <b style={{ color: headTitle }}>{contact.name}</b> — each one becomes its own task in Zoho, dated {cIso(new Date())} and already marked complete.
+            </div>
+
+            {loadErr && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5, marginBottom: 10 }}>Couldn't load the activity list from Zoho, so nothing can be logged right now: {loadErr}</div>}
+            {!loadErr && !meta && <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, padding: '14px 0' }}>Loading the activity list from Zoho…</div>}
+            {!loadErr && meta && options.length === 0 && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>Zoho's Task Type list has nothing on it besides call types, so there's nothing to log here.</div>}
+
+            {!loadErr && meta && options.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {options.map(type => {
+                  const on = !!sel[type];
+                  return (
+                    <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 11px', border: `1px solid ${on ? addCol : bord}`, borderRadius: 10, background: on ? addBg : fieldBg }}>
+                      <div onClick={() => toggle(type)} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                        <i className={`ti ti-${on ? 'square-check' : 'square'}`} style={{ fontSize: 16, color: on ? addCol : mutedCol, flexShrink: 0 }} />
+                        <span style={{ fontFamily: J, fontSize: 10, fontWeight: on ? 600 : 500, color: headTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{type}</span>
+                      </div>
+                      <input type="number" min="1" max={LOG_MAX_TASKS} value={on ? sel[type] : ''} disabled={!on}
+                        onChange={e => setCount(type, e.target.value)}
+                        style={{ width: 52, textAlign: 'center', fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, background: on ? (dark ? '#040C1C' : '#FFFFFF') : 'transparent', border: `1px solid ${on ? bord : 'transparent'}`, borderRadius: 8, padding: '6px 4px', flexShrink: 0 }} />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Exactly what will be written, before it is written — the one
+                thing that makes a wrong Task Type or subject visible up front
+                instead of a week later in the report. */}
+            {items.length > 0 && (
+              <div style={{ marginTop: 12, padding: '9px 11px', borderRadius: 10, background: fieldBg, border: `1px solid ${bord}` }}>
+                <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', textTransform: 'uppercase', color: mutedCol, marginBottom: 5 }}>Will create {total} task{total === 1 ? '' : 's'}</div>
+                {items.map(it => (
+                  <div key={it.type} style={{ fontFamily: J, fontSize: 9, color: headTitle, lineHeight: 1.6 }}>
+                    {it.count} × <span style={{ fontWeight: 600 }}>{activitySubject(it.type, contact.name)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {overCap && <div style={{ marginTop: 8, fontFamily: J, fontSize: 8, color: redCol, lineHeight: 1.5 }}>That's {total} tasks in one go. Keep it to {LOG_MAX_TASKS} or fewer.</div>}
+            {err && <div style={{ marginTop: 8, fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>{err}</div>}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+              <button onClick={onClose} disabled={busy} style={{ ...btn, background: fieldBg, color: headTitle, border: `1px solid ${bord}` }}>Cancel</button>
+              <button onClick={submit} disabled={busy || !items.length || overCap}
+                style={{ ...btn, background: goBg, color: '#fff', opacity: (busy || !items.length || overCap) ? 0.45 : 1, cursor: (busy || !items.length || overCap) ? 'default' : 'pointer' }}>
+                {busy ? 'Adding…' : ('Add' + (total ? ' ' + total : ''))}
+              </button>
+            </div>
+          </div>
         </div>
       );
     }

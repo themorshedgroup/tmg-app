@@ -505,6 +505,17 @@
             let best = null;
             list.forEach(t => {
               if (!/complete/i.test(t.Status || '')) return;
+              // ONLY a completed CALL sets the cadence baseline. Without this
+              // guard a completed Note or Pop-by counted as "the last call",
+              // so a contact nobody had actually phoned looked freshly touched
+              // and their next touch got pushed out a whole interval (30-120
+              // days) — silently dropping them off the board. The local
+              // lastCompletedByContact has always checked this; this path (the
+              // live top-up) did not. tasks_for_contacts is fetched without the
+              // Task Type field, so isCallTask falls through to its subject
+              // test, which is exactly what separates "A Touch Call: Jane Doe"
+              // from "Pop-by: Jane Doe".
+              if (!isCallTask(t, { type: 'Task_Type' })) return;
               const key = String(t.Closed_Time || t.Due_Date || '');
               if (!best || key.localeCompare(String(best.Closed_Time || best.Due_Date || '')) > 0) best = t;
             });

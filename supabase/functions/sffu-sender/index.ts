@@ -127,7 +127,12 @@ Deno.serve(async (req) => {
     if (p.address) { agentByAddr[p.address] = p.listing_agent; urlByAddr[p.address] = p.zillow_url; }
   });
 
-  // 2) Due showings (regular touch sequence).
+  // 2) Due showings (regular touch sequence). `status` is the SFFU app's own
+  // manual in_progress/closed dropdown (sffu/index.html) — separate from
+  // `followup_status`, which only this sender touches. Closing a showing in
+  // the app never updated followup_status, so a showing closed after a
+  // failed send (which leaves followup_status/next_touch_at untouched so the
+  // touch retries) kept getting picked up here forever. Excluded explicitly.
   const { data: due, error: dueErr } = await sb
     .from("showings")
     .select("id, agent_name, agent_phone, property_address, added_by_name, touch_count")
@@ -135,6 +140,7 @@ Deno.serve(async (req) => {
     .not("next_touch_at", "is", null)
     .lte("next_touch_at", new Date().toISOString())
     .not("agent_phone", "is", null)
+    .or("status.is.null,status.neq.closed")
     .limit(25);
   if (dueErr) return json({ error: dueErr.message }, 500);
 

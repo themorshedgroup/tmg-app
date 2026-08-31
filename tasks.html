@@ -2520,6 +2520,44 @@ Rules:
       );
     }
 
+    // Multi-select dropdown for team pickers (Assignees / Assigned by) — same
+    // click-to-open-panel convention as DateField above (no outside-click
+    // handling anywhere in this codebase, so this doesn't add it either).
+    function PeopleDropdown({ dark, team, arr, set, placeholder }) {
+      const gold = dark ? '#C9A45A' : '#AD832F';
+      const J = C.fontSans;
+      const [open, setOpen] = useState(false);
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 14, outline: 'none', fontFamily: J, boxSizing: 'border-box' };
+      const nameOf = (id) => (team.find(m => m.id === id) || {}).name || '—';
+      const display = arr.length ? arr.map(nameOf).join(', ') : (placeholder || 'Select…');
+      const toggle = (id) => set(arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]);
+      return (
+        <div>
+          <div onClick={() => setOpen(o => !o)} style={{ ...inp, display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', gap: 8 }}>
+            <span style={{ color: arr.length ? ink : sub, fontFamily: J, fontSize: '0.86rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{display}</span>
+            <i className={`ti ti-chevron-${open ? 'up' : 'down'}`} style={{ fontSize: 15, color: gold, flexShrink: 0 }} />
+          </div>
+          {open && (
+            <div style={{ marginTop: 6, background: dark ? '#0A1730' : '#FFFFFF', border: `1px solid ${bord}`, borderRadius: 12, padding: 6, boxShadow: dark ? '0 10px 30px rgba(0,0,0,0.4)' : '0 10px 30px rgba(0,26,74,0.12)', maxHeight: 220, overflowY: 'auto' }}>
+              {!team.length && <div style={{ padding: '8px 6px', fontSize: '0.74rem', color: sub, fontFamily: J }}>No teammates loaded.</div>}
+              {team.map(m => { const on = arr.includes(m.id); return (
+                <div key={m.id} onClick={() => toggle(m.id)} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 8px', borderRadius: 8, cursor: 'pointer', background: on ? (dark ? 'rgba(201,164,90,0.12)' : '#F3EBDA') : 'transparent' }}>
+                  <i className={`ti ${on ? 'ti-square-check-filled' : 'ti-square'}`} style={{ fontSize: 16, color: on ? gold : sub, flexShrink: 0 }} />
+                  <span style={{ fontSize: '0.82rem', color: ink, fontFamily: J }}>{m.name}</span>
+                </div>
+              ); })}
+              {arr.length > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4, paddingTop: 6, borderTop: `1px solid ${bord}` }}>
+                  <button type="button" onClick={() => set([])} style={{ fontFamily: J, fontSize: '0.72rem', fontWeight: 600, color: sub, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>Clear</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ─── Tasks module (full screen, opened from the top-bar Tasks chip) ──
     function TaskForm({ dark, task, team, user, onSave, onCancel }) {
       const t = task || {};
@@ -2685,8 +2723,8 @@ Rules:
             </div>}
           </div>
           {/* People */}
-          {field('Assignees', chips(assignees, setAssignees))}
-          {field('Assigned by', chips(assigners, setAssigners))}
+          {field('Assignees', <PeopleDropdown dark={dark} team={team} arr={assignees} set={setAssignees} placeholder="Select assignees…" />)}
+          {field('Assigned by', <PeopleDropdown dark={dark} team={team} arr={assigners} set={setAssigners} placeholder="Select who assigned this…" />)}
           {/* Status + Priority side by side */}
           <div style={{ display: 'flex', gap: 10 }}>
             <div style={{ flex: 1 }}>{field('Status', sel(status, setStatus, TASK_STATUS))}</div>

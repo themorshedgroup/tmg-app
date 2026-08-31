@@ -178,12 +178,36 @@
   <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.5/dist/purify.min.js"></script>
-  <!-- Office file support: xlsx read/write, docx/pptx read (mammoth/jszip), docx/pptx write (docx/pptxgenjs) -->
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/docx@9.7.1/dist/index.iife.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+  <!-- Office file support: xlsx read/write, docx/pptx read (mammoth/jszip), docx/pptx write
+       (docx/pptxgenjs). These are ~1.9MB combined and most sessions never open an Office
+       file, so they load on first use instead of on every page load. Versions stay pinned
+       here in one place. -->
+  <script>
+  (function () {
+    window.CDN = {
+      xlsx:      "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+      mammoth:   "https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js",
+      jszip:     "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+      docx:      "https://cdn.jsdelivr.net/npm/docx@9.7.1/dist/index.iife.js",
+      pptxgenjs: "https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"
+    };
+    var inflight = {};
+    // Resolves with the library's global once loaded. Concurrent callers share one
+    // request; a failed load is not cached, so a retry can still succeed.
+    window.ensureLib = function (globalName, url) {
+      if (window[globalName]) return Promise.resolve(window[globalName]);
+      if (inflight[url]) return inflight[url];
+      inflight[url] = new Promise(function (resolve, reject) {
+        var el = document.createElement("script");
+        el.src = url; el.async = true;
+        el.onload = function () { resolve(window[globalName]); };
+        el.onerror = function () { delete inflight[url]; reject(new Error("Could not load " + url)); };
+        document.head.appendChild(el);
+      });
+      return inflight[url];
+    };
+  })();
+  </script>
 </head>
 <body>
   <!-- ─── Dark mode init (before render to avoid flash) ─── -->
@@ -438,7 +462,7 @@ Continue with TMG Gmail
         if (busy) return;
         setBusy(true); setErr(null);
         try {
-          const blob = kind === 'doc' ? await genDocxBlob(body) : kind === 'sheet' ? genXlsxBlob(body) : await genPptxBlob(body);
+          const blob = kind === 'doc' ? await genDocxBlob(body) : kind === 'sheet' ? await genXlsxBlob(body) : await genPptxBlob(body);
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click();
           setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 400);
@@ -476,7 +500,7 @@ Continue with TMG Gmail
         if (busy) return;
         setBusy(kind); setErr(null);
         try {
-          const blob = kind === 'sheet' ? genXlsxBlob(mdRowsToCsv(tableRows)) : await genDocxBlob(text);
+          const blob = kind === 'sheet' ? await genXlsxBlob(mdRowsToCsv(tableRows)) : await genDocxBlob(text);
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url; a.download = kind === 'sheet' ? 'TMG-Table.xlsx' : 'TMG-Notes.docx';
@@ -996,21 +1020,21 @@ Continue with TMG Gmail
     // Word/PowerPoint/Excel are parsed client-side into plain text and sent through
     // the same 'text' attachment path CSV/txt already use — no backend changes needed.
     async function readXlsxAsText(file) {
-      const XLSX = window.XLSX;
+      const XLSX = await ensureLib('XLSX', CDN.xlsx);
       if (!XLSX) throw new Error('Spreadsheet reader failed to load — check your connection and try again.');
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: 'array' });
       return wb.SheetNames.map(name => '### Sheet: ' + name + '\n' + XLSX.utils.sheet_to_csv(wb.Sheets[name])).join('\n\n');
     }
     async function readDocxAsText(file) {
-      const mammoth = window.mammoth;
+      const mammoth = await ensureLib('mammoth', CDN.mammoth);
       if (!mammoth) throw new Error('Word reader failed to load — check your connection and try again.');
       const buf = await file.arrayBuffer();
       const result = await mammoth.extractRawText({ arrayBuffer: buf });
       return result.value || '';
     }
     async function readPptxAsText(file) {
-      const JSZip = window.JSZip;
+      const JSZip = await ensureLib('JSZip', CDN.jszip);
       if (!JSZip) throw new Error('Presentation reader failed to load — check your connection and try again.');
       const zip = await JSZip.loadAsync(await file.arrayBuffer());
       const slideFiles = Object.keys(zip.files)
@@ -1035,7 +1059,7 @@ Continue with TMG Gmail
       });
     }
     async function genDocxBlob(body) {
-      const d = window.docx;
+      const d = await ensureLib('docx', CDN.docx);
       if (!d) throw new Error('Word writer failed to load — check your connection and try again.');
       const { Document, Packer, Paragraph, HeadingLevel } = d;
       const children = (body || '').split('\n').map(raw => {
@@ -1049,8 +1073,8 @@ Continue with TMG Gmail
       const doc = new Document({ sections: [{ children }] });
       return Packer.toBlob(doc);
     }
-    function genXlsxBlob(body) {
-      const XLSX = window.XLSX;
+    async function genXlsxBlob(body) {
+      const XLSX = await ensureLib('XLSX', CDN.xlsx);
       if (!XLSX) throw new Error('Spreadsheet writer failed to load — check your connection and try again.');
       const wb = XLSX.utils.book_new();
       const re = /^### Sheet: (.+)$/gm;
@@ -1071,7 +1095,7 @@ Continue with TMG Gmail
       return new Blob([arr], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     }
     async function genPptxBlob(body) {
-      const PptxGenJS = window.PptxGenJS;
+      const PptxGenJS = await ensureLib('PptxGenJS', CDN.pptxgenjs);
       if (!PptxGenJS) throw new Error('Presentation writer failed to load — check your connection and try again.');
       const pptx = new PptxGenJS();
       const slides = (body || '').split(/^---\s*$/m).map(s => s.trim()).filter(Boolean);

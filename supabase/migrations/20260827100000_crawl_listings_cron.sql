@@ -13,15 +13,23 @@
 -- 'x-cron-secret' header read live from vault (name 'crawl_cron_secret'),
 -- ONE BROKER PER INVOCATION because a single source can page up to 25 times:
 --
---   crawl-ecr      '0  1 * * 1,4'
---   crawl-aquila   '5  1 * * 1,4'
---   crawl-hpi      '10 1 * * 1,4'
---   crawl-cushman  '15 1 * * 1,4'
---   crawl-kucera   '20 1 * * 1,4'
+--   crawl-ecr      '1  5 * * 2,4,6'
+--   crawl-aquila   '6  5 * * 2,4,6'
+--   crawl-hpi      '11 5 * * 2,4,6'
+--   crawl-cushman  '16 5 * * 2,4,6'
+--   crawl-kucera   '21 5 * * 2,4,6'
 --
--- 01:00 UTC Mon & Thu = 9:00 AM Manila / 8:00 PM Sun & Wed Austin. Staggered
--- five minutes apart so the sources never overlap. Slowest observed source is
--- aquila at ~27s, well inside the wall-clock limit.
+-- 05:01 UTC Tue/Thu/Sat = 12:01 AM Austin. Staggered five minutes apart so the
+-- sources never overlap. Slowest observed source is aquila at ~27s, well
+-- inside the wall-clock limit.
+--
+-- DAYLIGHT SAVING CAVEAT: pg_cron 1.6.4 has no per-job timezone (cron.job has
+-- no timezone column) and this database runs in UTC, so these are fixed UTC
+-- times. They are correct while Austin is on CDT (UTC-5). When DST ends on
+-- 2026-11-01 Austin moves to CST (UTC-6) and 05:01 UTC becomes 11:01 PM the
+-- PREVIOUS evening -- i.e. Mon/Wed/Fri night rather than Tue/Thu/Sat morning.
+-- Harmless for a crawl, but to keep the stated local time, change the hour
+-- from 5 to 6 in each schedule after 2026-11-01 (and back to 5 in March).
 --
 -- To redo from scratch (e.g. secret rotation):
 --   1. supabase secrets set CRAWL_CRON_SECRET=<new value>

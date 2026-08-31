@@ -18,6 +18,11 @@ import { getExisting, upsertListings, supabase } from "./lib/db.js";
 // properties under its own names and URLs, so importing them would create
 // near-duplicates the id hash cannot catch (different url|name|broker).
 // CoStar's job is only to cover what we CANNOT crawl.
+// CoStar's real column names (confirmed from the export field picker):
+// "Leasing Company Name" / "Sale Company Name", not "Listing Company".
+const COMPANY_FIELDS = ["leasingcompanyname", "salecompanyname", "listingcompany", "brokeragecompany", "company"];
+const CONTACT_FIELDS = ["leasingcompanycontact", "salecompanycontact", "listingbrokeragent", "brokeragent", "agent"];
+
 const ALREADY_CRAWLED = [
   /\becr\b|equitable commercial/i,
   /aquila/i,
@@ -76,7 +81,7 @@ const today = new Date().toISOString().slice(0, 10);
 
 let skippedBroker = 0;
 const kept = records.filter((r) => {
-  const co = pick(r, "listingcompany", "brokeragecompany", "company") || "";
+  const co = pick(r, ...COMPANY_FIELDS) || "";
   if (ALREADY_CRAWLED.some((re) => re.test(co))) { skippedBroker++; return false; }
   return true;
 });
@@ -87,16 +92,34 @@ if (skippedBroker) {
 const listings = kept.map((r) => {
   const l = finalize(
     {
-      broker: pick(r, "listingcompany", "brokeragecompany", "company") || "CoStar (unattributed)",
+      broker: pick(r, ...COMPANY_FIELDS) || "CoStar (unattributed)",
       name: pick(r, "propertyname", "buildingname", "name") || pick(r, "propertyaddress", "address"),
       address: pick(r, "propertyaddress", "address", "streetaddress"),
       city: pick(r, "city") || "Austin",
       submarket: pick(r, "submarketname", "submarket", "submarketcluster"),
-      type_text: pick(r, "propertytype", "spaceuse", "type"),
-      status_text: pick(r, "listingtype", "forsaleorlease", "status") || "lease",
-      size: pick(r, "rba", "availablesf", "totalavailablespacesf", "buildingsf", "size"),
-      price_or_rate: pick(r, "rentsfyr", "askingrent", "salesprice", "price", "rate"),
-      agents: [{ name: pick(r, "listingbrokeragent", "brokeragent", "agent"), phone: pick(r, "brokerphone", "phone"), email: null }],
+      type_text: pick(r, "propertytype", "secondarytype", "spaceuse", "type"),
+      // CoStar has no single lease-or-sale column. "Building Status" means
+      // Existing/Under Construction, not availability -- using it would be
+      // wrong. Derive from which price actually has a value instead.
+      status: (() => {
+        const rent = pick(r, "rentsf", "rentsfyr", "askingrent", "rate");
+        const sale = pick(r, "forsaleprice", "salesprice", "price");
+        const saleOff = /not for sale|off market/i.test(pick(r, "forsalestatus") || "");
+        const forSale = !!sale && !saleOff;
+        if (rent && forSale) return "both";
+        if (forSale) return "for_sale";
+        if (rent) return "for_lease";
+        return null;
+      })(),
+      // CoStar gives bare numbers; crawled rows read "62,127 SF". Match them.
+      size: (() => {
+        const v = pick(r, "totalavailablespacesf", "rentablebuildingarea", "rba", "availablesf", "buildingsf", "size");
+        if (!v) return null;
+        const n = Number(String(v).replace(/[^0-9.]/g, ""));
+        return Number.isFinite(n) && n > 0 ? `${n.toLocaleString("en-US")} SF` : v;
+      })(),
+      price_or_rate: pick(r, "rentsf", "rentsfyr", "askingrent", "forsaleprice", "salesprice", "price", "rate"),
+      agents: [{ name: pick(r, ...CONTACT_FIELDS), phone: pick(r, "brokerphone", "phone"), email: null }],
       url: pick(r, "listingurl", "url"),
       image_url: null,
     },

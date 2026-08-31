@@ -63,7 +63,8 @@
   th .srt{color:var(--gold);margin-left:3px}
   td.wrap-cell{white-space:normal;min-width:190px}
   .brokerline{font-size:11px;color:var(--muted);margin-top:2px;font-weight:400}
-  th.actcol,td.actcol{width:34px;min-width:34px;padding-left:8px;padding-right:4px;text-align:center}
+  th.actcol,td.actcol{width:34px;min-width:34px;padding-left:8px;padding-right:4px;
+    text-align:center;vertical-align:middle}
   .addbtn{border:1px solid var(--line);background:#fff;color:var(--navy);border-radius:5px;
           width:24px;height:24px;line-height:1;font-size:15px;cursor:pointer;padding:0}
   .addbtn:hover{background:var(--navy);color:#fff;border-color:var(--navy)}
@@ -128,9 +129,9 @@
       <select id="f-broker"><option value="">All brokers</option></select>
       <select id="f-type"><option value="">All types</option></select>
       <select id="f-status">
-        <option value="">Lease &amp; sale</option>
-        <option value="for_lease">For lease</option>
-        <option value="for_sale">For sale</option>
+        <option value="">Lease &amp; Sale</option>
+        <option value="for_lease">For Lease</option>
+        <option value="for_sale">For Sale</option>
         <option value="both">Both</option>
       </select>
       <span class="count" id="count"></span>
@@ -203,6 +204,7 @@
   "use strict";
 
   var ALL_COLS = [
+    {key:"client_lists",  label:"Client List", wrap:true},
     {key:"name",          label:"Property",   wrap:true},
     {key:"address",       label:"Address",    wrap:true},
     {key:"city",          label:"City"},
@@ -212,11 +214,10 @@
     {key:"size",          label:"Size"},
     {key:"price_or_rate", label:"Rate / Price"},
     {key:"agents",        label:"Agents",     wrap:true},
-    {key:"client_lists",  label:"Client List", wrap:true},
     {key:"first_seen",    label:"First seen"},
     {key:"last_seen",     label:"Last seen"}
   ];
-  var DEFAULT = ["name","address","submarket","property_type","status","size","price_or_rate","agents","client_lists"];
+  var DEFAULT = ["client_lists","name","address","submarket","property_type","status","size","price_or_rate","agents"];
 
   // CoStar rows are licensed data. Until every portal viewer is confirmed to
   // hold a CoStar seat, they stay hidden -- flip to true only then.
@@ -229,6 +230,12 @@
   var activeClient="";
 
   var $=function(id){return document.getElementById(id)};
+  // "for_lease" -> "For Lease", "multifamily" -> "Multifamily"
+  function titleCase(v){
+    return String(v||"").replace(/_/g," ").replace(/\S+/g,function(w){
+      return w.charAt(0).toUpperCase()+w.slice(1);
+    });
+  }
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
     return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
   function showErr(m){ $("err").innerHTML='<div class="err">'+esc(m)+'</div>'; }
@@ -307,7 +314,7 @@
   function fill(sel, vals){
     var keep = sel.options[0];
     sel.innerHTML=""; sel.appendChild(keep);
-    vals.forEach(function(v){ var o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o); });
+    vals.forEach(function(v){ var o=document.createElement("option"); o.value=v; o.textContent=titleCase(v); sel.appendChild(o); });
   }
 
   function visible(){
@@ -330,11 +337,56 @@
       return true;
     });
     out.sort(function(a,b){
-      var x=(a[sortKey]==null?"":String(a[sortKey])).toLowerCase();
-      var y=(b[sortKey]==null?"":String(b[sortKey])).toLowerCase();
+      var x=sortValue(a,sortKey), y=sortValue(b,sortKey);
+      // Blanks always sink, whichever way the column is pointing.
+      var xb=(x===""||x==null), yb=(y===""||y==null);
+      if(xb&&yb) return 0;
+      if(xb) return 1;
+      if(yb) return -1;
+      if(typeof x==="number"&&typeof y==="number") return (x-y)*sortDir;
       return x<y?-sortDir:x>y?sortDir:0;
     });
     return out;
+  }
+
+  // Comparable value per column: numbers sort numerically, list-shaped
+  // columns sort by their first entry, everything else case-insensitively.
+  function sortValue(l,key){
+    if(key==="size"){
+      // Sizes arrive as "62,127 SF", "2 Acres" or a range like "48,000-1,000,000 SF".
+      // Sort on the first number, converting acres to square feet so land and
+      // buildings order sensibly against each other.
+      // ECR writes "2 suites: 805 SF & 4,452 SF" -- the leading count is not a
+      // size, so drop it before reading the first number. Acres appear as
+      // "Acres", "Acre" or "AC"; convert to square feet so land and buildings
+      // order against each other correctly.
+      var raw=String(l.size==null?"":l.size).replace(/,/g,"");
+      raw=raw.replace(/^\s*\d+\s*suites?\s*:?\s*/i,"");
+      var m=raw.match(/[0-9.]+/);
+      if(!m) return null;
+      var n=parseFloat(m[0]);
+      if(isNaN(n)) return null;
+      return /\bac\b|acres?\b/i.test(raw) ? n*43560 : n;
+    }
+    if(key==="price_or_rate"){
+      var p=parseFloat(String(l.price_or_rate==null?"":l.price_or_rate).replace(/,/g,"").match(/[0-9.]+/)||"");
+      return isNaN(p)?null:p;
+    }
+    if(key==="agents"){
+      var a=Array.isArray(l.agents)?l.agents:[];
+      return a.length?String(a[0].name||"").toLowerCase():null;
+    }
+    if(key==="client_lists"){
+      var on=items.filter(function(it){ return it.listing_id===l.id; });
+      if(!on.length) return null;
+      var names=on.map(function(it){
+        var c=clients.filter(function(x){ return x.id===it.client_id; })[0];
+        return c?c.name:"";
+      }).sort();
+      return String(names[0]||"").toLowerCase();
+    }
+    var v=l[key];
+    return v==null?null:String(v).toLowerCase();
   }
 
   // ── render ────────────────────────────────────────────────────────
@@ -362,7 +414,7 @@
       return head + (l.broker ? '<div class="brokerline">'+esc(l.broker)+'</div>' : "");
     }
     if(key==="status"||key==="property_type"){
-      return l[key] ? '<span class="pill">'+esc(String(l[key]).replace(/_/g," "))+'</span>' : "—";
+      return l[key] ? '<span class="pill">'+esc(titleCase(l[key]))+'</span>' : "—";
     }
     return l[key] ? esc(l[key]) : '<span class="hint">—</span>';
   }

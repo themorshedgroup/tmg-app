@@ -1616,6 +1616,29 @@ Rules:
         this.syncToZohoProjects({ ...oldTask, ...fields, id }, oldTask, user);
       },
 
+      // Hard delete — clears child rows first (task_people/labels/activity/
+      // decision options/assist/email links/links) since most of this schema
+      // predates tracked migrations and cascade isn't guaranteed everywhere.
+      // Refuses if the task still has subtasks rather than silently cascading
+      // a whole subtree the user didn't ask to remove.
+      async delete(id) {
+        const c = this.client(); if (!c) return { error: 'Not connected.' };
+        const { data: subtasks } = await c.from('tasks').select('id').eq('parent_task_id', id).limit(1);
+        if (subtasks && subtasks.length) return { error: 'This task has subtasks — delete those first.' };
+        await Promise.all([
+          c.from('task_people').delete().eq('task_id', id),
+          c.from('task_labels').delete().eq('task_id', id),
+          c.from('task_activity').delete().eq('task_id', id),
+          c.from('task_decision_options').delete().eq('task_id', id),
+          c.from('task_assist').delete().eq('task_id', id),
+          c.from('task_email_links').delete().eq('task_id', id),
+        ]);
+        await c.from('task_links').delete().or('predecessor_id.eq.' + id + ',successor_id.eq.' + id);
+        const { error } = await c.from('tasks').delete().eq('id', id);
+        if (error) { console.error('[TaskDB] delete:', error.message); return { error: error.message }; }
+        return { error: null };
+      },
+
       // Spawn the next instance of a recurring task (due date advanced by the interval).
       async spawnRecurrence(task, user) {
         const c = this.client(); if (!c) return;
@@ -2736,7 +2759,17 @@ Rules:
       );
     }
 
-    function TaskDetail({ dark, task, people, team, user, allTasks, onEdit, onStatus, onOpenSubtask, emailLinks, onEmailChanged, initialTab, onTabSettled }) {
+    function TaskDetail({ dark, task, people, team, user, allTasks, onEdit, onDelete, onStatus, onOpenSubtask, emailLinks, onEmailChanged, initialTab, onTabSettled }) {
+      const [deleting, setDeleting] = useState(false);
+      async function handleDelete() {
+        if (deleting) return;
+        if (!window.confirm('Delete "' + task.title + '"? This can\'t be undone.')) return;
+        setDeleting(true);
+        const { error } = await TaskDB.delete(task.id);
+        setDeleting(false);
+        if (error) { window.alert(error); return; }
+        onDelete && onDelete();
+      }
       const [detTab, setDetTab] = useState('details');   // 'details' | 'thread' | 'email'
       const emLinks = emailLinks || [];
       // Opened from the mailbox or a subject email icon — land on Email, not Details.
@@ -2871,6 +2904,7 @@ Rules:
               {emLinks.length > 0 && <i className="ti ti-mail" title="Has a linked email — view on the Email tab" onClick={() => setDetTab('email')} style={{ fontSize: 17, color: dark ? '#7FA8DD' : '#185FA5', cursor: 'pointer', flexShrink: 0 }} />}
             </div>
             <button onClick={onEdit} style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: sub, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}>Edit</button>
+            <button onClick={handleDelete} disabled={deleting} style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#C0392B', background: dark ? '#0A1730' : '#fff', border: '1px solid #C0392B55', borderRadius: 6, padding: '7px 12px', cursor: deleting ? 'default' : 'pointer', opacity: deleting ? 0.6 : 1, fontFamily: C.fontSans, flexShrink: 0 }}>{deleting ? 'Deleting…' : 'Delete'}</button>
           </div>
           {/* Status segmented control — ported from the prototype's .status-seg */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 22 }}>
@@ -3707,7 +3741,7 @@ Rules:
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             {taskEditing
               ? <TaskForm dark={dark} task={openTask} team={team} user={user} onSave={onTaskSave} onCancel={() => setTaskEditing(false)} />
-              : <TaskDetail dark={dark} task={openTask} people={openTask._people || []} team={team} user={user} allTasks={(current && current._tasks) || []} onEdit={() => setTaskEditing(true)} onStatus={(s) => onTaskStatus(openTask, s)} onOpenSubtask={(child) => setOpenTask(child)} />}
+              : <TaskDetail dark={dark} task={openTask} people={openTask._people || []} team={team} user={user} allTasks={(current && current._tasks) || []} onEdit={() => setTaskEditing(true)} onDelete={async () => { const fresh = await reload(); const proj = current && fresh.find(x => x.id === current.id); setCurrent(proj || null); setOpenTask(null); setTaskEditing(false); }} onStatus={(s) => onTaskStatus(openTask, s)} onOpenSubtask={(child) => setOpenTask(child)} />}
           </div>
         </React.Fragment>
       );
@@ -4387,7 +4421,7 @@ Rules:
       );
       const detailPane = (
         view === 'form' ? <TaskForm dark={dark} task={current ? withMeta(current) : null} team={team} user={user} onSave={handleSave} onCancel={() => setView(current ? 'detail' : 'list')} />
-          : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} allTasks={data.tasks} onEdit={() => setView('form')} onStatus={(s) => changeStatus(current, s)} onOpenSubtask={(child) => { setCurrent(child); setView('detail'); }}
+          : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={data.peopleByTask[current.id] || []} team={team} user={user} allTasks={data.tasks} onEdit={() => setView('form')} onDelete={async () => { await reload(); setView('list'); setCurrent(null); }} onStatus={(s) => changeStatus(current, s)} onOpenSubtask={(child) => { setCurrent(child); setView('detail'); }}
               emailLinks={linksByTask[current.id] || []} onEmailChanged={onEmailAttached} initialTab={emailTabFocus ? 'email' : undefined} onTabSettled={() => setEmailTabFocus(null)} />
           : view === 'labels' ? <LabelManager dark={dark} user={user} onClose={() => setView('list')} />
           : null

@@ -7,15 +7,19 @@
 <title>Commercial Listings | The Morshed Group</title>
 <style>
   :root{
-    --navy:#1B2A4A; --navy-2:#24365C; --gold:#B8912F; --gold-lt:#E7C56A;
-    --ink:#1F2937; --muted:#6B7280; --line:#E5E7EB; --bg:#F7F8FA; --card:#fff;
+    --navy:#001A4A; --navy-2:#0A2A66; --gold:#AD832F; --gold-lt:#E8D9BC;
+    --ink:#1F2937; --muted:#6B7280; --line:#E4DFD4; --bg:#F7F8FA; --card:#fff;
   }
   *{box-sizing:border-box}
   body{margin:0;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;color:var(--ink);background:var(--bg)}
   a{color:var(--navy)}
   .top{background:var(--navy);color:#fff;padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-  .top h1{margin:0;font-size:17px;font-weight:600;letter-spacing:.02em}
-  .eyebrow{font-size:10px;letter-spacing:.18em;color:var(--gold-lt);text-transform:uppercase;margin:0 0 2px}
+  .top h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.02em}
+  .top .logo{height:26px;width:auto;display:block}
+  .top .divider{width:1px;height:22px;background:#3A4A6B;display:inline-block}
+  .backlink{display:inline-flex;align-items:center;gap:6px;color:#C7D0E0;text-decoration:none;
+            font-size:13px;padding:5px 9px;border:1px solid #41527A;border-radius:6px}
+  .backlink:hover{background:#2B3D63;color:#fff}
   .top .spacer{flex:1}
   .top .who{font-size:12px;color:#C7D0E0}
   .btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:6px;padding:6px 11px;font-size:13px;cursor:pointer}
@@ -27,6 +31,10 @@
   .wrap{display:flex;align-items:flex-start;gap:0;min-height:calc(100vh - 56px)}
   .rail{width:232px;flex:0 0 232px;background:#fff;border-right:1px solid var(--line);padding:14px 12px;min-height:calc(100vh - 56px)}
   .rail h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+  .railhead{margin-top:14px !important;padding-top:12px;border-top:1px solid var(--line)}
+  .cl.allrow{font-weight:700}
+  .cl .agentribbon{display:block;font-size:10.5px;color:var(--muted);margin-top:2px;font-weight:400}
+  .cl.on .agentribbon{color:#C7D0E0}
   .cl{display:block;width:100%;text-align:left;border:0;background:transparent;padding:7px 9px;border-radius:6px;cursor:pointer;font-size:13px;color:var(--ink)}
   .cl:hover{background:#F3F4F6}
   .cl.on{background:var(--navy);color:#fff}
@@ -69,12 +77,15 @@
 <body>
 
 <div class="top">
-  <div>
-    <p class="eyebrow">The Morshed Group</p>
-    <h1>Commercial Listings</h1>
-  </div>
+  <a class="backlink" href="/" title="Back to the app">
+    <span aria-hidden="true">&#8592;</span><span class="backtext">Back</span>
+  </a>
+  <img class="logo" src="../Morshed%20Group%20Logo%20White.png" alt="The Morshed Group">
+  <span class="divider" aria-hidden="true"></span>
+  <h1>Commercial Listings</h1>
   <div class="spacer"></div>
   <span class="who" id="who"></span>
+  <button class="btn btn-ghost" id="btn-import" style="display:none">Import CoStar</button>
   <button class="btn btn-ghost" id="btn-cols">Columns</button>
   <button class="btn btn-ghost" id="btn-out" style="display:none">Sign out</button>
 </div>
@@ -87,8 +98,8 @@
 
 <div class="wrap" id="app" style="display:none">
   <aside class="rail">
-    <h2>Clients</h2>
-    <button class="cl on" data-client="" id="cl-all">All listings <span class="n" id="n-all"></span></button>
+    <button class="cl allrow on" data-client="" id="cl-all">All Listings <span class="n" id="n-all"></span></button>
+    <h2 class="railhead">Client List</h2>
     <div id="cl-list"></div>
     <button class="btn" id="btn-newclient" style="width:100%;margin-top:10px">+ New Client</button>
     <div id="cl-meta" style="margin-top:14px"></div>
@@ -132,15 +143,30 @@
 </form></dialog>
 
 <dialog id="dlg-add"><form method="dialog" class="dlg">
-  <h3>Add to client</h3>
+  <h3>Add to Client List</h3>
   <div id="add-what" class="hint" style="margin-bottom:10px"></div>
-  <label for="a-client">Client</label>
+  <label for="a-client">Client List</label>
   <select id="a-client"></select>
   <label for="a-note">Note (optional)</label>
   <input id="a-note" type="text" placeholder="Why this one">
   <div class="row">
     <button class="btn" value="cancel">Cancel</button>
     <button class="btn btn-primary" value="save">Add</button>
+  </div>
+</form></dialog>
+
+<dialog id="dlg-import"><form method="dialog" class="dlg">
+  <h3>Import CoStar export</h3>
+  <p class="hint" style="margin:0 0 10px">
+    Excel (.xlsx) or CSV, straight from CoStar &mdash; no converting needed.
+    Listings from brokers we already crawl are skipped automatically.
+  </p>
+  <label for="i-file">File</label>
+  <input id="i-file" type="file" accept=".xlsx,.xls,.csv">
+  <div id="i-result" class="hint" style="margin-top:12px"></div>
+  <div class="row">
+    <button class="btn" value="cancel">Close</button>
+    <button class="btn btn-primary" id="i-go" value="go">Import</button>
   </div>
 </form></dialog>
 
@@ -170,15 +196,17 @@
     {key:"size",          label:"Size"},
     {key:"price_or_rate", label:"Rate / Price"},
     {key:"agents",        label:"Agents",     wrap:true},
+    {key:"client_lists",  label:"Client List", wrap:true},
     {key:"first_seen",    label:"First seen"},
     {key:"last_seen",     label:"Last seen"}
   ];
-  var DEFAULT = ["name","address","submarket","property_type","status","size","price_or_rate","agents"];
+  var DEFAULT = ["name","address","submarket","property_type","status","size","price_or_rate","agents","client_lists"];
 
   // CoStar rows are licensed data. Until every portal viewer is confirmed to
   // hold a CoStar seat, they stay hidden -- flip to true only then.
   var INCLUDE_COSTAR = false;
 
+  var FN_BASE = "https://ipqoqhsnjubopybujetn.functions.supabase.co";
   var sb=null, user=null;
   var listings=[], clients=[], items=[], agents=[];
   var cols=[], sortKey="broker", sortDir=1;
@@ -200,6 +228,7 @@
       $("gate").style.display="none"; $("app").style.display="flex";
       $("who").textContent = user.email || "";
       $("btn-out").style.display="";
+      $("btn-import").style.display="";
       try { await loadAll(); } catch(e){ showErr(e.message || String(e)); }
     });
   }
@@ -229,9 +258,12 @@
     var i = await sb.from("listing_client_items").select("*");
     if(i.error) throw i.error;
     items = i.data || [];
+    // Sales agents only: the directory marks them with 'agent' in access.
+    // Title is unreliable here -- one agent has none, another is "Chief Realty
+    // Officer" -- so filter on access, not on the job title.
     var a = await sb.from("profiles")
-      .select("id, first_name, last_name, title")
-      .eq("status","active").order("first_name");
+      .select("id, first_name, last_name, title, access")
+      .eq("status","active").contains("access", ["agent"]).order("first_name");
     agents = a.error ? [] : (a.data || []);
   }
   async function loadCols(){
@@ -288,6 +320,14 @@
 
   // ── render ────────────────────────────────────────────────────────
   function cellHtml(l,key){
+    if(key==="client_lists"){
+      var on = items.filter(function(it){ return it.listing_id===l.id; });
+      if(!on.length) return '<span class="hint">—</span>';
+      return on.map(function(it){
+        var c = clients.filter(function(x){ return x.id===it.client_id; })[0];
+        return '<span class="pill">'+esc(c ? c.name : "…")+'</span>';
+      }).join(" ");
+    }
     if(key==="agents"){
       var a=Array.isArray(l.agents)?l.agents:[];
       if(!a.length) return '<span class="hint">—</span>';
@@ -329,10 +369,10 @@
       var atd=document.createElement("td"); atd.className="actcol";
       var ab=document.createElement("button"); ab.className="addbtn";
       if(activeClient){
-        ab.textContent="×"; ab.title="Remove from this client";
+        ab.textContent="×"; ab.title="Remove from this Client List";
         ab.addEventListener("click",function(){ removeFromClient(l.id); });
       } else {
-        ab.textContent="+"; ab.title="Add to a client";
+        ab.textContent="+"; ab.title="Add to a Client List";
         ab.addEventListener("click",function(){ openAdd(l); });
       }
       atd.appendChild(ab); tr.appendChild(atd);
@@ -367,13 +407,16 @@
   }
 
   // ── clients ───────────────────────────────────────────────────────
+  function agentNameByIdSafe(id){ try { return agentNameById(id); } catch(e){ return null; } }
   function renderRail(){
     var box=$("cl-list"); box.innerHTML="";
     clients.forEach(function(c){
       var n=items.filter(function(it){return it.client_id===c.id}).length;
       var b=document.createElement("button");
       b.className="cl"+(activeClient===c.id?" on":"");
-      b.innerHTML=esc(c.name)+'<span class="n">'+n+'</span>';
+      var who=agentNameByIdSafe(c.agent_id);
+      b.innerHTML=esc(c.name)+'<span class="n">'+n+'</span>'+
+                  (who?'<span class="agentribbon">'+esc(who)+'</span>':'');
       b.addEventListener("click",function(){ activeClient=c.id; renderRail(); render(); renderMeta(c); });
       box.appendChild(b);
     });
@@ -388,7 +431,7 @@
       '<h2 style="margin-top:12px">Criteria</h2><div class="hint" style="white-space:pre-wrap">'+
       esc((c.criteria&&c.criteria.text)||"—")+'</div>'+
       (c.notes?'<h2 style="margin-top:12px">Notes</h2><div class="hint" style="white-space:pre-wrap">'+esc(c.notes)+'</div>':'')+
-      '<button class="btn" id="cl-edit" style="width:100%;margin-top:12px">Edit client</button>';
+      '<button class="btn" id="cl-edit" style="width:100%;margin-top:12px">Edit Client</button>';
     $("cl-edit").addEventListener("click",function(){ openClient(c); });
   }
 
@@ -403,7 +446,7 @@
   var editing=null;
   function openClient(c){
     editing=c||null;
-    $("dlg-client-title").textContent = c ? "Edit Client" : "New Client";
+    $("dlg-client-title").textContent = c ? "Edit Client List" : "New Client";
     var sel=$("c-agent");
     sel.innerHTML='<option value="">— Unassigned —</option>';
     agents.forEach(function(a){
@@ -433,7 +476,7 @@
 
   var pending=null;
   function openAdd(l){
-    if(!clients.length){ showErr("Create a client first."); return; }
+    if(!clients.length){ showErr("Create a Client List first."); return; }
     pending=l;
     $("add-what").textContent = (l.name||l.address||"This listing") + " — " + (l.broker||"");
     var s=$("a-client"); s.innerHTML="";
@@ -447,7 +490,7 @@
       client_id:$("a-client").value, listing_id:pending.id,
       note:$("a-note").value.trim()||null, snapshot:pending, added_by:user.id
     });
-    if(r.error){ showErr(r.error.code==="23505" ? "That listing is already on this client's list." : r.error.message); return; }
+    if(r.error){ showErr(r.error.code==="23505" ? "That listing is already on this Client List." : r.error.message); return; }
     clearErr(); pending=null; await loadClients(); renderRail(); render();
   });
 
@@ -492,6 +535,34 @@
     Array.prototype.forEach.call(box.children,function(el){ if(el.firstChild.checked) next.push(el.dataset.key); });
     if(!next.length){ showErr("Keep at least one column."); return; }
     cols=next; render(); await saveCols();
+  });
+
+  // ── CoStar import ─────────────────────────────────────────────────
+  $("btn-import").addEventListener("click",function(){
+    $("i-file").value=""; $("i-result").textContent=""; $("dlg-import").showModal();
+  });
+  $("dlg-import").addEventListener("close", async function(){
+    if($("dlg-import").returnValue!=="go") return;
+    var f=$("i-file").files[0];
+    if(!f){ showErr("Choose a file first."); return; }
+    clearErr();
+    var res=$("i-result"); res.textContent="Importing "+f.name+"…";
+    $("dlg-import").showModal();
+    try{
+      var session=await window.SupabaseAuth.getSession();
+      var token=session && session.access_token;
+      var fd=new FormData(); fd.append("file", f);
+      var r=await fetch(FN_BASE+"/import-costar",{method:"POST",headers:{Authorization:"Bearer "+token},body:fd});
+      var d=await r.json();
+      if(!r.ok||d.error){ res.innerHTML='<span style="color:#991B1B">'+esc(d.error||("HTTP "+r.status))+'</span>'; return; }
+      res.innerHTML="Read "+d.read+" row(s). Imported <b>"+d.imported+"</b> ("+d.new+" new).<br>"+
+        "Skipped "+d.skipped_already_crawled+" from brokers we already crawl, "+
+        d.skipped_same_address+" already listed at the same address"+
+        (d.merged_duplicates? ", merged "+d.merged_duplicates+" duplicate row(s)":"")+".";
+      await loadListings(); buildFilters(); render();
+    }catch(e){
+      res.innerHTML='<span style="color:#991B1B">'+esc(e.message||String(e))+'</span>';
+    }
   });
 
   // ── misc wiring ───────────────────────────────────────────────────

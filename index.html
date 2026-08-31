@@ -8074,6 +8074,7 @@ Rules:
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
         .concat([{ id: 'timeoff', label: 'Time Off', icon: 'ti-calendar-off' }])
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
+        .concat([{ id: 'commercial-listings', label: 'Commercial Listings', icon: 'ti-building-skyscraper', href: 'commercial-listings/' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', img: 'sffu-icon.png' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
         .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);

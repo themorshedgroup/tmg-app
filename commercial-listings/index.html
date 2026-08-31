@@ -43,6 +43,11 @@
   th.drag{opacity:.4}
   th .srt{color:var(--gold);margin-left:3px}
   td.wrap-cell{white-space:normal;min-width:190px}
+  .brokerline{font-size:11px;color:var(--muted);margin-top:2px;font-weight:400}
+  th.actcol,td.actcol{width:34px;min-width:34px;padding-left:8px;padding-right:4px;text-align:center}
+  .addbtn{border:1px solid var(--line);background:#fff;color:var(--navy);border-radius:5px;
+          width:24px;height:24px;line-height:1;font-size:15px;cursor:pointer;padding:0}
+  .addbtn:hover{background:var(--navy);color:#fff;border-color:var(--navy)}
   tbody tr:hover{background:#FAFBFC}
   .pill{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;border:1px solid var(--line);background:#F9FAFB;color:var(--muted);margin-right:4px}
   .empty{padding:40px;text-align:center;color:var(--muted)}
@@ -85,7 +90,7 @@
     <h2>Clients</h2>
     <button class="cl on" data-client="" id="cl-all">All listings <span class="n" id="n-all"></span></button>
     <div id="cl-list"></div>
-    <button class="btn" id="btn-newclient" style="width:100%;margin-top:10px">+ New client</button>
+    <button class="btn" id="btn-newclient" style="width:100%;margin-top:10px">+ New Client</button>
     <div id="cl-meta" style="margin-top:14px"></div>
   </aside>
 
@@ -111,9 +116,11 @@
 </div>
 
 <dialog id="dlg-client"><form method="dialog" class="dlg">
-  <h3 id="dlg-client-title">New client</h3>
+  <h3 id="dlg-client-title">New Client</h3>
   <label for="c-name">Client name</label>
   <input id="c-name" type="text" required placeholder="e.g. Bluebonnet Holdings">
+  <label for="c-agent">Agent</label>
+  <select id="c-agent"><option value="">— Unassigned —</option></select>
   <label for="c-notes">Notes</label>
   <textarea id="c-notes" rows="2" placeholder="Anything the team should know"></textarea>
   <label for="c-crit">Search parameters</label>
@@ -154,7 +161,6 @@
   "use strict";
 
   var ALL_COLS = [
-    {key:"broker",        label:"Broker"},
     {key:"name",          label:"Property",   wrap:true},
     {key:"address",       label:"Address",    wrap:true},
     {key:"city",          label:"City"},
@@ -165,17 +171,16 @@
     {key:"price_or_rate", label:"Rate / Price"},
     {key:"agents",        label:"Agents",     wrap:true},
     {key:"first_seen",    label:"First seen"},
-    {key:"last_seen",     label:"Last seen"},
-    {key:"url",           label:"Link"}
+    {key:"last_seen",     label:"Last seen"}
   ];
-  var DEFAULT = ["broker","name","address","submarket","property_type","status","size","price_or_rate","agents","url"];
+  var DEFAULT = ["name","address","submarket","property_type","status","size","price_or_rate","agents"];
 
   // CoStar rows are licensed data. Until every portal viewer is confirmed to
   // hold a CoStar seat, they stay hidden -- flip to true only then.
   var INCLUDE_COSTAR = false;
 
   var sb=null, user=null;
-  var listings=[], clients=[], items=[];
+  var listings=[], clients=[], items=[], agents=[];
   var cols=[], sortKey="broker", sortDir=1;
   var activeClient="";
 
@@ -224,6 +229,10 @@
     var i = await sb.from("listing_client_items").select("*");
     if(i.error) throw i.error;
     items = i.data || [];
+    var a = await sb.from("profiles")
+      .select("id, first_name, last_name, title")
+      .eq("status","active").order("first_name");
+    agents = a.error ? [] : (a.data || []);
   }
   async function loadCols(){
     var r = await sb.from("listing_column_prefs").select("columns").eq("user_id",user.id).maybeSingle();
@@ -286,8 +295,12 @@
         return esc(p.name||"") + (p.phone? ' <span class="hint">'+esc(p.phone)+'</span>' : "");
       }).join("<br>");
     }
-    if(key==="url"){
-      return l.url ? '<a href="'+esc(l.url)+'" target="_blank" rel="noopener noreferrer nofollow">Open ↗</a>' : "—";
+    if(key==="name"){
+      var label = esc(l.name || l.address || "—");
+      var head  = l.url
+        ? '<a href="'+esc(l.url)+'" target="_blank" rel="noopener noreferrer nofollow">'+label+'</a>'
+        : label;
+      return head + (l.broker ? '<div class="brokerline">'+esc(l.broker)+'</div>' : "");
     }
     if(key==="status"||key==="property_type"){
       return l[key] ? '<span class="pill">'+esc(String(l[key]).replace(/_/g," "))+'</span>' : "—";
@@ -298,6 +311,8 @@
   function render(){
     var rows=visible();
     var thead=$("thead"); thead.innerHTML="";
+    var actTh=document.createElement("th"); actTh.className="actcol"; actTh.draggable=false;
+    thead.appendChild(actTh);
     cols.forEach(function(key){
       var c=ALL_COLS.filter(function(x){return x.key===key})[0]; if(!c) return;
       var th=document.createElement("th");
@@ -307,11 +322,20 @@
       wireDrag(th);
       thead.appendChild(th);
     });
-    var act=document.createElement("th"); act.textContent=""; act.draggable=false; thead.appendChild(act);
 
     var tb=$("tbody"); tb.innerHTML="";
     rows.forEach(function(l){
       var tr=document.createElement("tr");
+      var atd=document.createElement("td"); atd.className="actcol";
+      var ab=document.createElement("button"); ab.className="addbtn";
+      if(activeClient){
+        ab.textContent="×"; ab.title="Remove from this client";
+        ab.addEventListener("click",function(){ removeFromClient(l.id); });
+      } else {
+        ab.textContent="+"; ab.title="Add to a client";
+        ab.addEventListener("click",function(){ openAdd(l); });
+      }
+      atd.appendChild(ab); tr.appendChild(atd);
       cols.forEach(function(key){
         var c=ALL_COLS.filter(function(x){return x.key===key})[0]; if(!c) return;
         var td=document.createElement("td");
@@ -319,17 +343,6 @@
         td.innerHTML=cellHtml(l,key);
         tr.appendChild(td);
       });
-      var td=document.createElement("td");
-      if(activeClient){
-        var rm=document.createElement("button"); rm.className="btn"; rm.textContent="Remove";
-        rm.addEventListener("click",function(){ removeFromClient(l.id); });
-        td.appendChild(rm);
-      } else {
-        var b=document.createElement("button"); b.className="btn"; b.textContent="+ Client";
-        b.addEventListener("click",function(){ openAdd(l); });
-        td.appendChild(b);
-      }
-      tr.appendChild(td);
       tb.appendChild(tr);
     });
     $("empty").style.display = rows.length ? "none" : "block";
@@ -370,17 +383,36 @@
   function renderMeta(c){
     var m=$("cl-meta");
     if(!c){ m.innerHTML=""; return; }
-    m.innerHTML='<h2>Criteria</h2><div class="hint" style="white-space:pre-wrap">'+
+    var who=agentNameById(c.agent_id);
+    m.innerHTML=(who?'<h2>Agent</h2><div class="hint">'+esc(who)+'</div>':'')+
+      '<h2 style="margin-top:12px">Criteria</h2><div class="hint" style="white-space:pre-wrap">'+
       esc((c.criteria&&c.criteria.text)||"—")+'</div>'+
       (c.notes?'<h2 style="margin-top:12px">Notes</h2><div class="hint" style="white-space:pre-wrap">'+esc(c.notes)+'</div>':'')+
       '<button class="btn" id="cl-edit" style="width:100%;margin-top:12px">Edit client</button>';
     $("cl-edit").addEventListener("click",function(){ openClient(c); });
   }
 
+  function agentLabel(a){
+    return ((a.first_name||"")+" "+(a.last_name||"")).trim() || "(unnamed)";
+  }
+  function agentNameById(id){
+    for(var i=0;i<agents.length;i++) if(agents[i].id===id) return agentLabel(agents[i]);
+    return null;
+  }
+
   var editing=null;
   function openClient(c){
     editing=c||null;
-    $("dlg-client-title").textContent = c ? "Edit client" : "New client";
+    $("dlg-client-title").textContent = c ? "Edit Client" : "New Client";
+    var sel=$("c-agent");
+    sel.innerHTML='<option value="">— Unassigned —</option>';
+    agents.forEach(function(a){
+      var o=document.createElement("option");
+      o.value=a.id;
+      o.textContent=agentLabel(a)+(a.title?" · "+a.title:"");
+      sel.appendChild(o);
+    });
+    sel.value = c && c.agent_id ? c.agent_id : "";
     $("c-name").value  = c ? (c.name||"") : "";
     $("c-notes").value = c ? (c.notes||"") : "";
     $("c-crit").value  = c ? ((c.criteria&&c.criteria.text)||"") : "";
@@ -390,6 +422,7 @@
     if($("dlg-client").returnValue!=="save") return;
     var name=$("c-name").value.trim(); if(!name) return;
     var payload={ name:name, notes:$("c-notes").value.trim()||null,
+                  agent_id:$("c-agent").value || null,
                   criteria:{text:$("c-crit").value.trim()}, updated_at:new Date().toISOString() };
     var r;
     if(editing) r = await sb.from("listing_clients").update(payload).eq("id",editing.id);

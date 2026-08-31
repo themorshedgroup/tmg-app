@@ -1,17 +1,34 @@
 // Ingest a CoStar Excel/CSV export (saved as CSV) into the same listings table.
-// Usage: node src/import-costar.js path/to/export.csv
+// Usage: node src/import-costar.js <file.csv | folder> [more...]
+//
+// CoStar caps each export at 500 rows, so a full market needs several files.
+// Pass them all at once -- or just point at the folder holding them and every
+// .csv inside is read, merged and de-duplicated in one pass.
 //
 // License note: CoStar data is for licensed users. Rows imported here are tagged
 // source="costar" and costar_restricted so the portal can limit who sees them.
 // The default portal query EXCLUDES source=costar unless you opt in.
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { parse } from "csv-parse/sync";
 import { finalize } from "./lib/normalize.js";
 import { getExisting, upsertListings } from "./lib/db.js";
 
-const file = process.argv[2];
-if (!file) {
-  console.error("Usage: node src/import-costar.js <export.csv>");
+const inputs = process.argv.slice(2);
+if (!inputs.length) {
+  console.error("Usage: node src/import-costar.js <file.csv | folder> [more...]");
+  process.exit(1);
+}
+
+// Expand any folder into the .csv files inside it.
+const files = inputs.flatMap((p) => {
+  if (!statSync(p).isDirectory()) return [p];
+  return readdirSync(p)
+    .filter((f) => f.toLowerCase().endsWith(".csv"))
+    .map((f) => join(p, f));
+});
+if (!files.length) {
+  console.error("No .csv files found in: " + inputs.join(", "));
   process.exit(1);
 }
 
@@ -23,7 +40,13 @@ const pick = (row, ...names) => {
   return null;
 };
 
-const records = parse(readFileSync(file), { columns: true, skip_empty_lines: true, relax_column_count: true });
+const records = [];
+for (const f of files) {
+  const rows = parse(readFileSync(f), { columns: true, skip_empty_lines: true, relax_column_count: true });
+  console.log(`  ${f}: ${rows.length} rows`);
+  records.push(...rows);
+}
+console.log(`Read ${records.length} rows from ${files.length} file(s).`);
 const today = new Date().toISOString().slice(0, 10);
 
 const listings = records.map((r) => {
@@ -48,8 +71,10 @@ const listings = records.map((r) => {
 });
 
 const existing = await getExisting();
+const seen = new Set();
 const rows = listings
   .filter((l) => l.name)
+  .filter((l) => (seen.has(l.id) ? false : (seen.add(l.id), true)))
   .map((l) => ({
     ...l,
     first_seen: existing.get(l.id)?.first_seen ?? today,
@@ -60,4 +85,6 @@ const rows = listings
   }));
 
 await upsertListings(rows);
-console.log(`Imported ${rows.length} CoStar rows (${rows.filter((r) => r.is_new).length} new).`);
+const dupes = listings.filter((l) => l.name).length - rows.length;
+console.log(`Imported ${rows.length} CoStar rows (${rows.filter((r) => r.is_new).length} new` +
+            (dupes ? `, ${dupes} duplicate rows merged across exports` : "") + ").");

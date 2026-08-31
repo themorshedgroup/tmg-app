@@ -12,6 +12,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "csv-parse/sync";
 import { finalize } from "./lib/normalize.js";
+import { createHash } from "node:crypto";
 import { getExisting, upsertListings, supabase } from "./lib/db.js";
 
 // Brokers the crawler already collects directly. CoStar re-lists the same
@@ -125,6 +126,14 @@ const listings = kept.map((r) => {
     },
     "costar"
   );
+  // CoStar's export has no listing URL, so the usual id hash (url|name|broker)
+  // loses its most distinguishing part. Two different properties sharing a name
+  // under one brokerage would collide and silently overwrite each other. Fold
+  // the address in so the id stays unique without inventing a fake URL.
+  if (!l.url) {
+    const key = `costar|${l.address || ""}|${l.name || ""}|${l.broker || ""}`.toLowerCase();
+    l.id = createHash("md5").update(key).digest("hex").slice(0, 12);
+  }
   return l;
 });
 

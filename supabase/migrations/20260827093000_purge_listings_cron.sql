@@ -1,0 +1,21 @@
+-- Documents (does not itself re-provision) the pg_cron job that purges
+-- long-dead listings. Following the convention set by the zoho-projects-poll
+-- cron, the cron.schedule() call was run once via
+-- `supabase db query --linked -f <scratch file>` rather than as a versioned
+-- migration, so re-running migrations can never duplicate or reset the job.
+--
+-- Live job: jobname 'purge-stale-listings', schedule '0 3 * * 0'
+-- (Sundays 03:00 UTC), running:
+--     select public.purge_stale_listings(90);
+--
+-- purge_stale_listings() is defined in 20260827090000_commercial_listings.sql.
+-- It deletes only rows that are inactive AND untouched for 90 days AND not
+-- saved to any client, so a failed scrape or a client's shown-listing history
+-- can never be destroyed by it.
+--
+-- To redo from scratch:
+--   create extension if not exists pg_cron;
+--   select cron.unschedule(jobid) from cron.job
+--    where jobname = 'purge-stale-listings';
+--   select cron.schedule('purge-stale-listings','0 3 * * 0',
+--     $$select public.purge_stale_listings(90)$$);

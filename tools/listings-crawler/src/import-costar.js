@@ -127,10 +127,16 @@ const listings = kept.map((r) => {
     "costar"
   );
   // CoStar's export has no listing URL, so the usual id hash (url|name|broker)
-  // loses its most distinguishing part. Two different properties sharing a name
-  // under one brokerage would collide and silently overwrite each other. Fold
-  // the address in so the id stays unique without inventing a fake URL.
-  if (!l.url) {
+  // loses its most distinguishing part. Prefer CoStar's own Property ID when
+  // the export carries it -- it is stable even if the name or address gets
+  // reformatted between exports. Otherwise fall back to folding the address in,
+  // which at least stops two same-named properties from one brokerage
+  // colliding and silently overwriting each other.
+  const costarId = pick(r, "propertyid", "costarpropertyid", "propertyidno", "costarid");
+  if (costarId) {
+    l.id = createHash("md5").update(`costar:${costarId}`).digest("hex").slice(0, 12);
+    l.raw = { costar_property_id: costarId };
+  } else if (!l.url) {
     const key = `costar|${l.address || ""}|${l.name || ""}|${l.broker || ""}`.toLowerCase();
     l.id = createHash("md5").update(key).digest("hex").slice(0, 12);
   }

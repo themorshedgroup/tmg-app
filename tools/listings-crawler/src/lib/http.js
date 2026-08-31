@@ -1,6 +1,8 @@
 // Polite fetch helpers: real UA, retries, delays between requests.
+// Identify honestly. The previous string impersonated Chrome, which some WAFs
+// (ECR's among them) reject outright -- and it misrepresented who we are.
 const UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 TMGListingsBot/1.0 (internal market research; manager@themorshedgroup.com)";
+  "TMGListingsBot/1.0 (+https://themorshedgroup.com; internal market research; manager@themorshedgroup.com)";
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

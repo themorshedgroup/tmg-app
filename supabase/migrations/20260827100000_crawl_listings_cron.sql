@@ -1,0 +1,31 @@
+-- Documents (does not itself re-provision) the pg_cron jobs that drive the
+-- Austin broker crawl. Same convention as zoho-projects-poll: the vault
+-- secret + cron.schedule() calls were run once via
+-- `supabase db query --linked -f <scratch file>` (not committed -- it held the
+-- raw secret) so the secret never lands in git history.
+--
+-- These REPLACE the GitHub Actions workflow. Actions could not be used: the
+-- repo's deploy token lacks the 'workflow' scope, so no workflow file can be
+-- pushed. Running the crawl from Supabase also means no service key has to be
+-- stored in GitHub -- the edge function gets one injected automatically.
+--
+-- Live jobs, all calling functions/v1/crawl-listings with an
+-- 'x-cron-secret' header read live from vault (name 'crawl_cron_secret'),
+-- ONE BROKER PER INVOCATION because a single source can page up to 25 times:
+--
+--   crawl-ecr      '0  1 * * 1,4'
+--   crawl-aquila   '5  1 * * 1,4'
+--   crawl-hpi      '10 1 * * 1,4'
+--   crawl-cushman  '15 1 * * 1,4'
+--   crawl-kucera   '20 1 * * 1,4'
+--
+-- 01:00 UTC Mon & Thu = 9:00 AM Manila / 8:00 PM Sun & Wed Austin. Staggered
+-- five minutes apart so the sources never overlap. Slowest observed source is
+-- aquila at ~27s, well inside the wall-clock limit.
+--
+-- To redo from scratch (e.g. secret rotation):
+--   1. supabase secrets set CRAWL_CRON_SECRET=<new value>
+--   2. via db query (scratch file, never committed):
+--        delete from vault.secrets where name = 'crawl_cron_secret';
+--        select vault.create_secret('<same value>', 'crawl_cron_secret', '...');
+--      then unschedule/reschedule each crawl-<source> job.

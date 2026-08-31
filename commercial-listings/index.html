@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Commercial Listings | The Morshed Group</title>
+<style>
+  :root{
+    --navy:#1B2A4A; --navy-2:#24365C; --gold:#B8912F; --gold-lt:#E7C56A;
+    --ink:#1F2937; --muted:#6B7280; --line:#E5E7EB; --bg:#F7F8FA; --card:#fff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;color:var(--ink);background:var(--bg)}
+  a{color:var(--navy)}
+  .top{background:var(--navy);color:#fff;padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  .top h1{margin:0;font-size:17px;font-weight:600;letter-spacing:.02em}
+  .eyebrow{font-size:10px;letter-spacing:.18em;color:var(--gold-lt);text-transform:uppercase;margin:0 0 2px}
+  .top .spacer{flex:1}
+  .top .who{font-size:12px;color:#C7D0E0}
+  .btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:6px;padding:6px 11px;font-size:13px;cursor:pointer}
+  .btn:hover{background:#F3F4F6}
+  .btn-primary{background:var(--navy);border-color:var(--navy);color:#fff}
+  .btn-primary:hover{background:var(--navy-2)}
+  .btn-ghost{background:transparent;border-color:#41527A;color:#fff}
+  .btn-ghost:hover{background:#2B3D63}
+  .wrap{display:flex;align-items:flex-start;gap:0;min-height:calc(100vh - 56px)}
+  .rail{width:232px;flex:0 0 232px;background:#fff;border-right:1px solid var(--line);padding:14px 12px;min-height:calc(100vh - 56px)}
+  .rail h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+  .cl{display:block;width:100%;text-align:left;border:0;background:transparent;padding:7px 9px;border-radius:6px;cursor:pointer;font-size:13px;color:var(--ink)}
+  .cl:hover{background:#F3F4F6}
+  .cl.on{background:var(--navy);color:#fff}
+  .cl .n{float:right;opacity:.6;font-size:11px}
+  .main{flex:1;min-width:0;padding:14px 18px 40px}
+  .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+  input[type=search],select,input[type=text],textarea{border:1px solid var(--line);border-radius:6px;padding:6px 9px;font:inherit;background:#fff}
+  input[type=search]{min-width:230px}
+  .count{color:var(--muted);font-size:12px;margin-left:auto}
+  .tblwrap{overflow-x:auto;background:#fff;border:1px solid var(--line);border-radius:8px}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
+  th{background:#F9FAFB;font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);cursor:grab;position:sticky;top:0;z-index:1;user-select:none}
+  th.drag{opacity:.4}
+  th .srt{color:var(--gold);margin-left:3px}
+  td.wrap-cell{white-space:normal;min-width:190px}
+  tbody tr:hover{background:#FAFBFC}
+  .pill{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;border:1px solid var(--line);background:#F9FAFB;color:var(--muted);margin-right:4px}
+  .empty{padding:40px;text-align:center;color:var(--muted)}
+  dialog{border:0;border-radius:10px;padding:0;box-shadow:0 18px 50px rgba(0,0,0,.22);max-width:440px;width:92vw}
+  dialog::backdrop{background:rgba(15,23,42,.42)}
+  .dlg{padding:18px}
+  .dlg h3{margin:0 0 12px;font-size:15px}
+  .dlg label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px}
+  .dlg input,.dlg textarea,.dlg select{width:100%}
+  .dlg input[type=checkbox]{width:auto;flex:0 0 auto;margin:0}
+  .dlg .row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  .colitem{display:flex;align-items:center;gap:9px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;margin-bottom:5px;background:#fff;cursor:grab}
+  .colitem.drag{opacity:.4}
+  .gate{max-width:420px;margin:12vh auto;background:#fff;border:1px solid var(--line);border-radius:10px;padding:28px;text-align:center}
+  .err{background:#FEF2F2;border:1px solid #FCA5A5;color:#991B1B;padding:9px 12px;border-radius:6px;margin-bottom:10px;font-size:13px}
+  .hint{color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div>
+    <p class="eyebrow">The Morshed Group</p>
+    <h1>Commercial Listings</h1>
+  </div>
+  <div class="spacer"></div>
+  <span class="who" id="who"></span>
+  <button class="btn btn-ghost" id="btn-cols">Columns</button>
+  <button class="btn btn-ghost" id="btn-out" style="display:none">Sign out</button>
+</div>
+
+<div id="gate" class="gate" style="display:none">
+  <h2 style="margin:0 0 8px;font-size:17px">Sign in required</h2>
+  <p class="hint" style="margin:0 0 18px">This page is limited to signed-in Morshed Group staff.</p>
+  <a class="btn btn-primary" id="gate-link" href="/">Go to the app and sign in</a>
+</div>
+
+<div class="wrap" id="app" style="display:none">
+  <aside class="rail">
+    <h2>Clients</h2>
+    <button class="cl on" data-client="" id="cl-all">All listings <span class="n" id="n-all"></span></button>
+    <div id="cl-list"></div>
+    <button class="btn" id="btn-newclient" style="width:100%;margin-top:10px">+ New client</button>
+    <div id="cl-meta" style="margin-top:14px"></div>
+  </aside>
+
+  <main class="main">
+    <div id="err"></div>
+    <div class="bar">
+      <input type="search" id="q" placeholder="Search name, address, city…">
+      <select id="f-broker"><option value="">All brokers</option></select>
+      <select id="f-type"><option value="">All types</option></select>
+      <select id="f-status">
+        <option value="">Lease &amp; sale</option>
+        <option value="for_lease">For lease</option>
+        <option value="for_sale">For sale</option>
+        <option value="both">Both</option>
+      </select>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="tblwrap">
+      <table id="tbl"><thead><tr id="thead"></tr></thead><tbody id="tbody"></tbody></table>
+    </div>
+    <div class="empty" id="empty" style="display:none">Nothing matches those filters.</div>
+  </main>
+</div>
+
+<dialog id="dlg-client"><form method="dialog" class="dlg">
+  <h3 id="dlg-client-title">New client</h3>
+  <label for="c-name">Client name</label>
+  <input id="c-name" type="text" required placeholder="e.g. Bluebonnet Holdings">
+  <label for="c-notes">Notes</label>
+  <textarea id="c-notes" rows="2" placeholder="Anything the team should know"></textarea>
+  <label for="c-crit">Search parameters</label>
+  <textarea id="c-crit" rows="3" placeholder="e.g. Office, 3,000–6,000 SF, CBD or Northwest, under $35 NNN"></textarea>
+  <div class="row">
+    <button class="btn" value="cancel">Cancel</button>
+    <button class="btn btn-primary" id="c-save" value="save">Save</button>
+  </div>
+</form></dialog>
+
+<dialog id="dlg-add"><form method="dialog" class="dlg">
+  <h3>Add to client</h3>
+  <div id="add-what" class="hint" style="margin-bottom:10px"></div>
+  <label for="a-client">Client</label>
+  <select id="a-client"></select>
+  <label for="a-note">Note (optional)</label>
+  <input id="a-note" type="text" placeholder="Why this one">
+  <div class="row">
+    <button class="btn" value="cancel">Cancel</button>
+    <button class="btn btn-primary" value="save">Add</button>
+  </div>
+</form></dialog>
+
+<dialog id="dlg-cols"><form method="dialog" class="dlg">
+  <h3>Columns</h3>
+  <p class="hint" style="margin:0 0 10px">Tick to show. Drag to reorder. Saved to your account.</p>
+  <div id="col-list"></div>
+  <div class="row">
+    <button class="btn" value="cancel">Close</button>
+    <button class="btn btn-primary" value="save">Save layout</button>
+  </div>
+</form></dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
+<script src="../supabase.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  var ALL_COLS = [
+    {key:"broker",        label:"Broker"},
+    {key:"name",          label:"Property",   wrap:true},
+    {key:"address",       label:"Address",    wrap:true},
+    {key:"city",          label:"City"},
+    {key:"submarket",     label:"Submarket"},
+    {key:"property_type", label:"Type"},
+    {key:"status",        label:"Status"},
+    {key:"size",          label:"Size"},
+    {key:"price_or_rate", label:"Rate / Price"},
+    {key:"agents",        label:"Agents",     wrap:true},
+    {key:"first_seen",    label:"First seen"},
+    {key:"last_seen",     label:"Last seen"},
+    {key:"url",           label:"Link"}
+  ];
+  var DEFAULT = ["broker","name","address","submarket","property_type","status","size","price_or_rate","agents","url"];
+
+  var sb=null, user=null;
+  var listings=[], clients=[], items=[];
+  var cols=[], sortKey="broker", sortDir=1;
+  var activeClient="";
+
+  var $=function(id){return document.getElementById(id)};
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+  function showErr(m){ $("err").innerHTML='<div class="err">'+esc(m)+'</div>'; }
+  function clearErr(){ $("err").innerHTML=""; }
+
+  // ── boot ──────────────────────────────────────────────────────────
+  function boot(){
+    if(!window.SupabaseAuth){ $("gate").style.display="block"; return; }
+    window.SupabaseAuth.onAuthStateChange(async function(ev){
+      var session = ev && ev.session;
+      if(!session){ $("gate").style.display="block"; $("app").style.display="none"; return; }
+      user = session.user; sb = window.SupabaseAuth._client;
+      $("gate").style.display="none"; $("app").style.display="flex";
+      $("who").textContent = user.email || "";
+      $("btn-out").style.display="";
+      try { await loadAll(); } catch(e){ showErr(e.message || String(e)); }
+    });
+  }
+
+  async function loadAll(){
+    cols = await loadCols();
+    await Promise.all([loadListings(), loadClients()]);
+    buildFilters(); renderRail(); render();
+  }
+
+  // ── data ──────────────────────────────────────────────────────────
+  async function loadListings(){
+    listings = []; var page=1000;
+    for(var from=0;;from+=page){
+      var r = await sb.from("listings").select("*").eq("active",true).range(from, from+page-1);
+      if(r.error) throw r.error;
+      listings = listings.concat(r.data);
+      if(r.data.length < page) break;
+    }
+  }
+  async function loadClients(){
+    var r = await sb.from("listing_clients").select("*").eq("archived",false).order("name");
+    if(r.error) throw r.error;
+    clients = r.data || [];
+    var i = await sb.from("listing_client_items").select("*");
+    if(i.error) throw i.error;
+    items = i.data || [];
+  }
+  async function loadCols(){
+    var r = await sb.from("listing_column_prefs").select("columns").eq("user_id",user.id).maybeSingle();
+    var saved = (r && r.data && Array.isArray(r.data.columns)) ? r.data.columns : null;
+    if(!saved || !saved.length) return DEFAULT.slice();
+    return saved.filter(function(k){ return ALL_COLS.some(function(c){return c.key===k}) });
+  }
+  async function saveCols(){
+    var r = await sb.from("listing_column_prefs")
+      .upsert({user_id:user.id, columns:cols, updated_at:new Date().toISOString()});
+    if(r.error) showErr("Could not save layout: "+r.error.message);
+  }
+
+  // ── filters ───────────────────────────────────────────────────────
+  function buildFilters(){
+    var bs={}, ts={};
+    listings.forEach(function(l){ if(l.broker)bs[l.broker]=1; if(l.property_type)ts[l.property_type]=1; });
+    fill($("f-broker"), Object.keys(bs).sort());
+    fill($("f-type"),   Object.keys(ts).sort());
+  }
+  function fill(sel, vals){
+    var keep = sel.options[0];
+    sel.innerHTML=""; sel.appendChild(keep);
+    vals.forEach(function(v){ var o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o); });
+  }
+
+  function visible(){
+    var q=($("q").value||"").toLowerCase().trim();
+    var fb=$("f-broker").value, ft=$("f-type").value, fs=$("f-status").value;
+    var set = null;
+    if(activeClient){
+      set = {};
+      items.filter(function(it){return it.client_id===activeClient}).forEach(function(it){ set[it.listing_id]=1; });
+    }
+    var out = listings.filter(function(l){
+      if(set && !set[l.id]) return false;
+      if(fb && l.broker!==fb) return false;
+      if(ft && l.property_type!==ft) return false;
+      if(fs && l.status!==fs) return false;
+      if(q){
+        var hay=[l.name,l.address,l.city,l.submarket,l.broker].join(" ").toLowerCase();
+        if(hay.indexOf(q)===-1) return false;
+      }
+      return true;
+    });
+    out.sort(function(a,b){
+      var x=(a[sortKey]==null?"":String(a[sortKey])).toLowerCase();
+      var y=(b[sortKey]==null?"":String(b[sortKey])).toLowerCase();
+      return x<y?-sortDir:x>y?sortDir:0;
+    });
+    return out;
+  }
+
+  // ── render ────────────────────────────────────────────────────────
+  function cellHtml(l,key){
+    if(key==="agents"){
+      var a=Array.isArray(l.agents)?l.agents:[];
+      if(!a.length) return '<span class="hint">—</span>';
+      return a.map(function(p){
+        return esc(p.name||"") + (p.phone? ' <span class="hint">'+esc(p.phone)+'</span>' : "");
+      }).join("<br>");
+    }
+    if(key==="url"){
+      return l.url ? '<a href="'+esc(l.url)+'" target="_blank" rel="noopener noreferrer nofollow">Open ↗</a>' : "—";
+    }
+    if(key==="status"||key==="property_type"){
+      return l[key] ? '<span class="pill">'+esc(String(l[key]).replace(/_/g," "))+'</span>' : "—";
+    }
+    return l[key] ? esc(l[key]) : '<span class="hint">—</span>';
+  }
+
+  function render(){
+    var rows=visible();
+    var thead=$("thead"); thead.innerHTML="";
+    cols.forEach(function(key){
+      var c=ALL_COLS.filter(function(x){return x.key===key})[0]; if(!c) return;
+      var th=document.createElement("th");
+      th.textContent=c.label; th.draggable=true; th.dataset.key=key;
+      if(sortKey===key){ var s=document.createElement("span"); s.className="srt"; s.textContent=sortDir>0?"▲":"▼"; th.appendChild(s); }
+      th.addEventListener("click",function(){ if(sortKey===key) sortDir=-sortDir; else {sortKey=key;sortDir=1;} render(); });
+      wireDrag(th);
+      thead.appendChild(th);
+    });
+    var act=document.createElement("th"); act.textContent=""; act.draggable=false; thead.appendChild(act);
+
+    var tb=$("tbody"); tb.innerHTML="";
+    rows.forEach(function(l){
+      var tr=document.createElement("tr");
+      cols.forEach(function(key){
+        var c=ALL_COLS.filter(function(x){return x.key===key})[0]; if(!c) return;
+        var td=document.createElement("td");
+        if(c.wrap) td.className="wrap-cell";
+        td.innerHTML=cellHtml(l,key);
+        tr.appendChild(td);
+      });
+      var td=document.createElement("td");
+      if(activeClient){
+        var rm=document.createElement("button"); rm.className="btn"; rm.textContent="Remove";
+        rm.addEventListener("click",function(){ removeFromClient(l.id); });
+        td.appendChild(rm);
+      } else {
+        var b=document.createElement("button"); b.className="btn"; b.textContent="+ Client";
+        b.addEventListener("click",function(){ openAdd(l); });
+        td.appendChild(b);
+      }
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    });
+    $("empty").style.display = rows.length ? "none" : "block";
+    $("count").textContent = rows.length + " of " + listings.length + " listings";
+    $("n-all").textContent = listings.length;
+  }
+
+  // ── column drag ───────────────────────────────────────────────────
+  var dragKey=null;
+  function wireDrag(th){
+    th.addEventListener("dragstart",function(e){ dragKey=th.dataset.key; th.classList.add("drag"); e.dataTransfer.effectAllowed="move"; });
+    th.addEventListener("dragend",function(){ th.classList.remove("drag"); dragKey=null; });
+    th.addEventListener("dragover",function(e){ e.preventDefault(); });
+    th.addEventListener("drop",function(e){
+      e.preventDefault();
+      var target=th.dataset.key;
+      if(!dragKey||dragKey===target) return;
+      var from=cols.indexOf(dragKey), to=cols.indexOf(target);
+      cols.splice(from,1); cols.splice(to,0,dragKey);
+      render(); saveCols();
+    });
+  }
+
+  // ── clients ───────────────────────────────────────────────────────
+  function renderRail(){
+    var box=$("cl-list"); box.innerHTML="";
+    clients.forEach(function(c){
+      var n=items.filter(function(it){return it.client_id===c.id}).length;
+      var b=document.createElement("button");
+      b.className="cl"+(activeClient===c.id?" on":"");
+      b.innerHTML=esc(c.name)+'<span class="n">'+n+'</span>';
+      b.addEventListener("click",function(){ activeClient=c.id; renderRail(); render(); renderMeta(c); });
+      box.appendChild(b);
+    });
+    $("cl-all").className="cl"+(activeClient?"":" on");
+    if(!activeClient) renderMeta(null);
+  }
+  function renderMeta(c){
+    var m=$("cl-meta");
+    if(!c){ m.innerHTML=""; return; }
+    m.innerHTML='<h2>Criteria</h2><div class="hint" style="white-space:pre-wrap">'+
+      esc((c.criteria&&c.criteria.text)||"—")+'</div>'+
+      (c.notes?'<h2 style="margin-top:12px">Notes</h2><div class="hint" style="white-space:pre-wrap">'+esc(c.notes)+'</div>':'')+
+      '<button class="btn" id="cl-edit" style="width:100%;margin-top:12px">Edit client</button>';
+    $("cl-edit").addEventListener("click",function(){ openClient(c); });
+  }
+
+  var editing=null;
+  function openClient(c){
+    editing=c||null;
+    $("dlg-client-title").textContent = c ? "Edit client" : "New client";
+    $("c-name").value  = c ? (c.name||"") : "";
+    $("c-notes").value = c ? (c.notes||"") : "";
+    $("c-crit").value  = c ? ((c.criteria&&c.criteria.text)||"") : "";
+    $("dlg-client").showModal();
+  }
+  $("dlg-client").addEventListener("close", async function(){
+    if($("dlg-client").returnValue!=="save") return;
+    var name=$("c-name").value.trim(); if(!name) return;
+    var payload={ name:name, notes:$("c-notes").value.trim()||null,
+                  criteria:{text:$("c-crit").value.trim()}, updated_at:new Date().toISOString() };
+    var r;
+    if(editing) r = await sb.from("listing_clients").update(payload).eq("id",editing.id);
+    else { payload.created_by=user.id; r = await sb.from("listing_clients").insert(payload); }
+    if(r.error){ showErr(r.error.message); return; }
+    clearErr(); await loadClients(); renderRail(); render();
+  });
+
+  var pending=null;
+  function openAdd(l){
+    if(!clients.length){ showErr("Create a client first."); return; }
+    pending=l;
+    $("add-what").textContent = (l.name||l.address||"This listing") + " — " + (l.broker||"");
+    var s=$("a-client"); s.innerHTML="";
+    clients.forEach(function(c){ var o=document.createElement("option"); o.value=c.id; o.textContent=c.name; s.appendChild(o); });
+    $("a-note").value="";
+    $("dlg-add").showModal();
+  }
+  $("dlg-add").addEventListener("close", async function(){
+    if($("dlg-add").returnValue!=="save"||!pending) return;
+    var r = await sb.from("listing_client_items").insert({
+      client_id:$("a-client").value, listing_id:pending.id,
+      note:$("a-note").value.trim()||null, snapshot:pending, added_by:user.id
+    });
+    if(r.error){ showErr(r.error.code==="23505" ? "That listing is already on this client's list." : r.error.message); return; }
+    clearErr(); pending=null; await loadClients(); renderRail(); render();
+  });
+
+  async function removeFromClient(listingId){
+    var r = await sb.from("listing_client_items").delete().eq("client_id",activeClient).eq("listing_id",listingId);
+    if(r.error){ showErr(r.error.message); return; }
+    await loadClients(); renderRail(); render();
+  }
+
+  // ── column picker ─────────────────────────────────────────────────
+  var pick=[];
+  $("btn-cols").addEventListener("click",function(){
+    if(!sb) return;
+    pick = cols.slice().concat(ALL_COLS.map(function(c){return c.key}).filter(function(k){return cols.indexOf(k)===-1}));
+    var box=$("col-list"); box.innerHTML="";
+    pick.forEach(function(key){
+      var c=ALL_COLS.filter(function(x){return x.key===key})[0];
+      var d=document.createElement("div"); d.className="colitem"; d.draggable=true; d.dataset.key=key;
+      var cb=document.createElement("input"); cb.type="checkbox"; cb.checked=cols.indexOf(key)!==-1;
+      var sp=document.createElement("span"); sp.textContent=c.label; sp.style.flex="1"; sp.style.textAlign="left";
+      var gr=document.createElement("span"); gr.textContent="⠿"; gr.style.marginLeft="auto"; gr.style.color="#9CA3AF";
+      d.appendChild(cb); d.appendChild(sp); d.appendChild(gr);
+      d.addEventListener("dragstart",function(e){ dragKey=key; d.classList.add("drag"); e.dataTransfer.effectAllowed="move"; });
+      d.addEventListener("dragend",function(){ d.classList.remove("drag"); dragKey=null; });
+      d.addEventListener("dragover",function(e){ e.preventDefault(); });
+      d.addEventListener("drop",function(e){
+        e.preventDefault(); if(!dragKey||dragKey===key) return;
+        var f=pick.indexOf(dragKey), t=pick.indexOf(key);
+        pick.splice(f,1); pick.splice(t,0,dragKey);
+        var order=pick.slice(); var checked={};
+        Array.prototype.forEach.call(box.children,function(el){ checked[el.dataset.key]=el.firstChild.checked; });
+        box.innerHTML=""; cols=order.filter(function(k){return checked[k]});
+        $("btn-cols").click();
+      });
+      box.appendChild(d);
+    });
+    $("dlg-cols").showModal();
+  });
+  $("dlg-cols").addEventListener("close", async function(){
+    if($("dlg-cols").returnValue!=="save") return;
+    var box=$("col-list"), next=[];
+    Array.prototype.forEach.call(box.children,function(el){ if(el.firstChild.checked) next.push(el.dataset.key); });
+    if(!next.length){ showErr("Keep at least one column."); return; }
+    cols=next; render(); await saveCols();
+  });
+
+  // ── misc wiring ───────────────────────────────────────────────────
+  ["q","f-broker","f-type","f-status"].forEach(function(id){
+    $(id).addEventListener("input",render); $(id).addEventListener("change",render);
+  });
+  $("cl-all").addEventListener("click",function(){ activeClient=""; renderRail(); render(); });
+  $("btn-newclient").addEventListener("click",function(){ openClient(null); });
+  $("btn-out").addEventListener("click",function(){ window.SupabaseAuth.signOut(); });
+
+  boot();
+})();
+</script>
+</body>
+</html>

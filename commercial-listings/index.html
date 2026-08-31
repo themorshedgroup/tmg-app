@@ -5,31 +5,42 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Commercial Listings | The Morshed Group</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css">
 <style>
   :root{
     --navy:#001A4A; --navy-2:#0A2A66; --gold:#AD832F; --gold-lt:#E8D9BC;
     --ink:#1F2937; --muted:#6B7280; --line:#E4DFD4; --bg:#F7F8FA; --card:#fff;
   }
   *{box-sizing:border-box}
-  body{margin:0;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;color:var(--ink);background:var(--bg)}
+  body{margin:0;font:14px/1.45 'Jost',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
   a{color:var(--navy)}
-  .top{background:var(--navy);color:#fff;padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-  .top h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.02em}
-  .top .logo{height:26px;width:auto;display:block}
-  .top .divider{width:1px;height:22px;background:#3A4A6B;display:inline-block}
-  .backlink{display:inline-flex;align-items:center;gap:6px;color:#C7D0E0;text-decoration:none;
-            font-size:13px;padding:5px 9px;border:1px solid #41527A;border-radius:6px}
-  .backlink:hover{background:#2B3D63;color:#fff}
-  .top .spacer{flex:1}
-  .top .who{font-size:12px;color:#C7D0E0}
+  .tmgbar{display:flex;align-items:center;justify-content:space-between;
+    padding:12px 16px;padding-top:calc(12px + env(safe-area-inset-top));
+    background:#001A4A;border-bottom:1px solid rgba(255,255,255,0.08);flex-shrink:0}
+  .tmgbrand{display:flex;align-items:center;gap:9px}
+  .tmgbrand img{height:22px;width:auto;display:block}
+  .tmgword{height:22px;font-size:14.4px;line-height:22px;font-weight:600;color:#AD832F;
+    letter-spacing:.18em;text-transform:uppercase;font-family:'Jost',sans-serif;white-space:nowrap}
+  .tmgchips{display:flex;align-items:center;gap:10px}
+  .chip{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:9px;
+    cursor:pointer;padding:0;background:rgba(201,164,90,0.16);border:none;color:#C9A45A;font-size:16px;
+    line-height:1;text-decoration:none;transition:background .15s,box-shadow .15s}
+  .chip:hover{background:rgba(201,164,90,0.30);box-shadow:0 0 0 2px #C9A45A}
+  .chip.avatar{font-family:'Jost',sans-serif;font-weight:600;font-size:13px;cursor:default}
+  .chip.avatar:hover{background:rgba(201,164,90,0.16);box-shadow:none}
+  .pagebar{display:flex;align-items:baseline;gap:12px;padding:12px 18px 10px;
+    background:#fff;border-bottom:1px solid var(--line)}
+  .pagebar h1{margin:0;font-family:'Jost',sans-serif;font-size:18px;font-weight:600;color:var(--navy);letter-spacing:.01em}
+  .pagebar .who{font-size:12px;color:var(--muted);margin-left:auto}
   .btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:6px;padding:6px 11px;font-size:13px;cursor:pointer}
   .btn:hover{background:#F3F4F6}
   .btn-primary{background:var(--navy);border-color:var(--navy);color:#fff}
   .btn-primary:hover{background:var(--navy-2)}
-  .btn-ghost{background:transparent;border-color:#41527A;color:#fff}
-  .btn-ghost:hover{background:#2B3D63}
-  .wrap{display:flex;align-items:flex-start;gap:0;min-height:calc(100vh - 56px)}
-  .rail{width:232px;flex:0 0 232px;background:#fff;border-right:1px solid var(--line);padding:14px 12px;min-height:calc(100vh - 56px)}
+  .wrap{display:flex;align-items:flex-start;gap:0;min-height:calc(100vh - 104px)}
+  .rail{width:232px;flex:0 0 232px;background:#fff;border-right:1px solid var(--line);padding:14px 12px;min-height:calc(100vh - 104px)}
   .rail h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
   .railhead{margin-top:14px !important;padding-top:12px;border-top:1px solid var(--line)}
   .cl.allrow{font-weight:700}
@@ -76,18 +87,23 @@
 </head>
 <body>
 
-<div class="top">
-  <a class="backlink" href="/" title="Back to the app">
-    <span aria-hidden="true">&#8592;</span><span class="backtext">Back</span>
-  </a>
-  <img class="logo" src="../Morshed%20Group%20Logo%20White.png" alt="The Morshed Group">
-  <span class="divider" aria-hidden="true"></span>
+<div class="tmgbar">
+  <div class="tmgbrand">
+    <img src="../m-monogram.png" alt="">
+    <div class="tmgword">TMG APP</div>
+  </div>
+  <div class="tmgchips">
+    <a class="chip" href="/" title="Back to the app" aria-label="Back to the app"><i class="ti ti-arrow-left"></i></a>
+    <button class="chip" id="btn-import" title="Import CoStar" aria-label="Import CoStar" style="display:none"><i class="ti ti-file-upload"></i></button>
+    <button class="chip" id="btn-cols" title="Columns" aria-label="Columns"><i class="ti ti-columns-3"></i></button>
+    <button class="chip" id="btn-out" title="Sign out" aria-label="Sign out" style="display:none"><i class="ti ti-logout"></i></button>
+    <span class="chip avatar" id="who-chip" title=""></span>
+  </div>
+</div>
+
+<div class="pagebar">
   <h1>Commercial Listings</h1>
-  <div class="spacer"></div>
   <span class="who" id="who"></span>
-  <button class="btn btn-ghost" id="btn-import" style="display:none">Import CoStar</button>
-  <button class="btn btn-ghost" id="btn-cols">Columns</button>
-  <button class="btn btn-ghost" id="btn-out" style="display:none">Sign out</button>
 </div>
 
 <div id="gate" class="gate" style="display:none">
@@ -227,6 +243,9 @@
       user = session.user; sb = window.SupabaseAuth._client;
       $("gate").style.display="none"; $("app").style.display="flex";
       $("who").textContent = user.email || "";
+      var ch=$("who-chip");
+      ch.textContent=(user.email||"?").trim().charAt(0).toUpperCase();
+      ch.title=user.email||"";
       $("btn-out").style.display="";
       $("btn-import").style.display="";
       try { await loadAll(); } catch(e){ showErr(e.message || String(e)); }

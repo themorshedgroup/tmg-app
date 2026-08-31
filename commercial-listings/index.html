@@ -31,21 +31,44 @@
   .chip:hover{background:rgba(201,164,90,0.30);box-shadow:0 0 0 2px #C9A45A}
   .chip.avatar{font-family:'Jost',sans-serif;font-weight:600;font-size:13px;cursor:default}
   .chip.avatar:hover{background:rgba(201,164,90,0.16);box-shadow:none}
-  .pagebar{display:flex;align-items:baseline;gap:12px;padding:12px 18px 10px;
-    background:#fff;border-bottom:1px solid var(--line)}
+  .pagebar{display:flex;align-items:center;gap:14px;padding:10px 18px;
+    background:#fff;border-bottom:1px solid var(--line);flex-wrap:wrap}
   .pagebar h1{margin:0;font-family:'Jost',sans-serif;font-size:18px;font-weight:600;color:var(--navy);letter-spacing:.01em}
-  .pagebar .who{font-size:12px;color:var(--muted);margin-left:auto}
+  .pageactions{display:flex;align-items:center;gap:8px;margin-left:auto}
+  .pagebar .who{font-size:12px;color:var(--muted)}
+  .backbtn{display:inline-flex;align-items:center;gap:6px;color:var(--navy);text-decoration:none;
+    font-size:13px;font-weight:500;padding:6px 11px;border:1px solid var(--line);border-radius:7px;background:#fff}
+  .backbtn:hover{background:#F3F4F6}
+  .chip.avatar{position:relative}
+  .chip.avatar .dot{position:absolute;right:-2px;bottom:-2px;width:11px;height:11px;border-radius:50%;
+    background:#22C55E;border:2px solid #001A4A}
   .btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:6px;padding:6px 11px;font-size:13px;cursor:pointer}
   .btn:hover{background:#F3F4F6}
   .btn-primary{background:var(--navy);border-color:var(--navy);color:#fff}
   .btn-primary:hover{background:var(--navy-2)}
-  .wrap{display:flex;align-items:flex-start;gap:0;min-height:calc(100vh - 104px)}
-  .rail{width:232px;flex:0 0 232px;background:#fff;border-right:1px solid var(--line);padding:14px 12px;min-height:calc(100vh - 104px)}
+  .wrap{display:flex;align-items:flex-start;gap:0;min-height:calc(100vh - 108px)}
+  .rail{width:232px;flex:0 0 232px;background:#fff;border-right:1px solid var(--line);padding:14px 12px;min-height:calc(100vh - 108px)}
   .rail h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
   .railhead{margin-top:14px !important;padding-top:12px;border-top:1px solid var(--line)}
   .cl.allrow{font-weight:700}
   .cl .agentribbon{display:block;font-size:10.5px;color:var(--muted);margin-top:2px;font-weight:400}
   .cl.on .agentribbon{color:#C7D0E0}
+  .railbtn{width:100%;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:6px}
+  .clrow{position:relative;display:flex;align-items:flex-start}
+  .clrow .cl{flex:1;padding-right:26px}
+  .dots{position:absolute;right:2px;top:5px;border:none;background:transparent;color:var(--muted);
+    cursor:pointer;font-size:15px;line-height:1;padding:2px 5px;border-radius:5px}
+  .dots:hover{background:#E9EAEC;color:var(--ink)}
+  .clrow .cl.on ~ .dots{color:#C7D0E0}
+  .menu{position:absolute;right:2px;top:26px;z-index:20;background:#fff;border:1px solid var(--line);
+    border-radius:8px;box-shadow:0 8px 22px rgba(0,0,0,.16);padding:4px;min-width:140px}
+  .menu button{display:block;width:100%;text-align:left;border:none;background:transparent;
+    padding:7px 10px;border-radius:6px;cursor:pointer;font:inherit;font-size:13px;color:var(--ink)}
+  .menu button:hover{background:#F3F4F6}
+  .archhead{cursor:pointer;user-select:none;display:flex;align-items:center;gap:5px}
+  .archhead .n{margin-left:auto;opacity:.6}
+  #arch-list .cl{color:#9CA3AF}
+  #arch-list .cl .agentribbon{color:#B6BBC4}
   .cl{display:block;width:100%;text-align:left;border:0;background:transparent;padding:7px 9px;border-radius:6px;cursor:pointer;font-size:13px;color:var(--ink)}
   .cl:hover{background:#F3F4F6}
   .cl.on{background:var(--navy);color:#fff}
@@ -94,17 +117,25 @@
     <div class="tmgword">TMG APP</div>
   </div>
   <div class="tmgchips">
-    <a class="chip" href="/" title="Back to the app" aria-label="Back to the app"><i class="ti ti-arrow-left"></i></a>
-    <button class="chip" id="btn-import" title="Import CoStar" aria-label="Import CoStar" style="display:none"><i class="ti ti-file-upload"></i></button>
-    <button class="chip" id="btn-cols" title="Columns" aria-label="Columns"><i class="ti ti-columns-3"></i></button>
-    <button class="chip" id="btn-out" title="Sign out" aria-label="Sign out" style="display:none"><i class="ti ti-logout"></i></button>
-    <span class="chip avatar" id="who-chip" title=""></span>
+    <a class="chip" href="../tasks.html" title="Tasks" aria-label="Tasks"><i class="ti ti-checklist"></i></a>
+    <a class="chip" href="/" title="Decisions" aria-label="Decisions">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+           stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v6"/><path d="M9 7l3-3 3 3"/>
+        <path d="M4 13l-2 2 2 2"/><path d="M2 15h7"/><path d="M20 13l2 2-2 2"/><path d="M22 15h-7"/></svg>
+    </a>
+    <a class="chip" href="/" title="Calendar" aria-label="Calendar"><i class="ti ti-calendar"></i></a>
+    <a class="chip avatar" href="/" id="who-chip" title="Your profile"><span class="dot"></span></a>
   </div>
 </div>
 
 <div class="pagebar">
+  <a class="backbtn" href="/"><i class="ti ti-arrow-left"></i> Back to App</a>
   <h1>Commercial Listings</h1>
-  <span class="who" id="who"></span>
+  <div class="pageactions">
+    <span class="who" id="who"></span>
+    <button class="btn" id="btn-cols"><i class="ti ti-columns-3"></i> Columns</button>
+    <button class="btn" id="btn-out" style="display:none">Sign out</button>
+  </div>
 </div>
 
 <div id="gate" class="gate" style="display:none">
@@ -116,9 +147,17 @@
 <div class="wrap" id="app" style="display:none">
   <aside class="rail">
     <button class="cl allrow on" data-client="" id="cl-all">All Listings <span class="n" id="n-all"></span></button>
+    <button class="btn railbtn" id="btn-import" style="display:none">
+      <i class="ti ti-file-upload"></i> Import CoStar File
+    </button>
     <h2 class="railhead">Client List</h2>
     <div id="cl-list"></div>
-    <button class="btn" id="btn-newclient" style="width:100%;margin-top:10px">+ New Client</button>
+    <button class="btn railbtn" id="btn-newclient">+ New Client</button>
+    <h2 class="railhead archhead" id="arch-toggle">
+      <i class="ti ti-chevron-right" id="arch-caret"></i> Archived Client List
+      <span class="n" id="n-arch"></span>
+    </h2>
+    <div id="arch-list" style="display:none"></div>
     <div id="cl-meta" style="margin-top:14px"></div>
   </aside>
 
@@ -225,7 +264,8 @@
 
   var FN_BASE = "https://ipqoqhsnjubopybujetn.functions.supabase.co";
   var sb=null, user=null;
-  var listings=[], clients=[], items=[], agents=[];
+  var listings=[], clients=[], items=[], agents=[], archived=[];
+  var archOpen=false;
   var cols=[], sortKey="broker", sortDir=1;
   var activeClient="";
 
@@ -251,7 +291,7 @@
       $("gate").style.display="none"; $("app").style.display="flex";
       $("who").textContent = user.email || "";
       var ch=$("who-chip");
-      ch.textContent=(user.email||"?").trim().charAt(0).toUpperCase();
+      ch.insertBefore(document.createTextNode((user.email||"?").trim().charAt(0).toUpperCase()), ch.firstChild);
       ch.title=user.email||"";
       $("btn-out").style.display="";
       $("btn-import").style.display="";
@@ -278,9 +318,11 @@
     }
   }
   async function loadClients(){
-    var r = await sb.from("listing_clients").select("*").eq("archived",false).order("name");
+    var r = await sb.from("listing_clients").select("*").order("name");
     if(r.error) throw r.error;
-    clients = r.data || [];
+    var all = r.data || [];
+    clients  = all.filter(function(c){ return !c.archived; });
+    archived = all.filter(function(c){ return  c.archived; });
     var i = await sb.from("listing_client_items").select("*");
     if(i.error) throw i.error;
     items = i.data || [];
@@ -479,19 +521,62 @@
 
   // ── clients ───────────────────────────────────────────────────────
   function agentNameByIdSafe(id){ try { return agentNameById(id); } catch(e){ return null; } }
+  function clRow(c,isArch){
+    var n=items.filter(function(it){return it.client_id===c.id}).length;
+    var wrap=document.createElement("div"); wrap.className="clrow";
+    var b=document.createElement("button");
+    b.className="cl"+(activeClient===c.id?" on":"");
+    var who=agentNameByIdSafe(c.agent_id);
+    b.innerHTML=esc(c.name)+'<span class="n">'+n+'</span>'+
+                (who?'<span class="agentribbon">'+esc(who)+'</span>':'');
+    b.addEventListener("click",function(){ activeClient=c.id; renderRail(); render(); renderMeta(c); });
+    wrap.appendChild(b);
+
+    var dots=document.createElement("button");
+    dots.className="dots"; dots.innerHTML="&#8943;"; dots.title="Options";
+    dots.addEventListener("click",function(ev){
+      ev.stopPropagation();
+      closeMenus();
+      var m=document.createElement("div"); m.className="menu";
+      function item(label,fn){
+        var x=document.createElement("button"); x.textContent=label;
+        x.addEventListener("click",function(e){ e.stopPropagation(); closeMenus(); fn(); });
+        m.appendChild(x);
+      }
+      item("Edit", function(){ openClient(c); });
+      item(isArch ? "Unarchive" : "Archive", function(){ setArchived(c, !isArch); });
+      wrap.appendChild(m);
+    });
+    wrap.appendChild(dots);
+    return wrap;
+  }
+
+  function closeMenus(){
+    Array.prototype.forEach.call(document.querySelectorAll(".menu"),function(m){ m.remove(); });
+  }
+  document.addEventListener("click",closeMenus);
+
+  async function setArchived(c,val){
+    var r = await sb.from("listing_clients")
+      .update({archived:val, updated_at:new Date().toISOString()}).eq("id",c.id);
+    if(r.error){ showErr(r.error.message); return; }
+    if(activeClient===c.id){ activeClient=""; renderMeta(null); }
+    if(val) archOpen=true;
+    await loadClients(); renderRail(); render();
+  }
+
   function renderRail(){
     var box=$("cl-list"); box.innerHTML="";
-    clients.forEach(function(c){
-      var n=items.filter(function(it){return it.client_id===c.id}).length;
-      var b=document.createElement("button");
-      b.className="cl"+(activeClient===c.id?" on":"");
-      var who=agentNameByIdSafe(c.agent_id);
-      b.innerHTML=esc(c.name)+'<span class="n">'+n+'</span>'+
-                  (who?'<span class="agentribbon">'+esc(who)+'</span>':'');
-      b.addEventListener("click",function(){ activeClient=c.id; renderRail(); render(); renderMeta(c); });
-      box.appendChild(b);
-    });
-    $("cl-all").className="cl"+(activeClient?"":" on");
+    clients.forEach(function(c){ box.appendChild(clRow(c,false)); });
+
+    var ab=$("arch-list"); ab.innerHTML="";
+    archived.forEach(function(c){ ab.appendChild(clRow(c,true)); });
+    $("n-arch").textContent = archived.length || "";
+    ab.style.display = archOpen ? "block" : "none";
+    $("arch-caret").className = "ti " + (archOpen ? "ti-chevron-down" : "ti-chevron-right");
+    $("arch-toggle").style.display = archived.length ? "flex" : "none";
+
+    $("cl-all").className="cl allrow"+(activeClient?"":" on");
     if(!activeClient) renderMeta(null);
   }
   function renderMeta(c){
@@ -641,6 +726,7 @@
     $(id).addEventListener("input",render); $(id).addEventListener("change",render);
   });
   $("cl-all").addEventListener("click",function(){ activeClient=""; renderRail(); render(); });
+  $("arch-toggle").addEventListener("click",function(){ archOpen=!archOpen; renderRail(); });
   $("btn-newclient").addEventListener("click",function(){ openClient(null); });
   $("btn-out").addEventListener("click",function(){ window.SupabaseAuth.signOut(); });
 

@@ -12,7 +12,32 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "csv-parse/sync";
 import { finalize } from "./lib/normalize.js";
-import { getExisting, upsertListings } from "./lib/db.js";
+import { getExisting, upsertListings, supabase } from "./lib/db.js";
+
+// Brokers the crawler already collects directly. CoStar re-lists the same
+// properties under its own names and URLs, so importing them would create
+// near-duplicates the id hash cannot catch (different url|name|broker).
+// CoStar's job is only to cover what we CANNOT crawl.
+const ALREADY_CRAWLED = [
+  /\becr\b|equitable commercial/i,
+  /aquila/i,
+  /\bhpi\b/i,
+  /cushman/i,
+  /kucera/i,
+];
+
+// Loose address key: "16235 N. IH-35" and "16235 N IH 35, Ste 200" collapse to
+// the same thing. Suite/unit parts are dropped before comparing.
+function addrKey(addr, city) {
+  if (!addr) return null;
+  const a = String(addr)
+    .toLowerCase()
+    .split(/\b(?:ste|suite|unit|bldg|building|#)\b/)[0]
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  if (!a) return null;
+  return `${a}|${String(city || "").toLowerCase().replace(/[^a-z]/g, "")}`;
+}
 
 const inputs = process.argv.slice(2);
 if (!inputs.length) {
@@ -49,7 +74,17 @@ for (const f of files) {
 console.log(`Read ${records.length} rows from ${files.length} file(s).`);
 const today = new Date().toISOString().slice(0, 10);
 
-const listings = records.map((r) => {
+let skippedBroker = 0;
+const kept = records.filter((r) => {
+  const co = pick(r, "listingcompany", "brokeragecompany", "company") || "";
+  if (ALREADY_CRAWLED.some((re) => re.test(co))) { skippedBroker++; return false; }
+  return true;
+});
+if (skippedBroker) {
+  console.log(`Skipped ${skippedBroker} row(s) from brokers the crawler already covers.`);
+}
+
+const listings = kept.map((r) => {
   const l = finalize(
     {
       broker: pick(r, "listingcompany", "brokeragecompany", "company") || "CoStar (unattributed)",
@@ -71,9 +106,27 @@ const listings = records.map((r) => {
 });
 
 const existing = await getExisting();
+
+// Second guard: drop anything already in the table at the same address,
+// whichever broker put it there.
+const addrIndex = new Set();
+for (let from = 0; ; from += 1000) {
+  const { data, error } = await supabase
+    .from("listings").select("address, city").neq("source", "costar").range(from, from + 999);
+  if (error) throw error;
+  for (const r of data) { const k = addrKey(r.address, r.city); if (k) addrIndex.add(k); }
+  if (data.length < 1000) break;
+}
+
+let skippedAddr = 0;
 const seen = new Set();
 const rows = listings
   .filter((l) => l.name)
+  .filter((l) => {
+    const k = addrKey(l.address, l.city);
+    if (k && addrIndex.has(k)) { skippedAddr++; return false; }
+    return true;
+  })
   .filter((l) => (seen.has(l.id) ? false : (seen.add(l.id), true)))
   .map((l) => ({
     ...l,
@@ -85,6 +138,9 @@ const rows = listings
   }));
 
 await upsertListings(rows);
-const dupes = listings.filter((l) => l.name).length - rows.length;
+if (skippedAddr) {
+  console.log(`Skipped ${skippedAddr} row(s) already listed at the same address by a crawled broker.`);
+}
+const dupes = listings.filter((l) => l.name).length - rows.length - skippedAddr;
 console.log(`Imported ${rows.length} CoStar rows (${rows.filter((r) => r.is_new).length} new` +
             (dupes ? `, ${dupes} duplicate rows merged across exports` : "") + ").");

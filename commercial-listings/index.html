@@ -170,6 +170,10 @@
   ];
   var DEFAULT = ["broker","name","address","submarket","property_type","status","size","price_or_rate","agents","url"];
 
+  // CoStar rows are licensed data. Until every portal viewer is confirmed to
+  // hold a CoStar seat, they stay hidden -- flip to true only then.
+  var INCLUDE_COSTAR = false;
+
   var sb=null, user=null;
   var listings=[], clients=[], items=[];
   var cols=[], sortKey="broker", sortDir=1;
@@ -205,7 +209,9 @@
   async function loadListings(){
     listings = []; var page=1000;
     for(var from=0;;from+=page){
-      var r = await sb.from("listings").select("*").eq("active",true).range(from, from+page-1);
+      var q = sb.from("listings").select("*").eq("active",true);
+      if(!INCLUDE_COSTAR) q = q.neq("source","costar");
+      var r = await q.range(from, from+page-1);
       if(r.error) throw r.error;
       listings = listings.concat(r.data);
       if(r.data.length < page) break;

@@ -153,12 +153,14 @@ Deno.serve(async (req) => {
     if (data.length < 1000) break;
   }
 
-  const existing = new Set<string>();
+  // id -> first_seen, so a re-import keeps the date we first saw a property
+  // instead of resetting it to today.
+  const existing = new Map<string, string>();
   for (let from = 0; ; from += 1000) {
     const { data, error } = await sb.from("listings")
-      .select("id").eq("source", "costar").range(from, from + 999);
+      .select("id, first_seen").eq("source", "costar").range(from, from + 999);
     if (error) return json({ error: error.message }, 500);
-    for (const r of data) existing.add(r.id);
+    for (const r of data) existing.set(r.id, r.first_seen);
     if (data.length < 1000) break;
   }
 
@@ -171,12 +173,29 @@ Deno.serve(async (req) => {
       return true;
     })
     .filter((l) => (seen.has(l.id as string) ? false : (seen.add(l.id as string), true)))
-    .map((l) => ({ ...l, first_seen: today, last_seen: today, is_new: !existing.has(l.id as string), active: true, updated_at: new Date().toISOString() }));
+    .map((l) => ({
+      ...l,
+      first_seen: existing.get(l.id as string) ?? today,
+      last_seen: today,
+      is_new: !existing.has(l.id as string),
+      active: true,
+      updated_at: new Date().toISOString(),
+    }));
 
   for (let i = 0; i < payload.length; i += 200) {
     const { error } = await sb.from("listings").upsert(payload.slice(i, i + 200));
     if (error) return json({ error: error.message }, 500);
   }
+
+  const totals = {
+    source: "costar",
+    total: payload.length,
+    new: payload.filter((r) => r.is_new).length,
+    read: rows.length,
+    skipped_already_crawled: skippedBroker,
+    skipped_same_address: skippedAddr,
+  };
+  await sb.from("crawl_runs").insert({ totals, notes: { costar: `import by ${auth.user.email || auth.user.id}` } });
 
   return json({
     ok: true,

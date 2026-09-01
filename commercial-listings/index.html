@@ -36,9 +36,11 @@
   .pagebar h1{margin:0;font-family:'Jost',sans-serif;font-size:18px;font-weight:600;color:var(--navy);letter-spacing:.01em}
   .pageactions{display:flex;align-items:center;gap:8px;margin-left:auto}
   .pagebar .who{font-size:12px;color:var(--muted)}
-  .backbtn{display:inline-flex;align-items:center;gap:6px;color:var(--navy);text-decoration:none;
-    font-size:13px;font-weight:500;padding:6px 11px;border:1px solid var(--line);border-radius:7px;background:#fff}
-  .backbtn:hover{background:#F3F4F6}
+  .tag{font-size:11px;color:var(--muted);background:#F3F4F6;border:1px solid var(--line);
+    border-radius:999px;padding:3px 9px;white-space:nowrap}
+  .backarrow{color:rgba(255,255,255,.7);text-decoration:none;display:flex;align-items:center;
+    margin-right:3px;font-size:18px}
+  .backarrow:hover{color:#fff}
   .chip.avatar{position:relative}
   .chip.avatar .dot{position:absolute;right:-2px;bottom:-2px;width:11px;height:11px;border-radius:50%;
     background:#22C55E;border:2px solid #001A4A}
@@ -92,8 +94,12 @@
   th .srt{color:var(--gold);margin-left:3px}
   td.wrap-cell{white-space:normal;min-width:190px}
   .brokerline{font-size:11px;color:var(--muted);margin-top:2px;font-weight:400}
-  th.actcol,td.actcol{width:34px;min-width:34px;padding-left:8px;padding-right:4px;
-    text-align:center;vertical-align:middle}
+  th.actcol,td.actcol{width:52px;min-width:52px;padding-left:8px;padding-right:4px;
+    text-align:center;vertical-align:middle;white-space:nowrap}
+  .addbtn.onlist{border-color:var(--gold);color:var(--gold)}
+  .addbtn.onlist:hover{background:var(--gold);color:#fff;border-color:var(--gold)}
+  .onbadge{display:inline-block;margin-left:3px;min-width:15px;height:15px;line-height:15px;padding:0 4px;
+    border-radius:999px;background:var(--gold);color:#fff;font-size:9.5px;font-weight:700;vertical-align:middle}
   .addbtn{border:1px solid var(--line);background:#fff;color:var(--navy);border-radius:5px;
           width:24px;height:24px;line-height:1;font-size:15px;cursor:pointer;padding:0}
   .addbtn:hover{background:var(--navy);color:#fff;border-color:var(--navy)}
@@ -119,6 +125,7 @@
 
 <div class="tmgbar">
   <div class="tmgbrand">
+    <a class="backarrow" href="/" title="Back to TMG App" aria-label="Back to TMG App"><i class="ti ti-arrow-left"></i></a>
     <img src="../m-monogram.png" alt="">
     <div class="tmgword">TMG APP</div>
   </div>
@@ -135,12 +142,12 @@
 </div>
 
 <div class="pagebar">
-  <a class="backbtn" href="/"><i class="ti ti-arrow-left"></i> Back to App</a>
   <h1>Commercial Listings</h1>
+  <span class="tag" id="tag-sync">Last auto sync: &mdash;</span>
+  <span class="tag" id="tag-import">Last import: &mdash;</span>
   <div class="pageactions">
     <span class="who" id="who"></span>
     <button class="btn" id="btn-cols"><i class="ti ti-columns-3"></i> Columns</button>
-    <button class="btn" id="btn-out" style="display:none">Sign out</button>
   </div>
 </div>
 
@@ -249,7 +256,6 @@
   "use strict";
 
   var ALL_COLS = [
-    {key:"client_lists",  label:"Client List", wrap:true},
     {key:"name",          label:"Property",   wrap:true},
     {key:"address",       label:"Address",    wrap:true},
     {key:"city",          label:"City"},
@@ -262,7 +268,7 @@
     {key:"first_seen",    label:"First seen"},
     {key:"last_seen",     label:"Last seen"}
   ];
-  var DEFAULT = ["client_lists","name","address","submarket","property_type","status","size","price_or_rate","agents"];
+  var DEFAULT = ["name","address","submarket","property_type","status","size","price_or_rate","agents"];
 
   // CoStar rows are licensed data. Until every portal viewer is confirmed to
   // hold a CoStar seat, they stay hidden -- flip to true only then.
@@ -297,7 +303,6 @@
       $("gate").style.display="none"; $("app").style.display="flex";
       $("who").textContent = user.email || "";
       paintAvatar(null);
-      $("btn-out").style.display="";
       $("btn-import").style.display="";
       try { await loadAll(); } catch(e){ showErr(e.message || String(e)); }
     });
@@ -326,9 +331,34 @@
   }
   function mkDot(){ var d=document.createElement("span"); d.className="dot"; return d; }
 
+  // MM/DD/YY - HH:MM in the viewer's own timezone.
+  function stamp(iso){
+    if(!iso) return "\u2014";
+    var d=new Date(iso);
+    if(isNaN(d)) return "\u2014";
+    function p(n){ return (n<10?"0":"")+n; }
+    return p(d.getMonth()+1)+"/"+p(d.getDate())+"/"+String(d.getFullYear()).slice(2)+
+           " - "+p(d.getHours())+":"+p(d.getMinutes());
+  }
+  async function loadStamps(){
+    var r = await sb.from("crawl_runs").select("ran_at,totals").order("ran_at",{ascending:false}).limit(60);
+    if(r.error) return;
+    var runs = r.data || [];
+    function latest(isCostar){
+      for(var i=0;i<runs.length;i++){
+        var t=runs[i].totals||{};
+        var costar = t.source==="costar";
+        if(costar===isCostar && !t.failed) return runs[i].ran_at;
+      }
+      return null;
+    }
+    $("tag-sync").textContent   = "Last auto sync: "+stamp(latest(false));
+    $("tag-import").textContent = "Last import: "+stamp(latest(true));
+  }
+
   async function loadAll(){
     cols = await loadCols();
-    await Promise.all([loadListings(), loadClients()]);
+    await Promise.all([loadListings(), loadClients(), loadStamps()]);
     buildFilters(); renderRail(); render();
   }
 
@@ -423,6 +453,14 @@
 
   // Comparable value per column: numbers sort numerically, list-shaped
   // columns sort by their first entry, everything else case-insensitively.
+  function listsFor(listingId){
+    return items.filter(function(it){ return it.listing_id===listingId; })
+      .map(function(it){
+        var c=clients.filter(function(x){ return x.id===it.client_id; })[0];
+        return c?c.name:"";
+      }).filter(Boolean).sort();
+  }
+
   function sortValue(l,key){
     if(key==="size"){
       // Sizes arrive as "62,127 SF", "2 Acres" or a range like "48,000-1,000,000 SF".
@@ -463,14 +501,6 @@
 
   // ── render ────────────────────────────────────────────────────────
   function cellHtml(l,key){
-    if(key==="client_lists"){
-      var on = items.filter(function(it){ return it.listing_id===l.id; });
-      if(!on.length) return '<span class="hint">—</span>';
-      return on.map(function(it){
-        var c = clients.filter(function(x){ return x.id===it.client_id; })[0];
-        return '<span class="pill">'+esc(c ? c.name : "…")+'</span>';
-      }).join(" ");
-    }
     if(key==="agents"){
       var a=Array.isArray(l.agents)?l.agents:[];
       if(!a.length) return '<span class="hint">—</span>';
@@ -511,14 +541,25 @@
       var tr=document.createElement("tr");
       var atd=document.createElement("td"); atd.className="actcol";
       var ab=document.createElement("button"); ab.className="addbtn";
+      var on=listsFor(l.id);
       if(activeClient){
         ab.textContent="×"; ab.title="Remove from this Client List";
         ab.addEventListener("click",function(){ removeFromClient(l.id); });
       } else {
-        ab.textContent="+"; ab.title="Add to a Client List";
+        ab.textContent="+";
+        ab.title = on.length
+          ? "On "+on.length+" Client List"+(on.length>1?"s":"")+": "+on.join(", ")+" \u2014 click to add to another"
+          : "Add to a Client List";
+        if(on.length) ab.className="addbtn onlist";
         ab.addEventListener("click",function(){ openAdd(l); });
       }
-      atd.appendChild(ab); tr.appendChild(atd);
+      atd.appendChild(ab);
+      if(on.length && !activeClient){
+        var cnt=document.createElement("span");
+        cnt.className="onbadge"; cnt.textContent=on.length; cnt.title=on.join(", ");
+        atd.appendChild(cnt);
+      }
+      tr.appendChild(atd);
       cols.forEach(function(key){
         var c=ALL_COLS.filter(function(x){return x.key===key})[0]; if(!c) return;
         var td=document.createElement("td");
@@ -725,7 +766,8 @@
 
   // ── CoStar import ─────────────────────────────────────────────────
   $("btn-import").addEventListener("click",function(){
-    $("i-file").value=""; $("i-result").textContent=""; $("dlg-import").showModal();
+    $("i-file").value=""; $("i-result").textContent=""; $("i-go").textContent="Import";
+    $("dlg-import").showModal();
   });
   $("dlg-import").addEventListener("close", async function(){
     if($("dlg-import").returnValue!=="go") return;
@@ -741,11 +783,12 @@
       var r=await fetch(FN_BASE+"/import-costar",{method:"POST",headers:{Authorization:"Bearer "+token},body:fd});
       var d=await r.json();
       if(!r.ok||d.error){ res.innerHTML='<span style="color:#991B1B">'+esc(d.error||("HTTP "+r.status))+'</span>'; return; }
+      $("i-go").textContent="Done";
       res.innerHTML="Read "+d.read+" row(s). Imported <b>"+d.imported+"</b> ("+d.new+" new).<br>"+
         "Skipped "+d.skipped_already_crawled+" from brokers we already crawl, "+
         d.skipped_same_address+" already listed at the same address"+
         (d.merged_duplicates? ", merged "+d.merged_duplicates+" duplicate row(s)":"")+".";
-      await loadListings(); buildFilters(); render();
+      await loadListings(); await loadStamps(); buildFilters(); render();
     }catch(e){
       res.innerHTML='<span style="color:#991B1B">'+esc(e.message||String(e))+'</span>';
     }
@@ -758,7 +801,6 @@
   $("cl-all").addEventListener("click",function(){ activeClient=""; renderRail(); render(); });
   $("arch-toggle").addEventListener("click",function(){ archOpen=!archOpen; renderRail(); });
   $("btn-newclient").addEventListener("click",function(){ openClient(null); });
-  $("btn-out").addEventListener("click",function(){ window.SupabaseAuth.signOut(); });
 
   boot();
 })();

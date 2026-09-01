@@ -29,8 +29,8 @@
     cursor:pointer;padding:0;background:rgba(201,164,90,0.16);border:none;color:#C9A45A;font-size:16px;
     line-height:1;text-decoration:none;transition:background .15s,box-shadow .15s}
   .chip:hover{background:rgba(201,164,90,0.30);box-shadow:0 0 0 2px #C9A45A}
-  .chip.avatar{font-family:'Jost',sans-serif;font-weight:600;font-size:13px;cursor:default}
-  .chip.avatar:hover{background:rgba(201,164,90,0.16);box-shadow:none}
+  .chip.avatar{font-family:'Jost',sans-serif;font-weight:600;font-size:13px;overflow:visible}
+  .chip.avatar img{width:32px;height:32px;border-radius:9px;object-fit:cover;display:block}
   .pagebar{display:flex;align-items:center;gap:14px;padding:10px 18px;
     background:#fff;border-bottom:1px solid var(--line);flex-wrap:wrap}
   .pagebar h1{margin:0;font-family:'Jost',sans-serif;font-size:18px;font-weight:600;color:var(--navy);letter-spacing:.01em}
@@ -296,14 +296,35 @@
       user = session.user; sb = window.SupabaseAuth._client;
       $("gate").style.display="none"; $("app").style.display="flex";
       $("who").textContent = user.email || "";
-      var ch=$("who-chip");
-      ch.insertBefore(document.createTextNode((user.email||"?").trim().charAt(0).toUpperCase()), ch.firstChild);
-      ch.title=user.email||"";
+      paintAvatar(null);
       $("btn-out").style.display="";
       $("btn-import").style.display="";
       try { await loadAll(); } catch(e){ showErr(e.message || String(e)); }
     });
   }
+
+  // Mirrors the app's TopBar avatar: photo when the profile has one, otherwise
+  // the initial. Rebuilt from scratch so repeated auth events cannot stack it.
+  function paintAvatar(profile){
+    var ch=$("who-chip");
+    if(!ch||!user) return;
+    var url=profile && profile.avatar_url;
+    var initial=((profile && profile.first_name) || user.email || "?").trim().charAt(0).toUpperCase();
+    ch.innerHTML="";
+    if(url){
+      var im=document.createElement("img");
+      im.src=url; im.alt="";
+      im.onerror=function(){ ch.innerHTML=""; ch.appendChild(document.createTextNode(initial));
+                             ch.appendChild(mkDot()); };
+      ch.appendChild(im);
+    } else {
+      ch.appendChild(document.createTextNode(initial));
+    }
+    ch.appendChild(mkDot());
+    var nm = profile ? ((profile.first_name||"")+" "+(profile.last_name||"")).trim() : "";
+    ch.title = nm || user.email || "";
+  }
+  function mkDot(){ var d=document.createElement("span"); d.className="dot"; return d; }
 
   async function loadAll(){
     cols = await loadCols();
@@ -339,6 +360,9 @@
       .select("id, first_name, last_name, title, access")
       .eq("status","active").contains("access", ["agent"]).order("first_name");
     agents = a.error ? [] : (a.data || []);
+    var me = await sb.from("profiles")
+      .select("first_name,last_name,avatar_url").eq("id",user.id).maybeSingle();
+    paintAvatar(me && me.data ? me.data : null);
   }
   async function loadCols(){
     var r = await sb.from("listing_column_prefs").select("columns").eq("user_id",user.id).maybeSingle();

@@ -130,7 +130,7 @@ Deno.serve(async (req) => {
       price_or_rate: clean(rent || sale),
       agents: [{ name: clean(pick(r, ...CONTACT_FIELDS)), phone: clean(pick(r, "brokerphone", "phone")), email: null }]
         .filter((a) => a.name),
-      url: listingUrl,
+      url: listingUrl || (costarId ? `https://product.costar.com/detail/all-properties/${encodeURIComponent(costarId)}/summary` : null),
       image_url: null,
       source: "costar",
       raw: costarId ? { costar_property_id: costarId } : null,

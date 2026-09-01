@@ -136,6 +136,8 @@ const listings = kept.map((r) => {
   if (costarId) {
     l.id = createHash("md5").update(`costar:${costarId}`).digest("hex").slice(0, 12);
     l.raw = { costar_property_id: costarId };
+    // CoStar exports carry no URL; their detail page is addressable by id.
+    if (!l.url) l.url = `https://product.costar.com/detail/all-properties/${encodeURIComponent(costarId)}/summary`;
   } else if (!l.url) {
     const key = `costar|${l.address || ""}|${l.name || ""}|${l.broker || ""}`.toLowerCase();
     l.id = createHash("md5").update(key).digest("hex").slice(0, 12);

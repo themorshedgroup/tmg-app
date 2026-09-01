@@ -309,6 +309,14 @@
     }
     return t;
   }
+  // CoStar's export carries no URL, but a Property ID resolves to their
+  // detail page. Built at display time so the rows already imported become
+  // clickable without a re-import.
+  function costarUrl(l){
+    var pid = l && l.raw && l.raw.costar_property_id;
+    return pid ? "https://product.costar.com/detail/all-properties/"+encodeURIComponent(pid)+"/summary" : null;
+  }
+  function linkFor(l){ return l.url || (l.source==="costar" ? costarUrl(l) : null); }
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
     return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
   function showErr(m){ $("err").innerHTML='<div class="err">'+esc(m)+'</div>'; }
@@ -578,16 +586,16 @@
     }
     if(key==="name"){
       var label = esc(l.name || l.address || "—");
-      var head  = l.url
-        ? '<a href="'+esc(l.url)+'" target="_blank" rel="noopener noreferrer nofollow">'+label+'</a>'
+      var href  = linkFor(l);
+      var head  = href
+        ? '<a href="'+esc(href)+'" target="_blank" rel="noopener noreferrer nofollow">'+label+'</a>'
         : label;
       // CoStar's export carries no listing URL, and their site 403s every
       // request from us, so a link cannot be built or verified. Surface the
       // Property ID instead -- it pastes straight into CoStar's search.
       var pid = l.raw && l.raw.costar_property_id;
       var tag = l.source==="costar"
-        ? '<span class="srctag"'+(pid?' title="CoStar Property ID '+esc(pid)+' \u2014 paste into CoStar search"':'')+
-          '>CoStar'+(pid?' '+esc(pid):'')+'</span>'
+        ? '<span class="srctag"'+(pid?' title="CoStar Property ID '+esc(pid)+'"':'')+'>CoStar</span>'
         : "";
       var line = (l.broker ? esc(l.broker) : "") + tag;
       return head + (line ? '<div class="brokerline">'+line+'</div>' : "");

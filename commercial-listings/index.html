@@ -261,8 +261,6 @@
   var ALL_COLS = [
     {key:"name",          label:"Property",   wrap:true},
     {key:"address",       label:"Address",    wrap:true},
-    {key:"city",          label:"City"},
-    {key:"submarket",     label:"Submarket"},
     {key:"property_type", label:"Type"},
     {key:"status",        label:"Status"},
     {key:"size",          label:"Size"},
@@ -271,7 +269,7 @@
     {key:"first_seen",    label:"First seen"},
     {key:"last_seen",     label:"Last seen"}
   ];
-  var DEFAULT = ["name","address","submarket","property_type","status","size","price_or_rate","agents"];
+  var DEFAULT = ["name","address","property_type","status","size","price_or_rate","agents"];
 
   // CoStar rows are licensed data. Confirmed 2026-09-01 that every portal
   // viewer holds a CoStar seat, so they are shown -- and tagged, so nobody
@@ -487,6 +485,22 @@
       var p=parseFloat(String(l.price_or_rate==null?"":l.price_or_rate).replace(/,/g,"").match(/[0-9.]+/)||"");
       return isNaN(p)?null:p;
     }
+    if(key==="address"){
+      var street = l.address ? esc(l.address) : "";
+      // City and submarket ride underneath rather than taking two more columns.
+      // Several suburbs are their own submarket ("Buda · Buda"); show one.
+      var parts=[], sawL={};
+      [l.city, l.submarket].forEach(function(v){
+        if(!v) return;
+        var k=String(v).toLowerCase().trim();
+        if(sawL[k]) return;
+        sawL[k]=1; parts.push(esc(v));
+      });
+      var where = parts.join(" \u00b7 ");
+      if(!street && !where) return '<span class="hint">—</span>';
+      return (street || '<span class="hint">—</span>') +
+             (where ? '<div class="brokerline">'+where+'</div>' : "");
+    }
     if(key==="agents"){
       var a=Array.isArray(l.agents)?l.agents:[];
       return a.length?String(a[0].name||"").toLowerCase():null;
@@ -506,6 +520,22 @@
 
   // ── render ────────────────────────────────────────────────────────
   function cellHtml(l,key){
+    if(key==="address"){
+      var street = l.address ? esc(l.address) : "";
+      // City and submarket ride underneath rather than taking two more columns.
+      // Several suburbs are their own submarket ("Buda · Buda"); show one.
+      var parts=[], sawL={};
+      [l.city, l.submarket].forEach(function(v){
+        if(!v) return;
+        var k=String(v).toLowerCase().trim();
+        if(sawL[k]) return;
+        sawL[k]=1; parts.push(esc(v));
+      });
+      var where = parts.join(" \u00b7 ");
+      if(!street && !where) return '<span class="hint">—</span>';
+      return (street || '<span class="hint">—</span>') +
+             (where ? '<div class="brokerline">'+where+'</div>' : "");
+    }
     if(key==="agents"){
       var a=Array.isArray(l.agents)?l.agents:[];
       if(!a.length) return '<span class="hint">—</span>';

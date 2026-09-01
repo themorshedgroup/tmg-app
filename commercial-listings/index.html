@@ -94,6 +94,9 @@
   th .srt{color:var(--gold);margin-left:3px}
   td.wrap-cell{white-space:normal;min-width:190px}
   .brokerline{font-size:11px;color:var(--muted);margin-top:2px;font-weight:400}
+  .srctag{display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;
+    background:#EFE7D6;color:#8A6100;border:1px solid #E0D2B4;
+    font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;vertical-align:1px}
   th.actcol,td.actcol{width:52px;min-width:52px;padding-left:8px;padding-right:4px;
     text-align:center;vertical-align:middle;white-space:nowrap}
   .addbtn.onlist{border-color:var(--gold);color:var(--gold)}
@@ -270,9 +273,11 @@
   ];
   var DEFAULT = ["name","address","submarket","property_type","status","size","price_or_rate","agents"];
 
-  // CoStar rows are licensed data. Until every portal viewer is confirmed to
-  // hold a CoStar seat, they stay hidden -- flip to true only then.
-  var INCLUDE_COSTAR = false;
+  // CoStar rows are licensed data. Confirmed 2026-09-01 that every portal
+  // viewer holds a CoStar seat, so they are shown -- and tagged, so nobody
+  // mistakes licensed data for something we crawled ourselves. Set back to
+  // false if that ever stops being true.
+  var INCLUDE_COSTAR = true;
 
   var FN_BASE = "https://ipqoqhsnjubopybujetn.functions.supabase.co";
   var sb=null, user=null;
@@ -513,7 +518,9 @@
       var head  = l.url
         ? '<a href="'+esc(l.url)+'" target="_blank" rel="noopener noreferrer nofollow">'+label+'</a>'
         : label;
-      return head + (l.broker ? '<div class="brokerline">'+esc(l.broker)+'</div>' : "");
+      var tag = l.source==="costar" ? '<span class="srctag">CoStar</span>' : "";
+      var line = (l.broker ? esc(l.broker) : "") + tag;
+      return head + (line ? '<div class="brokerline">'+line+'</div>' : "");
     }
     if(key==="status"||key==="property_type"){
       return l[key] ? '<span class="pill">'+esc(titleCase(l[key]))+'</span>' : "—";

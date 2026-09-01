@@ -86,6 +86,8 @@
   input[type=search],select,input[type=text],textarea{border:1px solid var(--line);border-radius:6px;padding:6px 9px;font:inherit;background:#fff}
   input[type=search]{min-width:230px}
   .count{color:var(--muted);font-size:12px;margin-left:auto}
+  #btn-copy{margin-left:auto}
+  #btn-copy.done{border-color:var(--gold);color:var(--gold)}
   .tblwrap{overflow-x:auto;background:#fff;border:1px solid var(--line);border-radius:8px}
   table{border-collapse:collapse;width:100%;font-size:13px}
   th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
@@ -194,6 +196,7 @@
         <option value="for_sale">For Sale</option>
         <option value="both">Both</option>
       </select>
+      <button class="btn" id="btn-copy" style="display:none"><i class="ti ti-copy"></i> Copy table</button>
       <span class="count" id="count"></span>
     </div>
     <div class="tblwrap">
@@ -660,6 +663,7 @@
       });
       tb.appendChild(tr);
     });
+    $("btn-copy").style.display = activeClient ? "" : "none";
     $("empty").style.display = rows.length ? "none" : "block";
     $("count").textContent = rows.length + " of " + listings.length + " listings";
     $("n-all").textContent = listings.length;
@@ -854,6 +858,86 @@
     if(!next.length){ showErr("Keep at least one column."); return; }
     cols=next; render(); await saveCols();
   });
+
+  // ── Copy a Client List as a pasteable table ───────────────────────
+  // Written to the clipboard as both HTML and plain text, so Gmail, Word and
+  // Docs get a real table with live links while plain-text targets still get
+  // something readable.
+  function plainCell(l,key){
+    if(key==="name"){
+      var href=linkFor(l);
+      var base=(l.name||l.address||"") + (l.broker?" ("+l.broker+")":"");
+      return href ? base+" "+href : base;
+    }
+    if(key==="address") return [l.address,l.city,l.submarket].filter(Boolean).join(", ");
+    if(key==="agents"){
+      var a=Array.isArray(l.agents)?l.agents:[];
+      return a.map(function(p){ return (p.name||"")+(p.phone?" "+p.phone:""); }).join("; ");
+    }
+    if(key==="price_or_rate") return money(l.price_or_rate)||"";
+    if(key==="status"||key==="property_type") return titleCase(l[key])||"";
+    return l[key]==null?"":String(l[key]);
+  }
+  function htmlCell(l,key){
+    if(key==="name"){
+      var href=linkFor(l), label=esc(l.name||l.address||"");
+      var head=href?'<a href="'+esc(href)+'">'+label+'</a>':label;
+      return head+(l.broker?'<br><span style="font-size:11px;color:#6B7280">'+esc(l.broker)+'</span>':"");
+    }
+    if(key==="address"){
+      var where=[l.city,l.submarket].filter(Boolean);
+      var seen={}, uniq=[];
+      where.forEach(function(v){ var k=String(v).toLowerCase(); if(!seen[k]){seen[k]=1;uniq.push(v);} });
+      return esc(l.address||"")+(uniq.length?'<br><span style="font-size:11px;color:#6B7280">'+esc(uniq.join(" \u00b7 "))+'</span>':"");
+    }
+    return esc(plainCell(l,key));
+  }
+  async function copyTable(){
+    var rows=visible();
+    if(!rows.length){ showErr("Nothing to copy."); return; }
+    var c=clients.filter(function(x){ return x.id===activeClient; })[0];
+    var labels=cols.map(function(k){
+      var d=ALL_COLS.filter(function(x){return x.key===k})[0]; return d?d.label:k;
+    });
+    var html='<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">'+
+      '<thead><tr>'+labels.map(function(t){
+        return '<th style="background:#001A4A;color:#fff;text-align:left;font-size:11px;letter-spacing:.04em">'+esc(t.toUpperCase())+'</th>';
+      }).join("")+'</tr></thead><tbody>'+
+      rows.map(function(l){
+        return '<tr>'+cols.map(function(k){
+          return '<td style="vertical-align:top">'+htmlCell(l,k)+'</td>';
+        }).join("")+'</tr>';
+      }).join("")+'</tbody></table>';
+    if(c) html='<p style="font-family:Arial,sans-serif"><b>'+esc(c.name)+'</b> \u2014 '+rows.length+' listing'+(rows.length>1?'s':'')+'</p>'+html;
+
+    var text=(c?c.name+"\n":"")+labels.join("\t")+"\n"+
+      rows.map(function(l){ return cols.map(function(k){ return plainCell(l,k).replace(/\s+/g," "); }).join("\t"); }).join("\n");
+
+    var btn=$("btn-copy");
+    try{
+      if(navigator.clipboard && window.ClipboardItem){
+        await navigator.clipboard.write([new ClipboardItem({
+          "text/html":  new Blob([html], {type:"text/html"}),
+          "text/plain": new Blob([text], {type:"text/plain"})
+        })]);
+      } else {
+        // Older browsers: select a hidden rich node and use execCommand.
+        var d=document.createElement("div");
+        d.contentEditable="true"; d.innerHTML=html;
+        d.style.cssText="position:fixed;left:-9999px;top:0;";
+        document.body.appendChild(d);
+        var r=document.createRange(); r.selectNodeContents(d);
+        var sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        document.execCommand("copy"); sel.removeAllRanges(); d.remove();
+      }
+      clearErr();
+      btn.classList.add("done"); btn.innerHTML='<i class="ti ti-check"></i> Copied '+rows.length+' row'+(rows.length>1?'s':'');
+      setTimeout(function(){ btn.classList.remove("done"); btn.innerHTML='<i class="ti ti-copy"></i> Copy table'; },2200);
+    }catch(e){
+      showErr("Could not copy: "+(e.message||e));
+    }
+  }
+  $("btn-copy").addEventListener("click",copyTable);
 
   // ── CoStar import ─────────────────────────────────────────────────
   $("btn-import").addEventListener("click",function(){

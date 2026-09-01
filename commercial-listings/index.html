@@ -55,8 +55,8 @@
   .cl.on .agentribbon{color:#C7D0E0}
   .railbtn{width:100%;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:6px}
   .clrow{position:relative;display:flex;align-items:flex-start}
-  .clrow .cl{flex:1;padding-right:26px}
-  .dots{position:absolute;right:2px;top:5px;border:none;background:transparent;color:var(--muted);
+  .clrow .cl{flex:1;padding-right:30px}
+  .dots{position:absolute;right:0;top:5px;border:none;background:transparent;color:var(--muted);
     cursor:pointer;font-size:15px;line-height:1;padding:2px 5px;border-radius:5px}
   .dots:hover{background:#E9EAEC;color:var(--ink)}
   .clrow .cl.on ~ .dots{color:#C7D0E0}
@@ -66,13 +66,19 @@
     padding:7px 10px;border-radius:6px;cursor:pointer;font:inherit;font-size:13px;color:var(--ink)}
   .menu button:hover{background:#F3F4F6}
   .archhead{cursor:pointer;user-select:none;display:flex;align-items:center;gap:5px}
-  .archhead .n{margin-left:auto;opacity:.6}
+  .archhead .n{margin-left:auto;opacity:.6;background:none;color:inherit;padding:0;font-weight:600}
   #arch-list .cl{color:#9CA3AF}
   #arch-list .cl .agentribbon{color:#B6BBC4}
   .cl{display:block;width:100%;text-align:left;border:0;background:transparent;padding:7px 9px;border-radius:6px;cursor:pointer;font-size:13px;color:var(--ink)}
   .cl:hover{background:#F3F4F6}
   .cl.on{background:var(--navy);color:#fff}
-  .cl .n{float:right;opacity:.6;font-size:11px}
+  .cl .n{float:right;font-size:10.5px;line-height:16px;min-width:16px;height:16px;padding:0 5px;
+    border-radius:999px;background:#E9EAEC;color:#4B5563;text-align:center;font-weight:600;
+    margin-top:1px;margin-right:2px}
+  .cl.on .n{background:rgba(255,255,255,0.22);color:#fff}
+  .cl.allrow .n{background:#E9EAEC;color:#4B5563}
+  .cl.allrow.on .n{background:rgba(255,255,255,0.22);color:#fff}
+  #arch-list .cl .n{background:#EFEFF1;color:#9CA3AF}
   .main{flex:1;min-width:0;padding:14px 18px 40px}
   .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
   input[type=search],select,input[type=text],textarea{border:1px solid var(--line);border-radius:6px;padding:6px 9px;font:inherit;background:#fff}

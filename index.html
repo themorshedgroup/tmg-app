@@ -5057,20 +5057,92 @@ Rules:
       return stash({ api: f.api_name, options, at: Date.now() });
     }
 
-    // Any write from this tab makes three caches wrong at once: this page's own
-    // team-calls pull and BOTH of /crm-tasks's caches — and those two never
-    // expire on their own. Clearing them is the only thing stopping the CRM
-    // page from showing a call as still open for days after it was closed here.
-    function bustTaskCaches() {
-      ['tmg-calls-org-v1', 'tmg_crmtasks_cache_open', 'tmg_crmtasks_cache_full']
-        .forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
+    // The day list is a LIVE WORKLIST, so it gets a deliberately SHORT cache:
+    // long enough that flipping to another tab and back stops re-querying Zoho
+    // four times, short enough that it can never show a call somebody already
+    // closed. A long cache would be wrong here for exactly the reason the tab
+    // exists — its job is being current, and Zoho books the next call by
+    // workflow, so new rows appear on their own. The pulls that CAN sit for a
+    // long time (contact phone/email/spouse, and the capacity pull) already do.
+    const CALL_DAY_KEY = 'tmg-calls-day-v1';
+    const CALL_DAY_TTL = 5 * 60 * 1000;
+    // Only the fields this tab actually reads. A raw Zoho task carries a
+    // Description that can run to pages, and localStorage is a ~5MB budget
+    // shared with every other cache in the app.
+    const trimTask = (t) => ({
+      id: t.id,
+      Subject: t.Subject || '',
+      Status: t.Status || '',
+      Due_Date: t.Due_Date || null,
+      Owner: t.Owner ? { id: t.Owner.id || null, name: t.Owner.name || null } : null,
+      Who_Id: t.Who_Id ? { id: t.Who_Id.id || null, name: t.Who_Id.name || null } : null,
+    });
+    function loadDayCache(sig) {
+      try {
+        const c = JSON.parse(localStorage.getItem(CALL_DAY_KEY) || 'null');
+        // The signature pins the cache to one owner-scope AND one calendar day,
+        // so it can never be served across a date rollover or to the wrong view.
+        if (!c || c.sig !== sig || !c.at || (Date.now() - c.at) > CALL_DAY_TTL) return null;
+        if (!c.buckets || !c.overdue) return null;
+        return c;
+      } catch (e) { return null; }
+    }
+    function saveDayCache(sig, payload, at) {
+      try {
+        const b = payload.buckets || {};
+        localStorage.setItem(CALL_DAY_KEY, JSON.stringify({
+          sig,
+          // `at` is the time the data was FETCHED, carried through every
+          // optimistic patch — otherwise ticking calls would keep renewing the
+          // lease and a stale list could live forever.
+          at: at || Date.now(),
+          buckets: {
+            yesterday: (b.yesterday || []).map(trimTask),
+            today: (b.today || []).map(trimTask),
+            tomorrow: (b.tomorrow || []).map(trimTask),
+          },
+          overdue: { count: payload.overdue.count, capped: !!payload.overdue.capped, list: (payload.overdue.list || []).map(trimTask) },
+          clipped: payload.clipped || {},
+        }));
+      } catch (e) { /* quota — just skip caching this round */ }
     }
 
-    async function setTaskStatus(id, status) {
+    // A write does NOT invalidate everything equally, and treating it as if it
+    // did is expensive: /crm-tasks's two caches hold ALL open tasks, so any
+    // write makes them wrong and they never expire on their own — but the
+    // capacity pull holds only OPEN CALLS. Logging a completed pop-by cannot
+    // affect it at all, and completing a call only takes one row out. Throwing
+    // that away meant re-paging ten pages of tasks out of Zoho after every
+    // single tick, so it is patched in place instead.
+    function bustCrmTaskCaches() {
+      ['tmg_crmtasks_cache_open', 'tmg_crmtasks_cache_full']
+        .forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
+    }
+    function patchOrgCache(fn) {
+      try {
+        const c = loadOrgCache();
+        if (!c) return;
+        const next = fn(c.calls || []);
+        // cachedAt is carried through unchanged, so "loaded 20m ago" stays true.
+        if (next) localStorage.setItem(CALL_ORG_KEY, JSON.stringify({ ...c, calls: next }));
+      } catch (e) {}
+    }
+
+    async function setTaskStatus(id, status, task) {
       if (callsIsDev()) { await new Promise(r => setTimeout(r, 260)); return; }
       const { ok, data } = await safeZoho({ action: 'update_record', module: 'Tasks', id, record: { Status: status } });
       if (!ok) throw new Error((data && data.error) || 'Zoho would not update that task.');
-      bustTaskCaches();
+      bustCrmTaskCaches();
+      const done = /completed/i.test(status);
+      patchOrgCache(list => {
+        if (done) return list.filter(c => c.id !== id);
+        if (!task || list.some(c => c.id === id)) return list;
+        return list.concat([{
+          id: task.id, Subject: task.Subject || '', Status: status, Due_Date: (task.Due_Date || '').slice(0, 10),
+          owner: (task.Owner && task.Owner.name) || 'Unassigned',
+          cid: (task.Who_Id && task.Who_Id.id) || null, cname: (task.Who_Id && task.Who_Id.name) || '',
+        }]);
+      });
     }
 
     // Logging 5 of something creates 5 task rows, because that is how the Zoho
@@ -5153,7 +5225,7 @@ Rules:
       const madeCount = () => Object.keys(landed).reduce((n, k) => n + landed[k], 0);
       const byType = () => Object.keys(landed).map(type => ({ type, count: landed[type] }));
       const stop = (msg) => {
-        if (madeCount()) bustTaskCaches();
+        if (madeCount()) bustCrmTaskCaches();
         const err = new Error(msg);
         err.partial = { made: madeCount(), byType: byType() };
         throw err;
@@ -5175,7 +5247,7 @@ Rules:
         // the rows it already wrote.
         if (bad) stop('Created ' + madeCount() + ' of ' + jobs.length + ', then it stopped: ' + ((bad.r.data && bad.r.data.error) || 'unknown error'));
       }
-      bustTaskCaches();
+      bustCrmTaskCaches();
       return { made: jobs.length, byType: byType() };
     }
 
@@ -5377,6 +5449,7 @@ Rules:
       const [rowBusy, setRowBusy] = useState({});              // taskId -> true while a write is in flight
       const [rowErr, setRowErr] = useState({});                // taskId -> message, shown on the row itself
       const [sheet, setSheet] = useState(null);                // { task, contact } | null — the + popup
+      const [dataAt, setDataAt] = useState(0);                 // when the shown day data was FETCHED, not last touched
 
       // A phone PWA sits on this tab for days at a time, so "today" cannot be
       // frozen at mount — it would quietly come to mean yesterday, and this
@@ -5411,8 +5484,19 @@ Rules:
       const myOwner = (ownerName && ownerName !== 'Me' && ownerName.trim()) ? ownerName.trim() : '';
       const team = !!isAdmin;
 
-      async function load() {
+      // Pins the cache to one owner-scope and one calendar day.
+      const daySig = (team ? 'team' : 'me:' + myOwner) + '|' + dates.today;
+
+      async function load(force) {
         if (!team && !myOwner) { setBuckets({ yesterday: [], today: [], tomorrow: [] }); setOverdue({ list: [], count: 0, capped: false }); return; }
+        if (!force && !callsIsDev()) {
+          const c = loadDayCache(daySig);
+          if (c) {
+            setBuckets(c.buckets); setOverdue(c.overdue); setClipped(c.clipped || {});
+            setDataAt(c.at); setErr(''); setRowErr({});
+            return;
+          }
+        }
         setBusy(true); setErr(''); setRowErr({});
         if (callsIsDev()) {
           await new Promise(r => setTimeout(r, 250));
@@ -5460,13 +5544,29 @@ Rules:
           // the day may be clipped. Say so rather than quietly showing a short list.
           setClipped({ yesterday: full(res[0]), today: full(res[1]), tomorrow: full(res[2]) });
           const od = norm(res[3]);
-          setOverdue({ list: od, count: od.length, capped: ((res[3].data && res[3].data.tasks) || []).length >= 200 });
+          const overdueNext = { list: od, count: od.length, capped: ((res[3].data && res[3].data.tasks) || []).length >= 200 };
+          setOverdue(overdueNext);
+          const now = Date.now();
+          setDataAt(now);
+          saveDayCache(daySig, {
+            buckets: { yesterday: norm(res[0]), today: norm(res[1]), tomorrow: norm(res[2]) },
+            overdue: overdueNext,
+            clipped: { yesterday: full(res[0]), today: full(res[1]), tomorrow: full(res[2]) },
+          }, now);
         } catch (e) {
           setErr((e && e.message) || String(e));
           setBuckets({ yesterday: [], today: [], tomorrow: [] });
         } finally { setBusy(false); }
       }
       useEffect(() => { load(); }, [myOwner, team, dates.today]);
+
+      // Write-through: a ticked call has to survive into the cache, or the next
+      // visit inside the TTL would serve the pre-tick list straight back.
+      // dataAt is passed along so patching never extends the cache's life.
+      useEffect(() => {
+        if (!buckets || !overdue || busy || !dataAt || callsIsDev()) return;
+        saveDayCache(daySig, { buckets, overdue, clipped }, dataAt);
+      }, [buckets, overdue, clipped, daySig, busy, dataAt]);
 
       const ownerOf = (t) => (t.Owner && t.Owner.name) || 'Unassigned';
 
@@ -5586,7 +5686,7 @@ Rules:
         setRowBusy(b => ({ ...b, [t.id]: true }));
         setRowErr(e => { const n = { ...e }; delete n[t.id]; return n; });
         try {
-          await setTaskStatus(t.id, next);
+          await setTaskStatus(t.id, next, t);
           patchTask(t, next);
         } catch (e) {
           // Never a silent success: the row keeps its old state and says why.
@@ -5825,7 +5925,7 @@ Rules:
             {team
               ? agentPicker
               : <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Call List</div>}
-            <button onClick={() => !busy && load()} disabled={busy} title="Refresh from Zoho" style={{ width: 24, height: 24, borderRadius: '50%', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1, background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <button onClick={() => !busy && load(true)} disabled={busy} title="Refresh from Zoho" style={{ width: 24, height: 24, borderRadius: '50%', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1, background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
               <i className="ti ti-refresh" style={{ fontSize: 12 }} />
             </button>
           </div>

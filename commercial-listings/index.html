@@ -593,10 +593,7 @@
       // CoStar's export carries no listing URL, and their site 403s every
       // request from us, so a link cannot be built or verified. Surface the
       // Property ID instead -- it pastes straight into CoStar's search.
-      var pid = l.raw && l.raw.costar_property_id;
-      var tag = l.source==="costar"
-        ? '<span class="srctag"'+(pid?' title="CoStar Property ID '+esc(pid)+'"':'')+'>CoStar</span>'
-        : "";
+      var tag = l.source==="costar" ? '<span class="srctag">CoStar</span>' : "";
       var line = (l.broker ? esc(l.broker) : "") + tag;
       return head + (line ? '<div class="brokerline">'+line+'</div>' : "");
     }

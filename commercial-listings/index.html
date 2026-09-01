@@ -97,12 +97,14 @@
   .srctag{display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;
     background:#EFE7D6;color:#8A6100;border:1px solid #E0D2B4;
     font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;vertical-align:1px}
-  th.actcol,td.actcol{width:52px;min-width:52px;padding-left:8px;padding-right:4px;
-    text-align:center;vertical-align:middle;white-space:nowrap}
+  th.actcol,td.actcol{width:92px;min-width:92px;padding-left:10px;padding-right:6px;
+    text-align:left;vertical-align:middle;white-space:nowrap}
+  .actwrap{display:flex;align-items:center;gap:5px}
   .addbtn.onlist{border-color:var(--gold);color:var(--gold)}
   .addbtn.onlist:hover{background:var(--gold);color:#fff;border-color:var(--gold)}
-  .onbadge{display:inline-block;margin-left:3px;min-width:15px;height:15px;line-height:15px;padding:0 4px;
-    border-radius:999px;background:var(--gold);color:#fff;font-size:9.5px;font-weight:700;vertical-align:middle}
+  .onbadge{display:flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 5px;
+    border-radius:999px;background:var(--gold);color:#fff;font-size:10px;font-weight:700;
+    cursor:default;flex:0 0 auto}
   .addbtn{border:1px solid var(--line);background:#fff;color:var(--navy);border-radius:5px;
           width:24px;height:24px;line-height:1;font-size:15px;cursor:pointer;padding:0}
   .addbtn:hover{background:var(--navy);color:#fff;border-color:var(--navy)}
@@ -148,6 +150,7 @@
   <h1>Commercial Listings</h1>
   <span class="tag" id="tag-sync">Last auto sync: &mdash;</span>
   <span class="tag" id="tag-import">Last import: &mdash;</span>
+  <span class="tag" id="tag-sched">Sync schedule: Tue / Thu / Sat, 12:01 AM</span>
   <div class="pageactions">
     <span class="who" id="who"></span>
     <button class="btn" id="btn-cols"><i class="ti ti-columns-3"></i> Columns</button>
@@ -355,8 +358,15 @@
       }
       return null;
     }
-    $("tag-sync").textContent   = "Last auto sync: "+stamp(latest(false));
-    $("tag-import").textContent = "Last import: "+stamp(latest(true));
+    $("tag-sync").textContent = "Last auto sync: "+stamp(latest(false));
+
+    var imported = latest(true);
+    if(!imported){
+      var c = await sb.from("listings").select("updated_at")
+        .eq("source","costar").order("updated_at",{ascending:false}).limit(1);
+      if(!c.error && c.data && c.data.length) imported = c.data[0].updated_at;
+    }
+    $("tag-import").textContent = "Last import: "+stamp(imported);
   }
 
   async function loadAll(){
@@ -562,6 +572,7 @@
     var rows=visible();
     var thead=$("thead"); thead.innerHTML="";
     var actTh=document.createElement("th"); actTh.className="actcol"; actTh.draggable=false;
+    actTh.textContent="Client List";
     thead.appendChild(actTh);
     cols.forEach(function(key){
       var c=ALL_COLS.filter(function(x){return x.key===key})[0]; if(!c) return;
@@ -590,12 +601,16 @@
         if(on.length) ab.className="addbtn onlist";
         ab.addEventListener("click",function(){ openAdd(l); });
       }
-      atd.appendChild(ab);
+      var aw=document.createElement("div"); aw.className="actwrap";
+      aw.appendChild(ab);
       if(on.length && !activeClient){
         var cnt=document.createElement("span");
-        cnt.className="onbadge"; cnt.textContent=on.length; cnt.title=on.join(", ");
-        atd.appendChild(cnt);
+        cnt.className="onbadge"; cnt.textContent=on.length;
+        // 3. Hovering the count names the lists it belongs to.
+        cnt.title="On "+on.length+" Client List"+(on.length>1?"s":"")+": "+on.join(", ");
+        aw.appendChild(cnt);
       }
+      atd.appendChild(aw);
       tr.appendChild(atd);
       cols.forEach(function(key){
         var c=ALL_COLS.filter(function(x){return x.key===key})[0]; if(!c) return;

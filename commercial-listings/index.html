@@ -91,7 +91,9 @@
   th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
   th{background:#F9FAFB;font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);cursor:grab;position:sticky;top:0;z-index:1;user-select:none}
   th.drag{opacity:.4}
-  th .srt{color:var(--gold);margin-left:3px}
+  th .srt{margin-left:4px;font-size:9px;color:#C3C7CE;letter-spacing:-1px}
+  th:hover .srt{color:#8A8F98}
+  th .srt.active{color:var(--gold);font-size:8px;letter-spacing:0}
   td.wrap-cell{white-space:normal;min-width:190px}
   .brokerline{font-size:11px;color:var(--muted);margin-top:2px;font-weight:400}
   .srctag{display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;
@@ -148,9 +150,9 @@
 
 <div class="pagebar">
   <h1>Commercial Listings</h1>
+  <span class="tag" id="tag-sched">Sync schedule: Tue / Thu / Sat, 12:01 AM</span>
   <span class="tag" id="tag-sync">Last auto sync: &mdash;</span>
   <span class="tag" id="tag-import">Last import: &mdash;</span>
-  <span class="tag" id="tag-sched">Sync schedule: Tue / Thu / Sat, 12:01 AM</span>
   <div class="pageactions">
     <span class="who" id="who"></span>
     <button class="btn" id="btn-cols"><i class="ti ti-columns-3"></i> Columns</button>
@@ -293,6 +295,19 @@
     return String(v||"").replace(/_/g," ").replace(/\S+/g,function(w){
       return w.charAt(0).toUpperCase()+w.slice(1);
     });
+  }
+  // CoStar sale prices arrive as bare numbers ("4100000"). Crawled rates
+  // already read "$20.00 NNN". Normalise the bare ones without touching text
+  // like "Contact us for pricing".
+  function money(v){
+    if(v==null) return null;
+    var t=String(v).trim();
+    if(!t) return null;
+    if(/^[0-9][0-9,]*(\.[0-9]+)?$/.test(t)){
+      var n=Number(t.replace(/,/g,""));
+      if(isFinite(n)) return "$"+n.toLocaleString("en-US",{maximumFractionDigits:2});
+    }
+    return t;
   }
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){
     return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
@@ -495,6 +510,10 @@
       var p=parseFloat(String(l.price_or_rate==null?"":l.price_or_rate).replace(/,/g,"").match(/[0-9.]+/)||"");
       return isNaN(p)?null:p;
     }
+    if(key==="price_or_rate"){
+      var m=money(l.price_or_rate);
+      return m ? esc(m) : '<span class="hint">—</span>';
+    }
     if(key==="address"){
       var street = l.address ? esc(l.address) : "";
       // City and submarket ride underneath rather than taking two more columns.
@@ -530,6 +549,10 @@
 
   // ── render ────────────────────────────────────────────────────────
   function cellHtml(l,key){
+    if(key==="price_or_rate"){
+      var m=money(l.price_or_rate);
+      return m ? esc(m) : '<span class="hint">—</span>';
+    }
     if(key==="address"){
       var street = l.address ? esc(l.address) : "";
       // City and submarket ride underneath rather than taking two more columns.
@@ -558,7 +581,14 @@
       var head  = l.url
         ? '<a href="'+esc(l.url)+'" target="_blank" rel="noopener noreferrer nofollow">'+label+'</a>'
         : label;
-      var tag = l.source==="costar" ? '<span class="srctag">CoStar</span>' : "";
+      // CoStar's export carries no listing URL, and their site 403s every
+      // request from us, so a link cannot be built or verified. Surface the
+      // Property ID instead -- it pastes straight into CoStar's search.
+      var pid = l.raw && l.raw.costar_property_id;
+      var tag = l.source==="costar"
+        ? '<span class="srctag"'+(pid?' title="CoStar Property ID '+esc(pid)+' \u2014 paste into CoStar search"':'')+
+          '>CoStar'+(pid?' '+esc(pid):'')+'</span>'
+        : "";
       var line = (l.broker ? esc(l.broker) : "") + tag;
       return head + (line ? '<div class="brokerline">'+line+'</div>' : "");
     }
@@ -578,7 +608,11 @@
       var c=ALL_COLS.filter(function(x){return x.key===key})[0]; if(!c) return;
       var th=document.createElement("th");
       th.textContent=c.label; th.draggable=true; th.dataset.key=key;
-      if(sortKey===key){ var s=document.createElement("span"); s.className="srt"; s.textContent=sortDir>0?"▲":"▼"; th.appendChild(s); }
+      var ar=document.createElement("span");
+      ar.className = "srt" + (sortKey===key ? " active" : "");
+      ar.textContent = sortKey===key ? (sortDir>0 ? "\u25B2" : "\u25BC") : "\u25B4\u25BE";
+      th.appendChild(ar);
+      th.title = "Sort by "+c.label;
       th.addEventListener("click",function(){ if(sortKey===key) sortDir=-sortDir; else {sortKey=key;sortDir=1;} render(); });
       wireDrag(th);
       thead.appendChild(th);

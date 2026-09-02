@@ -6811,17 +6811,60 @@ Rules:
     const HG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const HG_STATUSES = ['In Progress', 'Catching Up', 'Success', 'Failed'];
     const HG_STATUS_COLOR = { 'In Progress': '#185FA5', 'Catching Up': '#B07A00', 'Success': '#0F6E56', 'Failed': '#9B1C1C' };
-    // Every Monday-start week that touches the month: the week containing the
-    // 1st through the week containing the last day (4-6 weeks).
+
+    // The roster is FIXED: every month shows these rows, in this order, whether
+    // or not that person has logged a goal in Zoho yet (an empty month is a
+    // full table of dashes, not a blank page). `from`/`until` are YYYY-MM
+    // bounds — from is inclusive, until is exclusive — so roster changes are
+    // dated instead of retroactive: August still shows Luciana, September
+    // shows Angelica in her place and adds Camila.
+    const HG_ROSTER = [
+      { key: 'tarek',    name: 'Tarek',    emails: ['tarek@themorshedgroup.com'] },
+      { key: 'brad',     name: 'Brad',     emails: ['brad@themorshedgroup.com'] },
+      { key: 'brett',    name: 'Brett',    emails: ['brett@themorshedgroup.com'] },
+      { key: 'kyle',     name: 'Kyle',     emails: ['kyle@themorshedgroup.com'] },
+      // Symon's app login and his Zoho user are different addresses.
+      { key: 'symon',    name: 'Symon',    emails: ['symon@themorshedgroup.com', 'manager@themorshedgroup.com'] },
+      { key: 'luciana',  name: 'Luciana',  emails: ['ea@themorshedgroup.com'], until: '2026-09' },
+      // No address on file for Angelica yet — she matches on first name until
+      // she has a profile, then add it here.
+      { key: 'angelica', name: 'Angelica', emails: [], from: '2026-09' },
+      { key: 'alexa',    name: 'Alexa',    emails: ['alexandra@themorshedgroup.com'], alsoNames: ['alexandra'] },
+      { key: 'gustavo',  name: 'Gustavo',  emails: ['gustavo@themorshedgroup.com'] },
+      { key: 'camila',   name: 'Camila',   emails: ['camila@themorshedgroup.com'], from: '2026-09' },
+    ];
+    const hgStamp = (y, m) => y * 12 + m; // comparable month number
+    const hgParse = (s) => { const p = String(s).split('-'); return hgStamp(Number(p[0]), Number(p[1]) - 1); };
+    function hgRoster(year, monthIdx) {
+      const at = hgStamp(year, monthIdx);
+      return HG_ROSTER.filter(p => (!p.from || at >= hgParse(p.from)) && (!p.until || at < hgParse(p.until)));
+    }
+    // Does this Zoho record belong to this roster person? Email first (the
+    // reliable key), first name as the fallback for anyone without one on file.
+    function hgOwns(person, rec) {
+      const em = (rec.ownerEmail || '').toLowerCase();
+      if (em && (person.emails || []).indexOf(em) !== -1) return true;
+      const first = (rec.owner || '').trim().split(/\s+/)[0].toLowerCase();
+      if (!first) return false;
+      return first === person.name.toLowerCase() || (person.alsoNames || []).indexOf(first) !== -1;
+    }
+
+    // The Monday-start weeks that BELONG to a month: the ones whose Thursday
+    // falls inside it (the ISO rule). That's always 4 or 5 — a week split
+    // across two months counts once, for the month holding most of it — which
+    // is how the team already tracks it (August 2026 = Aug 3/10/17/24, four
+    // weeks, not the six weeks that merely touch the month).
     function hgWeeks(year, monthIdx) {
-      const last = new Date(year, monthIdx + 1, 0);
       const cur = new Date(year, monthIdx, 1);
       cur.setDate(cur.getDate() - ((cur.getDay() + 6) % 7)); // back up to Monday
       const out = [];
-      while (cur <= last) {
-        const s = new Date(cur);
-        const e = new Date(cur); e.setDate(e.getDate() + 6);
-        out.push({ start: s, end: e });
+      for (let i = 0; i < 6; i++) {
+        const thu = new Date(cur); thu.setDate(thu.getDate() + 3);
+        if (thu.getFullYear() === year && thu.getMonth() === monthIdx) {
+          const s = new Date(cur);
+          const e = new Date(cur); e.setDate(e.getDate() + 6);
+          out.push({ start: s, end: e });
+        }
         cur.setDate(cur.getDate() + 7);
       }
       return out;
@@ -6865,6 +6908,10 @@ Rules:
           ownerEmail: (r.Owner && r.Owner.email) || '',
           goal: r.Health_Goal_s || '',
           month: r.Month_of || '',
+          // Month_of is just a month name — no year on the module — so the
+          // year a record was logged in is the only thing separating
+          // "August" 2026 from "August" 2027.
+          createdYear: r.Created_Time ? new Date(r.Created_Time).getFullYear() : null,
           status: r.Goal_Status && r.Goal_Status !== '-None-' ? r.Goal_Status : '',
         }));
         setRows(list);
@@ -6879,13 +6926,21 @@ Rules:
       useEffect(() => { load(); }, []);
 
       // Editing someone else's health goal isn't yours to do — own rows only
-      // (admins can fix anyone's).
-      const canEdit = (r) => isAdmin
-        || (!!ownerEmail && !!r.ownerEmail && r.ownerEmail.toLowerCase() === ownerEmail.toLowerCase())
-        || (!!ownerName && !!r.owner && r.owner.toLowerCase() === ownerName.toLowerCase());
+      // (admins can fix anyone's). Matched against the roster person as well as
+      // the Zoho record, since a row can exist with no record behind it.
+      const me = { owner: ownerName, ownerEmail: ownerEmail };
+      // Strictly "this row is mine" — separate from canEdit, because Add Goal
+      // always files under the signed-in user, so an admin must not be offered
+      // it on someone else's row.
+      const isMine = (person, rec) => (!!person && hgOwns(person, me))
+        || (!!rec && ((!!ownerEmail && !!rec.ownerEmail && rec.ownerEmail.toLowerCase() === ownerEmail.toLowerCase())
+          || (!!ownerName && !!rec.owner && rec.owner.toLowerCase() === ownerName.toLowerCase())));
+      const canEdit = (person, rec) => isAdmin
+        || (!!person && hgOwns(person, me))
+        || (!!rec && ((!!ownerEmail && !!rec.ownerEmail && rec.ownerEmail.toLowerCase() === ownerEmail.toLowerCase())
+          || (!!ownerName && !!rec.owner && rec.owner.toLowerCase() === ownerName.toLowerCase())));
 
       const toggleWeek = async (row, week) => {
-        if (!canEdit(row)) return;
         const key = row.id + ':' + week;
         const next = !ticks[key];
         setTicks(t => ({ ...t, [key]: next }));
@@ -6923,7 +6978,18 @@ Rules:
         setMonthIdx(m); setYear(y);
       };
 
-      const shown = (rows || []).filter(r => r.month === monthName);
+      // One row per roster member, in roster order, record or no record —
+      // then anything logged in Zoho by someone off the roster, so a goal is
+      // never silently hidden just because the person isn't listed.
+      const monthRecs = (rows || []).filter(r =>
+        r.month === monthName &&
+        (r.createdYear === null || r.createdYear === year || (monthIdx === 0 && r.createdYear === year - 1)));
+      const claimed = {};
+      const shown = hgRoster(year, monthIdx).map(person => {
+        const rec = monthRecs.filter(r => !claimed[r.id] && hgOwns(person, r))[0] || null;
+        if (rec) claimed[rec.id] = true;
+        return { key: person.key, person, rec };
+      }).concat(monthRecs.filter(r => !claimed[r.id]).map(r => ({ key: r.id, person: null, rec: r })));
       const th = { fontFamily: J, fontSize: 8, letterSpacing: '0.14em', fontWeight: 600, textTransform: 'uppercase', color: muted, padding: '8px 10px', textAlign: 'left', whiteSpace: 'nowrap', borderBottom: `1px solid ${line}` };
       const td = { fontFamily: J, fontSize: 12, color: ink, padding: '10px', borderBottom: `1px solid ${line}`, verticalAlign: 'top' };
 
@@ -6965,8 +7031,6 @@ Rules:
           <div style={{ flex: 1, minHeight: 0, overflow: 'auto', WebkitOverflowScrolling: 'touch' }}>
             {rows === null ? (
               <div style={{ fontFamily: J, fontSize: 12, color: muted, padding: 20 }}>Loading health goals…</div>
-            ) : shown.length === 0 ? (
-              <div style={{ fontFamily: J, fontSize: 12, color: muted, padding: 20 }}>No health goals logged for {monthName} yet.</div>
             ) : (
               <table style={{ borderCollapse: 'collapse', minWidth: '100%', background: cardBg }}>
                 <thead style={{ background: headBg }}>
@@ -6981,23 +7045,35 @@ Rules:
                         <span style={{ fontSize: 8, letterSpacing: 0, textTransform: 'none', fontWeight: 400 }}>{hgFmt(w.start)}–{hgFmt(w.end)}</span>
                       </th>
                     ))}
+                    <th style={{ ...th, textAlign: 'center' }}>Done</th>
                     <th style={{ ...th, minWidth: 120 }}>Status</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {shown.map(r => {
-                    const mine = canEdit(r);
+                  {shown.map(({ key, person, rec }) => {
+                    const mine = canEdit(person, rec);
+                    const label = person ? person.name : rec.owner;
+                    const hit = rec ? weeks.filter((w, i) => ticks[rec.id + ':' + (i + 1)]).length : 0;
+                    const dash = <span style={{ color: muted }}>—</span>;
                     return (
-                      <tr key={r.id}>
-                        <td style={{ ...td, fontWeight: 600, whiteSpace: 'nowrap', position: 'sticky', left: 0, zIndex: 1, background: cardBg }}>{r.owner}</td>
-                        <td style={{ ...td, whiteSpace: 'pre-wrap', minWidth: 150, maxWidth: 240 }}>{r.goal || <span style={{ color: muted }}>—</span>}</td>
+                      <tr key={key}>
+                        <td style={{ ...td, fontWeight: 600, whiteSpace: 'nowrap', position: 'sticky', left: 0, zIndex: 1, background: cardBg }}>{label}</td>
+                        <td style={{ ...td, whiteSpace: 'pre-wrap', minWidth: 150, maxWidth: 240 }}>
+                          {rec ? (rec.goal || dash)
+                            : isMine(person, rec) ? (
+                              <span onClick={() => setAdding(true)} style={{ color: gold, cursor: 'pointer', fontWeight: 600 }}>+ Add your goal</span>
+                            ) : dash}
+                        </td>
                         {weeks.map((w, i) => {
-                          const on = !!ticks[r.id + ':' + (i + 1)];
+                          // No goal logged = nothing to tick: dashes, like the
+                          // paper version of this table.
+                          if (!rec) return <td key={i} style={{ ...td, textAlign: 'center', color: muted }}>—</td>;
+                          const on = !!ticks[rec.id + ':' + (i + 1)];
                           return (
                             <td key={i} style={{ ...td, textAlign: 'center' }}>
                               <div
-                                onClick={() => toggleWeek(r, i + 1)}
-                                title={mine ? '' : 'Only ' + r.owner + ' can tick this'}
+                                onClick={() => { if (mine) toggleWeek(rec, i + 1); }}
+                                title={mine ? '' : 'Only ' + label + ' can tick this'}
                                 style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: 5, cursor: mine ? 'pointer' : 'not-allowed', opacity: mine ? 1 : 0.45, border: on ? '1.5px solid #0F6E56' : `1.5px solid ${dark ? '#2A3A5A' : '#C4B9A8'}`, background: on ? '#0F6E56' : 'transparent' }}
                               >
                                 {on && <i className="ti ti-check" style={{ fontSize: 11, color: '#fff' }} />}
@@ -7005,16 +7081,21 @@ Rules:
                             </td>
                           );
                         })}
+                        <td style={{ ...td, textAlign: 'center', fontWeight: 600, whiteSpace: 'nowrap', color: rec ? ink : muted }}>
+                          {rec ? hit + '/' + weeks.length : '—'}
+                        </td>
                         <td style={td}>
-                          <select
-                            value={r.status}
-                            disabled={!mine}
-                            onChange={e => changeStatus(r, e.target.value)}
-                            style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: HG_STATUS_COLOR[r.status] || muted, background: cardBg, border: `1px solid ${line}`, borderRadius: 6, padding: '5px 7px', cursor: mine ? 'pointer' : 'not-allowed' }}
-                          >
-                            <option value="">—</option>
-                            {HG_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                          </select>
+                          {rec ? (
+                            <select
+                              value={rec.status}
+                              disabled={!mine}
+                              onChange={e => changeStatus(rec, e.target.value)}
+                              style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: HG_STATUS_COLOR[rec.status] || muted, background: cardBg, border: `1px solid ${line}`, borderRadius: 6, padding: '5px 7px', cursor: mine ? 'pointer' : 'not-allowed' }}
+                            >
+                              <option value="">—</option>
+                              {HG_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                          ) : dash}
                         </td>
                       </tr>
                     );

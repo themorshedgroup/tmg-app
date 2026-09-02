@@ -510,6 +510,7 @@ Deno.serve(async (req) => {
             priority: zt.priority, status: zt.status, project_id: proj.id,
             zoho_task_id: zt.id, zoho_last_synced_at: new Date().toISOString(),
             zoho_last_modified_time: zt.last_modified_time,
+            zoho_tasklist_id: zt.tasklist_id, zoho_tasklist_name: zt.tasklist_name,
           }).select().single();
           if (inserted) {
             await sb.from("task_activity").insert({ task_id: inserted.id, kind: "system", content: "Task created in Zoho Projects" });
@@ -534,6 +535,7 @@ Deno.serve(async (req) => {
               title: zt.title, description: zt.description, due_at: zt.due_at,
               priority: zt.priority, status: zt.status,
               zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: zt.last_modified_time,
+              zoho_tasklist_id: zt.tasklist_id, zoho_tasklist_name: zt.tasklist_name,
             }).eq("id", local.id);
             await sb.from("zoho_sync_conflicts").insert({ task_id: local.id, project_id: proj.id, field: changedField, tmg_value: String((local as any)[changedField] ?? ""), zoho_value: String((zt as any)[changedField] ?? ""), resolution: "zoho_won" });
             await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync conflict on "${changedField}" — Zoho's edit was more recent; Zoho's value was kept.` });
@@ -554,6 +556,7 @@ Deno.serve(async (req) => {
             title: zt.title, description: zt.description, due_at: zt.due_at,
             priority: zt.priority, status: zt.status,
             zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: zt.last_modified_time,
+            zoho_tasklist_id: zt.tasklist_id, zoho_tasklist_name: zt.tasklist_name,
           }).eq("id", local.id);
           pulled++;
         }
@@ -571,6 +574,9 @@ Deno.serve(async (req) => {
 
 // Normalizes a raw Zoho task record down to exactly the fields TMG syncs
 // (plan §2.1) — nothing else from Zoho's task object is ever surfaced.
+// tasklist_id/name are the one exception: display-only grouping (e.g.
+// "Pre-List", "Clear to Close"), not part of the narrow field-sync scope,
+// but they ride along on every task object already so no extra API call.
 function mapZohoTask(t: any) {
   return {
     id: t.id_string || String(t.id),
@@ -580,6 +586,8 @@ function mapZohoTask(t: any) {
     priority: zohoPriorityToTmg(t.priority),
     status: zohoStatusToTmg(t.status?.name || t.status),
     last_modified_time: t.last_modified_time_long != null ? Number(t.last_modified_time_long) : null,
+    tasklist_id: t.tasklist?.id_string || (t.tasklist?.id != null ? String(t.tasklist.id) : null),
+    tasklist_name: t.tasklist?.name ? String(t.tasklist.name).trim() : null,
   };
 }
 

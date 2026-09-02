@@ -1490,6 +1490,20 @@ Rules:
         return { tasks, peopleByTask, projById, labelsByTask };
       },
 
+      // For permalinks (tasks.html#task/<id>) — a task can belong to any
+      // project/CTC file/rock, so this fetches it directly rather than
+      // requiring it be pre-loaded into whichever surface is currently open.
+      async getById(id) {
+        const c = this.client(); if (!c || !id) return null;
+        const { data } = await c.from('tasks').select('*').eq('id', id).single();
+        return data || null;
+      },
+      async loadPeopleFor(id) {
+        const c = this.client(); if (!c) return [];
+        const { data } = await c.from('task_people').select('task_id,user_id,role').eq('task_id', id);
+        return data || [];
+      },
+
       async findOrCreateProject(name, user) {
         const c = this.client(); if (!c || !name || !name.trim()) return null;
         const nm = name.trim();
@@ -2799,6 +2813,16 @@ Rules:
 
     function TaskDetail({ dark, task, people, team, user, allTasks, onEdit, onDelete, onStatus, onOpenSubtask, emailLinks, onEmailChanged, initialTab, onTabSettled }) {
       const [deleting, setDeleting] = useState(false);
+      const [linkCopied, setLinkCopied] = useState(false);
+      // Permalink — every task has one: tasks.html#task/<id>. Opens straight
+      // into this task from anywhere, whatever project it lives under.
+      const taskPermalink = () => location.origin + location.pathname + '#task/' + task.id;
+      async function copyLink() {
+        const url = taskPermalink();
+        try { await navigator.clipboard.writeText(url); }
+        catch (e) { window.prompt('Copy this task link:', url); return; }
+        setLinkCopied(true); setTimeout(() => setLinkCopied(false), 1600);
+      }
       async function handleDelete() {
         if (deleting) return;
         if (!window.confirm('Delete "' + task.title + '"? This can\'t be undone.')) return;
@@ -2941,6 +2965,7 @@ Rules:
               {task.title}
               {emLinks.length > 0 && <i className="ti ti-mail" title="Has a linked email — view on the Email tab" onClick={() => setDetTab('email')} style={{ fontSize: 17, color: dark ? '#7FA8DD' : '#185FA5', cursor: 'pointer', flexShrink: 0 }} />}
             </div>
+            <button onClick={copyLink} title="Copy a link straight to this task" style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: linkCopied ? '#0F6E56' : sub, background: dark ? '#0A1730' : '#fff', border: `1px solid ${linkCopied ? '#0F6E5655' : bord}`, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5 }}><i className={`ti ${linkCopied ? 'ti-check' : 'ti-link'}`} style={{ fontSize: 13 }} />{linkCopied ? 'Copied' : 'Link'}</button>
             <button onClick={onEdit} style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: sub, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}>Edit</button>
             <button onClick={handleDelete} disabled={deleting} style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#C0392B', background: dark ? '#0A1730' : '#fff', border: '1px solid #C0392B55', borderRadius: 6, padding: '7px 12px', cursor: deleting ? 'default' : 'pointer', opacity: deleting ? 0.6 : 1, fontFamily: C.fontSans, flexShrink: 0 }}>{deleting ? 'Deleting…' : 'Delete'}</button>
           </div>
@@ -3792,24 +3817,50 @@ Rules:
           ))}
         </div>
       );
-      const listTab = (p) => (
-        <div style={{ padding: wide ? '14px 20px 24px' : '12px 14px 24px', flex: 1, minWidth: 0, overflowY: 'auto' }}>
-          {p._tasks.length === 0 ? <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans }}>No tasks yet.</div> : TASK_STATUS.map(col => {
-            const items = p._tasks.filter(t => t.status === col.id);
-            if (!items.length) return null;
-            return (
-              <div key={col.id} style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} />
-                  <span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{col.label} · {items.length}</span>
+      // Synced Zoho Projects tasks carry a tasklist (e.g. "Pre-List", "Clear to
+      // Close") — group by that instead of status when any task here has one,
+      // since a flat status-grouped dump of 100+ synced tasks isn't readable.
+      // Plain (non-synced) task lists keep the original status grouping.
+      const listTab = (p) => {
+        const tasklistNames = p._tasks.some(t => t.zoho_tasklist_name);
+        if (tasklistNames) {
+          const groups = {};
+          p._tasks.forEach(t => { const key = t.zoho_tasklist_name || 'Other tasks'; (groups[key] = groups[key] || []).push(t); });
+          const earliest = (arr) => Math.min(...arr.map(t => t.created_at ? new Date(t.created_at).getTime() : Date.now()));
+          const order = Object.keys(groups).sort((a, b) => earliest(groups[a]) - earliest(groups[b]));
+          return (
+            <div style={{ padding: wide ? '14px 20px 24px' : '12px 14px 24px', flex: 1, minWidth: 0, overflowY: 'auto' }}>
+              {order.map(key => (
+                <div key={key} style={{ marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
+                    <span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{key} · {groups[key].length}</span>
+                  </div>
+                  {groups[key].map(detailTaskRow)}
                 </div>
-                {items.map(detailTaskRow)}
-              </div>
-            );
-          })}
-          {addInputs}
-        </div>
-      );
+              ))}
+              {addInputs}
+            </div>
+          );
+        }
+        return (
+          <div style={{ padding: wide ? '14px 20px 24px' : '12px 14px 24px', flex: 1, minWidth: 0, overflowY: 'auto' }}>
+            {p._tasks.length === 0 ? <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans }}>No tasks yet.</div> : TASK_STATUS.map(col => {
+              const items = p._tasks.filter(t => t.status === col.id);
+              if (!items.length) return null;
+              return (
+                <div key={col.id} style={{ marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} />
+                    <span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{col.label} · {items.length}</span>
+                  </div>
+                  {items.map(detailTaskRow)}
+                </div>
+              );
+            })}
+            {addInputs}
+          </div>
+        );
+      };
       const boardTab = (p) => <TaskBoard items={p._tasks} dark={dark} onOpen={setOpenTask} onDrop={onBoardDrop} showSource={false} />;
       const timelineTab = (p) => <TaskTimeline items={p._tasks} dark={dark} onOpen={setOpenTask} />;
 
@@ -4348,6 +4399,22 @@ Rules:
         setView('detail');
       }
       useEffect(() => { reload(); }, []);
+      // Permalink (tasks.html#task/<id>) — open that task straight into the
+      // detail view. loadAll() already pulls every non-archived task, whatever
+      // project it belongs to, so a link to any task resolves here; the direct
+      // fetch is the fallback for anything loadAll filtered out.
+      useEffect(() => {
+        const open = async () => {
+          const m = /^#\/?task\/([0-9a-f-]{36})/i.exec(location.hash || '');
+          if (!m) return;
+          const id = m[1];
+          const found = (data.tasks || []).find(t => t.id === id) || await TaskDB.getById(id);
+          if (found) { setCurrent(found); setView('detail'); }
+        };
+        open();
+        window.addEventListener('hashchange', open);
+        return () => window.removeEventListener('hashchange', open);
+      }, [data.tasks]);
       useEffect(() => { if (view === 'list') { try { const p = JSON.parse(localStorage.getItem(labelKey(user && user.id)) || '[]') || []; const m = {}; p.forEach(x => { m[x.name] = x.color; }); setLabelColors(m); } catch (e) {} } }, [view]);
       async function handleSave(form) {
         const due_at = form.due ? new Date(form.due).toISOString() : null;
@@ -6575,6 +6642,7 @@ Rules:
       }, []);
       useEffect(() => {
         if (location.hash.indexOf('=') !== -1) return; // never clobber the OAuth #access_token=... hash
+        if (/^#\/?task\//i.test(location.hash)) return; // nor a task permalink (#task/<id>)
         const token = activeTab === 'more' ? (moreView || 'directory') : activeTab;
         if (location.hash.replace(/^#\/?/, '') !== token) {
           try { firstSync.current ? history.replaceState(null, '', '#' + token) : history.pushState(null, '', '#' + token); }

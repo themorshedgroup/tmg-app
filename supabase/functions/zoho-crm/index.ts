@@ -464,6 +464,51 @@ Deno.serve(async (req) => {
       );
     }
 
+    // ── Create a Health Goal (owner = the signed-in member) ─────────
+    // Same owner-resolution path as create_agent_kpi: Zoho otherwise assigns
+    // every app-created record to the API connection owner.
+    if (action === "create_health_goal") {
+      const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+      const month = typeof body.month === "string" ? body.month.trim() : "";
+      const status = typeof body.status === "string" ? body.status.trim() : "";
+      if (!goal) return json({ error: "Missing goal." }, 400);
+
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      const record: Record<string, unknown> = { Health_Goal_s: goal };
+      if (month) record.Month_of = month;
+      if (status) record.Goal_Status = status;
+
+      let ownerWarning: string | null = null;
+      const ownerEmail = typeof body.owner_email === "string" ? body.owner_email.trim() : "";
+      let callerName: string | null = null;
+      if (auth.userId && auth.userId !== "service") {
+        const { data: callerProf } = await sb
+          .from("profiles").select("first_name, last_name").eq("id", auth.userId).maybeSingle();
+        if (callerProf) callerName = [callerProf.first_name, callerProf.last_name].filter(Boolean).join(" ") || null;
+      }
+      if (ownerEmail || callerName) {
+        const resolved = await resolveZohoOwner(sb, conn, accessToken, apiDomain, ownerEmail, callerName);
+        if (resolved.id) record.Owner = { id: resolved.id };
+        else ownerWarning = `Could not match you to a Zoho CRM user (tried email "${ownerEmail || "—"}"${callerName ? ` and name "${callerName}"` : ""}), so Zoho assigned this goal to the API connection owner instead. Detail: ${resolved.trace.join(" → ")}`;
+      } else {
+        ownerWarning = "No account email was available, so Zoho assigned this goal to the API connection owner instead.";
+      }
+
+      const r = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Health_Goals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: [record] }),
+      });
+      const d = await r.json().catch(() => ({}));
+      const row = d?.data?.[0];
+      if (!r.ok || row?.status !== "success")
+        return json({ error: row?.message || d?.message || "Could not create health goal", detail: d }, r.ok ? 400 : r.status);
+      return json({ ok: true, id: row?.details?.id || null, owner_warning: ownerWarning }, 200);
+    }
+
     // ── Owner diagnosis (ops/admin only) ────────────────────────────
     // Returns the org's Zoho user directory (sanitized) plus a full resolution
     // trace for each given email/name pair — the tool that ends the "records

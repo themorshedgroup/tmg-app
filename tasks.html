@@ -144,6 +144,21 @@
     body.dark .md-body th { background: rgba(173,131,47,0.18); color: #fff; }
   </style>
 
+  <!-- Remember a deep link (#task/<id>, #ctc/<id>/board, …) so it survives the
+       Google OAuth round-trip: Google redirects back to the clean URL with no
+       fragment at all, so a pasted link opened while logged out would other-
+       wise land on the default view. Mirrors index.html's /guide stash.
+       Stamped with a time so a stale stash can't teleport a later visit. -->
+  <script>
+    try {
+      var _h = window.location.hash || '';
+      var _embedded = (function () { try { return window.self !== window.top; } catch (e) { return false; } })();
+      if (_h && !_embedded && _h.indexOf('=') === -1 &&
+          /^#\/?(?:(?:task|project|ctc|rock)\/[0-9a-f-]{36}|(?:tasks|ctc|projects|rocks)$)/i.test(_h)) {
+        sessionStorage.setItem('tmg-tasks-deeplink', JSON.stringify({ h: _h, t: Date.now() }));
+      }
+    } catch (e) {}
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
   <script src="supabase.js"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -275,6 +290,50 @@ Continue with TMG Gmail
     // Embedded (inside the main app's iframe popout) → no top bar, so popouts fill from the top.
     const POPOUT_TOP = TASKS_EMBED ? '0px' : 'calc(60px + env(safe-area-inset-top))';
     const TASKS_HASH = (typeof location !== 'undefined' ? location.hash : '').replace('#', '').toLowerCase();
+
+    // ─── Deep-link routes ────────────────────────────────────────────────
+    // Every view has a URL: #tasks, #task/<id>, #ctc, #ctc/<id>[/<tab>],
+    // #projects, #project/<id>[/<tab>], #rocks, #rock/<id>[/<tab>].
+    // Detail routes always contain a '/', which App's parseRoute can never
+    // match; the list tokens are claimed here first (see isDeepRoute below).
+    const ROUTE_KIND_BY_SEG = { ctc: 'ctc_file', project: 'project', rock: 'rock' };
+    const ROUTE_SEG_BY_KIND = { ctc_file: 'ctc', project: 'project', rock: 'rock' };
+    const ROUTE_SURFACE_BY_SEG = { ctc: 'ctc', project: 'projects', rock: 'rocks' };
+    const ROUTE_LIST = { tasks: 'my', ctc: 'ctc', projects: 'projects', rocks: 'rocks' };
+    const ROUTE_LIST_SEG = { my: 'tasks', ctc: 'ctc', projects: 'projects', rocks: 'rocks' };
+    const ROUTE_DTABS = ['overview', 'list', 'board', 'timeline'];
+    const ROUTE_ID_RE = /^[0-9a-f-]{36}$/i;
+
+    // hash -> route, or null when it isn't ours (a tab token, #calendar,
+    // #decisions, the OAuth #access_token=... hash, or empty).
+    function parseTaskRoute(hash) {
+      const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
+      if (!h || h.indexOf('=') !== -1) return null;
+      const s = h.split('/').filter(Boolean);
+      if (s.length === 1) return ROUTE_LIST[s[0]] ? { type: 'list', surface: ROUTE_LIST[s[0]] } : null;
+      if (!ROUTE_ID_RE.test(s[1])) return null;
+      if (s[0] === 'task') return { type: 'task', id: s[1] };
+      const kind = ROUTE_KIND_BY_SEG[s[0]];
+      if (!kind) return null;
+      const tab = s[2] && ROUTE_DTABS.indexOf(s[2]) !== -1 ? s[2] : 'overview';
+      return { type: 'record', kind, surface: ROUTE_SURFACE_BY_SEG[s[0]], id: s[1], tab };
+    }
+    // True for any hash this router owns — App must not rewrite these.
+    function isDeepRoute(hash) {
+      return !!parseTaskRoute(hash);
+    }
+    // Handoff from the router (TasksScreen) to ProjectsSurface for the sub-tab
+    // of a routed record. A module-level holder, not props/state: the target
+    // ProjectsSurface may not be mounted yet when the route is read, and its
+    // own reset effect runs a render later and would clobber a tab set here.
+    const PENDING_ROUTE = { kind: null, id: null, tab: null };
+    // Permalink URL for a route hash. Keeps location.search so the ?v= cache
+    // buster survives — a link without it can serve a recipient a stale
+    // tasks.html that predates the route it points at.
+    function permalinkFor(hash) {
+      const q = (location.search || '').replace(/[?&]embed=1\b/, '').replace(/^&/, '?');
+      return location.origin + location.pathname + q + '#' + hash;
+    }
     // Responsive helper: true when the popout/page is wide enough for a two-pane master-detail.
     function useWide(bp) { const b = bp || 700; const [w, setW] = useState(typeof window !== 'undefined' && window.innerWidth >= b); useEffect(() => { const f = () => setW(window.innerWidth >= b); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []); return w; }
 
@@ -2534,6 +2593,25 @@ Rules:
       );
     }
 
+    // Copy-a-link-to-this-view button. One component for all four sites (task
+    // detail + CTC file / project / rock detail) so they stay identical.
+    // prompt() fallback covers Safari and non-secure contexts.
+    function CopyLinkBtn({ dark, hash, title }) {
+      const [copied, setCopied] = useState(false);
+      const bord = dark ? '#152545' : '#E4DFD4', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const go = async () => {
+        const url = permalinkFor(hash);
+        try { await navigator.clipboard.writeText(url); }
+        catch (e) { window.prompt('Copy this link:', url); return; }
+        setCopied(true); setTimeout(() => setCopied(false), 1600);
+      };
+      return (
+        <button onClick={go} title={title || 'Copy a link straight to this view'} style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: copied ? '#0F6E56' : sub, background: dark ? '#0A1730' : '#fff', border: `1px solid ${copied ? '#0F6E5655' : bord}`, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5 }}>
+          <i className={`ti ${copied ? 'ti-check' : 'ti-link'}`} style={{ fontSize: 13 }} />{copied ? 'Copied' : 'Link'}
+        </button>
+      );
+    }
+
     // Multi-select dropdown for team pickers (Assignees / Assigned by) — same
     // click-to-open-panel convention as DateField above (no outside-click
     // handling anywhere in this codebase, so this doesn't add it either).
@@ -2813,16 +2891,6 @@ Rules:
 
     function TaskDetail({ dark, task, people, team, user, allTasks, onEdit, onDelete, onStatus, onOpenSubtask, emailLinks, onEmailChanged, initialTab, onTabSettled }) {
       const [deleting, setDeleting] = useState(false);
-      const [linkCopied, setLinkCopied] = useState(false);
-      // Permalink — every task has one: tasks.html#task/<id>. Opens straight
-      // into this task from anywhere, whatever project it lives under.
-      const taskPermalink = () => location.origin + location.pathname + '#task/' + task.id;
-      async function copyLink() {
-        const url = taskPermalink();
-        try { await navigator.clipboard.writeText(url); }
-        catch (e) { window.prompt('Copy this task link:', url); return; }
-        setLinkCopied(true); setTimeout(() => setLinkCopied(false), 1600);
-      }
       async function handleDelete() {
         if (deleting) return;
         if (!window.confirm('Delete "' + task.title + '"? This can\'t be undone.')) return;
@@ -2965,7 +3033,7 @@ Rules:
               {task.title}
               {emLinks.length > 0 && <i className="ti ti-mail" title="Has a linked email — view on the Email tab" onClick={() => setDetTab('email')} style={{ fontSize: 17, color: dark ? '#7FA8DD' : '#185FA5', cursor: 'pointer', flexShrink: 0 }} />}
             </div>
-            <button onClick={copyLink} title="Copy a link straight to this task" style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: linkCopied ? '#0F6E56' : sub, background: dark ? '#0A1730' : '#fff', border: `1px solid ${linkCopied ? '#0F6E5655' : bord}`, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5 }}><i className={`ti ${linkCopied ? 'ti-check' : 'ti-link'}`} style={{ fontSize: 13 }} />{linkCopied ? 'Copied' : 'Link'}</button>
+            <CopyLinkBtn dark={dark} hash={'task/' + task.id} title="Copy a link straight to this task" />
             <button onClick={onEdit} style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: sub, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}>Edit</button>
             <button onClick={handleDelete} disabled={deleting} style={{ fontSize: 12, fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#C0392B', background: dark ? '#0A1730' : '#fff', border: '1px solid #C0392B55', borderRadius: 6, padding: '7px 12px', cursor: deleting ? 'default' : 'pointer', opacity: deleting ? 0.6 : 1, fontFamily: C.fontSans, flexShrink: 0 }}>{deleting ? 'Deleting…' : 'Delete'}</button>
           </div>
@@ -3418,7 +3486,33 @@ Rules:
       const [openTask, setOpenTask] = useState(null);
       const [taskEditing, setTaskEditing] = useState(false);
       const [zohoLinkOpen, setZohoLinkOpen] = useState(false);   // ctc_file only — see ZohoLinkModal
-      useEffect(() => { setDtab('overview'); setOpenTask(null); setTaskEditing(false); }, [current && current.id]);
+      // Reset on record change — but honour a routed sub-tab (#ctc/<id>/board).
+      // PENDING_ROUTE is consumed here rather than read in the router, because
+      // this effect runs a render AFTER setCurrent and would otherwise clobber
+      // any tab the route set.
+      useEffect(() => {
+        const routed = current && PENDING_ROUTE.id === current.id ? PENDING_ROUTE.tab : null;
+        setDtab(routed && ROUTE_DTABS.indexOf(routed) !== -1 ? routed : 'overview');
+        if (routed) { PENDING_ROUTE.kind = null; PENDING_ROUTE.id = null; PENDING_ROUTE.tab = null; }
+        setOpenTask(null); setTaskEditing(false);
+      }, [current && current.id]);
+      // Record-level URL, so the address bar stays copy-pasteable inside a
+      // project too. Same rules as the router's writer: replaceState only,
+      // coalesced, never inside the iframe, never over the OAuth hash.
+      useEffect(() => {
+        if (TASKS_EMBED) return;   // embed: URL is invisible, history is shared
+        if (location.hash.indexOf('=') !== -1) return;
+        const seg = ROUTE_SEG_BY_KIND[kind];
+        if (!seg) return;
+        // This surface owns its whole hash — list and record alike.
+        const hash = (pview === 'detail' && current)
+          ? seg + '/' + current.id + (dtab && dtab !== 'overview' ? '/' + dtab : '')
+          : ROUTE_LIST_SEG[ROUTE_SURFACE_BY_SEG[seg]];
+        const t = setTimeout(() => {
+          try { if (location.hash.replace(/^#\/?/, '') !== hash) history.replaceState(null, '', '#' + hash); } catch (e) {}
+        }, 120);
+        return () => clearTimeout(t);
+      }, [current && current.id, dtab, pview]);
       const wide = useWide(700);
 
       useEffect(() => { localStorage.setItem(gKey, group); }, [group]);
@@ -3436,10 +3530,19 @@ Rules:
       useEffect(() => {
         if (openId == null) return;
         if (openId === 'new') { setCurrent(null); setPview('form'); }
-        else if (rows.length) { const r = rows.find(x => x.id === openId); if (r) { setCurrent(r); setPview('detail'); } else return; }
-        else return;
+        else if (loading) return;   // rows not in yet — wait for the load to finish
+        else {
+          const r = rows.find(x => x.id === openId);
+          if (r) { setCurrent(r); setPview('detail'); }
+          // Miss (archived, deleted, not visible, or the wrong surface for this
+          // id): fall through and CONSUME it anyway. Returning early here left
+          // openItemId pinned to a dead id — the effect never retried, and
+          // re-clicking that sidebar row was a no-op state write, so the row
+          // looked broken until reload.
+          else { setPview('list'); PENDING_ROUTE.id = null; PENDING_ROUTE.tab = null; }
+        }
         if (onOpenIdConsumed) onOpenIdConsumed();
-      }, [openId, rows]);
+      }, [openId, rows, loading]);
 
       // Reload this container's data and re-select both `current` and (if given)
       // the task being viewed, so edits/status-changes reflect immediately.
@@ -3892,6 +3995,7 @@ Rules:
                 {statusBadge(p.status)}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
+                <CopyLinkBtn dark={dark} hash={(ROUTE_SEG_BY_KIND[p.record_type || kind] || 'project') + '/' + p.id + (dtab && dtab !== 'overview' ? '/' + dtab : '')} title={'Copy a link straight to this ' + KL.singular.toLowerCase()} />
                 {zohoSyncable && (p.zoho_project_id
                   ? <span style={{ fontSize: 12, letterSpacing: '0.04em', padding: '7px 12px', borderRadius: 6, fontWeight: 500, border: `1px solid ${teal}55`, color: teal, background: dark ? 'rgba(15,110,86,.14)' : '#E6F2EC', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-check" style={{ fontSize: 13 }} />Synced with Zoho</span>
                   : <button onClick={() => setZohoLinkOpen(true)} style={{ fontSize: 12, letterSpacing: '0.04em', padding: '7px 12px', borderRadius: 6, fontWeight: 400, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}><i className="ti ti-link" style={{ fontSize: 13 }} />Link to Zoho Projects</button>)}
@@ -4364,7 +4468,13 @@ Rules:
       const [surfaceMenuOpen, setSurfaceMenuOpen] = useState(false);
       const [navItems, setNavItems] = useState([]);   // sidebar: every project/CTC file, for the per-item rows
       const [openItemId, setOpenItemId] = useState(null);   // sidebar-initiated: jump straight to this project/file ('new' = open the create form)
-      useEffect(() => { localStorage.setItem('tmg-tasks-surface', surface); }, [surface]);
+      // A surface set by a URL is a visit, not a preference — opening someone
+      // else's #rock/<id> link must not permanently change your default view.
+      const routeFromUrl = useRef(false);
+      useEffect(() => {
+        if (routeFromUrl.current) { routeFromUrl.current = false; return; }
+        localStorage.setItem('tmg-tasks-surface', surface);
+      }, [surface]);
       useEffect(() => { ProjectDB.sidebarList().then(setNavItems); }, [surface]);
       useEffect(() => { const r = requestAnimationFrame(() => setVis(true)); return () => cancelAnimationFrame(r); }, []);
       useEffect(() => { if (initialTask) { setCurrent(initialTask); setView('detail'); } }, [initialTask]);
@@ -4399,22 +4509,69 @@ Rules:
         setView('detail');
       }
       useEffect(() => { reload(); }, []);
-      // Permalink (tasks.html#task/<id>) — open that task straight into the
-      // detail view. loadAll() already pulls every non-archived task, whatever
-      // project it belongs to, so a link to any task resolves here; the direct
-      // fetch is the fallback for anything loadAll filtered out.
+      // ── Deep-link router ──────────────────────────────────────────────
+      // One reader, one writer, for every view: #tasks, #task/<id>, #ctc,
+      // #ctc/<id>[/<tab>], #projects, #project/<id>[/<tab>], #rocks,
+      // #rock/<id>[/<tab>].
+      //
+      // Deliberately NOT keyed on data.tasks: an effect that re-reads the hash
+      // after every reload() yanks the user back to the linked record on every
+      // save/status change. It runs once on mount, then only on hashchange.
+      const routeApplied = useRef(false);
       useEffect(() => {
-        const open = async () => {
-          const m = /^#\/?task\/([0-9a-f-]{36})/i.exec(location.hash || '');
-          if (!m) return;
-          const id = m[1];
-          const found = (data.tasks || []).find(t => t.id === id) || await TaskDB.getById(id);
-          if (found) { setCurrent(found); setView('detail'); }
+        const applyRoute = async (hash) => {
+          const r = parseTaskRoute(hash);
+          if (!r) return;
+          routeFromUrl.current = true;   // don't persist a route-driven surface switch
+          if (r.type === 'list') { setSurface(r.surface); setView('list'); setCurrent(null); return; }
+          if (r.type === 'record') {
+            // ProjectsSurface picks the tab up via this module-level handoff —
+            // its own reset effect would otherwise clobber a tab set here.
+            PENDING_ROUTE.kind = r.kind; PENDING_ROUTE.id = r.id; PENDING_ROUTE.tab = r.tab;
+            setSurface(r.surface);
+            setOpenItemId(r.id);
+            return;
+          }
+          // A task lives under any surface, but only the My Tasks surface can
+          // render a task detail — force it, or the link silently no-ops for
+          // anyone whose last surface was CTC/Projects/Rocks.
+          const found = (data.tasks || []).find(t => t.id === r.id) || await TaskDB.getById(r.id);
+          if (found) { setSurface('my'); setCurrent(found); setView('detail'); }
         };
-        open();
-        window.addEventListener('hashchange', open);
-        return () => window.removeEventListener('hashchange', open);
-      }, [data.tasks]);
+        // Consume a deep link stashed before the OAuth round-trip (see the
+        // head snippet) — Google redirects back with no fragment at all.
+        let initial = location.hash;
+        try {
+          const raw = sessionStorage.getItem('tmg-tasks-deeplink');
+          sessionStorage.removeItem('tmg-tasks-deeplink');
+          if (raw && !parseTaskRoute(initial)) {
+            const st = JSON.parse(raw);
+            if (st && st.h && (Date.now() - (st.t || 0)) < 60000) initial = st.h;
+          }
+        } catch (e) {}
+        if (!routeApplied.current) { routeApplied.current = true; applyRoute(initial); }
+        const onHash = () => applyRoute(location.hash);
+        window.addEventListener('hashchange', onHash);
+        return () => window.removeEventListener('hashchange', onHash);
+      }, []);
+
+      // Writer — keeps the address bar copy-pasteable. replaceState only: it
+      // fires no hashchange, so App's hash reader (which blanks the popouts)
+      // never sees our writes, and Back keeps exactly today's meaning. Skipped
+      // inside the iframe, where the URL is invisible and history is shared.
+      useEffect(() => {
+        if (TASKS_EMBED) return;
+        if (location.hash.indexOf('=') !== -1) return;   // never touch the OAuth hash
+        // Only the My Tasks surface is written here. Every other surface is
+        // owned end-to-end by its ProjectsSurface (list AND record), so the
+        // two writers can never race over the same hash.
+        if (surface !== 'my') return;
+        const hash = view === 'detail' && current ? 'task/' + current.id : 'tasks';
+        const t = setTimeout(() => {   // coalesce: Safari throws past ~100 replaceState/10s
+          try { if (location.hash.replace(/^#\/?/, '') !== hash) history.replaceState(null, '', '#' + hash); } catch (e) {}
+        }, 120);
+        return () => clearTimeout(t);
+      }, [surface, view, current && current.id]);
       useEffect(() => { if (view === 'list') { try { const p = JSON.parse(localStorage.getItem(labelKey(user && user.id)) || '[]') || []; const m = {}; p.forEach(x => { m[x.name] = x.color; }); setLabelColors(m); } catch (e) {} } }, [view]);
       async function handleSave(form) {
         const due_at = form.due ? new Date(form.due).toISOString() : null;
@@ -6547,7 +6704,9 @@ Rules:
     // (hash only, no server config). Overlays (calendar/tasks/profile) close on
     // Back but aren't deep-linked yet. parseRoute maps a hash → {tab, view}.
     const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
-    const ROUTE_MORE = ['drives', 'directory', 'projects', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
+    // 'projects' deliberately omitted here (unlike index.html's copy): in this
+    // file #projects is the Projects list route — one hash, one meaning.
+    const ROUTE_MORE = ['drives', 'directory', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
@@ -6642,7 +6801,7 @@ Rules:
       }, []);
       useEffect(() => {
         if (location.hash.indexOf('=') !== -1) return; // never clobber the OAuth #access_token=... hash
-        if (/^#\/?task\//i.test(location.hash)) return; // nor a task permalink (#task/<id>)
+        if (isDeepRoute(location.hash)) return; // nor any deep-link route (#task/<id>, #ctc/<id>/board, …)
         const token = activeTab === 'more' ? (moreView || 'directory') : activeTab;
         if (location.hash.replace(/^#\/?/, '') !== token) {
           try { firstSync.current ? history.replaceState(null, '', '#' + token) : history.pushState(null, '', '#' + token); }

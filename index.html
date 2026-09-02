@@ -7071,12 +7071,15 @@ Rules:
                           const on = !!ticks[rec.id + ':' + (i + 1)];
                           return (
                             <td key={i} style={{ ...td, textAlign: 'center' }}>
+                              {/* Two states only, the way the team already writes
+                                  it on paper: green check = hit, red X = missed.
+                                  An empty box would read as "not decided yet". */}
                               <div
                                 onClick={() => { if (mine) toggleWeek(rec, i + 1); }}
-                                title={mine ? '' : 'Only ' + label + ' can tick this'}
-                                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: 5, cursor: mine ? 'pointer' : 'not-allowed', opacity: mine ? 1 : 0.45, border: on ? '1.5px solid #0F6E56' : `1.5px solid ${dark ? '#2A3A5A' : '#C4B9A8'}`, background: on ? '#0F6E56' : 'transparent' }}
+                                title={mine ? (on ? 'Achieved — click to mark missed' : 'Missed — click to mark achieved') : 'Only ' + label + ' can tick this'}
+                                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: 5, cursor: mine ? 'pointer' : 'not-allowed', opacity: mine ? 1 : 0.5, border: `1.5px solid ${on ? '#0F6E56' : '#9B1C1C'}`, background: on ? '#0F6E56' : '#9B1C1C' }}
                               >
-                                {on && <i className="ti ti-check" style={{ fontSize: 11, color: '#fff' }} />}
+                                <i className={on ? 'ti ti-check' : 'ti ti-x'} style={{ fontSize: 11, color: '#fff' }} />
                               </div>
                             </td>
                           );

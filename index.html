@@ -7003,7 +7003,9 @@ Rules:
         return { key: person.key, person, rec };
       }).concat(monthRecs.filter(r => !claimed[r.id]).map(r => ({ key: r.id, person: null, rec: r })));
       const th = { fontFamily: J, fontSize: 8, letterSpacing: '0.14em', fontWeight: 600, textTransform: 'uppercase', color: muted, padding: '8px 10px', textAlign: 'left', whiteSpace: 'nowrap', borderBottom: `1px solid ${line}` };
-      const td = { fontFamily: J, fontSize: 12, color: ink, padding: '10px', borderBottom: `1px solid ${line}`, verticalAlign: 'top' };
+      // Middle, not top: a three-line goal shouldn't leave that row's name,
+      // marks and status stranded at the top of a tall cell.
+      const td = { fontFamily: J, fontSize: 12, color: ink, padding: '10px', borderBottom: `1px solid ${line}`, verticalAlign: 'middle' };
 
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: pageBg }}>

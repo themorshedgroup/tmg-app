@@ -3977,10 +3977,13 @@ Rules:
             <div style={{ paddingLeft: 2 }}>{p._milestones.map((m, i) => spineItem(p, m, i === p._milestones.length - 1))}</div>
           </React.Fragment>
         );
+        // The Open-tasks list used to live here; it's gone from the Overview
+        // (the List/Board tabs are the place for tasks, and on a synced CTC
+        // file it was a 100-row wall). addInputs STAYS — it carries the "Add a
+        // milestone" and "Add a task" inputs, which are the only way to add
+        // either from this screen.
         const tasksBlock = (
           <React.Fragment>
-            <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '22px 0 8px' }}>Open tasks · {p._openTasks.length}</div>
-            {p._openTasks.length === 0 ? <div style={{ fontSize: '0.76rem', color: sub, fontFamily: C.fontSans }}>No open tasks.</div> : <div style={{ borderTop: `1px solid ${bord}` }}>{p._openTasks.map(detailTaskRow)}</div>}
             {addInputs}
           </React.Fragment>
         );

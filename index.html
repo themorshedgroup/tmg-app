@@ -6871,13 +6871,31 @@ Rules:
     }
     const hgFmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
+    // Last-known goals + marks, so reopening the tab paints immediately instead
+    // of waiting on Zoho. Read-through only: every open still refetches, and
+    // the cache is rewritten from whatever comes back.
+    const HG_CACHE_KEY = 'tmg-health-goals-v1';
+    function hgCache() {
+      try {
+        const c = JSON.parse(localStorage.getItem(HG_CACHE_KEY) || 'null');
+        if (c && Array.isArray(c.rows)) return { rows: c.rows, ticks: c.ticks || {} };
+      } catch (e) {}
+      return { rows: null, ticks: {} };
+    }
+
     function HealthGoalsTab({ dark, ownerName, ownerEmail, isAdmin }) {
       const J = "'Jost', sans-serif";
       const now = new Date();
       const [monthIdx, setMonthIdx] = useState(now.getMonth());
       const [year, setYear] = useState(now.getFullYear());
-      const [rows, setRows] = useState(null); // null = loading
-      const [ticks, setTicks] = useState({}); // "zohoId:week" -> bool
+      // Seeded from the last visit's data so the table is on screen instantly:
+      // Zoho takes ~2s to answer and the marks another ~0.7s, which was ~3s of
+      // empty screen on every open. Cached data renders first, the live fetch
+      // then quietly replaces it (nothing here is edited often enough for a
+      // few-seconds-stale first paint to mislead anyone).
+      const [rows, setRows] = useState(() => hgCache().rows); // null = never loaded
+      const [ticks, setTicks] = useState(() => hgCache().ticks);
+      const [busy, setBusy] = useState(false);
       const [note, setNote] = useState('');
       const [adding, setAdding] = useState(false);
       const [saving, setSaving] = useState(false);
@@ -6895,13 +6913,32 @@ Rules:
       const pageBg  = dark ? '#050B16' : '#FCFBF8';
 
       const load = async () => {
-        setRows(null); setNote('');
-        const { ok, data } = await callZoho({
-          action: 'list_tasks', module: 'Health_Goals', per_page: 200,
-          fields: ['Owner', 'Health_Goal_s', 'Month_of', 'Goal_Status', 'Created_Time'],
-          sort_by: 'Created_Time', sort_order: 'desc',
-        });
-        if (!ok) { setNote(data.error || 'Could not load health goals from Zoho.'); setRows([]); return; }
+        // No setRows(null): blanking the table to a spinner on every refresh is
+        // the thing that made this feel slow. Cached rows stay up, "Updating…"
+        // says why they might change.
+        setBusy(true); setNote('');
+        // Both fetches at once — the marks don't depend on the goals list, so
+        // waiting for Zoho first just added its ~2s to the ~0.7s query.
+        const [zoho, marks] = await Promise.all([
+          callZoho({
+            action: 'list_tasks', module: 'Health_Goals', per_page: 200,
+            fields: ['Owner', 'Health_Goal_s', 'Month_of', 'Goal_Status', 'Created_Time'],
+            sort_by: 'Created_Time', sort_order: 'desc',
+          }),
+          (async () => {
+            const c = window.SupabaseAuth && window.SupabaseAuth._client;
+            if (!c) return null;
+            return await c.from('health_goal_weeks').select('zoho_id, week, done');
+          })(),
+        ]);
+        setBusy(false);
+        if (marks && !marks.error) {
+          const m = {};
+          (marks.data || []).forEach(w => { m[w.zoho_id + ':' + w.week] = !!w.done; });
+          setTicks(m);
+        }
+        const { ok, data } = zoho;
+        if (!ok) { setNote(data.error || 'Could not load health goals from Zoho.'); setRows(r => r || []); return; }
         const list = (data.tasks || []).map(r => ({
           id: r.id,
           owner: (r.Owner && (r.Owner.name || r.Owner.email)) || '—',
@@ -6915,15 +6952,15 @@ Rules:
           status: r.Goal_Status && r.Goal_Status !== '-None-' ? r.Goal_Status : '',
         }));
         setRows(list);
-        const c = window.SupabaseAuth && window.SupabaseAuth._client;
-        if (c && list.length) {
-          const { data: wk } = await c.from('health_goal_weeks').select('zoho_id, week, done').in('zoho_id', list.map(r => r.id));
-          const m = {};
-          (wk || []).forEach(w => { m[w.zoho_id + ':' + w.week] = !!w.done; });
-          setTicks(m);
-        }
       };
       useEffect(() => { load(); }, []);
+
+      // Keep the cache in step with what's on screen, so a tick made now is
+      // still ticked on the next open's first paint.
+      useEffect(() => {
+        if (rows === null) return;
+        try { localStorage.setItem(HG_CACHE_KEY, JSON.stringify({ rows, ticks })); } catch (e) {}
+      }, [rows, ticks]);
 
       // Editing someone else's health goal isn't yours to do — own rows only
       // (admins can fix anyone's). Matched against the roster person as well as
@@ -7102,7 +7139,8 @@ Rules:
               <button onClick={() => stepMonth(-1)} style={{ width: 24, height: 24, border: `1px solid ${line}`, background: cardBg, color: muted, borderRadius: '5px 0 0 5px', cursor: 'pointer', padding: 0, fontFamily: 'serif', fontSize: 14 }}>‹</button>
               <button onClick={() => stepMonth(1)} style={{ width: 24, height: 24, border: `1px solid ${line}`, borderLeft: 'none', background: cardBg, color: muted, borderRadius: '0 5px 5px 0', cursor: 'pointer', padding: 0, fontFamily: 'serif', fontSize: 14 }}>›</button>
             </div>
-            <span style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: ink, flex: 1 }}>{monthName} {year}</span>
+            <span style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: ink }}>{monthName} {year}</span>
+            <span style={{ flex: 1, fontFamily: J, fontSize: 10, color: muted }}>{busy && rows !== null ? 'Updating…' : ''}</span>
             <button onClick={() => setAdding(a => !a)} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: J, fontSize: 11, fontWeight: 600, color: '#fff', background: dark ? '#AD832F' : '#001A4A', border: 'none', borderRadius: 7, padding: '6px 11px', cursor: 'pointer' }}>
               <i className="ti ti-plus" style={{ fontSize: 13 }} />Add Goal
             </button>

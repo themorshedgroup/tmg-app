@@ -1180,6 +1180,19 @@ Rules:
     // used for CTC Files linked to a Zoho Projects project (plan: hidden-
     // wiggling-lamport). Same call shape as callZoho, different endpoint.
     const ZOHO_PROJECTS_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-projects';
+    const CTC_EMAILS_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/ctc-emails';
+    // Every write in the CTC Emails feature goes through the edge function on
+    // the service-role key — the tables are SELECT-only for the browser, so a
+    // direct client write would be silently filtered out rather than fail.
+    async function callCtcEmails(payload) {
+      const res = await fetch(CTC_EMAILS_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    }
     async function callZohoProjects(payload) {
       const res = await fetch(ZOHO_PROJECTS_ENDPOINT, {
         method: 'POST',
@@ -3371,6 +3384,125 @@ Rules:
       );
     }
 
+    // ─── CTC Emails tab ──────────────────────────────────────────────────
+    // One consolidated list of mail received by Sales Agents and Transaction
+    // Coordinators. Claude SUGGESTS which CTC file each belongs to plus a
+    // one-line update for that file's Overview; a human approves or rejects.
+    // Nothing is ever filed automatically.
+    //
+    // Reads come straight from ctc_emails (SELECT-only RLS for active users).
+    // Every write goes through callCtcEmails — see the note on that helper.
+    function CtcEmailsTab({ dark, user, files, onFiled }) {
+      const [rows, setRows] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [filter, setFilter] = useState('open');   // 'open' | 'all' | 'filed'
+      const [busyId, setBusyId] = useState(null);
+      const [err, setErr] = useState('');
+      const [triaging, setTriaging] = useState(false);
+      const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+      const gold = dark ? '#C9A45A' : '#AD832F', teal = '#0F6E56';
+      const nameOfFile = (id) => (files.find(f => f.id === id) || {}).name || '';
+
+      async function load() {
+        const c = window.SupabaseAuth?._client; if (!c) { setLoading(false); return; }
+        const q = c.from('ctc_emails').select('*').order('email_date', { ascending: false }).limit(200);
+        const { data, error } = await q;
+        if (error) setErr(error.message);
+        setRows(data || []); setLoading(false);
+      }
+      useEffect(() => { load(); }, []);
+
+      async function act(payload, id) {
+        setBusyId(id); setErr('');
+        const { ok, data } = await callCtcEmails(payload);
+        setBusyId(null);
+        if (!ok) { setErr(data.error || 'That did not go through.'); return false; }
+        await load(); if (onFiled) onFiled();
+        return true;
+      }
+      async function runTriage() {
+        setTriaging(true); setErr('');
+        const { ok, data } = await callCtcEmails({ action: 'triage', limit: 20 });
+        setTriaging(false);
+        if (!ok) { setErr(data.error || 'Triage failed.'); return; }
+        load();
+      }
+
+      const shown = rows.filter(r => filter === 'all' ? true
+        : filter === 'filed' ? (r.status === 'approved')
+        : (r.status === 'new' || r.status === 'suggested'));
+
+      const fmt = (d) => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+      const chip = (id, label, n) => (
+        <div key={id} onClick={() => setFilter(id)} style={{ padding: '6px 12px', borderRadius: 16, fontSize: 12, cursor: 'pointer', fontFamily: C.fontSans, border: `1px solid ${filter === id ? C.navy : bord}`, background: filter === id ? C.navy : 'transparent', color: filter === id ? '#fff' : sub }}>{label}{n != null ? ' · ' + n : ''}</div>
+      );
+
+      return (
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 20px 30px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            {chip('open', 'Needs filing', rows.filter(r => r.status === 'new' || r.status === 'suggested').length)}
+            {chip('filed', 'Filed', rows.filter(r => r.status === 'approved').length)}
+            {chip('all', 'All', rows.length)}
+            <button onClick={runTriage} disabled={triaging} style={{ marginLeft: 'auto', padding: '7px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? '#0A1730' : '#fff', color: gold, fontSize: 12, cursor: triaging ? 'default' : 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <i className={triaging ? 'ti ti-loader-2' : 'ti ti-sparkles'} style={{ fontSize: 13, animation: triaging ? 'spin 1s linear infinite' : 'none' }} />{triaging ? 'Reading…' : 'Suggest matches'}
+            </button>
+          </div>
+          {err && <div style={{ fontSize: 12.5, color: '#9B1C1C', marginBottom: 10, fontFamily: C.fontSans }}>{err}</div>}
+          {loading ? <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans }}>Loading emails…</div>
+            : !rows.length ? (
+              <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans, lineHeight: 1.6, maxWidth: 620 }}>
+                No emails collected yet. Mail is pulled from Sales Agent and Transaction Coordinator mailboxes every 15 minutes — but only for people an admin has switched on <em>and</em> who have connected their own Google account in the app. Nobody's mailbox is read without both.
+              </div>
+            )
+            : !shown.length ? <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans }}>Nothing here.</div>
+            : shown.map(r => {
+              const suggested = r.suggested_project_id ? nameOfFile(r.suggested_project_id) : '';
+              const filed = r.status === 'approved';
+              const busy = busyId === r.id;
+              return (
+                <div key={r.id} style={{ border: `1px solid ${bord}`, borderRadius: 10, padding: 13, marginBottom: 9, background: dark ? '#0A1730' : '#fff' }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 14, fontWeight: 500, color: ink, fontFamily: C.fontSans }}>{r.subject || '(no subject)'}</span>
+                    <span style={{ fontSize: 11.5, color: sub, fontFamily: C.fontSans, marginLeft: 'auto' }}>{fmt(r.email_date)}</span>
+                  </div>
+                  <div style={{ fontSize: 12.5, color: sub, fontFamily: C.fontSans, marginTop: 3 }}>
+                    {r.from_name || r.from_addr}{r.from_name && r.from_addr ? ' · ' + r.from_addr : ''} → {r.mailbox_email}
+                  </div>
+                  {r.snippet && <div style={{ fontSize: 12.5, color: ink, opacity: 0.8, fontFamily: C.fontSans, marginTop: 6, lineHeight: 1.5 }}>{r.snippet}</div>}
+
+                  {filed ? (
+                    <div style={{ marginTop: 9, fontSize: 12.5, color: teal, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <i className="ti ti-check" style={{ fontSize: 13 }} />Filed to {nameOfFile(r.linked_project_id) || 'a file'}
+                    </div>
+                  ) : r.status === 'rejected' ? (
+                    <div style={{ marginTop: 9, fontSize: 12.5, color: sub, fontFamily: C.fontSans }}>Dismissed.</div>
+                  ) : r.status === 'no_match' ? (
+                    <div style={{ marginTop: 9, fontSize: 12.5, color: sub, fontFamily: C.fontSans }}>No matching CTC file suggested.</div>
+                  ) : suggested ? (
+                    <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: dark ? 'rgba(201,164,90,0.10)' : '#F7F4EE', border: `1px solid ${bord}` }}>
+                      <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: gold, fontWeight: 600, fontFamily: C.fontSans, marginBottom: 5 }}>
+                        Suggested · {suggested}{r.suggested_confidence != null ? ' · ' + Math.round(Number(r.suggested_confidence) * 100) + '%' : ''}
+                      </div>
+                      {r.suggested_note && <div style={{ fontSize: 12.5, color: ink, fontFamily: C.fontSans, lineHeight: 1.5 }}>{r.suggested_note}</div>}
+                      <div style={{ display: 'flex', gap: 8, marginTop: 9 }}>
+                        <button disabled={busy} onClick={() => act({ action: 'approve', email_id: r.id }, r.id)} style={{ padding: '6px 12px', borderRadius: 6, border: 'none', background: C.navy, color: '#fff', fontSize: 12, cursor: busy ? 'default' : 'pointer', fontFamily: C.fontSans, opacity: busy ? 0.6 : 1 }}>{busy ? 'Filing…' : 'File it'}</button>
+                        <button disabled={busy} onClick={() => act({ action: 'reject', email_id: r.id }, r.id)} style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: 'none', color: sub, fontSize: 12, cursor: busy ? 'default' : 'pointer', fontFamily: C.fontSans }}>Dismiss</button>
+                        {r.permalink && <a href={r.permalink} target="_blank" rel="noreferrer" style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${bord}`, color: sub, fontSize: 12, textDecoration: 'none', fontFamily: C.fontSans }}>Open in Gmail</a>}
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 9, display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <span style={{ fontSize: 12.5, color: sub, fontFamily: C.fontSans }}>Not looked at yet.</span>
+                      {r.permalink && <a href={r.permalink} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: gold, textDecoration: 'none', fontFamily: C.fontSans }}>Open in Gmail</a>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+        </div>
+      );
+    }
+
     // ─── Link to Zoho Projects (CTC files only) ─────────────────────────
     // Picks a real Zoho Projects project to tie this CTC file to (plan:
     // hidden-wiggling-lamport §3.7). Field/task sync only turns on once
@@ -3486,6 +3618,18 @@ Rules:
       const [openTask, setOpenTask] = useState(null);
       const [taskEditing, setTaskEditing] = useState(false);
       const [zohoLinkOpen, setZohoLinkOpen] = useState(false);   // ctc_file only — see ZohoLinkModal
+      const [ctcTab, setCtcTab] = useState('files');   // ctc_file only: 'files' | 'emails'
+      // Approved email-derived updates for the open record (see CtcEmailsTab).
+      const [updates, setUpdates] = useState([]);
+      useEffect(() => {
+        let on = true;
+        if (!current || !current.id) { setUpdates([]); return; }
+        const c = window.SupabaseAuth?._client; if (!c) return;
+        c.from('project_updates').select('id,body,source,created_at').eq('project_id', current.id)
+          .order('created_at', { ascending: false }).limit(50)
+          .then(({ data }) => { if (on) setUpdates(data || []); });
+        return () => { on = false; };
+      }, [current && current.id]);
       // Reset on record change — but honour a routed sub-tab (#ctc/<id>/board).
       // PENDING_ROUTE is consumed here rather than read in the router, because
       // this effect runs a render AFTER setCurrent and would otherwise clobber
@@ -3984,6 +4128,21 @@ Rules:
         // either from this screen.
         const tasksBlock = (
           <React.Fragment>
+            {/* Updates filed from the Emails tab — approved by a human, never
+                auto-applied. Sits below Milestones, where Open tasks used to. */}
+            {updates.length > 0 && (
+              <React.Fragment>
+                <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '22px 0 8px' }}>Updates · {updates.length}</div>
+                <div style={{ borderTop: `1px solid ${bord}` }}>
+                  {updates.map(u => (
+                    <div key={u.id} style={{ padding: '10px 0', borderBottom: `1px solid ${bord}` }}>
+                      <div style={{ fontSize: 13.5, color: ink, fontFamily: C.fontSans, lineHeight: 1.55 }}>{u.body}</div>
+                      <div style={{ fontSize: 11, color: sub, fontFamily: C.fontSans, marginTop: 3 }}>{u.source === 'email' ? 'From email' : u.source} · {fmtD(u.created_at)}</div>
+                    </div>
+                  ))}
+                </div>
+              </React.Fragment>
+            )}
             {addInputs}
           </React.Fragment>
         );
@@ -4085,6 +4244,27 @@ Rules:
       );
       const wideRowFn = isCtc ? ctcRow : projRow;
 
+      // CTC Files carries a second tab beside the file list: the consolidated
+      // Emails inbox. Intercepted here rather than threaded through both the
+      // wide and narrow list layouts below, which it replaces wholesale.
+      const ctcTabBar = isCtc && pview === 'list' ? (
+        <div style={{ display: 'flex', gap: 2, padding: wide ? '0 34px' : '0 14px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>
+          {[['files', KL.plural], ['emails', 'Emails']].map(([id, label]) => (
+            <div key={id} onClick={() => setCtcTab(id)} style={{ padding: '10px 16px', fontSize: 13, color: ctcTab === id ? ink : sub, fontWeight: ctcTab === id ? 500 : 400, borderBottom: `2px solid ${ctcTab === id ? gold : 'transparent'}`, cursor: 'pointer', fontFamily: C.fontSans, marginBottom: -1 }}>{label}</div>
+          ))}
+        </div>
+      ) : null;
+
+      if (isCtc && pview === 'list' && ctcTab === 'emails') {
+        return (
+          <React.Fragment>
+            <div style={{ padding: wide ? '26px 34px 0' : '12px 14px 0', flexShrink: 0 }}>{titleNode ? titleNode(wide ? 27 : '1.05rem') : null}</div>
+            {ctcTabBar}
+            <CtcEmailsTab dark={dark} user={user} files={rows} onFiled={reload} />
+          </React.Fragment>
+        );
+      }
+
       return (
         <React.Fragment>
           {pview === 'form' ? formView()
@@ -4099,6 +4279,7 @@ Rules:
                 </div>
                 <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                   {listHeader}
+                  {ctcTabBar}
                   {theadRow}
                   <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 18px 24px' }}>{listBody(wideRowFn, true)}</div>
                 </div>
@@ -4106,12 +4287,14 @@ Rules:
             ) : wide ? (
               <React.Fragment>
                 {listHeader}
+                {ctcTabBar}
                 {theadRow}
                 <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 34px 24px' }}>{listBody(wideRowFn, true)}</div>
               </React.Fragment>
             ) : (
               <React.Fragment>
                 {listHeader}
+                {ctcTabBar}
                 <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 14px 24px' }}>{listBody(isCtc ? ctcCard : projCard, false)}</div>
               </React.Fragment>
             )}

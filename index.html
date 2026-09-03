@@ -6940,15 +6940,27 @@ Rules:
         || (!!rec && ((!!ownerEmail && !!rec.ownerEmail && rec.ownerEmail.toLowerCase() === ownerEmail.toLowerCase())
           || (!!ownerName && !!rec.owner && rec.owner.toLowerCase() === ownerName.toLowerCase())));
 
+      // Three states, cycled by clicking: blank (nothing said yet) -> check
+      // (hit it) -> X (missed it) -> blank. Blank is the ABSENCE of a row, so
+      // "not marked yet" and "marked as missed" stay different things —
+      // a future week shouldn't look like a failure.
+      const setMark = (key, v) => setTicks(t => {
+        const n = { ...t };
+        if (v === undefined) delete n[key]; else n[key] = v;
+        return n;
+      });
       const toggleWeek = async (row, week) => {
         const key = row.id + ':' + week;
-        const next = !ticks[key];
-        setTicks(t => ({ ...t, [key]: next }));
+        const prev = ticks[key];
+        const next = prev === undefined ? true : prev === true ? false : undefined;
+        setMark(key, next);
         const c = window.SupabaseAuth && window.SupabaseAuth._client;
         if (!c) return;
-        const { error } = await c.from('health_goal_weeks')
-          .upsert({ zoho_id: row.id, week, done: next, updated_at: new Date().toISOString() }, { onConflict: 'zoho_id,week' });
-        if (error) { setTicks(t => ({ ...t, [key]: !next })); setNote('Could not save that tick: ' + error.message); }
+        const { error } = next === undefined
+          ? await c.from('health_goal_weeks').delete().eq('zoho_id', row.id).eq('week', week)
+          : await c.from('health_goal_weeks')
+            .upsert({ zoho_id: row.id, week, done: next, updated_at: new Date().toISOString() }, { onConflict: 'zoho_id,week' });
+        if (error) { setMark(key, prev); setNote('Could not save that mark: ' + error.message); }
       };
 
       const changeStatus = async (row, status) => {
@@ -7053,7 +7065,7 @@ Rules:
                   {shown.map(({ key, person, rec }) => {
                     const mine = canEdit(person, rec);
                     const label = person ? person.name : rec.owner;
-                    const hit = rec ? weeks.filter((w, i) => ticks[rec.id + ':' + (i + 1)]).length : 0;
+                    const hit = rec ? weeks.filter((w, i) => ticks[rec.id + ':' + (i + 1)] === true).length : 0;
                     const dash = <span style={{ color: muted }}>—</span>;
                     return (
                       <tr key={key}>
@@ -7068,18 +7080,16 @@ Rules:
                           // No goal logged = nothing to tick: dashes, like the
                           // paper version of this table.
                           if (!rec) return <td key={i} style={{ ...td, textAlign: 'center', color: muted }}>—</td>;
-                          const on = !!ticks[rec.id + ':' + (i + 1)];
+                          const mark = ticks[rec.id + ':' + (i + 1)]; // true | false | undefined
+                          const on = mark === true, off = mark === false;
                           return (
                             <td key={i} style={{ ...td, textAlign: 'center' }}>
-                              {/* Two states only, the way the team already writes
-                                  it on paper: green check = hit, red X = missed.
-                                  An empty box would read as "not decided yet". */}
                               <div
                                 onClick={() => { if (mine) toggleWeek(rec, i + 1); }}
-                                title={mine ? (on ? 'Achieved — click to mark missed' : 'Missed — click to mark achieved') : 'Only ' + label + ' can tick this'}
-                                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: 5, cursor: mine ? 'pointer' : 'not-allowed', opacity: mine ? 1 : 0.5, border: `1.5px solid ${on ? '#0F6E56' : '#9B1C1C'}`, background: on ? '#0F6E56' : '#9B1C1C' }}
+                                title={mine ? (on ? 'Achieved — click for missed' : off ? 'Missed — click to clear' : 'Not marked — click for achieved') : 'Only ' + label + ' can mark this'}
+                                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: 5, cursor: mine ? 'pointer' : 'not-allowed', opacity: mine ? 1 : 0.5, border: `1.5px solid ${on ? '#0F6E56' : off ? '#9B1C1C' : (dark ? '#2A3A5A' : '#C4B9A8')}`, background: on ? '#0F6E56' : off ? '#9B1C1C' : 'transparent' }}
                               >
-                                <i className={on ? 'ti ti-check' : 'ti ti-x'} style={{ fontSize: 11, color: '#fff' }} />
+                                {(on || off) && <i className={on ? 'ti ti-check' : 'ti ti-x'} style={{ fontSize: 11, color: '#fff' }} />}
                               </div>
                             </td>
                           );
@@ -7107,7 +7117,7 @@ Rules:
               </table>
             )}
             <div style={{ fontFamily: J, fontSize: 10, color: muted, padding: '12px 14px 20px' }}>
-              Weekly ticks are saved in the app only — the goal, month and status sync with Zoho.
+              Click a week to cycle it: blank → ✓ achieved → ✕ missed → blank. Weekly marks are saved in the app only — the goal, month and status sync with Zoho.
             </div>
           </div>
         </div>

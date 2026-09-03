@@ -8244,7 +8244,11 @@ Rules:
     // (hash only, no server config). Overlays (calendar/tasks/profile) close on
     // Back but aren't deep-linked yet. parseRoute maps a hash → {tab, view}.
     const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
-    const ROUTE_MORE = ['guide', 'drives', 'directory', 'timeoff', 'expsurvey', 'sffu', 'admin', 'app-masterplan'];
+    // Every screen that lives under "More". This is what a #hash is checked
+    // against on load, so a view missing from this list survives being opened
+    // but silently falls back to AI Chat on refresh — ADD A NEW MORE SCREEN
+    // HERE as well as to allMoreDefs, or reloading it dumps you on chat.
+    const ROUTE_MORE = ['guide', 'drives', 'directory', 'timeoff', 'expsurvey', 'healthgoals', 'sffu', 'admin', 'app-masterplan'];
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
@@ -8528,6 +8532,11 @@ Rules:
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', img: 'sffu-icon.png' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
         .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
+      // Catches the drift above before a user does: a More screen with no route
+      // opens fine and then reloads onto AI Chat.
+      allMoreDefs.forEach(m => {
+        if (!m.href && ROUTE_MORE.indexOf(m.id) === -1) console.warn('[nav] "' + m.id + '" is missing from ROUTE_MORE — refreshing it will fall back to AI Chat.');
+      });
       const allItemMap = Object.fromEntries(TABS.concat(allMoreDefs).concat([tasksNavItem]).map(it => [it.id, it]));
       // Build nav + more from config, falling back to defaults.
       const buildLists = () => {

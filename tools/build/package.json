@@ -1,0 +1,8 @@
+{
+  "name": "tmg-build",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Compiles each page's JSX ahead of time so browsers don't have to.",
+  "type": "module",
+  "dependencies": { "@babel/standalone": "7.24.7" }
+}

@@ -1,8 +1,11 @@
 #!/bin/sh
 # Rebuilds build/*.js from src/*.jsx before every commit, so the deployed pages
-# can never be stale relative to their source. Only the build outputs this run
-# actually rewrote get staged -- nothing else is touched, which matters because
-# several Claude sessions share this working tree.
+# can never be stale relative to their source.
+#
+# Stages the whole build/ directory rather than diffing it: `git diff` only
+# reports tracked files, so a newly generated build output would otherwise be
+# silently left out of the commit. Scoped to build/ so it cannot sweep up work
+# from another Claude session sharing this tree.
 set -e
 
 if [ ! -d tools/build/node_modules ]; then
@@ -10,12 +13,11 @@ if [ ! -d tools/build/node_modules ]; then
   exit 1
 fi
 
-before=$(git diff --name-only -- build/ 2>/dev/null || true)
 node tools/build/build-jsx.mjs >/dev/null
-changed=$(git diff --name-only -- build/ 2>/dev/null || true)
+git add -A -- build/
 
-if [ -n "$changed" ]; then
-  echo "$changed" | while read -r f; do [ -n "$f" ] && git add -- "$f"; done
-  echo "pre-commit: rebuilt and staged:"; echo "$changed" | sed 's/^/  /'
+staged=$(git diff --cached --name-only -- build/ 2>/dev/null || true)
+if [ -n "$staged" ]; then
+  echo "pre-commit: build outputs staged:"; echo "$staged" | sed 's/^/  /'
 fi
 exit 0

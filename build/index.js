@@ -1,0 +1,24263 @@
+const {
+  useState,
+  useEffect,
+  useRef,
+  useMemo
+} = React;
+
+// ─── Design tokens (TMG Brand) ───────────────────────────────────
+const C = {
+  bg: '#FCFBF8',
+  surface: '#FFFFFF',
+  surfaceHover: '#F3EBDA',
+  border: '#E4DFD4',
+  navy: '#001A4A',
+  navyHover: '#0A2552',
+  gold: '#AD832F',
+  goldSoft: '#C9A45A',
+  textPrimary: '#001A4A',
+  textSecondary: '#6B6B6B',
+  textMuted: '#9B9380',
+  red: '#C0392B',
+  green: '#1E6B40',
+  amber: '#B07A00',
+  navBg: '#001A4A',
+  fontSans: "-apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif",
+  fontDisplay: "'Cormorant Garamond', Georgia, serif"
+};
+
+// Unified AI Chat accent palette — one mode only (Work/AI toggle removed).
+const AI_UI = {
+  primary: '#4C56C7',
+  tint: '#EEF0FB',
+  border: '#C9CDF2',
+  text: '#3C46A8'
+};
+
+// ─── Markdown rendering for AI responses (tables, bold, lists, etc.) ──
+// AI text arrives as markdown; the chat bubble must render it, not dump
+// raw `**`/`|` syntax. marked → HTML, DOMPurify → sanitized (AI text is
+// untrusted input), links forced to open in a new tab.
+if (window.DOMPurify && !window.DOMPurify._tmgLinkHook) {
+  window.DOMPurify.addHook('afterSanitizeAttributes', node => {
+    if (node.tagName === 'A') {
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
+  });
+  window.DOMPurify._tmgLinkHook = true;
+}
+if (window.marked) window.marked.setOptions({
+  breaks: true,
+  gfm: true
+});
+function mdToSafeHtml(text) {
+  if (!window.marked || !window.DOMPurify) return null; // CDN failed to load — fall back to plain text
+  try {
+    return window.DOMPurify.sanitize(window.marked.parse(text || ''));
+  } catch (e) {
+    return null;
+  }
+}
+
+// The AI can hand back a downloadable Word/Excel/PowerPoint file, or a generated image, by
+// wrapping content in a fenced ```tmg-doc / tmg-sheet / tmg-slides / tmg-image``` block (see
+// SYSTEM_PROMPT). Split those out of the raw text so they render as a card instead of a
+// plain code block.
+const TMG_FILE_BLOCK_RE = /```tmg-(doc|sheet|slides|image)(?:\s+filename="([^"\n]*)")?[ \t]*\n([\s\S]*?)```/g;
+function splitGeneratedBlocks(text) {
+  const segments = [];
+  let last = 0,
+    m;
+  TMG_FILE_BLOCK_RE.lastIndex = 0;
+  const t = text || '';
+  while (m = TMG_FILE_BLOCK_RE.exec(t)) {
+    if (m.index > last) segments.push({
+      type: 'md',
+      text: t.slice(last, m.index)
+    });
+    segments.push({
+      type: m[1],
+      filename: m[2] || null,
+      body: m[3]
+    });
+    last = m.index + m[0].length;
+  }
+  if (last < t.length) segments.push({
+    type: 'md',
+    text: t.slice(last)
+  });
+  return segments.length ? segments : [{
+    type: 'md',
+    text: t
+  }];
+}
+
+// Loose heuristic: does the user's message clearly ask for a downloadable file? Used only to
+// explain a miss (see runSend's fallback note) — never to force or block generation, since
+// SYSTEM_PROMPT already decides when the model should actually produce one.
+const FILE_INTENT_RE = /\b(excel|spreadsheet|xlsx|csv|powerpoint|pptx|docx|word doc|slide ?deck)\b/i;
+function looksLikeFileRequest(text) {
+  return FILE_INTENT_RE.test(text || '');
+}
+function hasFileBlock(text) {
+  TMG_FILE_BLOCK_RE.lastIndex = 0;
+  return TMG_FILE_BLOCK_RE.test(text || '');
+}
+
+// Finds a Markdown pipe-table in plain text (the AI's normal way of showing tabular data
+// when it *doesn't* use the ```tmg-sheet``` fence) and returns its rows — header row first,
+// separator row dropped — or null if there isn't one. Used by FallbackFileActions below.
+function findMdTable(text) {
+  const lines = (text || '').split(/\r?\n/);
+  for (let i = 0; i < lines.length - 1; i++) {
+    const head = lines[i].trim(),
+      sep = lines[i + 1].trim();
+    if (!/^\|.*\|$/.test(head)) continue;
+    if (!/^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test(sep)) continue;
+    const rows = [head];
+    let j = i + 2;
+    while (j < lines.length && /^\|.*\|$/.test(lines[j].trim())) {
+      rows.push(lines[j].trim());
+      j++;
+    }
+    return rows;
+  }
+  return null;
+}
+function csvCell(v) {
+  const s = String(v == null ? '' : v).replace(/\r?\n/g, ' ').trim();
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function mdRowsToCsv(rows) {
+  return rows.map(l => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map(csvCell).join(',')).join('\n');
+}
+
+// Renders AI markdown safely; falls back to plain text if parsing fails
+// or the CDN scripts didn't load, so a formatting bug never blanks a message.
+function MarkdownContent({
+  text
+}) {
+  const segments = useMemo(() => splitGeneratedBlocks(text), [text]);
+  if (segments.length === 1 && segments[0].type === 'md') {
+    const html = mdToSafeHtml(segments[0].text);
+    return /*#__PURE__*/React.createElement(React.Fragment, null, html == null ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        whiteSpace: 'pre-wrap'
+      }
+    }, text) : /*#__PURE__*/React.createElement("div", {
+      className: "md-body",
+      dangerouslySetInnerHTML: {
+        __html: html
+      }
+    }), /*#__PURE__*/React.createElement(FallbackFileActions, {
+      text: segments[0].text
+    }));
+  }
+  return /*#__PURE__*/React.createElement(React.Fragment, null, segments.map((seg, i) => {
+    if (seg.type === 'md') {
+      if (!seg.text.trim()) return null;
+      const html = mdToSafeHtml(seg.text);
+      return html == null ? /*#__PURE__*/React.createElement("span", {
+        key: i,
+        style: {
+          whiteSpace: 'pre-wrap'
+        }
+      }, seg.text) : /*#__PURE__*/React.createElement("div", {
+        key: i,
+        className: "md-body",
+        dangerouslySetInnerHTML: {
+          __html: html
+        }
+      });
+    }
+    if (seg.type === 'image') return /*#__PURE__*/React.createElement(GeneratedImageCard, {
+      key: i,
+      prompt: seg.body
+    });
+    return /*#__PURE__*/React.createElement(GeneratedFileCard, {
+      key: i,
+      kind: seg.type,
+      filename: seg.filename,
+      body: seg.body
+    });
+  }));
+}
+
+// A card offering to download an AI-generated Word/Excel/PowerPoint file. The actual
+// file (docx/xlsx/pptx) is only built on click, from the plain-text/CSV/slide body
+// the model produced — nothing binary is ever sent over the wire.
+const GEN_FILE_META = {
+  doc: {
+    icon: 'ti-file-type-doc',
+    label: 'Word document',
+    ext: '.docx'
+  },
+  sheet: {
+    icon: 'ti-file-type-xls',
+    label: 'Excel spreadsheet',
+    ext: '.xlsx'
+  },
+  slides: {
+    icon: 'ti-file-type-ppt',
+    label: 'PowerPoint presentation',
+    ext: '.pptx'
+  }
+};
+function GeneratedFileCard({
+  kind,
+  filename,
+  body
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const meta = GEN_FILE_META[kind] || GEN_FILE_META.doc;
+  const name = (filename || 'Generated' + meta.ext).replace(/\.[a-z0-9]+$/i, '') + meta.ext;
+  const download = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const blob = kind === 'doc' ? await genDocxBlob(body) : kind === 'sheet' ? await genXlsxBlob(body) : await genPptxBlob(body);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 400);
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      margin: '6px 0'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '11px 13px',
+      borderRadius: 12,
+      border: `1px solid ${C.border}`,
+      background: C.surfaceHover
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${meta.icon}`,
+    style: {
+      fontSize: 22,
+      color: C.gold,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.84rem',
+      fontWeight: 600,
+      color: C.textPrimary,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      fontFamily: C.fontSans
+    }
+  }, name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      color: C.textSecondary,
+      fontFamily: C.fontSans
+    }
+  }, meta.label)), /*#__PURE__*/React.createElement("button", {
+    onClick: download,
+    disabled: busy,
+    style: {
+      padding: '7px 12px',
+      borderRadius: 9,
+      border: 'none',
+      background: C.navy,
+      color: '#fff',
+      fontSize: '0.76rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      opacity: busy ? 0.6 : 1,
+      flexShrink: 0
+    }
+  }, busy ? '…' : 'Download')), err ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      color: C.red,
+      fontFamily: C.fontSans,
+      padding: '0 2px'
+    }
+  }, err) : null);
+}
+
+// Safety net for replies that clearly deserve a real file but where the model didn't use
+// the ```tmg-doc/tmg-sheet``` fence (it isn't 100% reliable at remembering custom syntax
+// mid-conversation) — e.g. it just prints a Markdown table instead. Rather than leaving the
+// user with plain, un-actionable text, any substantial assistant reply gets a manual
+// "Download as Word" action, and any reply containing a Markdown table also gets "Download
+// as Excel" — built straight from what's already on screen, no extra AI call needed.
+function FallbackFileActions({
+  text
+}) {
+  const tableRows = useMemo(() => findMdTable(text), [text]);
+  const worthIt = (text || '').trim().length > 160 || !!tableRows;
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  if (!worthIt) return null;
+  const go = async kind => {
+    if (busy) return;
+    setBusy(kind);
+    setErr(null);
+    try {
+      const blob = kind === 'sheet' ? await genXlsxBlob(mdRowsToCsv(tableRows)) : await genDocxBlob(text);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = kind === 'sheet' ? 'TMG-Table.xlsx' : 'TMG-Notes.docx';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 400);
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const btnStyle = {
+    padding: '5px 10px',
+    borderRadius: 8,
+    border: `1px solid ${C.border}`,
+    background: 'transparent',
+    color: C.textSecondary,
+    fontSize: '0.68rem',
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: C.fontSans
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: 6,
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => go('doc'),
+    disabled: !!busy,
+    style: {
+      ...btnStyle,
+      opacity: busy ? 0.6 : 1
+    }
+  }, busy === 'doc' ? '…' : 'Download as Word'), tableRows ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => go('sheet'),
+    disabled: !!busy,
+    style: {
+      ...btnStyle,
+      opacity: busy ? 0.6 : 1
+    }
+  }, busy === 'sheet' ? '…' : 'Download as Excel') : null, err ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.68rem',
+      color: C.red,
+      fontFamily: C.fontSans
+    }
+  }, err) : null);
+}
+
+// A card offering to generate a real AI image via OpenAI (gpt-image-1.5). Generation
+// is NEVER automatic — it costs real money per click, so it only runs when the user
+// taps "Generate image", and the result is cached in this component's own state (not
+// re-generated on re-render; a fresh reload of the conversation will show the button
+// again rather than silently re-spending).
+function GeneratedImageCard({
+  prompt
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [url, setUrl] = useState(null);
+  const generate = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      setUrl(await callGenerateImage(prompt, 'medium'));
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      margin: '6px 0'
+    }
+  }, url ? /*#__PURE__*/React.createElement("a", {
+    href: url,
+    download: "generated-image.png",
+    style: {
+      display: 'block'
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: url,
+    alt: prompt,
+    style: {
+      maxWidth: 280,
+      maxHeight: 280,
+      borderRadius: 12,
+      display: 'block',
+      border: `1px solid ${C.border}`
+    }
+  })) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '11px 13px',
+      borderRadius: 12,
+      border: `1px solid ${C.border}`,
+      background: C.surfaceHover
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-photo-plus",
+    style: {
+      fontSize: 22,
+      color: C.gold,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.84rem',
+      fontWeight: 600,
+      color: C.textPrimary,
+      fontFamily: C.fontSans
+    }
+  }, "AI-generated image"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      color: C.textSecondary,
+      fontFamily: C.fontSans,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, prompt)), /*#__PURE__*/React.createElement("button", {
+    onClick: generate,
+    disabled: busy,
+    style: {
+      padding: '7px 12px',
+      borderRadius: 9,
+      border: 'none',
+      background: C.navy,
+      color: '#fff',
+      fontSize: '0.76rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      opacity: busy ? 0.6 : 1,
+      flexShrink: 0
+    }
+  }, busy ? 'Generating…' : 'Generate image')), err ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      color: C.red,
+      fontFamily: C.fontSans,
+      padding: '0 2px'
+    }
+  }, err) : null);
+}
+
+// ─── AI backend ──────────────────────────────────────────────────
+const AI_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/ai-chat';
+const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
+const SYSTEM_PROMPT = "You are the TMG assistant, an AI helper for The Morshed Group, a real estate team. " + "Be warm, concise, and conversational — talk like a helpful colleague, not a report. " + "Help with general questions, drafting, and day-to-day tasks.\n\n" + "You can hand back an actual downloadable Word document, Excel spreadsheet, or PowerPoint " + "presentation. Only do this when the user clearly wants a file (e.g. \"make me a doc/deck/sheet\", " + "\"write this up as a Word doc\", \"put this in a spreadsheet\") — not for normal chat answers. " + "When you do, write a short one-line intro, then EXACTLY ONE fenced code block using one of these " + "language tags (include filename=\"...\" with a sensible name and the right extension), then an " + "optional short one-line outro:\n" + "- ```tmg-doc filename=\"Name.docx\"``` — content is Markdown: \"# \" for a heading, \"## \" for a " + "subheading, \"- \" for a bullet, **bold** for bold, blank lines between paragraphs.\n" + "- ```tmg-sheet filename=\"Name.xlsx\"``` — content is CSV. For more than one sheet, put a line " + "\"### Sheet: <name>\" before each sheet's CSV rows.\n" + "- ```tmg-slides filename=\"Name.pptx\"``` — content is one slide per block, separated by a line " + "containing only \"---\". Each slide's first line is its title; remaining lines starting with " + "\"- \" are bullets.\n\n" + "You can also offer to generate an actual AI image (a real picture, e.g. \"generate an image of a " + "modern living room\") using: ```tmg-image``` where the content is a single clear, detailed image-" + "generation prompt (no filename attribute needed). Only offer this when the user wants a picture " + "generated, not for anything else — generating an image costs real money per use, so never use it " + "speculatively or more than once per request.\n\n" + "Never mix these with your normal answer in the same block, and never use any of these tags unless " + "the user actually wants a file or image.";
+function authToken() {
+  return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON;
+}
+
+// Sends the running conversation to the ai-chat Edge Function and returns the reply text.
+// `feature` tags the call for per-feature cost attribution (defaults to this tab).
+async function callAI(messages, sysOverride, feature = 'ai_chat') {
+  const res = await fetch(AI_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken(),
+      'apikey': SUPABASE_ANON
+    },
+    body: JSON.stringify({
+      messages,
+      system: sysOverride || SYSTEM_PROMPT,
+      max_tokens: 4096,
+      feature
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) {
+    throw new Error(data.error || 'Request failed (' + res.status + ')');
+  }
+  return data.text || '';
+}
+
+// ─── AI image generation (OpenAI, via edge function) ─────────────
+const IMAGE_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/generate-image';
+// Returns a data: URL (base64) for the generated image. Real per-call cost — only
+// invoked when the user explicitly clicks "Generate image" (see GeneratedImageCard).
+async function callGenerateImage(prompt, quality = 'medium') {
+  const res = await fetch(IMAGE_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken(),
+      'apikey': SUPABASE_ANON
+    },
+    body: JSON.stringify({
+      prompt,
+      quality
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) throw new Error(data.error || 'Request failed (' + res.status + ')');
+  if (!data.b64) throw new Error('No image returned.');
+  return 'data:image/png;base64,' + data.b64;
+}
+
+// ─── Google Calendar (read-only) via edge function ──────────────
+const CAL_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-calendar';
+async function callCalendar(payload) {
+  const res = await fetch(CAL_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken(),
+      'apikey': SUPABASE_ANON
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json().catch(() => ({}));
+  return {
+    ok: res.ok,
+    status: res.status,
+    data
+  };
+}
+async function fetchGoogleEvents(timeMin, timeMax) {
+  const {
+    ok,
+    data
+  } = await callCalendar({
+    action: 'list',
+    timeMin,
+    timeMax
+  });
+  if (!ok) {
+    const err = new Error(data.error || 'calendar_error');
+    err.code = data.error;
+    err.detail = data.detail || '';
+    throw err;
+  }
+  return data.events || [];
+}
+function connectGoogleCalendar(refreshToken) {
+  callCalendar({
+    action: 'connect',
+    refresh_token: refreshToken
+  }).catch(() => {});
+}
+function greeting() {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
+// Generates a short conversation title via the edge function; falls back to the first message.
+async function generateTitle(firstUserText) {
+  const fallback = (firstUserText || 'New chat').replace(/\s+/g, ' ').trim().slice(0, 40);
+  try {
+    const res = await fetch(AI_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + authToken(),
+        'apikey': SUPABASE_ANON
+      },
+      body: JSON.stringify({
+        messages: [{
+          role: 'user',
+          content: 'Conversation starts with: "' + firstUserText + '"\n\nReply with ONLY a 3-6 word title for it, no quotes, no punctuation at the end.'
+        }],
+        system: 'You write short, specific chat titles. Reply with only the title text.',
+        max_tokens: 24,
+        feature: 'ai_chat'
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    const t = (data.text || '').replace(/^["'\s]+|["'\s.]+$/g, '').trim();
+    return t || fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+// ─── Conversations DB (Supabase on prod; no-op/in-memory on localhost) ──
+const ConvDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  userId() {
+    return window.SupabaseAuth?._state?.session?.user?.id || null;
+  },
+  async loadConversations() {
+    if (!this.client()) return devConvSeed().slice();
+    const {
+      data,
+      error
+    } = await this.client().from('ai_conversations').select('*').order('pinned', {
+      ascending: false
+    }).order('updated_at', {
+      ascending: false
+    });
+    if (error) {
+      console.error('[ConvDB] load:', error.message);
+      return [];
+    }
+    return (data || []).map(r => ({
+      id: r.id,
+      type: r.type,
+      workRequest: r.work_request,
+      title: r.title || 'New chat',
+      pinned: !!r.pinned,
+      archived: !!r.archived,
+      projectId: r.project_id || null,
+      updatedAt: r.updated_at
+    }));
+  },
+  async createConversation({
+    type,
+    workRequest,
+    title,
+    projectId
+  }) {
+    if (!this.client()) {
+      return {
+        id: 'local-' + Date.now(),
+        type,
+        workRequest: workRequest || null,
+        title: title || 'New chat',
+        pinned: false,
+        archived: false,
+        projectId: projectId || null
+      };
+    }
+    const {
+      data,
+      error
+    } = await this.client().from('ai_conversations').insert({
+      user_id: this.userId(),
+      type: type || 'ai',
+      work_request: workRequest || null,
+      title: title || null,
+      project_id: projectId || null
+    }).select().single();
+    if (error) {
+      console.error('[ConvDB] create:', error.message);
+      throw error;
+    }
+    return {
+      id: data.id,
+      type: data.type,
+      workRequest: data.work_request,
+      title: data.title || 'New chat',
+      pinned: false,
+      archived: false,
+      projectId: data.project_id || null
+    };
+  },
+  async setProject(id, projectId) {
+    if (!this.client() || String(id).startsWith('local-')) return;
+    const {
+      error
+    } = await this.client().from('ai_conversations').update({
+      project_id: projectId || null,
+      updated_at: new Date().toISOString()
+    }).eq('id', id);
+    if (error) console.error('[ConvDB] setProject:', error.message);
+  },
+  async updateConversation(id, fields) {
+    if (!this.client() || String(id).startsWith('local-')) return;
+    const mapped = {
+      updated_at: new Date().toISOString()
+    };
+    if (fields.title !== undefined) mapped.title = fields.title;
+    if (fields.pinned !== undefined) mapped.pinned = fields.pinned;
+    if (fields.archived !== undefined) mapped.archived = fields.archived;
+    const {
+      error
+    } = await this.client().from('ai_conversations').update(mapped).eq('id', id);
+    if (error) console.error('[ConvDB] update:', error.message);
+  },
+  async touchConversation(id) {
+    if (!this.client() || String(id).startsWith('local-')) return;
+    await this.client().from('ai_conversations').update({
+      updated_at: new Date().toISOString()
+    }).eq('id', id);
+  },
+  async deleteConversation(id) {
+    if (!this.client() || String(id).startsWith('local-')) return;
+    const {
+      error
+    } = await this.client().from('ai_conversations').delete().eq('id', id);
+    if (error) console.error('[ConvDB] delete:', error.message);
+  },
+  async loadMessages(convId) {
+    if (!this.client() || String(convId).startsWith('local-')) return [];
+    const {
+      data,
+      error
+    } = await this.client().from('ai_messages').select('*').eq('conversation_id', convId).order('created_at', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[ConvDB] loadMessages:', error.message);
+      return [];
+    }
+    const rows = data || [];
+    const out = [];
+    for (const r of rows) {
+      const atts = Array.isArray(r.attachments) ? r.attachments : [];
+      for (const a of atts) {
+        if (a.path) a.url = await this.signedUrl(a.path);
+      }
+      out.push({
+        role: r.role,
+        content: r.content || '',
+        attachments: atts
+      });
+    }
+    return out;
+  },
+  async insertMessage(convId, role, content, attachments) {
+    if (!this.client() || String(convId).startsWith('local-')) return;
+    // Strip transient fields (url/objectURL/textContent) before persisting.
+    const slim = (attachments || []).map(a => ({
+      kind: a.kind,
+      name: a.name,
+      mediaType: a.mediaType,
+      path: a.path,
+      size: a.size,
+      ...(a.kind === 'text' ? {
+        textContent: a.textContent
+      } : {})
+    }));
+    const {
+      error
+    } = await this.client().from('ai_messages').insert({
+      conversation_id: convId,
+      role,
+      content,
+      attachments: slim.length ? slim : null
+    });
+    if (error) console.error('[ConvDB] insertMessage:', error.message);
+  },
+  async uploadAttachment(file, convId) {
+    if (!this.client()) return null;
+    const safe = (file.name || 'file').replace(/[^\w.\-]+/g, '_').slice(-80);
+    const path = `${this.userId()}/${convId || 'tmp'}/${crypto.randomUUID()}-${safe}`;
+    const {
+      error
+    } = await this.client().storage.from('chat-attachments').upload(path, file, {
+      contentType: file.type || 'application/octet-stream',
+      upsert: false
+    });
+    if (error) {
+      console.error('[ConvDB] upload:', error.message);
+      throw error;
+    }
+    return path;
+  },
+  async signedUrl(path) {
+    if (!this.client() || !path) return null;
+    const {
+      data,
+      error
+    } = await this.client().storage.from('chat-attachments').createSignedUrl(path, 7200);
+    if (error) {
+      console.error('[ConvDB] signedUrl:', error.message);
+      return null;
+    }
+    return data?.signedUrl || null;
+  }
+};
+
+// ─── AI assistant memory + Projects (personal, per user) ──────────
+// localhost has no Supabase client, so these fall back to in-memory fixtures.
+let _devAiMemory = '';
+let _devProjects = [{
+  id: 'dp1',
+  name: 'TMG App',
+  instructions: '',
+  memory: '',
+  archived: false,
+  updatedAt: new Date().toISOString()
+}, {
+  id: 'dp2',
+  name: 'KPIs',
+  instructions: '',
+  memory: '',
+  archived: false,
+  updatedAt: new Date().toISOString()
+}, {
+  id: 'dp3',
+  name: 'Deals',
+  instructions: '',
+  memory: '',
+  archived: false,
+  updatedAt: new Date().toISOString()
+}];
+let _devProjectFiles = {}; // projectId -> [files]
+// Sample conversations for the localhost preview only (prod loads real ai_conversations).
+let _devConvs = null;
+function devConvSeed() {
+  if (_devConvs) return _devConvs;
+  const now = Date.now(),
+    DAY = 86400000,
+    HR = 3600000;
+  const iso = ms => new Date(now - ms).toISOString();
+  const mk = (id, title, type, o) => ({
+    id,
+    title,
+    type,
+    workRequest: null,
+    pinned: !!(o && o.pinned),
+    archived: false,
+    projectId: o && o.projectId || null,
+    updatedAt: iso(o && o.age || 0)
+  });
+  _devConvs = [mk('dc1', 'KPI Notes June 2026 Recap', 'work', {
+    pinned: true,
+    age: 1 * HR
+  }), mk('dc2', 'KPI Notes Agent Training Log', 'work', {
+    age: 3 * HR,
+    projectId: 'dp2'
+  }), mk('dc3', 'KPI Notes June 2026 Recap', 'work', {
+    age: 6 * HR
+  }), mk('dc4', 'Add New Chat Pill Feature', 'work', {
+    age: 3 * DAY,
+    projectId: 'dp1'
+  }), mk('dc5', 'Enter KPIs Data Tracking', 'work', {
+    age: 4 * DAY,
+    projectId: 'dp2'
+  }), mk('dc6', 'How Something Works Explained', 'ai', {
+    age: 4 * DAY
+  }), mk('dc7', 'Simple Test Message Exchange', 'ai', {
+    age: 5 * DAY
+  }), mk('dc8', 'TMG App Design Session 3', 'work', {
+    age: 20 * DAY,
+    projectId: 'dp1'
+  }), mk('dc9', 'Commission Disbursement Flow', 'work', {
+    age: 25 * DAY,
+    projectId: 'dp3'
+  }), mk('dc10', 'Bookkeeper Hiring Criteria', 'work', {
+    age: 30 * DAY
+  })];
+  return _devConvs;
+}
+const AIMemoryDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  uid() {
+    return window.SupabaseAuth?._state?.session?.user?.id || null;
+  },
+  async get() {
+    if (!this.client()) return _devAiMemory;
+    const {
+      data,
+      error
+    } = await this.client().from('ai_user_memory').select('memory').eq('user_id', this.uid()).maybeSingle();
+    if (error) {
+      console.error('[AIMemoryDB] get:', error.message);
+      return '';
+    }
+    return data && data.memory || '';
+  },
+  async set(memory) {
+    if (!this.client()) {
+      _devAiMemory = memory || '';
+      return;
+    }
+    const {
+      error
+    } = await this.client().from('ai_user_memory').upsert({
+      user_id: this.uid(),
+      memory: memory || '',
+      updated_at: new Date().toISOString()
+    });
+    if (error) {
+      console.error('[AIMemoryDB] set:', error.message);
+      throw error;
+    }
+  }
+};
+const ProjectDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  uid() {
+    return window.SupabaseAuth?._state?.session?.user?.id || null;
+  },
+  _map(r) {
+    return {
+      id: r.id,
+      name: r.name,
+      instructions: r.instructions || '',
+      memory: r.memory || '',
+      archived: !!r.archived,
+      updatedAt: r.updated_at
+    };
+  },
+  async list() {
+    if (!this.client()) return _devProjects.slice();
+    const {
+      data,
+      error
+    } = await this.client().from('ai_projects').select('*').eq('archived', false).order('updated_at', {
+      ascending: false
+    });
+    if (error) {
+      console.error('[ProjectDB] list:', error.message);
+      return [];
+    }
+    return (data || []).map(this._map);
+  },
+  async create(name) {
+    const row = {
+      name: name || 'New project',
+      instructions: '',
+      memory: ''
+    };
+    if (!this.client()) {
+      const r = {
+        ...row,
+        id: 'devp-' + Math.random().toString(36).slice(2),
+        archived: false,
+        updatedAt: new Date().toISOString()
+      };
+      _devProjects.unshift(r);
+      return r;
+    }
+    const {
+      data,
+      error
+    } = await this.client().from('ai_projects').insert({
+      ...row,
+      user_id: this.uid()
+    }).select().single();
+    if (error) {
+      console.error('[ProjectDB] create:', error.message);
+      throw error;
+    }
+    return this._map(data);
+  },
+  async update(id, fields) {
+    const p = {
+      ...fields,
+      updated_at: new Date().toISOString()
+    };
+    if (!this.client()) {
+      const i = _devProjects.findIndex(x => x.id === id);
+      if (i >= 0) _devProjects[i] = {
+        ..._devProjects[i],
+        ...fields
+      };
+      return;
+    }
+    const {
+      error
+    } = await this.client().from('ai_projects').update(p).eq('id', id);
+    if (error) {
+      console.error('[ProjectDB] update:', error.message);
+      throw error;
+    }
+  },
+  async remove(id) {
+    if (!this.client()) {
+      _devProjects = _devProjects.filter(x => x.id !== id);
+      delete _devProjectFiles[id];
+      return;
+    }
+    const {
+      error
+    } = await this.client().from('ai_projects').delete().eq('id', id);
+    if (error) {
+      console.error('[ProjectDB] remove:', error.message);
+      throw error;
+    }
+  },
+  async listFiles(projectId) {
+    if (!this.client()) return (_devProjectFiles[projectId] || []).slice();
+    const {
+      data,
+      error
+    } = await this.client().from('ai_project_files').select('*').eq('project_id', projectId).order('created_at', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[ProjectDB] listFiles:', error.message);
+      return [];
+    }
+    return (data || []).map(r => ({
+      id: r.id,
+      name: r.name,
+      mimeType: r.mime_type,
+      size: r.size,
+      textContent: r.text_content || ''
+    }));
+  },
+  async addFile(projectId, f) {
+    const row = {
+      name: f.name,
+      mime_type: f.mimeType || null,
+      size: f.size || null,
+      text_content: f.textContent || ''
+    };
+    if (!this.client()) {
+      const r = {
+        id: 'devf-' + Math.random().toString(36).slice(2),
+        name: row.name,
+        mimeType: row.mime_type,
+        size: row.size,
+        textContent: row.text_content
+      };
+      (_devProjectFiles[projectId] = _devProjectFiles[projectId] || []).push(r);
+      return r;
+    }
+    const {
+      data,
+      error
+    } = await this.client().from('ai_project_files').insert({
+      ...row,
+      project_id: projectId,
+      user_id: this.uid()
+    }).select().single();
+    if (error) {
+      console.error('[ProjectDB] addFile:', error.message);
+      throw error;
+    }
+    return {
+      id: data.id,
+      name: data.name,
+      mimeType: data.mime_type,
+      size: data.size,
+      textContent: data.text_content || ''
+    };
+  },
+  async removeFile(id, projectId) {
+    if (!this.client()) {
+      if (_devProjectFiles[projectId]) _devProjectFiles[projectId] = _devProjectFiles[projectId].filter(x => x.id !== id);
+      return;
+    }
+    const {
+      error
+    } = await this.client().from('ai_project_files').delete().eq('id', id);
+    if (error) {
+      console.error('[ProjectDB] removeFile:', error.message);
+      throw error;
+    }
+  }
+};
+
+// ─── Profiles / access ───────────────────────────────────────────
+// Per-tool access: which configurable roles can open each tool/app.
+// Admins are always on. Operations is a configurable role like the others.
+// Editable in Admin → Tab Access, persisted in app_access (see app-access.sql).
+const ACCESS_APPS = [{
+  id: 'chat',
+  label: 'AI Chat',
+  icon: 'ti-sparkles'
+}, {
+  id: 'teamchat',
+  label: 'Team Chat',
+  icon: 'ti-message'
+}, {
+  id: 'calls',
+  label: 'Calls',
+  icon: 'ti-phone'
+}, {
+  id: 'kpis',
+  label: 'KPIs',
+  icon: 'ti-chart-bar'
+}, {
+  id: 'deals',
+  label: 'Deals',
+  icon: 'ti-currency-dollar'
+}, {
+  id: 'drives',
+  label: 'Shared Drives',
+  icon: 'ti-folders'
+}, {
+  id: 'directory',
+  label: 'Company Directory',
+  icon: 'ti-users'
+}, {
+  id: 'sffu',
+  label: 'SFFU',
+  icon: 'ti-messages'
+}];
+const ACCESS_ROLES = [{
+  id: 'operations',
+  label: 'Operations'
+}, {
+  id: 'agent',
+  label: 'Sales Agent'
+}, {
+  id: 'tc',
+  label: 'Transaction Coordinator'
+}];
+// Operations defaults to ON for every tool (preserving its old all-access),
+// but is now editable per-tool like Sales Agent / Transaction Coordinator.
+const DEFAULT_ACCESS = {
+  chat: ['operations', 'agent', 'tc'],
+  teamchat: ['operations', 'agent', 'tc'],
+  calls: ['operations', 'agent'],
+  kpis: ['operations', 'agent'],
+  deals: ['operations', 'agent'],
+  drives: ['operations', 'agent', 'tc'],
+  directory: ['operations', 'agent', 'tc'],
+  sffu: ['operations', 'tc']
+};
+// Fill any missing/invalid apps with defaults; keep only configurable roles.
+function normalizeAccess(cfg) {
+  const valid = r => r === 'operations' || r === 'agent' || r === 'tc';
+  // A config saved before Operations was configurable lists no 'operations'
+  // anywhere → backfill it ON for every tool (preserve its old always-on access).
+  const legacy = cfg && !ACCESS_APPS.some(a => Array.isArray(cfg[a.id]) && cfg[a.id].includes('operations'));
+  const out = {};
+  ACCESS_APPS.forEach(a => {
+    let v = (cfg && Array.isArray(cfg[a.id]) ? cfg[a.id] : DEFAULT_ACCESS[a.id]) || [];
+    v = v.filter(valid);
+    if (legacy && !v.includes('operations')) v = ['operations', ...v];
+    out[a.id] = v;
+  });
+  return out;
+}
+const ProfileDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  uid() {
+    return window.SupabaseAuth?._state?.session?.user?.id || null;
+  },
+  // Returns the user's profile; auto-creates a pending one on first sign-in. Fail-open (null) on error.
+  async ensureProfile(user) {
+    if (!this.client()) return null;
+    try {
+      const {
+        data,
+        error
+      } = await this.client().from('profiles').select('*').eq('id', user.id).maybeSingle();
+      if (error) {
+        console.error('[ProfileDB] load:', error.message);
+        return null;
+      }
+      if (data) return data;
+      const full = (user.user_metadata?.full_name || '').trim();
+      const parts = full.split(' ');
+      const first = parts.shift() || null;
+      const last = parts.join(' ') || null;
+      const {
+        data: ins,
+        error: e2
+      } = await this.client().from('profiles').insert({
+        id: user.id,
+        email: user.email,
+        first_name: first,
+        last_name: last,
+        avatar_url: user.user_metadata?.avatar_url || null
+      }).select().single();
+      if (e2) {
+        console.error('[ProfileDB] create:', e2.message);
+        return null;
+      }
+      return ins;
+    } catch (e) {
+      console.error('[ProfileDB] ensure:', e);
+      return null;
+    }
+  },
+  async loadAll() {
+    if (!this.client()) return [];
+    const {
+      data,
+      error
+    } = await this.client().from('profiles').select('*').order('created_at', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[ProfileDB] loadAll:', error.message);
+      return [];
+    }
+    return data || [];
+  },
+  async updateMine(fields) {
+    if (!this.client()) return;
+    const m = {
+      first_name: fields.first_name || null,
+      last_name: fields.last_name || null,
+      phone: fields.phone || null
+    };
+    ['country', 'timezone', 'dob', 'pets'].forEach(k => {
+      if (fields[k] !== undefined) m[k] = fields[k] || null;
+    });
+    const {
+      error
+    } = await this.client().from('profiles').update(m).eq('id', this.uid());
+    if (error) {
+      console.error('[ProfileDB] updateMine:', error.message);
+      throw error;
+    }
+  },
+  // Presence/status (own profile). touchPresence = the "I'm online" heartbeat.
+  async touchPresence() {
+    if (!this.client()) return;
+    try {
+      await this.client().from('profiles').update({
+        last_seen_at: new Date().toISOString()
+      }).eq('id', this.uid());
+    } catch (e) {}
+  },
+  async setPresence(fields) {
+    // { away?, status_text?, status_emoji? }
+    if (!this.client()) return;
+    const {
+      error
+    } = await this.client().from('profiles').update(fields).eq('id', this.uid());
+    if (error) console.error('[ProfileDB] setPresence:', error.message);
+  },
+  async adminUpdate(id, fields) {
+    if (!this.client()) return;
+    const mapped = {};
+    ['first_name', 'last_name', 'employee_id', 'title', 'reports_to', 'assigned_tc', 'access', 'status', 'hire_date', 'time_off_days'].forEach(k => {
+      if (fields[k] !== undefined) mapped[k] = fields[k] || null;
+    });
+    const {
+      error
+    } = await this.client().from('profiles').update(mapped).eq('id', id);
+    if (error) {
+      console.error('[ProfileDB] adminUpdate:', error.message);
+      throw error;
+    }
+  },
+  // Adds a teammate directly, active from the start — no pending-approval step. Has to go
+  // through the edge function: creating the login account itself needs the service role key,
+  // which can never live in the browser (see admin-create-user for the full mechanism).
+  async adminCreate(fields) {
+    const res = await fetch('https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/admin-create-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + authToken(),
+        'apikey': SUPABASE_ANON
+      },
+      body: JSON.stringify(fields)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not add user');
+    return data;
+  }
+};
+
+// Maps a UI message to Claude API content (string, or blocks when it has attachments).
+function toApiContent(msg) {
+  const atts = msg.attachments || [];
+  if (!atts.length) return msg.content || '';
+  const blocks = [];
+  for (const a of atts) {
+    if (a.kind === 'image' && a.url) blocks.push({
+      type: 'image',
+      source: {
+        type: 'url',
+        url: a.url
+      }
+    });else if (a.kind === 'pdf' && a.url) blocks.push({
+      type: 'document',
+      source: {
+        type: 'url',
+        url: a.url
+      }
+    });else if (a.kind === 'text') blocks.push({
+      type: 'text',
+      text: 'Attached file "' + a.name + '":\n' + (a.textContent || '')
+    });
+  }
+  if (msg.content) blocks.push({
+    type: 'text',
+    text: msg.content
+  });
+  return blocks.length ? blocks : msg.content || '';
+}
+
+// Icon for a non-image/pdf attachment badge, based on filename extension.
+function attFileIcon(name) {
+  if (/\.(xlsx|xls|csv)$/i.test(name || '')) return 'ti-file-type-xls';
+  if (/\.docx?$/i.test(name || '')) return 'ti-file-type-doc';
+  if (/\.pptx?$/i.test(name || '')) return 'ti-file-type-ppt';
+  return 'ti-file-text';
+}
+
+// ─── Office file reading (attachments) ────────────────────────────
+// Word/PowerPoint/Excel are parsed client-side into plain text and sent through
+// the same 'text' attachment path CSV/txt already use — no backend changes needed.
+async function readXlsxAsText(file) {
+  const XLSX = await ensureLib('XLSX', CDN.xlsx);
+  if (!XLSX) throw new Error('Spreadsheet reader failed to load — check your connection and try again.');
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, {
+    type: 'array'
+  });
+  return wb.SheetNames.map(name => '### Sheet: ' + name + '\n' + XLSX.utils.sheet_to_csv(wb.Sheets[name])).join('\n\n');
+}
+async function readDocxAsText(file) {
+  const mammoth = await ensureLib('mammoth', CDN.mammoth);
+  if (!mammoth) throw new Error('Word reader failed to load — check your connection and try again.');
+  const buf = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({
+    arrayBuffer: buf
+  });
+  return result.value || '';
+}
+async function readPptxAsText(file) {
+  const JSZip = await ensureLib('JSZip', CDN.jszip);
+  if (!JSZip) throw new Error('Presentation reader failed to load — check your connection and try again.');
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const slideFiles = Object.keys(zip.files).filter(p => /^ppt\/slides\/slide\d+\.xml$/.test(p)).sort((a, b) => parseInt(a.match(/(\d+)/)[1], 10) - parseInt(b.match(/(\d+)/)[1], 10));
+  const parser = new DOMParser();
+  const slides = [];
+  for (let i = 0; i < slideFiles.length; i++) {
+    const xml = await zip.files[slideFiles[i]].async('text');
+    const doc = parser.parseFromString(xml, 'application/xml');
+    const texts = Array.from(doc.getElementsByTagName('a:t')).map(n => n.textContent || '').filter(Boolean);
+    slides.push('Slide ' + (i + 1) + ':\n' + texts.join('\n'));
+  }
+  return slides.join('\n\n');
+}
+// Generates a downloadable file from a ```tmg-doc/tmg-sheet/tmg-slides``` block the AI produced.
+function mdInlineRuns(line) {
+  const {
+    TextRun
+  } = window.docx;
+  return line.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map(p => {
+    const m = /^\*\*([^*]+)\*\*$/.exec(p);
+    return m ? new TextRun({
+      text: m[1],
+      bold: true
+    }) : new TextRun(p);
+  });
+}
+async function genDocxBlob(body) {
+  const d = await ensureLib('docx', CDN.docx);
+  if (!d) throw new Error('Word writer failed to load — check your connection and try again.');
+  const {
+    Document,
+    Packer,
+    Paragraph,
+    HeadingLevel
+  } = d;
+  const children = (body || '').split('\n').map(raw => {
+    const l = raw.replace(/\r$/, '');
+    if (/^#\s+/.test(l)) return new Paragraph({
+      text: l.replace(/^#\s+/, ''),
+      heading: HeadingLevel.HEADING_1
+    });
+    if (/^##\s+/.test(l)) return new Paragraph({
+      text: l.replace(/^##\s+/, ''),
+      heading: HeadingLevel.HEADING_2
+    });
+    if (/^-\s+/.test(l)) return new Paragraph({
+      text: l.replace(/^-\s+/, ''),
+      bullet: {
+        level: 0
+      }
+    });
+    if (!l.trim()) return new Paragraph({
+      text: ''
+    });
+    return new Paragraph({
+      children: mdInlineRuns(l)
+    });
+  });
+  const doc = new Document({
+    sections: [{
+      children
+    }]
+  });
+  return Packer.toBlob(doc);
+}
+async function genXlsxBlob(body) {
+  const XLSX = await ensureLib('XLSX', CDN.xlsx);
+  if (!XLSX) throw new Error('Spreadsheet writer failed to load — check your connection and try again.');
+  const wb = XLSX.utils.book_new();
+  const re = /^### Sheet: (.+)$/gm;
+  const marks = [];
+  let m;
+  while (m = re.exec(body || '')) marks.push({
+    name: m[1].trim(),
+    markStart: m.index,
+    bodyStart: m.index + m[0].length
+  });
+  if (!marks.length) {
+    const sub = XLSX.read(body || '', {
+      type: 'string'
+    });
+    XLSX.utils.book_append_sheet(wb, sub.Sheets[sub.SheetNames[0]], 'Sheet1');
+  } else {
+    marks.forEach((mk, i) => {
+      const end = i + 1 < marks.length ? marks[i + 1].markStart : body.length;
+      const chunk = body.slice(mk.bodyStart, end).trim();
+      const sub = XLSX.read(chunk || ' ', {
+        type: 'string'
+      });
+      XLSX.utils.book_append_sheet(wb, sub.Sheets[sub.SheetNames[0]], (mk.name || 'Sheet').slice(0, 31));
+    });
+  }
+  const arr = XLSX.write(wb, {
+    type: 'array',
+    bookType: 'xlsx'
+  });
+  return new Blob([arr], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  });
+}
+async function genPptxBlob(body) {
+  const PptxGenJS = await ensureLib('PptxGenJS', CDN.pptxgenjs);
+  if (!PptxGenJS) throw new Error('Presentation writer failed to load — check your connection and try again.');
+  const pptx = new PptxGenJS();
+  const slides = (body || '').split(/^---\s*$/m).map(s => s.trim()).filter(Boolean);
+  slides.forEach(raw => {
+    const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+    const title = (lines[0] || '').replace(/^#+\s*/, '').replace(/^Slide\s*\d+:?\s*/i, '');
+    const bullets = lines.slice(1).map(l => l.replace(/^[-*]\s*/, '')).filter(Boolean);
+    const slide = pptx.addSlide();
+    slide.addText(title, {
+      x: 0.5,
+      y: 0.3,
+      w: 9,
+      h: 1,
+      fontSize: 28,
+      bold: true,
+      color: '001A4A'
+    });
+    if (bullets.length) slide.addText(bullets.map(b => ({
+      text: b,
+      options: {
+        bullet: true,
+        breakLine: true
+      }
+    })), {
+      x: 0.5,
+      y: 1.3,
+      w: 9,
+      h: 4.5,
+      fontSize: 16,
+      color: '333333'
+    });
+  });
+  return pptx.write({
+    outputType: 'blob'
+  });
+}
+const WORK_REQUESTS = [{
+  key: 'kpis',
+  label: 'Enter KPIs',
+  short: 'KPIs'
+}, {
+  key: 'listing_presentation',
+  label: 'Request Listing Presentation',
+  short: 'Listing'
+}];
+
+// The AI instruction (the "command") that powers a Task pill. Stored INSIDE the
+// pill's config so it's editable in the pill builder — this is just the default.
+// The AI ends every reply with one ACTION block; the app reads it to create the task.
+const TASK_PILL_INSTRUCTION = `You are the TMG task assistant. Turn what the user tells you into ONE task on the team's shared task board. Have a short, natural conversation — ask only for what's missing and important, never interrogate. The user's message may begin with "To Do:" — treat that as a prefix and use the rest as the task.
+
+Before creating a task you need at least a TITLE and a DUE DATE. If there's no due date yet, ask for one. Everything else is optional.
+
+Fields you can capture into the payload:
+- title (short)
+- dueDate ("YYYY-MM-DD"); dueTime ("HH:MM", 24-hour) only if a time was given
+- priority: "low" | "medium" | "high"  (default "medium")
+- status: "todo" | "in_progress" | "stuck" | "done"  (default "todo")
+- project (a short name)
+- assignees: array of the people's names who will do it
+- assigners: array of the people's names who asked for it
+- description: a concise 1–2 sentence summary of the task (this becomes the task's Description)
+- context: any extra background/notes
+- workingUrl, emailLink: links, only if mentioned
+- decisionQuestion, decisionOptions (array of strings), decisionMaker (a name): only if this task is about making a decision
+
+## How to reply
+End EVERY reply with exactly ONE action block on its own final line, with nothing after it:
+ACTION:{"type":"ADD","payload":{ ...the fields you have... }}
+
+Rules:
+- Use "ADD" only once you have at least a title AND a dueDate — that creates the task immediately. Then confirm in one short sentence, e.g. Done — added "<title>", due <date>.
+- If the user's first message already has a title and a due date, create the task in your FIRST reply — do not ask follow-up questions.
+- If you still need something (like the due date), ask your question and end with: ACTION:{"type":"NONE","payload":{}}
+- Resolve relative dates ("Friday", "tomorrow", "next week") to an absolute YYYY-MM-DD using today's date given in the conversation.
+- Keep the conversational part brief and friendly.`;
+
+// ─── Enter KPI ─────────────────────────────────────────────────────
+// Phase A: every flow only PREVIEWS what would be sent — no network call.
+const KPI_LIVE = true;
+const KPI_OPTIONS = ['Touch Call', 'Follow Up Call', 'Notes', 'Hotzone Action/s', 'Pop-by', 'Lunch'];
+// Zoho's Agent_KPIs module has exactly 10 Person slots and 3 Other-KPI slots.
+// These caps MUST match Zoho: the form used to allow 25 people and 5 other
+// KPIs, and everything past the real slot count was silently dropped at
+// write time while the confirmation screen still listed it back as saved.
+const MAX_KPI_PERSONS = 10;
+const MAX_OTHER_KPIS = 3;
+const kpiTodayStr = () => {
+  const t = new Date();
+  return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+};
+const ZOHO_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-crm';
+async function callZoho(payload) {
+  const res = await fetch(ZOHO_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken(),
+      'apikey': SUPABASE_ANON
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json().catch(() => ({}));
+  return {
+    ok: res.ok,
+    status: res.status,
+    data
+  };
+}
+async function searchZohoContacts(query) {
+  const {
+    ok,
+    data
+  } = await callZoho({
+    action: 'search_contacts',
+    query
+  });
+  if (!ok) throw new Error(data.error || 'Contact search failed');
+  return data.contacts || [];
+}
+// Fuzzy-match a typed name against Zoho Contacts → ranked candidates [{id, full_name, email, score}].
+async function matchZohoContacts(name) {
+  const {
+    ok,
+    data
+  } = await callZoho({
+    action: 'match_contacts',
+    name
+  });
+  if (!ok) throw new Error(data.error || 'Contact match failed');
+  return data.matches || [];
+}
+// Create a new Zoho Contact → { id, full_name }.
+async function createZohoContact(firstName, lastName) {
+  const {
+    ok,
+    data
+  } = await callZoho({
+    action: 'create_contact',
+    first_name: firstName,
+    last_name: lastName
+  });
+  if (!ok) throw new Error(data.error || 'Could not create contact');
+  return data;
+}
+// Valid options for the "Other KPI" fields come from ZOHO, live — never a
+// hardcoded copy. A hardcoded list was here before and had silently gone
+// stale: it held things like "Networking Event for Brett" while the real
+// Zoho picklist says "Networking Event", so every submission was thrown
+// away by the exact-string check below and the agent was still told
+// "Submitted". Reading the picklist from the module itself can't drift,
+// and it means editing the options in Zoho is enough — no code change.
+let OTHER_KPI_CACHE = null;
+async function fetchOtherKpiOptions() {
+  if (OTHER_KPI_CACHE) return OTHER_KPI_CACHE;
+  const {
+    ok,
+    data
+  } = await callZoho({
+    action: 'get_fields',
+    module: 'Agent_KPIs'
+  });
+  if (!ok) throw new Error(data && data.error || 'Could not load the Other KPI options from Zoho.');
+  const f = (data.fields || []).find(x => x.api_name === 'Other_KPI_1');
+  // Zoho includes its own "-None-" placeholder in the picklist — that's the
+  // empty state, not a real KPI, so it never belongs in the chooser.
+  const opts = (f && f.picklist_values || []).filter(v => v && !/^-?\s*none\s*-?$/i.test(v));
+  if (!opts.length) throw new Error('Zoho returned no options for Other KPI 1.');
+  OTHER_KPI_CACHE = opts;
+  return opts;
+}
+async function createAgentKpi(payload) {
+  // Maps the app payload onto the REAL Agent_KPIs module fields (verified against Zoho 2026-06-20).
+  // Owner isn't set here — the edge function resolves payload.owner_email to a Zoho user id
+  // and sets it server-side (Owner is a Zoho user lookup, not a plain string).
+  // Field names must match what BOTH entry paths actually produce (KpiInlineForm.review and
+  // the AI ACTION block): kpi_date / ctc_hours / others[].kpi. Reading payload.date or
+  // payload.ctc here silently yields undefined — the date then falls back to today and CTC
+  // is dropped, while formatKpiPreview (which reads the right keys) still shows the user
+  // correct values. That mismatch is why this went unnoticed.
+  const record = {
+    KPI_Date: payload.kpi_date || kpiTodayStr()
+  };
+  if (payload.ctc_hours != null && payload.ctc_hours !== '') record.CTC_Hours_2 = Number(payload.ctc_hours);
+
+  // Zoho only has Person_1..10 slots. This used to silently .slice(0, 10)
+  // and drop the rest — refuse instead, so nobody is told "Submitted" for
+  // people that were never written.
+  const persons = payload.persons || [];
+  if (persons.length > MAX_KPI_PERSONS) {
+    throw new Error(`Zoho has only ${MAX_KPI_PERSONS} person slots per KPI entry, but this has ${persons.length}. Split it across two entries.`);
+  }
+  for (let i = 0; i < persons.length; i++) {
+    const p = persons[i],
+      n = i + 1;
+    // Applicable KPIs is a MULTI-SELECT picklist → send an array of the exact option strings.
+    if ((p.kpis || []).length) record['Person_' + n + '_Applicable_KPIs'] = p.kpis;
+    if ((p.kpis || []).some(k => /hotzone/i.test(k)) && p.hotzone_count) {
+      record['Number_of_Hotzone_Actions_' + n] = Number(p.hotzone_count);
+    }
+    // Person_N_Name is a Contacts LOOKUP — use the contact resolved in the summary step.
+    if (p.contact_id) record['Person_' + n + '_Name'] = {
+      id: p.contact_id
+    };
+  }
+
+  // Other KPIs: 3 slots, each value must be a real Zoho picklist option.
+  // Anything unrecognised or over the slot count is REFUSED loudly — the
+  // old code silently `return`ed past bad values and sliced off extras,
+  // which is exactly how a logged "Networking" entry disappeared while
+  // the agent was shown a success message listing it.
+  const others = (payload.others || []).filter(o => o && o.kpi);
+  if (others.length) {
+    if (others.length > MAX_OTHER_KPIS) {
+      throw new Error(`Zoho has only ${MAX_OTHER_KPIS} Other KPI slots, but this has ${others.length}.`);
+    }
+    const allowedOthers = await fetchOtherKpiOptions();
+    const bad = others.filter(o => !allowedOthers.includes(o.kpi));
+    if (bad.length) {
+      throw new Error(`Not a valid Other KPI in Zoho: ${bad.map(o => '"' + o.kpi + '"').join(', ')}. ` + `Valid options are: ${allowedOthers.join(', ')}.`);
+    }
+    others.forEach((o, i) => {
+      const n = i + 1;
+      record['Other_KPI_' + n] = o.kpi;
+      if (o.count) record['Other_KPI_' + n + '_Count'] = Number(o.count);
+    });
+  }
+  const {
+    ok,
+    data
+  } = await callZoho({
+    action: 'create_agent_kpi',
+    record,
+    owner_email: payload.owner_email || null
+  });
+  if (!ok) throw new Error(data.error || 'Failed to create Agent KPI');
+  return data;
+}
+
+// Note-flow instruction: the AI parses a pasted KPI note and ends every reply with one ACTION block
+// (mirrors TASK_PILL_INSTRUCTION). A person may have MULTIPLE KPIs; names stay free text (Phase A).
+const KPI_NOTE_INSTRUCTION = `You are the TMG KPI assistant. The agent pastes a short note describing one day of real-estate prospecting activity. Turn it into ONE normalized KPI submission. Keep replies short and friendly — never interrogate.
+
+FORMAT the agents are taught to use:
+- The note STARTS with a date.
+- Each person is separated by a double slash "//". Everything between two "//" belongs to ONE person.
+- Inside a person's chunk: the person's name plus one or more activities, in any order.
+  Example: 6/18 // Sam Smith lunch call // John Doe hotzone // Jane Cruz pop-by notes
+  -> date 2026-06-18; Sam Smith = [Lunch, Touch Call]; John Doe = [Hotzone Action/s]; Jane Cruz = [Pop-by, Notes].
+If the note has no slashes, do your best to split people and activities sensibly.
+
+Map each activity to one or more of these six KPI types (a person CAN have several):
+"Touch Call", "Follow Up Call", "Notes", "Hotzone Action/s", "Pop-by", "Lunch".
+Hints: "call"/"called" -> "Touch Call" (use "Follow Up Call" only if they say follow-up); "note"/"left a note" -> "Notes"; "popped by"/"drop by" -> "Pop-by"; "lunch" -> "Lunch"; "hotzone"/"door-knock" -> "Hotzone Action/s".
+
+Also capture: kpi_date ("YYYY-MM-DD"; resolve a relative leading date like "today"/"yesterday"; default to today if none); ctc_hours (a number) only if CTC / call-time hours are mentioned; "others" = activities that fit none of the six, as {kpi, count}. Names are FREE TEXT — record them exactly as written; do NOT match them to any contact list (that happens later). At most 10 people per entry (Zoho has 10 slots) — if the note lists more, say so and ask them to split it into two entries.
+
+OTHER KPIs — the "kpi" value MUST be copied EXACTLY, character for character, from this list (it is a fixed Zoho picklist; anything else is rejected):
+{{OTHER_KPI_OPTIONS}}
+At most 3 other KPIs per entry. If an activity doesn't fit the six per-person types AND doesn't match one of the options above, do NOT invent a value — mention it in your reply and leave it out of the payload.
+
+HOTZONE RULE: if a person has "Hotzone Action/s" but no number is given, you MUST ask how many before submitting (one short question), ending with ACTION:{"type":"NONE","payload":{}}.
+
+## How to reply
+End EVERY reply with exactly ONE action block on its own final line, with nothing after it:
+ACTION:{"type":"KPI","payload":{ ...the fields you have... }}
+
+The payload shape MUST be:
+{ "kpi_date":"YYYY-MM-DD", "ctc_hours": <number or null>,
+  "persons":[ { "name":"...", "kpis":["<one or more of the six>"], "hotzone_count": <number, only when "Hotzone Action/s" is in kpis> } ],
+  "others":[ { "kpi":"...", "count": <number> } ] }
+
+Rules:
+- Use "KPI" only once you have kpi_date AND at least one person with a name and >=1 KPI, AND every hotzone person has a count. That readies it for confirmation; then say one short sentence, e.g. Ready - KPIs for 3 people on 2026-06-18.
+- If the first message already has everything, submit in your FIRST reply — no questions.
+- If something is missing or ambiguous (a hotzone count, follow-up vs touch call), ask ONE short question and end with: ACTION:{"type":"NONE","payload":{}}
+- Resolve relative dates using today's date given below. Do NOT use markdown formatting.`;
+
+// Plain-text KPI summary for the saved chat message (chat renders raw text — no markdown).
+function formatKpiPreview(p) {
+  const L = [];
+  L.push('KPI ENTRY');
+  L.push('Owner: ' + (p.owner || '—'));
+  L.push('Date: ' + (p.kpi_date || '—'));
+  L.push('CTC Hours: ' + (p.ctc_hours == null || p.ctc_hours === '' ? '—' : p.ctc_hours));
+  L.push('');
+  const persons = p.persons || [];
+  L.push('People (' + persons.length + '):');
+  persons.forEach(function (x, i) {
+    const parts = (x.kpis || []).map(function (k) {
+      return k === 'Hotzone Action/s' ? 'Hotzone Action/s (' + (x.hotzone_count || 0) + ')' : k;
+    });
+    L.push('  ' + (i + 1) + '. ' + (x.name || '—') + ' — ' + (parts.length ? parts.join(', ') : '—'));
+  });
+  if (p.others && p.others.length) {
+    L.push('');
+    L.push('Other KPIs:');
+    p.others.forEach(function (o) {
+      L.push('  • ' + o.kpi + ': ' + o.count);
+    });
+  }
+  return L.join('\n');
+}
+
+// ─── AI Chat pills ───────────────────────────────────────────────
+// Default pills shown when the work_pills table is empty/unreadable (preserves prior behavior).
+// `mode` is a legacy DB field, no longer used to filter — there's only one unified mode now.
+const FALLBACK_PILLS = [{
+  id: 'fb-task',
+  label: 'Add To Do',
+  icon: 'ti-checklist',
+  colorLight: '#001A4A',
+  colorDark: 'rgba(255,255,255,0.6)',
+  type: 'task',
+  mode: 'work',
+  config: {
+    instruction: TASK_PILL_INSTRUCTION,
+    seed: 'To Do: '
+  },
+  enabled: true
+}, {
+  id: 'fb-kpis',
+  label: 'Add KPIs',
+  icon: 'ti-chart-bar',
+  colorLight: '#AD832F',
+  colorDark: '#C9A45A',
+  type: 'prompt',
+  mode: 'work',
+  config: {
+    kpi: true,
+    prompt: 'Enter KPI'
+  },
+  enabled: true
+}];
+
+// Built-in pill, always shown first — starts a fresh chat.
+const NEW_CHAT_PILL = {
+  id: 'new-chat',
+  label: 'New Chat',
+  icon: 'ti-message-plus',
+  colorLight: '#001A4A',
+  colorDark: 'rgba(255,255,255,0.6)',
+  type: 'newchat',
+  config: {}
+};
+
+// Built-in Calendar Brief + Deals Update pills — always shown, like New Chat.
+// Hardcoded so they need no admin row or SQL; each opens the interactive
+// CalendarBriefCard. dispatchPill handles type 'calendar'.
+const CALENDAR_PILLS = [{
+  id: 'cal-daily',
+  label: "Today's Brief",
+  icon: 'ti-calendar-stats',
+  colorLight: '#5A3FA0',
+  colorDark: '#B79CEB',
+  type: 'calendar',
+  mode: 'work',
+  config: {
+    kind: 'daily'
+  },
+  enabled: true
+}, {
+  id: 'cal-weekly',
+  label: 'Weekly Brief',
+  icon: 'ti-calendar',
+  colorLight: '#5A3FA0',
+  colorDark: '#B79CEB',
+  type: 'calendar',
+  mode: 'work',
+  config: {
+    kind: 'weekly'
+  },
+  enabled: true
+}];
+// Prompt-only — the AI just asks conversationally, no special dispatch needed.
+const DEAL_PILL = {
+  id: 'fb-deal',
+  label: 'Deals Update',
+  icon: 'ti-currency-dollar',
+  type: 'soon',
+  config: {},
+  enabled: true
+};
+
+// Placeholder pills for features not built yet — rendered in neutral black/white with a
+// "SOON" badge (not the live AI_UI color) and dispatchPill's 'soon' case is a no-op alert.
+const SOON_PILLS = [{
+  id: 'soon-listing',
+  label: 'Req. Listing Presentation',
+  icon: 'ti-presentation',
+  type: 'soon',
+  config: {},
+  enabled: true
+}, {
+  id: 'soon-ctc',
+  label: 'CTC File Update',
+  icon: 'ti-refresh',
+  type: 'soon',
+  config: {},
+  enabled: true
+}, {
+  id: 'soon-timeoff',
+  label: 'File Time Off',
+  icon: 'ti-calendar-off',
+  type: 'soon',
+  config: {},
+  enabled: true
+}, {
+  id: 'soon-email',
+  label: 'Email Summary',
+  icon: 'ti-mail',
+  type: 'soon',
+  config: {},
+  enabled: true
+}, {
+  id: 'soon-calls',
+  label: "Today's Call List",
+  icon: 'ti-phone',
+  type: 'soon',
+  config: {},
+  enabled: true
+}, {
+  id: 'soon-score',
+  label: 'Latest Scorecard',
+  icon: 'ti-trophy',
+  type: 'soon',
+  config: {},
+  enabled: true
+}];
+
+// Curated icon set for the pill builder's icon picker (all verified Tabler names).
+const PILL_ICONS = ['ti-chart-bar', 'ti-presentation', 'ti-home', 'ti-currency-dollar', 'ti-users', 'ti-file-text', 'ti-calendar-stats', 'ti-sparkles', 'ti-clipboard', 'ti-clipboard-list', 'ti-mail', 'ti-phone', 'ti-map-pin', 'ti-building', 'ti-key', 'ti-calendar', 'ti-checklist', 'ti-notes', 'ti-report', 'ti-target', 'ti-trophy', 'ti-coin', 'ti-briefcase', 'ti-message'];
+
+// Color presets (light/dark pair) for pills.
+const PILL_COLORS = [{
+  l: '#AD832F',
+  d: '#C9A45A'
+},
+// gold
+{
+  l: '#001A4A',
+  d: 'rgba(255,255,255,0.6)'
+},
+// navy
+{
+  l: '#0F6E56',
+  d: '#5DCAA5'
+},
+// green
+{
+  l: '#9A3B3B',
+  d: '#E58A8A'
+},
+// red
+{
+  l: '#5A3FA0',
+  d: '#B79CEB'
+} // purple
+];
+
+// Make a safe template key from a label/question.
+function slugKey(s) {
+  return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24);
+}
+
+// Fill {key} placeholders from collected values; fall back to "Label: value" lines.
+function composeFromTemplate(template, values, items) {
+  if (template && template.trim()) {
+    return template.replace(/\{(\w+)\}/g, (m, k) => values[k] !== undefined && values[k] !== '' ? values[k] : '');
+  }
+  return (items || []).map(it => (it.label || it.question || it.key) + ': ' + (values[it.key] || '')).join('\n');
+}
+
+// Supabase helper for work_pills (mirrors ConvDB/ProfileDB: fail-open reads, throwing writes).
+const PillDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  uid() {
+    return window.SupabaseAuth?._state?.session?.user?.id || null;
+  },
+  _map(r) {
+    return {
+      id: r.id,
+      label: r.label,
+      icon: r.icon,
+      colorLight: r.color_light,
+      colorDark: r.color_dark,
+      type: r.type,
+      mode: r.mode || 'work',
+      config: r.config || {},
+      enabled: r.enabled,
+      sortOrder: r.sort_order,
+      roles: r.roles || []
+    };
+  },
+  async list() {
+    if (!this.client()) return null;
+    const {
+      data,
+      error
+    } = await this.client().from('work_pills').select('*').order('sort_order', {
+      ascending: true
+    }).order('created_at', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[PillDB] list:', error.message);
+      return null;
+    }
+    return (data || []).map(this._map);
+  },
+  async create(p) {
+    if (!this.client()) return;
+    const {
+      error
+    } = await this.client().from('work_pills').insert({
+      label: p.label,
+      icon: p.icon,
+      color_light: p.colorLight,
+      color_dark: p.colorDark,
+      type: p.type,
+      mode: p.mode || 'work',
+      config: p.config || {},
+      enabled: p.enabled !== false,
+      sort_order: p.sortOrder || 0,
+      roles: p.roles || [],
+      created_by: this.uid()
+    });
+    if (error) {
+      console.error('[PillDB] create:', error.message);
+      throw error;
+    }
+  },
+  async update(id, f) {
+    if (!this.client()) return;
+    const m = {};
+    if (f.label !== undefined) m.label = f.label;
+    if (f.icon !== undefined) m.icon = f.icon;
+    if (f.colorLight !== undefined) m.color_light = f.colorLight;
+    if (f.colorDark !== undefined) m.color_dark = f.colorDark;
+    if (f.type !== undefined) m.type = f.type;
+    if (f.mode !== undefined) m.mode = f.mode;
+    if (f.config !== undefined) m.config = f.config;
+    if (f.enabled !== undefined) m.enabled = f.enabled;
+    if (f.sortOrder !== undefined) m.sort_order = f.sortOrder;
+    if (f.roles !== undefined) m.roles = f.roles;
+    const {
+      error
+    } = await this.client().from('work_pills').update(m).eq('id', id);
+    if (error) {
+      console.error('[PillDB] update:', error.message);
+      throw error;
+    }
+  },
+  async remove(id) {
+    if (!this.client()) return;
+    const {
+      error
+    } = await this.client().from('work_pills').delete().eq('id', id);
+    if (error) {
+      console.error('[PillDB] remove:', error.message);
+      throw error;
+    }
+  },
+  async reorder(ids) {
+    if (!this.client()) return;
+    for (let i = 0; i < ids.length; i++) {
+      const {
+        error
+      } = await this.client().from('work_pills').update({
+        sort_order: i
+      }).eq('id', ids[i]);
+      if (error) {
+        console.error('[PillDB] reorder:', error.message);
+        throw error;
+      }
+    }
+  }
+};
+
+// ─── AI Chat Tab ─────────────────────────────────────────────────
+// ─── Calendar Brief inline card (native + interactive RSVP) ──────────
+// Fetches today's (daily) or the next 7 days' (weekly) Google Calendar events
+// and lets the user RSVP Yes/No per event — writes straight back via the
+// google-calendar edge function. No AI call.
+// ── Business-timezone helpers (TMG = America/Chicago). The brief shows every
+// user the same Central times, regardless of their device's own timezone. ──
+const BIZ_TZ = 'America/Chicago';
+function tzParts(date, tz) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).formatToParts(date).reduce((a, x) => (a[x.type] = x.value, a), {});
+}
+// Offset (ms) between the tz's wall-clock and UTC for a given instant.
+function tzOffsetMs(date, tz) {
+  const p = tzParts(date, tz);
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, p.hour === '24' ? 0 : +p.hour, +p.minute, +p.second);
+  return asUTC - date.getTime();
+}
+// Absolute Date for a given Central wall time (handles DST + month overflow).
+function bizWallToInstant(y, mo, d, h, mi) {
+  const guess = Date.UTC(y, mo - 1, d, h, mi, 0);
+  return new Date(guess - tzOffsetMs(new Date(guess), BIZ_TZ));
+}
+function bizYMD(date) {
+  const p = tzParts(date, BIZ_TZ);
+  return {
+    y: +p.year,
+    mo: +p.month,
+    d: +p.day
+  };
+}
+function bizDateKey(dval) {
+  const {
+    y,
+    mo,
+    d
+  } = bizYMD(new Date(dval));
+  return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+function CalendarBriefCard({
+  kind,
+  dark,
+  onCancel,
+  userName
+}) {
+  const isWeekly = kind === 'weekly';
+  const [st, setSt] = useState({
+    phase: 'loading',
+    events: [],
+    error: ''
+  });
+  const [quote, setQuote] = useState({
+    phase: 'idle',
+    text: ''
+  });
+  const [busy, setBusy] = useState({});
+  const GREEN = '#1E6B40',
+    RED = '#C0392B';
+  const evKey = e => (e.calendarId || 'primary') + '|' + e.id;
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const {
+        y,
+        mo,
+        d
+      } = bizYMD(new Date());
+      // Weekly = today through the end of THIS Mon–Sun week (e.g. Fri → Fri/Sat/Sun); daily = today only.
+      const dow = new Date(Date.UTC(y, mo - 1, d, 12)).getUTCDay(); // 0=Sun … 6=Sat
+      const span = isWeekly ? dow === 0 ? 1 : 8 - dow : 1;
+      const start = bizWallToInstant(y, mo, d, 0, 0);
+      const end = bizWallToInstant(y, mo, d + span, 0, 0);
+      try {
+        const evs = await fetchGoogleEvents(start.toISOString(), end.toISOString());
+        if (!alive) return;
+        const sorted = (evs || []).filter(e => e.start).sort((a, b) => new Date(a.start) - new Date(b.start));
+        setSt({
+          phase: 'ready',
+          events: sorted,
+          error: ''
+        });
+      } catch (e) {
+        if (!alive) return;
+        setSt({
+          phase: 'error',
+          events: [],
+          error: e.code === 'needs_connect' ? 'needs_connect' : e.message || 'Could not load your calendar'
+        });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [kind]);
+
+  // Fresh, original "Quote of the Day" at the top of the brief (per the email
+  // design). The schedule itself is built natively below — the AI only writes
+  // the quote. Fails silently so the schedule always shows.
+  useEffect(() => {
+    if (st.phase !== 'ready') return;
+    let alive = true;
+    setQuote({
+      phase: 'loading',
+      text: ''
+    });
+    (async () => {
+      try {
+        const sys = `You write a single short, fresh, ORIGINAL motivational or thoughtful quote for the top of someone's daily briefing. Make it genuinely original — do NOT use a famous or pre-existing quotation. One sentence, at most ~20 words. Reply with ONLY the quote text: no author, no quotation marks, no label.`;
+        const txt = await callAI([{
+          role: 'user',
+          content: 'Write the quote of the day.'
+        }], sys, 'ai_chat');
+        const clean = (txt || '').replace(/^["'\s]+|["'\s]+$/g, '').trim();
+        if (alive) setQuote({
+          phase: clean ? 'ready' : 'idle',
+          text: clean
+        });
+      } catch (e) {
+        if (alive) setQuote({
+          phase: 'idle',
+          text: ''
+        });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [st.phase, kind]);
+  async function rsvp(e, status) {
+    const k = evKey(e),
+      prev = e.myResponse;
+    setBusy(b => ({
+      ...b,
+      [k]: true
+    }));
+    setSt(s => ({
+      ...s,
+      events: s.events.map(x => evKey(x) === k ? {
+        ...x,
+        myResponse: status
+      } : x)
+    })); // optimistic
+    try {
+      const {
+        ok,
+        data
+      } = await callCalendar({
+        action: 'rsvp',
+        calendarId: e.calendarId,
+        eventId: e.id,
+        status
+      });
+      if (!ok) throw new Error(data.error || 'RSVP failed');
+    } catch (err) {
+      setSt(s => ({
+        ...s,
+        events: s.events.map(x => evKey(x) === k ? {
+          ...x,
+          myResponse: prev
+        } : x)
+      })); // revert
+      alert('Could not RSVP: ' + (err.message || err));
+    } finally {
+      setBusy(b => ({
+        ...b,
+        [k]: false
+      }));
+    }
+  }
+  const fmtTime = d => new Date(d).toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: BIZ_TZ
+  });
+  const fmtDayKey = key => new Date(key + 'T12:00:00Z').toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC'
+  });
+  const firstNames = e => (e.attendeesDetail || []).filter(a => !a.self && (a.name || a.email)).map(a => (a.name || a.email).split(/[ @]/)[0]).slice(0, 6);
+  const hourLabel = h => {
+    const ap = h >= 12 && h < 24 ? 'PM' : 'AM';
+    const hh = h % 12 || 12;
+    return hh + ':00 ' + ap;
+  };
+
+  // Group a list of events by their EXACT start time (all-day events bucketed separately).
+  const groupByExactTime = list => {
+    const allDay = list.filter(e => e.allDay);
+    const timed = list.filter(e => !e.allDay && e.start);
+    const map = new Map();
+    timed.forEach(e => {
+      const k = new Date(e.start).getTime();
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(e);
+    });
+    const groups = [...map.entries()].sort((a, b) => a[0] - b[0]).map(([t, evs]) => ({
+      kind: 'events',
+      sort: t,
+      time: t,
+      events: evs
+    }));
+    return {
+      allDay,
+      timed,
+      groups
+    };
+  };
+
+  // Whole hours 7AM–7PM with no timed event overlapping them, merged into ranges.
+  const emptyHourRows = timed => {
+    const {
+      y,
+      mo,
+      d
+    } = bizYMD(new Date());
+    const empties = [];
+    for (let h = 7; h <= 18; h++) {
+      const hs = bizWallToInstant(y, mo, d, h, 0),
+        he = bizWallToInstant(y, mo, d, h + 1, 0);
+      const covered = timed.some(e => {
+        const s = new Date(e.start),
+          en = new Date(e.end || e.start);
+        return s < he && en > hs;
+      });
+      if (!covered) empties.push(h);
+    }
+    const rows = [];
+    for (let i = 0; i < empties.length;) {
+      let j = i;
+      while (j + 1 < empties.length && empties[j + 1] === empties[j] + 1) j++;
+      const startH = empties[i],
+        endH = empties[j] + 1;
+      const sort = bizWallToInstant(y, mo, d, startH, 0).getTime();
+      rows.push({
+        kind: 'empty',
+        sort,
+        label: i === j ? hourLabel(startH) : hourLabel(startH) + ' – ' + hourLabel(endH)
+      });
+      i = j + 1;
+    }
+    return rows;
+  };
+
+  // Overlap detection (daily) for the Conflicts callout.
+  const conflicts = [];
+  if (!isWeekly) {
+    const t = st.events.filter(e => !e.allDay && e.start && e.end);
+    for (let i = 0; i < t.length; i++) for (let j = i + 1; j < t.length; j++) if (new Date(t[i].start) < new Date(t[j].end) && new Date(t[j].start) < new Date(t[i].end)) conflicts.push([t[i], t[j]]);
+  }
+  const cd = dark ? '#0A1730' : '#FFFFFF',
+    bd = dark ? '#152545' : C.border,
+    tx = dark ? '#fff' : C.navy,
+    sb = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const divider = dark ? bd : '#f0f0f0';
+  const quoteBg = dark ? 'rgba(255,255,255,0.06)' : '#f5f5f5';
+  const quoteTx = dark ? 'rgba(255,255,255,0.65)' : '#555';
+  const timeCol = dark ? sb : '#999';
+  const emptyCol = dark ? 'rgba(255,255,255,0.3)' : '#ccc';
+  const attCol = dark ? 'rgba(255,255,255,0.5)' : '#888';
+  const rowWrap = {
+    padding: '6px 0',
+    borderBottom: `1px solid ${divider}`
+  };
+  const timeLbl = {
+    fontSize: '0.72rem',
+    color: timeCol,
+    fontWeight: 600,
+    marginBottom: 4,
+    fontFamily: C.fontSans
+  };
+
+  // A single event line: ✅/⚠️ RSVP icon · title (Meet link blue) · attendee first names · tap RSVP.
+  function EventLine({
+    e
+  }) {
+    const k = evKey(e);
+    const invited = e.myResponse !== null && e.myResponse !== undefined;
+    const icon = invited ? e.myResponse === 'accepted' ? '✅' : '⚠️' : null;
+    const names = firstNames(e);
+    const btn = (label, status, active, color) => /*#__PURE__*/React.createElement("button", {
+      disabled: busy[k],
+      onClick: () => rsvp(e, status),
+      style: {
+        padding: '2px 10px',
+        borderRadius: 12,
+        cursor: busy[k] ? 'default' : 'pointer',
+        fontFamily: C.fontSans,
+        fontSize: '0.68rem',
+        fontWeight: 600,
+        opacity: busy[k] ? 0.5 : 1,
+        border: `1px solid ${active ? color : bd}`,
+        background: active ? color : 'transparent',
+        color: active ? '#fff' : sb
+      }
+    }, label);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        paddingLeft: 12,
+        marginBottom: 3
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.88rem',
+        lineHeight: 1.5
+      }
+    }, icon && /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginRight: 5
+      }
+    }, icon), e.hangoutLink ? /*#__PURE__*/React.createElement("a", {
+      href: e.hangoutLink,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      style: {
+        color: '#1a73e8',
+        textDecoration: 'none'
+      }
+    }, e.title) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: tx
+      }
+    }, e.title), names.length > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontStyle: 'italic',
+        fontSize: '0.78rem',
+        color: attCol,
+        marginLeft: 6
+      }
+    }, "(", names.join(', '), ")")), invited && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        marginTop: 5
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.58rem',
+        color: sb,
+        fontFamily: C.fontSans,
+        textTransform: 'uppercase',
+        letterSpacing: '0.06em'
+      }
+    }, "RSVP"), btn('Yes', 'accepted', e.myResponse === 'accepted', GREEN), btn('No', 'declined', e.myResponse === 'declined', RED)));
+  }
+  const Group = ({
+    label,
+    events
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: rowWrap
+  }, /*#__PURE__*/React.createElement("div", {
+    style: timeLbl
+  }, label), events.map(e => /*#__PURE__*/React.createElement(EventLine, {
+    key: evKey(e),
+    e: e
+  })));
+
+  // Daily: all-day group, then event-groups and empty-hour rows interleaved chronologically.
+  function DailySchedule() {
+    const {
+      allDay,
+      timed,
+      groups
+    } = groupByExactTime(st.events);
+    const rows = [...groups, ...emptyHourRows(timed)].sort((a, b) => a.sort - b.sort);
+    return /*#__PURE__*/React.createElement("div", null, allDay.length > 0 && /*#__PURE__*/React.createElement(Group, {
+      label: "All day",
+      events: allDay
+    }), rows.map((row, i) => row.kind === 'empty' ? /*#__PURE__*/React.createElement("div", {
+      key: 'em' + i,
+      style: rowWrap
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        ...timeLbl,
+        color: emptyCol
+      }
+    }, row.label), /*#__PURE__*/React.createElement("div", {
+      style: {
+        paddingLeft: 12,
+        color: emptyCol,
+        fontStyle: 'italic',
+        fontSize: '0.8rem'
+      }
+    }, "No Schedule")) : /*#__PURE__*/React.createElement("div", {
+      key: 'g' + i,
+      style: rowWrap
+    }, /*#__PURE__*/React.createElement("div", {
+      style: timeLbl
+    }, fmtTime(row.time)), row.events.map(e => /*#__PURE__*/React.createElement(EventLine, {
+      key: evKey(e),
+      e: e
+    })))));
+  }
+
+  // Weekly: group by day; within each day, all-day then event-groups by exact time.
+  function WeeklySchedule() {
+    const byDay = {};
+    st.events.forEach(e => {
+      const key = e.allDay ? (e.start || '').slice(0, 10) : bizDateKey(e.start);
+      (byDay[key] = byDay[key] || []).push(e);
+    });
+    return /*#__PURE__*/React.createElement("div", null, Object.keys(byDay).sort().map((key, di) => {
+      const {
+        allDay,
+        groups
+      } = groupByExactTime(byDay[key]);
+      return /*#__PURE__*/React.createElement("div", {
+        key: key,
+        style: {
+          marginTop: di === 0 ? 0 : 18,
+          marginBottom: 6
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginBottom: 8,
+          paddingBottom: 5,
+          borderBottom: `2px solid ${dark ? C.gold : C.navy}`,
+          fontSize: '0.86rem',
+          fontWeight: 800,
+          color: dark ? C.gold : C.navy,
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          fontFamily: C.fontSans
+        }
+      }, fmtDayKey(key)), allDay.length > 0 && /*#__PURE__*/React.createElement(Group, {
+        label: "All day",
+        events: allDay
+      }), groups.map((g, i) => /*#__PURE__*/React.createElement(Group, {
+        key: i,
+        label: fmtTime(g.time),
+        events: g.events
+      })));
+    }));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: cd,
+      border: `1px solid ${bd}`,
+      borderRadius: 16,
+      padding: 16,
+      margin: '8px 0',
+      maxWidth: 600
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-calendar-stats",
+    style: {
+      fontSize: 18,
+      color: dark ? C.gold : C.navy
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontFamily: C.fontDisplay,
+      fontStyle: 'italic',
+      fontSize: '1.15rem',
+      color: tx
+    }
+  }, isWeekly ? 'This Week' : "Today's Brief"), /*#__PURE__*/React.createElement("button", {
+    onClick: onCancel,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: sb,
+      fontSize: 18,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), st.phase === 'loading' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: sb,
+      fontSize: '0.82rem',
+      padding: '18px 0'
+    }
+  }, "Loading your calendar\u2026"), st.phase === 'error' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.82rem',
+      color: sb,
+      lineHeight: 1.6,
+      padding: '8px 0'
+    }
+  }, st.error === 'needs_connect' ? /*#__PURE__*/React.createElement("span", null, "Connect your Google Calendar first \u2014 open the calendar (top bar) and tap ", /*#__PURE__*/React.createElement("b", null, "Connect Calendar"), ", then try this pill again.") : /*#__PURE__*/React.createElement("span", null, "Couldn\u2019t load your calendar: ", st.error)), st.phase === 'ready' && /*#__PURE__*/React.createElement("div", null, (quote.phase === 'loading' || quote.phase === 'ready' && quote.text) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: quoteBg,
+      borderRadius: 6,
+      padding: '14px 18px',
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      letterSpacing: '0.08em',
+      color: '#999',
+      marginBottom: 6,
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans
+    }
+  }, "Quote of the Day"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontStyle: 'italic',
+      fontSize: 14,
+      color: quoteTx,
+      opacity: quote.phase === 'loading' ? 0.5 : 1
+    }
+  }, quote.phase === 'loading' ? '…' : quote.text)), st.events.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: sb,
+      fontSize: '0.85rem',
+      padding: '16px 0',
+      fontStyle: 'italic'
+    }
+  }, "Nothing scheduled ", isWeekly ? 'this week' : 'today', ". \uD83C\uDF89") : /*#__PURE__*/React.createElement("div", null, isWeekly ? /*#__PURE__*/React.createElement(WeeklySchedule, null) : /*#__PURE__*/React.createElement(DailySchedule, null), conflicts.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#fff8e1',
+      borderLeft: '4px solid #f5a623',
+      borderRadius: 4,
+      padding: '12px 16px',
+      marginTop: 20,
+      fontSize: '0.78rem',
+      color: '#7a5b00',
+      fontFamily: C.fontSans,
+      lineHeight: 1.5
+    }
+  }, "\u26A0\uFE0F ", /*#__PURE__*/React.createElement("b", null, "Conflicts"), " \u2014 ", conflicts.map(([a, b], i) => /*#__PURE__*/React.createElement("span", {
+    key: i
+  }, a.title, " (", fmtTime(a.start), ") & ", b.title, " (", fmtTime(b.start), ")", i < conflicts.length - 1 ? '; ' : ''))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 16,
+      fontSize: '0.72rem',
+      color: '#999',
+      fontFamily: C.fontSans
+    }
+  }, "Legend: \u2705 Confirmed \xA0|\xA0 \u26A0\uFE0F No RSVP"))));
+}
+
+// Pinned in the compact (active-chat) pill row; everything else lives behind the ⋯ overflow.
+const AI_PINNED_PILL_IDS = ['new-chat', 'fb-task'];
+const AI_COMPACT_ROW_H = 54;
+function AIChatTab({
+  user,
+  messages,
+  loading,
+  dark,
+  pills,
+  onPill,
+  flowCard,
+  flowKey,
+  projectName
+}) {
+  const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
+  const scrollRef = useRef(null);
+  const [showActions, setShowActions] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(() => typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, loading, flowKey]);
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const f = () => setReducedMotion(mq.matches);
+    mq.addEventListener ? mq.addEventListener('change', f) : mq.addListener(f);
+    return () => {
+      mq.removeEventListener ? mq.removeEventListener('change', f) : mq.removeListener(f);
+    };
+  }, []);
+  const empty = messages.length === 0 && !flowCard;
+  const allPills = pills || [];
+  // Row 1 = live pills, row 2 = "coming soon" placeholders — not an arbitrary half-split.
+  const marqueeRow1 = allPills.filter(p => p.type !== 'soon');
+  const marqueeRow2 = allPills.filter(p => p.type === 'soon');
+  const pinnedPills = allPills.filter(p => AI_PINNED_PILL_IDS.includes(p.id));
+
+  // "Coming soon" pills render neutral black/white (not the live AI_UI accent) with a SOON badge.
+  // Every pill renders in neutral black/white — "SOON" is the only thing that marks a
+  // placeholder, not a color difference. Marquee pills (the ones in the middle of the
+  // screen on a fresh chat) sit at 80% opacity so they read a touch quieter than the
+  // compact row's pinned pills, which are at full strength once you're actually chatting.
+  const pillChip = (p, key, compact) => {
+    const soon = p.type === 'soon';
+    return /*#__PURE__*/React.createElement("button", {
+      key: key,
+      onClick: () => onPill(p),
+      style: {
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
+        padding: compact ? '6px 12px' : '8px 16px 8px 12px',
+        borderRadius: compact ? 16 : 15,
+        border: '0.5px solid #DDD',
+        background: '#fff',
+        opacity: compact ? 1 : 0.8
+      }
+    }, soon && /*#__PURE__*/React.createElement("span", {
+      style: {
+        position: 'absolute',
+        top: -7,
+        left: 10,
+        padding: '1px 6px',
+        borderRadius: 8,
+        background: '#1A1A1A',
+        color: '#fff',
+        fontFamily: "'Jost', sans-serif",
+        fontSize: 7,
+        fontWeight: 700,
+        letterSpacing: '0.08em',
+        lineHeight: 1.4
+      }
+    }, "SOON"), /*#__PURE__*/React.createElement("i", {
+      className: `ti ${p.icon}`,
+      style: {
+        fontSize: 12,
+        color: '#1A1A1A'
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: "'Jost', sans-serif",
+        fontSize: compact ? 10 : 10.5,
+        fontWeight: 500,
+        color: '#1A1A1A'
+      }
+    }, p.label));
+  };
+  const marqueeRow = (items, dir) => {
+    if (!items.length) return null;
+    const loopItems = reducedMotion ? items : items.concat(items);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        overflow: 'hidden',
+        paddingTop: 10,
+        marginTop: -10,
+        maskImage: 'linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent)',
+        WebkitMaskImage: 'linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent)'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      className: reducedMotion ? '' : `tmg-marquee-track ${dir}`,
+      style: {
+        display: 'flex',
+        gap: 9,
+        width: reducedMotion ? '100%' : 'max-content',
+        justifyContent: reducedMotion ? 'center' : 'flex-start',
+        flexWrap: reducedMotion ? 'wrap' : 'nowrap'
+      }
+    }, loopItems.map((p, i) => pillChip(p, p.id + '-' + i, false))));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    ref: scrollRef,
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      padding: '20px 16px 64px'
+    }
+  }, projectName && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'center',
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '4px 12px',
+      borderRadius: 20,
+      background: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA',
+      border: `1px solid ${dark ? 'rgba(173,131,47,0.3)' : '#E8D9BC'}`,
+      fontFamily: C.fontSans,
+      fontSize: 11,
+      fontWeight: 600,
+      color: dark ? '#C9A45A' : '#AD832F'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-folder",
+    style: {
+      fontSize: 13
+    }
+  }), projectName)), empty ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      textAlign: 'center',
+      padding: '0 24px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '2rem',
+      fontWeight: 400,
+      fontStyle: 'italic',
+      color: C.navy,
+      fontFamily: C.fontDisplay
+    }
+  }, greeting(), ", ", firstName), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.8rem',
+      color: C.textSecondary,
+      marginTop: 8,
+      letterSpacing: '0.04em'
+    }
+  }, "What would you like to do?"), allPills.length > 0 &&
+  /*#__PURE__*/
+  // Bleed past both ancestors' padding (16px scroll area + 24px empty-state = 40px
+  // each side) so the marquee actually spans the full screen, not just its column.
+  React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+      marginTop: 22,
+      width: 'calc(100% + 80px)',
+      marginLeft: -40,
+      marginRight: -40
+    }
+  }, marqueeRow(marqueeRow1, 'left'), marqueeRow(marqueeRow2, 'right'))) : messages.map((m, i) => {
+    const isUser = m.role === 'user';
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        display: 'flex',
+        justifyContent: isUser ? 'flex-end' : 'flex-start',
+        marginBottom: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        maxWidth: '82%',
+        padding: '10px 14px',
+        borderRadius: 16,
+        fontSize: '0.9rem',
+        lineHeight: 1.55,
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        background: isUser ? C.navy : m.error ? '#FDECEA' : C.surface,
+        color: isUser ? '#fff' : m.error ? C.red : C.textPrimary,
+        border: isUser ? 'none' : `1px solid ${m.error ? C.red + '55' : C.border}`,
+        borderBottomRightRadius: isUser ? 4 : 16,
+        borderBottomLeftRadius: isUser ? 16 : 4,
+        boxShadow: isUser ? 'none' : '0 1px 2px rgba(0,26,74,0.05)'
+      }
+    }, (m.attachments || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 6,
+        marginBottom: m.content ? 8 : 0
+      }
+    }, m.attachments.map((a, ai) => a.kind === 'image' && a.url ? /*#__PURE__*/React.createElement("a", {
+      key: ai,
+      href: a.url,
+      target: "_blank",
+      rel: "noopener noreferrer"
+    }, /*#__PURE__*/React.createElement("img", {
+      src: a.url,
+      alt: a.name,
+      style: {
+        maxWidth: 200,
+        maxHeight: 200,
+        borderRadius: 10,
+        display: 'block',
+        objectFit: 'cover'
+      }
+    })) : /*#__PURE__*/React.createElement("a", {
+      key: ai,
+      href: a.url || undefined,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 7,
+        padding: '8px 10px',
+        borderRadius: 10,
+        maxWidth: 220,
+        background: isUser ? 'rgba(255,255,255,0.12)' : C.bg,
+        border: `1px solid ${isUser ? 'rgba(255,255,255,0.18)' : C.border}`,
+        textDecoration: 'none',
+        color: isUser ? '#fff' : C.textPrimary
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${a.kind === 'pdf' ? 'ti-file-type-pdf' : attFileIcon(a.name)}`,
+      style: {
+        fontSize: 18,
+        color: isUser ? '#fff' : C.gold,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.75rem',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, a.name)))), isUser || m.error ? m.content : /*#__PURE__*/React.createElement(MarkdownContent, {
+      text: m.content
+    })));
+  }), flowCard, loading && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'flex-start',
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '10px 14px',
+      borderRadius: 16,
+      borderBottomLeftRadius: 4,
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      color: C.textMuted,
+      fontSize: '0.9rem',
+      fontStyle: 'italic'
+    }
+  }, "Thinking\u2026"))), !empty && allPills.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 0,
+      height: AI_COMPACT_ROW_H,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7,
+      overflowX: 'auto',
+      padding: '0 16px',
+      borderTop: `1px solid ${dark ? '#152545' : C.border}`,
+      background: dark ? '#000D26' : C.bg
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowActions(true),
+    title: "More actions",
+    style: {
+      flexShrink: 0,
+      width: 30,
+      height: 30,
+      borderRadius: '50%',
+      cursor: 'pointer',
+      border: `0.5px solid ${AI_UI.border}`,
+      background: AI_UI.tint,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: AI_UI.primary
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-dots",
+    style: {
+      fontSize: 15
+    }
+  })), pinnedPills.map(p => pillChip(p, p.id, true))), !empty && showActions && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowActions(false),
+    style: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: AI_COMPACT_ROW_H,
+      zIndex: 24,
+      background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: AI_COMPACT_ROW_H,
+      zIndex: 25,
+      maxHeight: '60%',
+      overflowY: 'auto',
+      background: '#F5F0E8',
+      borderRadius: '16px 16px 0 0',
+      boxShadow: '0 -8px 28px rgba(0,0,0,0.18)',
+      padding: '8px 8px calc(8px + env(safe-area-inset-bottom))'
+    }
+  }, allPills.map(p => {
+    const soon = p.type === 'soon';
+    return /*#__PURE__*/React.createElement("button", {
+      key: p.id,
+      onClick: () => {
+        setShowActions(false);
+        onPill(p);
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        width: '100%',
+        textAlign: 'left',
+        cursor: 'pointer',
+        padding: '12px 12px',
+        borderRadius: 10,
+        border: 'none',
+        background: 'none'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${p.icon}`,
+      style: {
+        fontSize: 16,
+        color: '#1A1A1A',
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        fontFamily: "'Jost', sans-serif",
+        fontSize: 13,
+        fontWeight: 500,
+        color: '#001A4A'
+      }
+    }, p.label), soon && /*#__PURE__*/React.createElement("span", {
+      style: {
+        flexShrink: 0,
+        padding: '2px 7px',
+        borderRadius: 8,
+        background: '#1A1A1A',
+        color: '#fff',
+        fontFamily: "'Jost', sans-serif",
+        fontSize: 8,
+        fontWeight: 700,
+        letterSpacing: '0.08em'
+      }
+    }, "SOON"));
+  }))));
+}
+
+// ─── Settings Tab (placeholder for now) ──────────────────────────
+// ─── Location (countries + IANA time zones) + pets data ───
+const COUNTRIES = [{
+  "c": "AF",
+  "n": "Afghanistan"
+}, {
+  "c": "AX",
+  "n": "Åland Islands"
+}, {
+  "c": "AL",
+  "n": "Albania"
+}, {
+  "c": "DZ",
+  "n": "Algeria"
+}, {
+  "c": "AS",
+  "n": "American Samoa"
+}, {
+  "c": "AD",
+  "n": "Andorra"
+}, {
+  "c": "AO",
+  "n": "Angola"
+}, {
+  "c": "AI",
+  "n": "Anguilla"
+}, {
+  "c": "AQ",
+  "n": "Antarctica"
+}, {
+  "c": "AG",
+  "n": "Antigua and Barbuda"
+}, {
+  "c": "AR",
+  "n": "Argentina"
+}, {
+  "c": "AM",
+  "n": "Armenia"
+}, {
+  "c": "AW",
+  "n": "Aruba"
+}, {
+  "c": "AU",
+  "n": "Australia"
+}, {
+  "c": "AT",
+  "n": "Austria"
+}, {
+  "c": "AZ",
+  "n": "Azerbaijan"
+}, {
+  "c": "BS",
+  "n": "Bahamas"
+}, {
+  "c": "BH",
+  "n": "Bahrain"
+}, {
+  "c": "BD",
+  "n": "Bangladesh"
+}, {
+  "c": "BB",
+  "n": "Barbados"
+}, {
+  "c": "BY",
+  "n": "Belarus"
+}, {
+  "c": "BE",
+  "n": "Belgium"
+}, {
+  "c": "BZ",
+  "n": "Belize"
+}, {
+  "c": "BJ",
+  "n": "Benin"
+}, {
+  "c": "BM",
+  "n": "Bermuda"
+}, {
+  "c": "BT",
+  "n": "Bhutan"
+}, {
+  "c": "BO",
+  "n": "Bolivia"
+}, {
+  "c": "BA",
+  "n": "Bosnia and Herzegovina"
+}, {
+  "c": "BW",
+  "n": "Botswana"
+}, {
+  "c": "BR",
+  "n": "Brazil"
+}, {
+  "c": "IO",
+  "n": "British Indian Ocean Territory"
+}, {
+  "c": "BN",
+  "n": "Brunei"
+}, {
+  "c": "BG",
+  "n": "Bulgaria"
+}, {
+  "c": "BF",
+  "n": "Burkina Faso"
+}, {
+  "c": "BI",
+  "n": "Burundi"
+}, {
+  "c": "CV",
+  "n": "Cabo Verde"
+}, {
+  "c": "KH",
+  "n": "Cambodia"
+}, {
+  "c": "CM",
+  "n": "Cameroon"
+}, {
+  "c": "CA",
+  "n": "Canada"
+}, {
+  "c": "BQ",
+  "n": "Caribbean Netherlands"
+}, {
+  "c": "KY",
+  "n": "Cayman Islands"
+}, {
+  "c": "CF",
+  "n": "Central African Republic"
+}, {
+  "c": "TD",
+  "n": "Chad"
+}, {
+  "c": "CL",
+  "n": "Chile"
+}, {
+  "c": "CN",
+  "n": "China"
+}, {
+  "c": "CX",
+  "n": "Christmas Island"
+}, {
+  "c": "CC",
+  "n": "Cocos Islands"
+}, {
+  "c": "CO",
+  "n": "Colombia"
+}, {
+  "c": "KM",
+  "n": "Comoros"
+}, {
+  "c": "CK",
+  "n": "Cook Islands"
+}, {
+  "c": "CR",
+  "n": "Costa Rica"
+}, {
+  "c": "HR",
+  "n": "Croatia"
+}, {
+  "c": "CU",
+  "n": "Cuba"
+}, {
+  "c": "CW",
+  "n": "Curaçao"
+}, {
+  "c": "CY",
+  "n": "Cyprus"
+}, {
+  "c": "CZ",
+  "n": "Czechia"
+}, {
+  "c": "CD",
+  "n": "Democratic Republic of the Congo"
+}, {
+  "c": "DK",
+  "n": "Denmark"
+}, {
+  "c": "DJ",
+  "n": "Djibouti"
+}, {
+  "c": "DM",
+  "n": "Dominica"
+}, {
+  "c": "DO",
+  "n": "Dominican Republic"
+}, {
+  "c": "EC",
+  "n": "Ecuador"
+}, {
+  "c": "EG",
+  "n": "Egypt"
+}, {
+  "c": "SV",
+  "n": "El Salvador"
+}, {
+  "c": "GQ",
+  "n": "Equatorial Guinea"
+}, {
+  "c": "ER",
+  "n": "Eritrea"
+}, {
+  "c": "EE",
+  "n": "Estonia"
+}, {
+  "c": "SZ",
+  "n": "Eswatini"
+}, {
+  "c": "ET",
+  "n": "Ethiopia"
+}, {
+  "c": "FK",
+  "n": "Falkland Islands"
+}, {
+  "c": "FO",
+  "n": "Faroe Islands"
+}, {
+  "c": "FJ",
+  "n": "Fiji"
+}, {
+  "c": "FI",
+  "n": "Finland"
+}, {
+  "c": "FR",
+  "n": "France"
+}, {
+  "c": "GF",
+  "n": "French Guiana"
+}, {
+  "c": "PF",
+  "n": "French Polynesia"
+}, {
+  "c": "TF",
+  "n": "French Southern Territories"
+}, {
+  "c": "GA",
+  "n": "Gabon"
+}, {
+  "c": "GM",
+  "n": "Gambia"
+}, {
+  "c": "GE",
+  "n": "Georgia"
+}, {
+  "c": "DE",
+  "n": "Germany"
+}, {
+  "c": "GH",
+  "n": "Ghana"
+}, {
+  "c": "GI",
+  "n": "Gibraltar"
+}, {
+  "c": "GR",
+  "n": "Greece"
+}, {
+  "c": "GL",
+  "n": "Greenland"
+}, {
+  "c": "GD",
+  "n": "Grenada"
+}, {
+  "c": "GP",
+  "n": "Guadeloupe"
+}, {
+  "c": "GU",
+  "n": "Guam"
+}, {
+  "c": "GT",
+  "n": "Guatemala"
+}, {
+  "c": "GG",
+  "n": "Guernsey"
+}, {
+  "c": "GN",
+  "n": "Guinea"
+}, {
+  "c": "GW",
+  "n": "Guinea-Bissau"
+}, {
+  "c": "GY",
+  "n": "Guyana"
+}, {
+  "c": "HT",
+  "n": "Haiti"
+}, {
+  "c": "VA",
+  "n": "Holy See"
+}, {
+  "c": "HN",
+  "n": "Honduras"
+}, {
+  "c": "HK",
+  "n": "Hong Kong"
+}, {
+  "c": "HU",
+  "n": "Hungary"
+}, {
+  "c": "IS",
+  "n": "Iceland"
+}, {
+  "c": "IN",
+  "n": "India"
+}, {
+  "c": "ID",
+  "n": "Indonesia"
+}, {
+  "c": "IR",
+  "n": "Iran"
+}, {
+  "c": "IQ",
+  "n": "Iraq"
+}, {
+  "c": "IE",
+  "n": "Ireland"
+}, {
+  "c": "IM",
+  "n": "Isle of Man"
+}, {
+  "c": "IL",
+  "n": "Israel"
+}, {
+  "c": "IT",
+  "n": "Italy"
+}, {
+  "c": "CI",
+  "n": "Ivory Coast"
+}, {
+  "c": "JM",
+  "n": "Jamaica"
+}, {
+  "c": "JP",
+  "n": "Japan"
+}, {
+  "c": "JE",
+  "n": "Jersey"
+}, {
+  "c": "JO",
+  "n": "Jordan"
+}, {
+  "c": "KZ",
+  "n": "Kazakhstan"
+}, {
+  "c": "KE",
+  "n": "Kenya"
+}, {
+  "c": "KI",
+  "n": "Kiribati"
+}, {
+  "c": "KW",
+  "n": "Kuwait"
+}, {
+  "c": "KG",
+  "n": "Kyrgyzstan"
+}, {
+  "c": "LA",
+  "n": "Laos"
+}, {
+  "c": "LV",
+  "n": "Latvia"
+}, {
+  "c": "LB",
+  "n": "Lebanon"
+}, {
+  "c": "LS",
+  "n": "Lesotho"
+}, {
+  "c": "LR",
+  "n": "Liberia"
+}, {
+  "c": "LY",
+  "n": "Libya"
+}, {
+  "c": "LI",
+  "n": "Liechtenstein"
+}, {
+  "c": "LT",
+  "n": "Lithuania"
+}, {
+  "c": "LU",
+  "n": "Luxembourg"
+}, {
+  "c": "MO",
+  "n": "Macao"
+}, {
+  "c": "MG",
+  "n": "Madagascar"
+}, {
+  "c": "MW",
+  "n": "Malawi"
+}, {
+  "c": "MY",
+  "n": "Malaysia"
+}, {
+  "c": "MV",
+  "n": "Maldives"
+}, {
+  "c": "ML",
+  "n": "Mali"
+}, {
+  "c": "MT",
+  "n": "Malta"
+}, {
+  "c": "MH",
+  "n": "Marshall Islands"
+}, {
+  "c": "MQ",
+  "n": "Martinique"
+}, {
+  "c": "MR",
+  "n": "Mauritania"
+}, {
+  "c": "MU",
+  "n": "Mauritius"
+}, {
+  "c": "YT",
+  "n": "Mayotte"
+}, {
+  "c": "MX",
+  "n": "Mexico"
+}, {
+  "c": "FM",
+  "n": "Micronesia"
+}, {
+  "c": "MD",
+  "n": "Moldova"
+}, {
+  "c": "MC",
+  "n": "Monaco"
+}, {
+  "c": "MN",
+  "n": "Mongolia"
+}, {
+  "c": "ME",
+  "n": "Montenegro"
+}, {
+  "c": "MS",
+  "n": "Montserrat"
+}, {
+  "c": "MA",
+  "n": "Morocco"
+}, {
+  "c": "MZ",
+  "n": "Mozambique"
+}, {
+  "c": "MM",
+  "n": "Myanmar"
+}, {
+  "c": "NA",
+  "n": "Namibia"
+}, {
+  "c": "NR",
+  "n": "Nauru"
+}, {
+  "c": "NP",
+  "n": "Nepal"
+}, {
+  "c": "NL",
+  "n": "Netherlands"
+}, {
+  "c": "NC",
+  "n": "New Caledonia"
+}, {
+  "c": "NZ",
+  "n": "New Zealand"
+}, {
+  "c": "NI",
+  "n": "Nicaragua"
+}, {
+  "c": "NE",
+  "n": "Niger"
+}, {
+  "c": "NG",
+  "n": "Nigeria"
+}, {
+  "c": "NU",
+  "n": "Niue"
+}, {
+  "c": "NF",
+  "n": "Norfolk Island"
+}, {
+  "c": "KP",
+  "n": "North Korea"
+}, {
+  "c": "MK",
+  "n": "North Macedonia"
+}, {
+  "c": "MP",
+  "n": "Northern Mariana Islands"
+}, {
+  "c": "NO",
+  "n": "Norway"
+}, {
+  "c": "OM",
+  "n": "Oman"
+}, {
+  "c": "PK",
+  "n": "Pakistan"
+}, {
+  "c": "PW",
+  "n": "Palau"
+}, {
+  "c": "PS",
+  "n": "Palestine"
+}, {
+  "c": "PA",
+  "n": "Panama"
+}, {
+  "c": "PG",
+  "n": "Papua New Guinea"
+}, {
+  "c": "PY",
+  "n": "Paraguay"
+}, {
+  "c": "PE",
+  "n": "Peru"
+}, {
+  "c": "PH",
+  "n": "Philippines"
+}, {
+  "c": "PN",
+  "n": "Pitcairn"
+}, {
+  "c": "PL",
+  "n": "Poland"
+}, {
+  "c": "PT",
+  "n": "Portugal"
+}, {
+  "c": "PR",
+  "n": "Puerto Rico"
+}, {
+  "c": "QA",
+  "n": "Qatar"
+}, {
+  "c": "CG",
+  "n": "Republic of the Congo"
+}, {
+  "c": "RE",
+  "n": "Réunion"
+}, {
+  "c": "RO",
+  "n": "Romania"
+}, {
+  "c": "RU",
+  "n": "Russia"
+}, {
+  "c": "RW",
+  "n": "Rwanda"
+}, {
+  "c": "BL",
+  "n": "Saint Barthélemy"
+}, {
+  "c": "SH",
+  "n": "Saint Helena, Ascension and Tristan da Cunha"
+}, {
+  "c": "KN",
+  "n": "Saint Kitts and Nevis"
+}, {
+  "c": "LC",
+  "n": "Saint Lucia"
+}, {
+  "c": "MF",
+  "n": "Saint Martin"
+}, {
+  "c": "PM",
+  "n": "Saint Pierre and Miquelon"
+}, {
+  "c": "VC",
+  "n": "Saint Vincent and the Grenadines"
+}, {
+  "c": "WS",
+  "n": "Samoa"
+}, {
+  "c": "SM",
+  "n": "San Marino"
+}, {
+  "c": "ST",
+  "n": "Sao Tome and Principe"
+}, {
+  "c": "SA",
+  "n": "Saudi Arabia"
+}, {
+  "c": "SN",
+  "n": "Senegal"
+}, {
+  "c": "RS",
+  "n": "Serbia"
+}, {
+  "c": "SC",
+  "n": "Seychelles"
+}, {
+  "c": "SL",
+  "n": "Sierra Leone"
+}, {
+  "c": "SG",
+  "n": "Singapore"
+}, {
+  "c": "SX",
+  "n": "Sint Maarten"
+}, {
+  "c": "SK",
+  "n": "Slovakia"
+}, {
+  "c": "SI",
+  "n": "Slovenia"
+}, {
+  "c": "SB",
+  "n": "Solomon Islands"
+}, {
+  "c": "SO",
+  "n": "Somalia"
+}, {
+  "c": "ZA",
+  "n": "South Africa"
+}, {
+  "c": "GS",
+  "n": "South Georgia and the South Sandwich Islands"
+}, {
+  "c": "KR",
+  "n": "South Korea"
+}, {
+  "c": "SS",
+  "n": "South Sudan"
+}, {
+  "c": "ES",
+  "n": "Spain"
+}, {
+  "c": "LK",
+  "n": "Sri Lanka"
+}, {
+  "c": "SD",
+  "n": "Sudan"
+}, {
+  "c": "SR",
+  "n": "Suriname"
+}, {
+  "c": "SJ",
+  "n": "Svalbard and Jan Mayen"
+}, {
+  "c": "SE",
+  "n": "Sweden"
+}, {
+  "c": "CH",
+  "n": "Switzerland"
+}, {
+  "c": "SY",
+  "n": "Syria"
+}, {
+  "c": "TW",
+  "n": "Taiwan"
+}, {
+  "c": "TJ",
+  "n": "Tajikistan"
+}, {
+  "c": "TZ",
+  "n": "Tanzania"
+}, {
+  "c": "TH",
+  "n": "Thailand"
+}, {
+  "c": "TL",
+  "n": "Timor-Leste"
+}, {
+  "c": "TG",
+  "n": "Togo"
+}, {
+  "c": "TK",
+  "n": "Tokelau"
+}, {
+  "c": "TO",
+  "n": "Tonga"
+}, {
+  "c": "TT",
+  "n": "Trinidad and Tobago"
+}, {
+  "c": "TN",
+  "n": "Tunisia"
+}, {
+  "c": "TR",
+  "n": "Türkiye"
+}, {
+  "c": "TM",
+  "n": "Turkmenistan"
+}, {
+  "c": "TC",
+  "n": "Turks and Caicos Islands"
+}, {
+  "c": "TV",
+  "n": "Tuvalu"
+}, {
+  "c": "UG",
+  "n": "Uganda"
+}, {
+  "c": "UA",
+  "n": "Ukraine"
+}, {
+  "c": "AE",
+  "n": "United Arab Emirates"
+}, {
+  "c": "GB",
+  "n": "United Kingdom"
+}, {
+  "c": "UM",
+  "n": "United States Minor Outlying Islands"
+}, {
+  "c": "US",
+  "n": "United States of America"
+}, {
+  "c": "UY",
+  "n": "Uruguay"
+}, {
+  "c": "UZ",
+  "n": "Uzbekistan"
+}, {
+  "c": "VU",
+  "n": "Vanuatu"
+}, {
+  "c": "VE",
+  "n": "Venezuela"
+}, {
+  "c": "VN",
+  "n": "Vietnam"
+}, {
+  "c": "VG",
+  "n": "Virgin Islands (UK)"
+}, {
+  "c": "VI",
+  "n": "Virgin Islands (US)"
+}, {
+  "c": "WF",
+  "n": "Wallis and Futuna"
+}, {
+  "c": "EH",
+  "n": "Western Sahara"
+}, {
+  "c": "YE",
+  "n": "Yemen"
+}, {
+  "c": "ZM",
+  "n": "Zambia"
+}, {
+  "c": "ZW",
+  "n": "Zimbabwe"
+}];
+const COUNTRY_TZ = {
+  "AD": ["Europe/Andorra"],
+  "AE": ["Asia/Dubai"],
+  "AF": ["Asia/Kabul"],
+  "AG": ["America/Puerto_Rico"],
+  "AI": ["America/Puerto_Rico"],
+  "AL": ["Europe/Tirane"],
+  "AM": ["Asia/Yerevan"],
+  "AO": ["Africa/Lagos"],
+  "AQ": ["Antarctica/Casey", "Antarctica/Davis", "Antarctica/Mawson", "Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/Troll", "Antarctica/Vostok", "Asia/Riyadh", "Asia/Singapore", "Pacific/Auckland", "Pacific/Port_Moresby"],
+  "AR": ["America/Argentina/Buenos_Aires", "America/Argentina/Catamarca", "America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja", "America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta", "America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman", "America/Argentina/Ushuaia"],
+  "AS": ["Pacific/Pago_Pago"],
+  "AT": ["Europe/Vienna"],
+  "AU": ["Antarctica/Macquarie", "Asia/Tokyo", "Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill", "Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/Lindeman", "Australia/Lord_Howe", "Australia/Melbourne", "Australia/Perth", "Australia/Sydney"],
+  "AW": ["America/Puerto_Rico"],
+  "AX": ["Europe/Helsinki"],
+  "AZ": ["Asia/Baku"],
+  "BA": ["Europe/Belgrade"],
+  "BB": ["America/Barbados"],
+  "BD": ["Asia/Dhaka"],
+  "BE": ["Europe/Brussels"],
+  "BF": ["Africa/Abidjan"],
+  "BG": ["Europe/Sofia"],
+  "BH": ["Asia/Qatar"],
+  "BI": ["Africa/Maputo"],
+  "BJ": ["Africa/Lagos"],
+  "BL": ["America/Puerto_Rico"],
+  "BM": ["Atlantic/Bermuda"],
+  "BN": ["Asia/Kuching"],
+  "BO": ["America/La_Paz"],
+  "BQ": ["America/Puerto_Rico"],
+  "BR": ["America/Araguaina", "America/Bahia", "America/Belem", "America/Boa_Vista", "America/Campo_Grande", "America/Cuiaba", "America/Eirunepe", "America/Fortaleza", "America/Maceio", "America/Manaus", "America/Noronha", "America/Porto_Velho", "America/Recife", "America/Rio_Branco", "America/Santarem", "America/Sao_Paulo"],
+  "BS": ["America/Toronto"],
+  "BT": ["Asia/Thimphu"],
+  "BW": ["Africa/Maputo"],
+  "BY": ["Europe/Minsk"],
+  "BZ": ["America/Belize"],
+  "CA": ["America/Cambridge_Bay", "America/Dawson", "America/Dawson_Creek", "America/Edmonton", "America/Fort_Nelson", "America/Glace_Bay", "America/Goose_Bay", "America/Halifax", "America/Inuvik", "America/Iqaluit", "America/Moncton", "America/Panama", "America/Phoenix", "America/Puerto_Rico", "America/Rankin_Inlet", "America/Regina", "America/Resolute", "America/St_Johns", "America/Swift_Current", "America/Toronto", "America/Vancouver", "America/Whitehorse", "America/Winnipeg"],
+  "CC": ["Asia/Yangon"],
+  "CD": ["Africa/Lagos", "Africa/Maputo"],
+  "CF": ["Africa/Lagos"],
+  "CG": ["Africa/Lagos"],
+  "CH": ["Europe/Zurich"],
+  "CI": ["Africa/Abidjan"],
+  "CK": ["Pacific/Rarotonga"],
+  "CL": ["America/Coyhaique", "America/Punta_Arenas", "America/Santiago", "Pacific/Easter"],
+  "CM": ["Africa/Lagos"],
+  "CN": ["Asia/Shanghai", "Asia/Urumqi"],
+  "CO": ["America/Bogota"],
+  "CR": ["America/Costa_Rica"],
+  "CU": ["America/Havana"],
+  "CV": ["Atlantic/Cape_Verde"],
+  "CW": ["America/Puerto_Rico"],
+  "CX": ["Asia/Bangkok"],
+  "CY": ["Asia/Famagusta", "Asia/Nicosia"],
+  "CZ": ["Europe/Prague"],
+  "DE": ["Europe/Berlin", "Europe/Zurich"],
+  "DJ": ["Africa/Nairobi"],
+  "DK": ["Europe/Berlin"],
+  "DM": ["America/Puerto_Rico"],
+  "DO": ["America/Santo_Domingo"],
+  "DZ": ["Africa/Algiers"],
+  "EC": ["America/Guayaquil", "Pacific/Galapagos"],
+  "EE": ["Europe/Tallinn"],
+  "EG": ["Africa/Cairo"],
+  "EH": ["Africa/El_Aaiun"],
+  "ER": ["Africa/Nairobi"],
+  "ES": ["Africa/Ceuta", "Atlantic/Canary", "Europe/Madrid"],
+  "ET": ["Africa/Nairobi"],
+  "FI": ["Europe/Helsinki"],
+  "FJ": ["Pacific/Fiji"],
+  "FK": ["Atlantic/Stanley"],
+  "FM": ["Pacific/Guadalcanal", "Pacific/Kosrae", "Pacific/Port_Moresby"],
+  "FO": ["Atlantic/Faroe"],
+  "FR": ["Europe/Paris"],
+  "GA": ["Africa/Lagos"],
+  "GB": ["Europe/London"],
+  "GD": ["America/Puerto_Rico"],
+  "GE": ["Asia/Tbilisi"],
+  "GF": ["America/Cayenne"],
+  "GG": ["Europe/London"],
+  "GH": ["Africa/Abidjan"],
+  "GI": ["Europe/Gibraltar"],
+  "GL": ["America/Danmarkshavn", "America/Nuuk", "America/Scoresbysund", "America/Thule"],
+  "GM": ["Africa/Abidjan"],
+  "GN": ["Africa/Abidjan"],
+  "GP": ["America/Puerto_Rico"],
+  "GQ": ["Africa/Lagos"],
+  "GR": ["Europe/Athens"],
+  "GS": ["Atlantic/South_Georgia"],
+  "GT": ["America/Guatemala"],
+  "GU": ["Pacific/Guam"],
+  "GW": ["Africa/Bissau"],
+  "GY": ["America/Guyana"],
+  "HK": ["Asia/Hong_Kong"],
+  "HN": ["America/Tegucigalpa"],
+  "HR": ["Europe/Belgrade"],
+  "HT": ["America/Port-au-Prince"],
+  "HU": ["Europe/Budapest"],
+  "ID": ["Asia/Jakarta", "Asia/Jayapura", "Asia/Makassar", "Asia/Pontianak"],
+  "IE": ["Europe/Dublin"],
+  "IL": ["Asia/Jerusalem"],
+  "IM": ["Europe/London"],
+  "IN": ["Asia/Kolkata"],
+  "IO": ["Indian/Chagos"],
+  "IQ": ["Asia/Baghdad"],
+  "IR": ["Asia/Tehran"],
+  "IS": ["Africa/Abidjan"],
+  "IT": ["Europe/Rome"],
+  "JE": ["Europe/London"],
+  "JM": ["America/Jamaica"],
+  "JO": ["Asia/Amman"],
+  "JP": ["Asia/Tokyo"],
+  "KE": ["Africa/Nairobi"],
+  "KG": ["Asia/Bishkek"],
+  "KH": ["Asia/Bangkok"],
+  "KI": ["Pacific/Kanton", "Pacific/Kiritimati", "Pacific/Tarawa"],
+  "KM": ["Africa/Nairobi"],
+  "KN": ["America/Puerto_Rico"],
+  "KP": ["Asia/Pyongyang"],
+  "KR": ["Asia/Seoul"],
+  "KW": ["Asia/Riyadh"],
+  "KY": ["America/Panama"],
+  "KZ": ["Asia/Almaty", "Asia/Aqtau", "Asia/Aqtobe", "Asia/Atyrau", "Asia/Oral", "Asia/Qostanay", "Asia/Qyzylorda"],
+  "LA": ["Asia/Bangkok"],
+  "LB": ["Asia/Beirut"],
+  "LC": ["America/Puerto_Rico"],
+  "LI": ["Europe/Zurich"],
+  "LK": ["Asia/Colombo"],
+  "LR": ["Africa/Monrovia"],
+  "LS": ["Africa/Johannesburg"],
+  "LT": ["Europe/Vilnius"],
+  "LU": ["Europe/Brussels"],
+  "LV": ["Europe/Riga"],
+  "LY": ["Africa/Tripoli"],
+  "MA": ["Africa/Casablanca"],
+  "MC": ["Europe/Paris"],
+  "MD": ["Europe/Chisinau"],
+  "ME": ["Europe/Belgrade"],
+  "MF": ["America/Puerto_Rico"],
+  "MG": ["Africa/Nairobi"],
+  "MH": ["Pacific/Kwajalein", "Pacific/Tarawa"],
+  "MK": ["Europe/Belgrade"],
+  "ML": ["Africa/Abidjan"],
+  "MM": ["Asia/Yangon"],
+  "MN": ["Asia/Hovd", "Asia/Ulaanbaatar"],
+  "MO": ["Asia/Macau"],
+  "MP": ["Pacific/Guam"],
+  "MQ": ["America/Martinique"],
+  "MR": ["Africa/Abidjan"],
+  "MS": ["America/Puerto_Rico"],
+  "MT": ["Europe/Malta"],
+  "MU": ["Indian/Mauritius"],
+  "MV": ["Indian/Maldives"],
+  "MW": ["Africa/Maputo"],
+  "MX": ["America/Bahia_Banderas", "America/Cancun", "America/Chihuahua", "America/Ciudad_Juarez", "America/Hermosillo", "America/Matamoros", "America/Mazatlan", "America/Merida", "America/Mexico_City", "America/Monterrey", "America/Ojinaga", "America/Tijuana"],
+  "MY": ["Asia/Kuching", "Asia/Singapore"],
+  "MZ": ["Africa/Maputo"],
+  "NA": ["Africa/Windhoek"],
+  "NC": ["Pacific/Noumea"],
+  "NE": ["Africa/Lagos"],
+  "NF": ["Pacific/Norfolk"],
+  "NG": ["Africa/Lagos"],
+  "NI": ["America/Managua"],
+  "NL": ["Europe/Brussels"],
+  "NO": ["Europe/Berlin"],
+  "NP": ["Asia/Kathmandu"],
+  "NR": ["Pacific/Nauru"],
+  "NU": ["Pacific/Niue"],
+  "NZ": ["Pacific/Auckland", "Pacific/Chatham"],
+  "OM": ["Asia/Dubai"],
+  "PA": ["America/Panama"],
+  "PE": ["America/Lima"],
+  "PF": ["Pacific/Gambier", "Pacific/Marquesas", "Pacific/Tahiti"],
+  "PG": ["Pacific/Bougainville", "Pacific/Port_Moresby"],
+  "PH": ["Asia/Manila"],
+  "PK": ["Asia/Karachi"],
+  "PL": ["Europe/Warsaw"],
+  "PM": ["America/Miquelon"],
+  "PN": ["Pacific/Pitcairn"],
+  "PR": ["America/Puerto_Rico"],
+  "PS": ["Asia/Gaza", "Asia/Hebron"],
+  "PT": ["Atlantic/Azores", "Atlantic/Madeira", "Europe/Lisbon"],
+  "PW": ["Pacific/Palau"],
+  "PY": ["America/Asuncion"],
+  "QA": ["Asia/Qatar"],
+  "RE": ["Asia/Dubai"],
+  "RO": ["Europe/Bucharest"],
+  "RS": ["Europe/Belgrade"],
+  "RU": ["Asia/Anadyr", "Asia/Barnaul", "Asia/Chita", "Asia/Irkutsk", "Asia/Kamchatka", "Asia/Khandyga", "Asia/Krasnoyarsk", "Asia/Magadan", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk", "Asia/Sakhalin", "Asia/Srednekolymsk", "Asia/Tomsk", "Asia/Ust-Nera", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yekaterinburg", "Europe/Astrakhan", "Europe/Kaliningrad", "Europe/Kirov", "Europe/Moscow", "Europe/Samara", "Europe/Saratov", "Europe/Simferopol", "Europe/Ulyanovsk", "Europe/Volgograd"],
+  "RW": ["Africa/Maputo"],
+  "SA": ["Asia/Riyadh"],
+  "SB": ["Pacific/Guadalcanal"],
+  "SC": ["Asia/Dubai"],
+  "SD": ["Africa/Khartoum"],
+  "SE": ["Europe/Berlin"],
+  "SG": ["Asia/Singapore"],
+  "SH": ["Africa/Abidjan"],
+  "SI": ["Europe/Belgrade"],
+  "SJ": ["Europe/Berlin"],
+  "SK": ["Europe/Prague"],
+  "SL": ["Africa/Abidjan"],
+  "SM": ["Europe/Rome"],
+  "SN": ["Africa/Abidjan"],
+  "SO": ["Africa/Nairobi"],
+  "SR": ["America/Paramaribo"],
+  "SS": ["Africa/Juba"],
+  "ST": ["Africa/Sao_Tome"],
+  "SV": ["America/El_Salvador"],
+  "SX": ["America/Puerto_Rico"],
+  "SY": ["Asia/Damascus"],
+  "SZ": ["Africa/Johannesburg"],
+  "TC": ["America/Grand_Turk"],
+  "TD": ["Africa/Ndjamena"],
+  "TF": ["Asia/Dubai", "Indian/Maldives"],
+  "TG": ["Africa/Abidjan"],
+  "TH": ["Asia/Bangkok"],
+  "TJ": ["Asia/Dushanbe"],
+  "TK": ["Pacific/Fakaofo"],
+  "TL": ["Asia/Dili"],
+  "TM": ["Asia/Ashgabat"],
+  "TN": ["Africa/Tunis"],
+  "TO": ["Pacific/Tongatapu"],
+  "TR": ["Europe/Istanbul"],
+  "TT": ["America/Puerto_Rico"],
+  "TV": ["Pacific/Tarawa"],
+  "TW": ["Asia/Taipei"],
+  "TZ": ["Africa/Nairobi"],
+  "UA": ["Europe/Kyiv", "Europe/Simferopol"],
+  "UG": ["Africa/Nairobi"],
+  "UM": ["Pacific/Pago_Pago", "Pacific/Tarawa"],
+  "US": ["America/Adak", "America/Anchorage", "America/Boise", "America/Chicago", "America/Denver", "America/Detroit", "America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo", "America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Juneau", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Los_Angeles", "America/Menominee", "America/Metlakatla", "America/New_York", "America/Nome", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Phoenix", "America/Sitka", "America/Yakutat", "Pacific/Honolulu"],
+  "UY": ["America/Montevideo"],
+  "UZ": ["Asia/Samarkand", "Asia/Tashkent"],
+  "VA": ["Europe/Rome"],
+  "VC": ["America/Puerto_Rico"],
+  "VE": ["America/Caracas"],
+  "VG": ["America/Puerto_Rico"],
+  "VI": ["America/Puerto_Rico"],
+  "VN": ["Asia/Bangkok", "Asia/Ho_Chi_Minh"],
+  "VU": ["Pacific/Efate"],
+  "WF": ["Pacific/Tarawa"],
+  "WS": ["Pacific/Apia"],
+  "YE": ["Asia/Riyadh"],
+  "YT": ["Africa/Nairobi"],
+  "ZA": ["Africa/Johannesburg"],
+  "ZM": ["Africa/Maputo"],
+  "ZW": ["Africa/Maputo"]
+};
+const tzCity = z => (z || '').split('/').pop().replace(/_/g, ' ');
+const localTimeIn = z => {
+  try {
+    return new Date().toLocaleTimeString('en-US', {
+      timeZone: z,
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  } catch (e) {
+    return '';
+  }
+};
+const PETS = [{
+  k: 'dog',
+  label: 'Dog',
+  e: '🐶'
+}, {
+  k: 'cat',
+  label: 'Cat',
+  e: '🐱'
+}, {
+  k: 'bird',
+  label: 'Bird',
+  e: '🐦'
+}, {
+  k: 'fish',
+  label: 'Fish',
+  e: '🐠'
+}, {
+  k: 'rabbit',
+  label: 'Rabbit',
+  e: '🐰'
+}, {
+  k: 'hamster',
+  label: 'Hamster',
+  e: '🐹'
+}, {
+  k: 'turtle',
+  label: 'Turtle',
+  e: '🐢'
+}, {
+  k: 'reptile',
+  label: 'Reptile',
+  e: '🦎'
+}, {
+  k: 'horse',
+  label: 'Horse',
+  e: '🐴'
+}];
+const petLabel = k => {
+  const p = PETS.find(x => x.k === k);
+  return p ? p.e + ' ' + p.label : k;
+};
+const ACCESS_LABEL = {
+  admin: 'Admin',
+  operations: 'Operations',
+  agent: 'Sales Agent',
+  tc: 'Transaction Coordinator',
+  pending: 'Pending'
+};
+const STATUS_LABEL = {
+  active: 'Active',
+  pending: 'Pending',
+  disabled: 'Disabled'
+};
+// Access is a LIST of roles (Postgres text[]). Helpers are backward-compatible with old single-string values.
+const toRoles = a => (Array.isArray(a) ? a : a ? [a] : []).filter(r => r && r !== 'pending');
+const hasAdmin = a => toRoles(a).some(r => r === 'admin' || r === 'operations');
+const accessLabel = a => {
+  const r = toRoles(a);
+  return r.length ? r.map(x => ACCESS_LABEL[x] || x).join(' · ') : 'Pending';
+};
+// Apps this user may open. null = everything (admins, or no role set).
+// Otherwise a Set of app ids; 'more' + 'settings' are always available separately.
+function allowedAppSet(a, cfg) {
+  const roles = toRoles(a);
+  if (!roles.length) return null; // no roles → all (fallback)
+  if (roles.some(r => r === 'admin')) return null; // admins → all (operations is configurable)
+  const set = new Set();
+  ACCESS_APPS.forEach(app => {
+    const appRoles = cfg && Array.isArray(cfg[app.id]) ? cfg[app.id] : DEFAULT_ACCESS[app.id] || [];
+    if (roles.some(r => appRoles.includes(r))) set.add(app.id);
+  });
+  return set;
+}
+
+// Reads/writes the single-row app_access config (admins write; everyone reads).
+const AccessDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  async load() {
+    if (!this.client()) return null;
+    const {
+      data,
+      error
+    } = await this.client().from('app_access').select('config').eq('id', 1).maybeSingle();
+    if (error) {
+      console.error('[AccessDB] load:', error.message);
+      return null;
+    }
+    return data && data.config || null;
+  },
+  async save(config) {
+    if (!this.client()) return;
+    const {
+      error
+    } = await this.client().from('app_access').upsert({
+      id: 1,
+      config,
+      updated_at: new Date().toISOString()
+    });
+    if (error) {
+      console.error('[AccessDB] save:', error.message);
+      throw error;
+    }
+  }
+};
+
+// ─── Guide registry (static; each guide is its own HTML file) ─────────
+// The Guide tab is a read-only split view: left = this list, right = the
+// selected guide's HTML page embedded (?embed=1). To add a guide: build its
+// HTML page (with the embed light-mode) and add an entry here — no backend.
+const GUIDE_SECTIONS = ['Getting Started', 'App Guides', 'Reference'];
+const GUIDES = [{
+  slug: 'get-started',
+  emoji: '🚀',
+  title: 'Get Started',
+  description: 'Install the TMG App on your iPhone in under 60 seconds — no App Store needed.',
+  section: 'Getting Started',
+  url: '/get-started/'
+}, {
+  slug: 'ai-chat',
+  emoji: '✨',
+  title: 'AI Chat',
+  description: 'Pill shortcuts, chat history, and projects.',
+  section: 'App Guides',
+  url: '/ai-chat/'
+}, {
+  slug: 'enter-kpis',
+  emoji: '📊',
+  title: 'Enter KPIs',
+  description: 'Log your KPIs two ways — fill out a form or paste a note (the // divider).',
+  section: 'App Guides',
+  url: '/Enter-KPIs/'
+}];
+
+// ─── Tasks ───────────────────────────────────────────────────────
+const TASK_STATUS = [{
+  id: 'todo',
+  label: 'To Do',
+  color: '#AD832F',
+  bg: '#F3EBDA',
+  border: '#E8D9BC'
+},
+// gold
+{
+  id: 'in_progress',
+  label: 'In Progress',
+  color: '#185FA5',
+  bg: '#EEF3FB',
+  border: '#B8D4F0'
+},
+// blue
+{
+  id: 'stuck',
+  label: 'Stuck',
+  color: '#9B1C1C',
+  bg: '#FEE2E2',
+  border: '#FBBCBC'
+},
+// red
+{
+  id: 'done',
+  label: 'Completed',
+  color: '#0F6E56',
+  bg: '#E6F2EC',
+  border: '#A0D9C4'
+} // green
+];
+const TASK_PRIORITY = [{
+  id: 'low',
+  label: 'Low',
+  color: '#CA9A04'
+},
+// yellow
+{
+  id: 'medium',
+  label: 'Medium',
+  color: '#E07B00'
+},
+// orange
+{
+  id: 'high',
+  label: 'High',
+  color: '#DC2626'
+} // red
+];
+const TASK_RECUR = [{
+  id: 'none',
+  label: 'Does not repeat'
+}, {
+  id: 'daily',
+  label: 'Daily'
+}, {
+  id: 'weekly',
+  label: 'Weekly'
+}, {
+  id: 'monthly',
+  label: 'Monthly'
+}, {
+  id: 'custom',
+  label: 'Custom…'
+}];
+// Which fields carry over when a recurring task spawns its next instance.
+const RECUR_COPY_FIELDS = [{
+  id: 'description',
+  label: 'Description'
+}, {
+  id: 'context',
+  label: 'Context'
+}, {
+  id: 'priority',
+  label: 'Priority'
+}, {
+  id: 'project',
+  label: 'Project'
+}, {
+  id: 'people',
+  label: 'Assignees & assigners'
+}, {
+  id: 'decision',
+  label: 'Decision (question + options)'
+}, {
+  id: 'links',
+  label: 'Working URL & email'
+}];
+const RECUR_COPY_DEFAULT = RECUR_COPY_FIELDS.map(f => f.id);
+const statusLabel = s => (TASK_STATUS.find(x => x.id === s) || {}).label || s;
+const statusColor = s => (TASK_STATUS.find(x => x.id === s) || {}).color || '#6B6B6B';
+const statusBg = s => (TASK_STATUS.find(x => x.id === s) || {}).bg || '#EEEEEE';
+const statusBorder = s => (TASK_STATUS.find(x => x.id === s) || {}).border || '#E4DFD4';
+const priorityLabel = p => (TASK_PRIORITY.find(x => x.id === p) || {}).label || p;
+const priorityColor = p => (TASK_PRIORITY.find(x => x.id === p) || {}).color || '#9B9380';
+const recurLabel = r => (TASK_RECUR.find(x => x.id === r) || {}).label || 'Does not repeat';
+const recurDesc = t => {
+  if (!t || !t.recurrence || t.recurrence === 'none') return 'Does not repeat';
+  if (t.recurrence === 'custom') {
+    const n = t.recur_interval || 1;
+    const u = t.recur_unit || 'week';
+    return 'Every ' + n + ' ' + u + (n > 1 ? 's' : '');
+  }
+  return recurLabel(t.recurrence);
+};
+const TaskDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  async loadAll() {
+    const c = this.client();
+    if (!c) return {
+      tasks: [],
+      peopleByTask: {},
+      projById: {},
+      labelsByTask: {}
+    };
+    const [tRes, pRes, prRes, lRes] = await Promise.all([c.from('tasks').select('*').order('created_at', {
+      ascending: false
+    }), c.from('task_people').select('task_id,user_id,role'), c.from('projects').select('id,name,archived'), c.from('task_labels').select('task_id,user_id,label')]);
+    const peopleByTask = {};
+    (pRes.data || []).forEach(p => {
+      (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p);
+    });
+    const labelsByTask = {};
+    (lRes.data || []).forEach(l => {
+      (labelsByTask[l.task_id] = labelsByTask[l.task_id] || []).push(l);
+    });
+    // Archived projects (e.g. the App Masterplan roadmap) never surface in the
+    // regular Tasks list — they're a separate admin-only surface (RoadmapDB).
+    const archivedIds = new Set((prRes.data || []).filter(p => p.archived).map(p => p.id));
+    const projById = {};
+    (prRes.data || []).forEach(p => {
+      if (!p.archived) projById[p.id] = p.name;
+    });
+    const tasks = (tRes.data || []).filter(t => !t.project_id || !archivedIds.has(t.project_id));
+    return {
+      tasks,
+      peopleByTask,
+      projById,
+      labelsByTask
+    };
+  },
+  async findOrCreateProject(name, user) {
+    const c = this.client();
+    if (!c || !name || !name.trim()) return null;
+    const nm = name.trim();
+    const {
+      data: ex
+    } = await c.from('projects').select('id').ilike('name', nm).limit(1).maybeSingle();
+    if (ex) return ex.id;
+    const {
+      data,
+      error
+    } = await c.from('projects').insert({
+      name: nm,
+      created_by: user?.id || null
+    }).select('id').single();
+    if (error) {
+      console.error('[TaskDB] project:', error.message);
+      return null;
+    }
+    return data.id;
+  },
+  async create(fields, people, user) {
+    const c = this.client();
+    if (!c) return null;
+    const base = {
+      title: fields.title,
+      due_at: fields.due_at || null,
+      project_id: fields.project_id || null,
+      priority: fields.priority || 'medium',
+      status: fields.status || 'todo',
+      description: fields.description || null,
+      context: fields.context || null,
+      working_url: fields.working_url || null,
+      email_link: fields.email_link || null,
+      decision_question: fields.decision_question || null,
+      recurrence: fields.recurrence || 'none',
+      parent_task_id: fields.parent_task_id || null,
+      created_by: user?.id || null
+    };
+    const wd = {
+      weekly_priority: fields.weekly_priority || null,
+      weekly_rank: fields.weekly_rank || null,
+      daily_priority: fields.daily_priority || null,
+      daily_rank: fields.daily_rank || null,
+      decision_due_at: fields.decision_due_at || null,
+      decision_due_has_time: fields.decision_due_has_time || null,
+      recur_interval: fields.recur_interval || null,
+      recur_unit: fields.recur_unit || null,
+      recur_copy_fields: fields.recur_copy_fields || null
+    };
+    let res = await c.from('tasks').insert({
+      ...base,
+      ...wd
+    }).select().single();
+    if (res.error && /column|schema cache|PGRST204|42703/i.test((res.error.message || '') + (res.error.code || ''))) res = await c.from('tasks').insert(base).select().single();
+    const {
+      data,
+      error
+    } = res;
+    if (error) {
+      console.error('[TaskDB] create:', error.message);
+      throw error;
+    }
+    await this.setPeople(data.id, people || {});
+    await this.addActivity(data.id, 'system', fields.parent_task_id ? 'Subtask created' : 'Task created', user);
+    this.syncToGoogleTasks(data, user);
+    return data;
+  },
+  // Push to the caller's Google Tasks list if they've enabled auto-sync
+  // (profiles.calendar_prefs.autoSyncTasks). Fire-and-forget, fails silently —
+  // same fail-open pattern as the rest of the Google Calendar integration.
+  async syncToGoogleTasks(task, user) {
+    const c = this.client();
+    if (!c || !user) return;
+    try {
+      const {
+        data: prof
+      } = await c.from('profiles').select('calendar_prefs').eq('id', user.id).single();
+      if (!prof?.calendar_prefs?.autoSyncTasks) return;
+      await callCalendar({
+        action: 'create-task',
+        task: {
+          title: task.title,
+          notes: task.description || undefined,
+          due: task.due_at || undefined
+        }
+      });
+    } catch (e) {}
+  },
+  async update(id, oldTask, fields, user) {
+    const c = this.client();
+    if (!c) return;
+    const patch = {
+      ...fields,
+      updated_at: new Date().toISOString()
+    };
+    if (fields.status === 'done' && oldTask.status !== 'done') patch.completed_at = new Date().toISOString();
+    let {
+      error
+    } = await c.from('tasks').update(patch).eq('id', id);
+    if (error && /column|schema cache|PGRST204|42703/i.test((error.message || '') + (error.code || ''))) {
+      const p2 = {
+        ...patch
+      };
+      delete p2.weekly_priority;
+      delete p2.weekly_rank;
+      delete p2.daily_priority;
+      delete p2.daily_rank;
+      delete p2.decision_due_at;
+      delete p2.decision_due_has_time;
+      delete p2.recur_interval;
+      delete p2.recur_unit;
+      delete p2.recur_copy_fields;
+      ({
+        error
+      } = await c.from('tasks').update(p2).eq('id', id));
+    }
+    if (error) {
+      console.error('[TaskDB] update:', error.message);
+      throw error;
+    }
+    const FL = {
+      title: 'Title',
+      due_at: 'Due date',
+      project_id: 'Project',
+      priority: 'Priority',
+      status: 'Status',
+      description: 'Description',
+      context: 'Context',
+      working_url: 'Working URL',
+      email_link: 'Email link',
+      decision_question: 'Decision question',
+      decision_due_at: 'Decision due date',
+      recurrence: 'Recurrence'
+    };
+    for (const k of Object.keys(fields)) {
+      if (k === 'weekly_priority' || k === 'weekly_rank' || k === 'daily_priority' || k === 'daily_rank' || k === 'decision_due_has_time' || k === 'recur_interval' || k === 'recur_unit' || k === 'recur_copy_fields') continue;
+      if ((oldTask[k] || null) === (fields[k] || null)) continue;
+      let msg;
+      if (k === 'status') msg = 'Status: ' + statusLabel(oldTask.status) + ' → ' + statusLabel(fields.status);else if (k === 'priority') msg = 'Priority: ' + priorityLabel(oldTask.priority) + ' → ' + priorityLabel(fields.priority);else if (k === 'recurrence') msg = 'Recurrence: ' + recurLabel(fields.recurrence);else msg = (FL[k] || k) + ' updated';
+      await this.addActivity(id, 'system', msg, user, k);
+    }
+    // Recurrence rule: completing a repeating task spawns the next occurrence.
+    if (fields.status === 'done' && oldTask.status !== 'done' && oldTask.recurrence && oldTask.recurrence !== 'none') {
+      await this.spawnRecurrence({
+        ...oldTask,
+        ...fields,
+        id
+      }, user);
+    }
+  },
+  // Spawn the next instance of a recurring task (due date advanced by the interval).
+  async spawnRecurrence(task, user) {
+    const c = this.client();
+    if (!c) return;
+    let nextDue = null;
+    if (task.due_at) {
+      const d = new Date(task.due_at);
+      if (!isNaN(d)) {
+        if (task.recurrence === 'daily') d.setDate(d.getDate() + 1);else if (task.recurrence === 'weekly') d.setDate(d.getDate() + 7);else if (task.recurrence === 'monthly') d.setMonth(d.getMonth() + 1);else if (task.recurrence === 'custom') {
+          const n = task.recur_interval || 1;
+          const u = task.recur_unit || 'week';
+          if (u === 'day') d.setDate(d.getDate() + n);else if (u === 'week') d.setDate(d.getDate() + n * 7);else d.setMonth(d.getMonth() + n);
+        }
+        nextDue = d.toISOString();
+      }
+    }
+    // Which fields carry over (null = legacy default: copy everything).
+    const copy = Array.isArray(task.recur_copy_fields) && task.recur_copy_fields.length ? task.recur_copy_fields : RECUR_COPY_DEFAULT;
+    const has = k => copy.indexOf(k) !== -1;
+    const base = {
+      title: task.title,
+      due_at: nextDue,
+      status: 'todo',
+      recurrence: task.recurrence,
+      recur_interval: task.recur_interval || null,
+      recur_unit: task.recur_unit || null,
+      recur_copy_fields: task.recur_copy_fields || null,
+      project_id: has('project') ? task.project_id || null : null,
+      priority: has('priority') ? task.priority || 'medium' : 'medium',
+      description: has('description') ? task.description || null : null,
+      context: has('context') ? task.context || null : null,
+      working_url: has('links') ? task.working_url || null : null,
+      email_link: has('links') ? task.email_link || null : null,
+      decision_question: has('decision') ? task.decision_question || null : null,
+      created_by: user?.id || null
+    };
+    let res = await c.from('tasks').insert(base).select().single();
+    if (res.error && /column|schema cache|PGRST204|42703/i.test((res.error.message || '') + (res.error.code || ''))) {
+      const b2 = {
+        ...base
+      };
+      delete b2.recur_interval;
+      delete b2.recur_unit;
+      delete b2.recur_copy_fields;
+      res = await c.from('tasks').insert(b2).select().single();
+    }
+    const {
+      data,
+      error
+    } = res;
+    if (error) {
+      console.error('[TaskDB] spawnRecurrence:', error.message);
+      return;
+    }
+    if (has('people')) {
+      const {
+        data: ppl
+      } = await c.from('task_people').select('user_id,role').eq('task_id', task.id);
+      if (ppl && ppl.length) await c.from('task_people').insert(ppl.map(p => ({
+        task_id: data.id,
+        user_id: p.user_id,
+        role: p.role
+      })));
+    }
+    if (has('decision')) {
+      const {
+        data: opts
+      } = await c.from('task_decision_options').select('body,is_chosen,sort').eq('task_id', task.id);
+      if (opts && opts.length) await c.from('task_decision_options').insert(opts.map(o => ({
+        task_id: data.id,
+        body: o.body,
+        is_chosen: false,
+        sort: o.sort
+      })));
+    }
+    await this.addActivity(task.id, 'system', 'Recurring task completed — next instance created', user);
+    await this.addActivity(data.id, 'system', 'Created from a recurring task', user);
+    return data;
+  },
+  async setPeople(taskId, people) {
+    // { assignee:[ids], assigner:[ids], decision_maker:[ids] }
+    const c = this.client();
+    if (!c) return;
+    await c.from('task_people').delete().eq('task_id', taskId).in('role', ['assignee', 'assigner', 'decision_maker']);
+    const rows = [];
+    (people.assignee || []).forEach(uid => rows.push({
+      task_id: taskId,
+      user_id: uid,
+      role: 'assignee'
+    }));
+    (people.assigner || []).forEach(uid => rows.push({
+      task_id: taskId,
+      user_id: uid,
+      role: 'assigner'
+    }));
+    (people.decision_maker || []).forEach(uid => rows.push({
+      task_id: taskId,
+      user_id: uid,
+      role: 'decision_maker'
+    }));
+    if (rows.length) {
+      const {
+        error
+      } = await c.from('task_people').insert(rows);
+      if (error) console.error('[TaskDB] setPeople:', error.message);
+    }
+  },
+  // Per-user labels (each person keeps their own on a shared task).
+  async loadLabels(taskId) {
+    const c = this.client();
+    if (!c) return [];
+    const {
+      data
+    } = await c.from('task_labels').select('id,user_id,label,color').eq('task_id', taskId);
+    return data || [];
+  },
+  async setLabels(taskId, userId, labels) {
+    // labels = [string] — replaces THIS user's labels only
+    const c = this.client();
+    if (!c) return;
+    await c.from('task_labels').delete().eq('task_id', taskId).eq('user_id', userId);
+    const rows = (labels || []).map(l => (l || '').trim()).filter(Boolean).map(l => ({
+      task_id: taskId,
+      user_id: userId,
+      label: l
+    }));
+    if (rows.length) {
+      const {
+        error
+      } = await c.from('task_labels').insert(rows);
+      if (error) console.error('[TaskDB] setLabels:', error.message);
+    }
+  },
+  // Decision options (Option A / B / C … with one optionally marked chosen).
+  async loadDecisionOptions(taskId) {
+    const c = this.client();
+    if (!c) return [];
+    const {
+      data
+    } = await c.from('task_decision_options').select('*').eq('task_id', taskId).order('sort', {
+      ascending: true
+    });
+    return data || [];
+  },
+  async setDecisionOptions(taskId, options) {
+    // options = [{ body, is_chosen }]
+    const c = this.client();
+    if (!c) return;
+    await c.from('task_decision_options').delete().eq('task_id', taskId);
+    const rows = (options || []).map((o, i) => ({
+      task_id: taskId,
+      body: (o.body || '').trim(),
+      is_chosen: !!o.is_chosen,
+      sort: i
+    })).filter(r => r.body);
+    if (rows.length) {
+      const {
+        error
+      } = await c.from('task_decision_options').insert(rows);
+      if (error) console.error('[TaskDB] setDecisionOptions:', error.message);
+    }
+  },
+  // Subtasks (tasks with a parent — also shown in the main list, with a "↳ parent" caption).
+  async loadSubtasks(parentId) {
+    const c = this.client();
+    if (!c) return [];
+    const {
+      data
+    } = await c.from('tasks').select('*').eq('parent_task_id', parentId).order('created_at', {
+      ascending: true
+    });
+    return data || [];
+  },
+  async createSubtask(parentId, title, user) {
+    return this.create({
+      title: title.trim(),
+      status: 'todo',
+      priority: 'medium',
+      parent_task_id: parentId
+    }, {}, user);
+  },
+  // Predecessor / Successor links. predecessor_id must come before successor_id.
+  async loadLinks(taskId) {
+    const c = this.client();
+    if (!c) return {
+      predecessors: [],
+      successors: []
+    };
+    const {
+      data,
+      error
+    } = await c.from('task_links').select('id,predecessor_id,successor_id').or('predecessor_id.eq.' + taskId + ',successor_id.eq.' + taskId);
+    if (error) {
+      console.error('[TaskDB] loadLinks:', error.message);
+      return {
+        predecessors: [],
+        successors: []
+      };
+    }
+    const rows = data || [];
+    return {
+      predecessors: rows.filter(r => r.successor_id === taskId),
+      // tasks that must come before this one
+      successors: rows.filter(r => r.predecessor_id === taskId) // tasks that come after this one
+    };
+  },
+  async addLink(predecessorId, successorId) {
+    const c = this.client();
+    if (!c) return;
+    const {
+      error
+    } = await c.from('task_links').insert({
+      predecessor_id: predecessorId,
+      successor_id: successorId
+    });
+    if (error && !/duplicate|unique/i.test(error.message || '')) console.error('[TaskDB] addLink:', error.message);
+  },
+  async removeLink(id) {
+    const c = this.client();
+    if (!c) return;
+    await c.from('task_links').delete().eq('id', id);
+  },
+  // Label management — a user's distinct label names across all their tasks.
+  async myLabelNames(userId) {
+    const c = this.client();
+    if (!c) return [];
+    const {
+      data
+    } = await c.from('task_labels').select('label').eq('user_id', userId);
+    return Array.from(new Set((data || []).map(r => r.label))).sort((a, b) => a.localeCompare(b));
+  },
+  async renameLabel(userId, oldLabel, newLabel) {
+    const c = this.client();
+    if (!c || !newLabel.trim()) return;
+    const {
+      error
+    } = await c.from('task_labels').update({
+      label: newLabel.trim()
+    }).eq('user_id', userId).eq('label', oldLabel);
+    if (error) console.error('[TaskDB] renameLabel:', error.message);
+  },
+  async deleteLabel(userId, label) {
+    const c = this.client();
+    if (!c) return;
+    const {
+      error
+    } = await c.from('task_labels').delete().eq('user_id', userId).eq('label', label);
+    if (error) console.error('[TaskDB] deleteLabel:', error.message);
+  },
+  // Projects
+  async loadProjects() {
+    const c = this.client();
+    if (!c) return [];
+    const {
+      data
+    } = await c.from('projects').select('id,name').eq('archived', false).order('name', {
+      ascending: true
+    });
+    return data || [];
+  },
+  async loadActivity(taskId) {
+    const c = this.client();
+    if (!c) return [];
+    const {
+      data,
+      error
+    } = await c.from('task_activity').select('*').eq('task_id', taskId).order('created_at', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[TaskDB] activity:', error.message);
+      return [];
+    }
+    return data || [];
+  },
+  async addActivity(taskId, kind, content, user, field) {
+    const c = this.client();
+    if (!c) return null;
+    const {
+      data,
+      error
+    } = await c.from('task_activity').insert({
+      task_id: taskId,
+      kind,
+      content,
+      field: field || null,
+      author_id: user?.id || null,
+      author_name: user?.user_metadata?.full_name || user?.email || null
+    }).select().single();
+    if (error) {
+      console.error('[TaskDB] addActivity:', error.message);
+      return null;
+    }
+    return data;
+  },
+  // Task Thread — private-but-synced AI Assist (owner-only). Log updates stay in task_activity.
+  async loadAssist(taskId, user) {
+    const c = this.client();
+    if (!c || !user) return [];
+    const {
+      data,
+      error
+    } = await c.from('task_assist').select('*').eq('task_id', taskId).eq('user_id', user.id).order('created_at', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[TaskDB] loadAssist:', error.message);
+      return [];
+    }
+    return data || [];
+  },
+  async addAssist(taskId, role, content, user) {
+    const c = this.client();
+    if (!c || !user) return null;
+    const {
+      data,
+      error
+    } = await c.from('task_assist').insert({
+      task_id: taskId,
+      user_id: user.id,
+      role,
+      content
+    }).select().single();
+    if (error) {
+      console.error('[TaskDB] addAssist:', error.message);
+      return null;
+    }
+    return data;
+  },
+  async updateAssistContent(id, content) {
+    const c = this.client();
+    if (!c) return;
+    await c.from('task_assist').update({
+      content
+    }).eq('id', id);
+  },
+  async publishAssist(rowItem, taskId, user) {
+    const c = this.client();
+    if (!c) return;
+    const act = await this.addActivity(taskId, 'ai', rowItem.content, user);
+    await c.from('task_assist').update({
+      published: true,
+      published_activity_id: act?.id || null
+    }).eq('id', rowItem.id);
+    return act;
+  },
+  async unpublishAssist(rowItem) {
+    const c = this.client();
+    if (!c) return;
+    if (rowItem.published_activity_id) await c.from('task_activity').delete().eq('id', rowItem.published_activity_id);
+    await c.from('task_assist').update({
+      published: false,
+      published_activity_id: null
+    }).eq('id', rowItem.id);
+  },
+  // Write the AI thread summary into context WITHOUT logging an activity (avoids feed noise).
+  async setThreadSummary(taskId, text) {
+    const c = this.client();
+    if (!c) return;
+    await c.from('tasks').update({
+      context: text,
+      updated_at: new Date().toISOString()
+    }).eq('id', taskId);
+  },
+  async updateActivityContent(id, content) {
+    const c = this.client();
+    if (!c) return;
+    await c.from('task_activity').update({
+      content
+    }).eq('id', id);
+  }
+};
+
+// ─── App Masterplan (Roadmap) — backed by the shared tasks/projects tables ──
+// Lives as a real Project named "App Masterplan"; each roadmap "tab" is a
+// top-level task (parent_task_id null), each "subtask" a child task. Reuses
+// roadmap_type/roadmap_difficulty/roadmap_order columns added for this feature
+// so the granular app-feature list AND big initiatives are visible to anyone
+// (including Claude) via the same Supabase tables — no more localStorage-only.
+const RoadmapDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  PROJECT_NAME: 'App Masterplan',
+  dbToUi(row) {
+    return {
+      id: row.id,
+      name: row.title || '',
+      status: row.status || 'todo',
+      type: row.roadmap_type || 'mvp',
+      difficulty: row.roadmap_difficulty || 'normal',
+      dueDate: row.due_at ? row.due_at.slice(0, 10) : null,
+      parentId: row.parent_task_id || null,
+      order: row.roadmap_order || 0,
+      notes: row.description || ''
+    };
+  },
+  // archived: true keeps it out of the normal Tasks project picker (which
+  // filters .eq('archived', false)) — this project is only ever opened here.
+  async findOrCreateProjectId() {
+    const c = this.client();
+    if (!c) return null;
+    const {
+      data: ex
+    } = await c.from('projects').select('id').eq('name', this.PROJECT_NAME).limit(1).maybeSingle();
+    if (ex) return ex.id;
+    const {
+      data,
+      error
+    } = await c.from('projects').insert({
+      name: this.PROJECT_NAME,
+      archived: true
+    }).select('id').single();
+    if (error) {
+      console.error('[RoadmapDB] project:', error.message);
+      return null;
+    }
+    return data.id;
+  },
+  async load() {
+    const projectId = await this.findOrCreateProjectId();
+    if (!projectId) return {
+      projectId: null,
+      rows: []
+    };
+    const c = this.client();
+    const {
+      data,
+      error
+    } = await c.from('tasks').select('*').eq('project_id', projectId).order('roadmap_order', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[RoadmapDB] load:', error.message);
+      return {
+        projectId,
+        rows: []
+      };
+    }
+    return {
+      projectId,
+      rows: (data || []).map(r => this.dbToUi(r))
+    };
+  },
+  async insert(projectId, {
+    name,
+    status,
+    type,
+    dueDate,
+    parentId,
+    order
+  }, user) {
+    const c = this.client();
+    if (!c) return null;
+    const {
+      data,
+      error
+    } = await c.from('tasks').insert({
+      title: name || '',
+      status: status || 'todo',
+      roadmap_type: type || 'mvp',
+      roadmap_order: order || 0,
+      due_at: dueDate || null,
+      project_id: projectId,
+      parent_task_id: parentId || null,
+      created_by: user?.id || null
+    }).select().single();
+    if (error) {
+      console.error('[RoadmapDB] insert:', error.message);
+      return null;
+    }
+    return this.dbToUi(data);
+  },
+  async update(id, patch) {
+    const c = this.client();
+    if (!c) return;
+    const dbPatch = {
+      updated_at: new Date().toISOString()
+    };
+    if ('name' in patch) dbPatch.title = patch.name;
+    if ('status' in patch) dbPatch.status = patch.status;
+    if ('type' in patch) dbPatch.roadmap_type = patch.type;
+    if ('difficulty' in patch) dbPatch.roadmap_difficulty = patch.difficulty;
+    if ('dueDate' in patch) dbPatch.due_at = patch.dueDate || null;
+    if ('parentId' in patch) dbPatch.parent_task_id = patch.parentId || null;
+    if ('order' in patch) dbPatch.roadmap_order = patch.order;
+    if ('notes' in patch) dbPatch.description = patch.notes;
+    const {
+      error
+    } = await c.from('tasks').update(dbPatch).eq('id', id);
+    if (error) console.error('[RoadmapDB] update:', error.message);
+  },
+  // Persist every row's current order (cheap — only fires on structural changes
+  // like drag-drop/add/delete, not on every keystroke) so order never drifts.
+  async persistOrder(rows) {
+    const c = this.client();
+    if (!c) return;
+    await Promise.all(rows.map(r => c.from('tasks').update({
+      roadmap_order: r.order,
+      due_at: r.dueDate || null,
+      parent_task_id: r.parentId || null
+    }).eq('id', r.id)));
+  },
+  async delete(ids) {
+    const c = this.client();
+    if (!c || !ids.length) return;
+    const {
+      error
+    } = await c.from('tasks').delete().in('id', ids);
+    if (error) console.error('[RoadmapDB] delete:', error.message);
+  }
+};
+
+// Turn an AI "ADD" payload (from a Task pill's ACTION block) into a real task.
+// Names are matched to teammates; unmatched names are skipped (left blank).
+async function createTaskFromAI(payload, user) {
+  if (!payload) return null;
+  const roster = await ProfileDB.loadAll();
+  const nameToId = {};
+  (roster || []).forEach(p => {
+    const full = (((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || '').toLowerCase();
+    const first = (p.first_name || '').toLowerCase();
+    if (full) nameToId[full] = p.id;
+    if (first && !nameToId[first]) nameToId[first] = p.id;
+  });
+  const matchIds = arr => (Array.isArray(arr) ? arr : arr ? [arr] : []).map(n => nameToId[(n || '').toLowerCase().trim()]).filter(Boolean);
+  let due_at = null;
+  if (payload.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(payload.dueDate)) {
+    const t = payload.dueTime && /^\d{1,2}:\d{2}$/.test(payload.dueTime) ? payload.dueTime : '09:00';
+    const d = new Date(payload.dueDate + 'T' + (t.length === 4 ? '0' + t : t));
+    if (!isNaN(d)) due_at = d.toISOString();
+  }
+  const project_id = payload.project ? await TaskDB.findOrCreateProject(payload.project, user) : null;
+  const fields = {
+    title: (payload.title || 'Untitled task').trim(),
+    due_at,
+    project_id,
+    priority: ['low', 'medium', 'high'].includes(payload.priority) ? payload.priority : 'medium',
+    status: ['todo', 'in_progress', 'stuck', 'done'].includes(payload.status) ? payload.status : 'todo',
+    description: payload.description || payload.summary || null,
+    context: payload.context || null,
+    working_url: payload.workingUrl || null,
+    email_link: payload.emailLink || null,
+    decision_question: payload.decisionQuestion || null,
+    recurrence: 'none'
+  };
+  const people = {
+    assignee: matchIds(payload.assignees),
+    assigner: matchIds(payload.assigners),
+    decision_maker: matchIds(payload.decisionMakers || payload.decisionMaker)
+  };
+  const created = await TaskDB.create(fields, people, user);
+  if (created && created.id) {
+    const opts = (payload.decisionOptions || []).map(o => typeof o === 'string' ? {
+      body: o,
+      is_chosen: false
+    } : {
+      body: o && o.body || '',
+      is_chosen: !!(o && o.is_chosen)
+    });
+    if (opts.length) await TaskDB.setDecisionOptions(created.id, opts);
+    await TaskDB.addActivity(created.id, 'ai', 'Created from AI Chat', user);
+  }
+  return created;
+}
+const CARD = {
+  background: C.surface,
+  boxShadow: '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)',
+  borderRadius: 14,
+  padding: 16,
+  marginBottom: 14
+};
+
+// App-wide rule: Phone values become tel: links, Email values become mailto: links.
+// Use contactLink(label, value) wherever a Phone/Email value is displayed.
+const telHref = v => 'tel:' + String(v).replace(/[^\d+]/g, '');
+const mailHref = v => 'mailto:' + String(v).trim();
+function contactLink(label, value) {
+  if (!value) return value;
+  if (label === 'Phone') return /*#__PURE__*/React.createElement("a", {
+    href: telHref(value),
+    style: {
+      color: 'inherit',
+      textDecoration: 'none'
+    }
+  }, value);
+  if (label === 'Email') return /*#__PURE__*/React.createElement("a", {
+    href: mailHref(value),
+    style: {
+      color: 'inherit',
+      textDecoration: 'none'
+    }
+  }, value);
+  return value;
+}
+
+// Builds a Gmail "compose" link with a ready-to-send welcome email (TMG runs on Google Workspace).
+// Used for one-click approval notifications from the Admin console.
+function gmailComposeUrl(u) {
+  const first = (u.first_name || '').trim();
+  const APP_URL = 'https://app.themorshedgroup.com/';
+  const subject = "You're in — your TMG App account is ready";
+  const body = [first ? 'Hi ' + first + ',' : 'Hi,', '', 'Good news — your TMG App account is now active.', '', 'Open the app and sign in here:', APP_URL, '', 'Tap "Continue with TMG Google" and use your @themorshedgroup.com account.', '', '— The Morshed Group'].join('\n');
+  return 'https://mail.google.com/mail/?view=cm&fs=1&to=' + encodeURIComponent(u.email || '') + '&su=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+}
+
+// Admin-only user-management console (under the More tab). Replaces editing in Supabase.
+// Hoisted to a STABLE top-level component so it isn't recreated on every
+// AdminUsers re-render. (When it lived inside AdminUsers, any parent
+// re-render gave it a new function identity → React remounted it → all the
+// field state reset to the saved values, so edits appeared to be "lost".)
+function UserEditor({
+  u,
+  users,
+  refresh,
+  setOpenId,
+  nameOf,
+  inp,
+  lbl
+}) {
+  const [firstName, setFirstName] = useState(u.first_name || '');
+  const [lastName, setLastName] = useState(u.last_name || '');
+  const [emp, setEmp] = useState(u.employee_id || '');
+  const [hireDate, setHireDate] = useState(u.hire_date || '');
+  const [title, setTitle] = useState(u.title || '');
+  const [reports, setReports] = useState(u.reports_to || '');
+  const [assignedTc, setAssignedTc] = useState(u.assigned_tc || '');
+  const [timeOffDays, setTimeOffDays] = useState(u.time_off_days != null ? String(u.time_off_days) : '');
+  const [roles, setRoles] = useState(toRoles(u.access));
+  const [status, setStatus] = useState(u.status || 'pending');
+  const [saving, setSaving] = useState(false);
+  const isAgent = roles.includes('agent'); // Assigned TC only applies to sales agents
+  async function save() {
+    setSaving(true);
+    // Newly approved (any non-active → active) with an email → pop a ready-to-send welcome email.
+    const justApproved = status === 'active' && u.status !== 'active' && !!u.email;
+    // Open the tab synchronously (inside the click) so it isn't popup-blocked; fill it after the save succeeds.
+    const mailTab = justApproved ? window.open('', '_blank') : null;
+    try {
+      await ProfileDB.adminUpdate(u.id, {
+        first_name: firstName || null,
+        last_name: lastName || null,
+        employee_id: emp,
+        hire_date: hireDate || null,
+        title,
+        reports_to: reports || null,
+        assigned_tc: isAgent ? assignedTc || null : null,
+        access: roles,
+        status,
+        time_off_days: timeOffDays === '' ? null : Math.max(0, Math.round(Number(timeOffDays) || 0))
+      });
+      await refresh();
+      setOpenId(null);
+      if (mailTab) mailTab.location.href = gmailComposeUrl(u);
+    } catch (e) {
+      if (mailTab) mailTab.close();
+      alert('Could not save: ' + (e.message || e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '10px 12px',
+      background: C.bg,
+      borderRadius: 10,
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1fr 1fr',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "First name"), /*#__PURE__*/React.createElement("input", {
+    value: firstName,
+    onChange: e => setFirstName(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Last name"), /*#__PURE__*/React.createElement("input", {
+    value: lastName,
+    onChange: e => setLastName(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Employee ID"), /*#__PURE__*/React.createElement("input", {
+    value: emp,
+    onChange: e => setEmp(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Hire date"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: hireDate,
+    onChange: e => setHireDate(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Time off (days/yr)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    value: timeOffDays,
+    onChange: e => setTimeOffDays(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-end'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.66rem',
+      color: C.textMuted,
+      fontFamily: C.fontSans,
+      paddingBottom: 9,
+      lineHeight: 1.3
+    }
+  }, "Blank = not tracked (files for visibility only)")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Title"), /*#__PURE__*/React.createElement("input", {
+    value: title,
+    onChange: e => setTitle(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Access ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(one or more)")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 6
+    }
+  }, ['admin', 'operations', 'agent', 'tc'].map(a => {
+    const on = roles.includes(a);
+    return /*#__PURE__*/React.createElement("button", {
+      key: a,
+      type: "button",
+      onClick: () => setRoles(on ? roles.filter(r => r !== a) : [...roles, a]),
+      style: {
+        padding: '6px 10px',
+        borderRadius: 8,
+        border: `1px solid ${on ? C.navy : C.border}`,
+        background: on ? C.navy : C.surface,
+        color: on ? '#fff' : C.textSecondary,
+        fontSize: '0.74rem',
+        fontWeight: on ? 600 : 500,
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, ACCESS_LABEL[a]);
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Status"), /*#__PURE__*/React.createElement("select", {
+    value: status,
+    onChange: e => setStatus(e.target.value),
+    style: inp
+  }, ['active', 'pending', 'disabled'].map(s => /*#__PURE__*/React.createElement("option", {
+    key: s,
+    value: s
+  }, STATUS_LABEL[s])))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Reports to"), /*#__PURE__*/React.createElement("select", {
+    value: reports,
+    onChange: e => setReports(e.target.value),
+    style: inp
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\u2014 None \u2014"), users.filter(x => x.id !== u.id).map(x => /*#__PURE__*/React.createElement("option", {
+    key: x.id,
+    value: x.id
+  }, nameOf(x))))), isAgent && /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Assigned TC"), /*#__PURE__*/React.createElement("select", {
+    value: assignedTc,
+    onChange: e => setAssignedTc(e.target.value),
+    style: inp
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\u2014 None \u2014"), users.filter(x => toRoles(x.access).includes('tc')).map(x => /*#__PURE__*/React.createElement("option", {
+    key: x.id,
+    value: x.id
+  }, nameOf(x)))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: save,
+    disabled: saving,
+    style: {
+      flex: 1,
+      padding: '8px',
+      background: C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 8,
+      fontSize: '0.8rem',
+      fontWeight: 500,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, saving ? 'Saving…' : 'Save'), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpenId(null),
+    style: {
+      flex: 1,
+      padding: '8px',
+      background: 'none',
+      color: C.textSecondary,
+      border: `1px solid ${C.border}`,
+      borderRadius: 8,
+      fontSize: '0.8rem',
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Close")));
+}
+
+// Adds a teammate directly, active from the start — skips the normal "sign in once,
+// wait for approval" flow. Hoisted to a stable top-level component for the same reason
+// as UserEditor above (avoids remounting / losing field state on every parent re-render).
+function AddUserForm({
+  users,
+  refresh,
+  onClose,
+  nameOf,
+  inp,
+  lbl
+}) {
+  const [email, setEmail] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [emp, setEmp] = useState('');
+  const [title, setTitle] = useState('');
+  const [reports, setReports] = useState('');
+  const [assignedTc, setAssignedTc] = useState('');
+  const [roles, setRoles] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+  const isAgent = roles.includes('agent');
+  async function create() {
+    if (!email.trim()) {
+      setErr('Email is required.');
+      return;
+    }
+    setSaving(true);
+    setErr(null);
+    try {
+      await ProfileDB.adminCreate({
+        email: email.trim(),
+        first_name: firstName || null,
+        last_name: lastName || null,
+        employee_id: emp || null,
+        title,
+        reports_to: reports || null,
+        assigned_tc: isAgent ? assignedTc || null : null,
+        access: roles
+      });
+      await refresh();
+      onClose();
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '10px 12px',
+      background: C.bg,
+      borderRadius: 10,
+      marginTop: 6,
+      border: `1px dashed ${C.border}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1fr 1fr',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Email ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(their Google sign-in email)")), /*#__PURE__*/React.createElement("input", {
+    type: "email",
+    value: email,
+    onChange: e => setEmail(e.target.value),
+    style: inp,
+    placeholder: "name@themorshedgroup.com"
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "First name"), /*#__PURE__*/React.createElement("input", {
+    value: firstName,
+    onChange: e => setFirstName(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Last name"), /*#__PURE__*/React.createElement("input", {
+    value: lastName,
+    onChange: e => setLastName(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Employee ID"), /*#__PURE__*/React.createElement("input", {
+    value: emp,
+    onChange: e => setEmp(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-end'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.66rem',
+      color: C.textMuted,
+      fontFamily: C.fontSans,
+      paddingBottom: 9,
+      lineHeight: 1.3
+    }
+  }, "Hire date & time off can be set after they're added")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Title"), /*#__PURE__*/React.createElement("input", {
+    value: title,
+    onChange: e => setTitle(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Access ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(one or more)")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 6
+    }
+  }, ['admin', 'operations', 'agent', 'tc'].map(a => {
+    const on = roles.includes(a);
+    return /*#__PURE__*/React.createElement("button", {
+      key: a,
+      type: "button",
+      onClick: () => setRoles(on ? roles.filter(r => r !== a) : [...roles, a]),
+      style: {
+        padding: '6px 10px',
+        borderRadius: 8,
+        border: `1px solid ${on ? C.navy : C.border}`,
+        background: on ? C.navy : C.surface,
+        color: on ? '#fff' : C.textSecondary,
+        fontSize: '0.74rem',
+        fontWeight: on ? 600 : 500,
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, ACCESS_LABEL[a]);
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Reports to"), /*#__PURE__*/React.createElement("select", {
+    value: reports,
+    onChange: e => setReports(e.target.value),
+    style: inp
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\u2014 None \u2014"), users.map(x => /*#__PURE__*/React.createElement("option", {
+    key: x.id,
+    value: x.id
+  }, nameOf(x))))), isAgent && /*#__PURE__*/React.createElement("div", {
+    style: {
+      gridColumn: 'span 2'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Assigned TC"), /*#__PURE__*/React.createElement("select", {
+    value: assignedTc,
+    onChange: e => setAssignedTc(e.target.value),
+    style: inp
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\u2014 None \u2014"), users.filter(x => toRoles(x.access).includes('tc')).map(x => /*#__PURE__*/React.createElement("option", {
+    key: x.id,
+    value: x.id
+  }, nameOf(x)))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      color: C.textMuted,
+      fontFamily: C.fontSans,
+      marginTop: 8,
+      lineHeight: 1.4
+    }
+  }, "Adds them active right away \u2014 no pending approval. The first time they tap \"Continue with TMG Gmail\" using this exact email, they'll go straight into the app."), err ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.red,
+      fontFamily: C.fontSans,
+      marginTop: 6
+    }
+  }, err) : null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: create,
+    disabled: saving,
+    style: {
+      flex: 1,
+      padding: '8px',
+      background: C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 8,
+      fontSize: '0.8rem',
+      fontWeight: 500,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, saving ? 'Adding…' : 'Add User'), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      flex: 1,
+      padding: '8px',
+      background: 'none',
+      color: C.textSecondary,
+      border: `1px solid ${C.border}`,
+      borderRadius: 8,
+      fontSize: '0.8rem',
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Cancel")));
+}
+function AdminUsers() {
+  const [users, setUsers] = useState([]);
+  const [openId, setOpenId] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const refresh = () => ProfileDB.loadAll().then(setUsers);
+  useEffect(() => {
+    refresh();
+  }, []);
+  const nameOf = u => ((u.first_name || '') + ' ' + (u.last_name || '')).trim() || u.email || 'User';
+  const pending = users.filter(u => u.status === 'pending');
+  const others = users.filter(u => u.status !== 'pending');
+  const inp = {
+    width: '100%',
+    padding: '8px 10px',
+    background: C.surfaceHover,
+    border: `1px solid ${C.border}`,
+    borderRadius: 8,
+    color: C.textPrimary,
+    fontSize: '0.82rem',
+    outline: 'none',
+    fontFamily: C.fontSans
+  };
+  const lbl = {
+    fontSize: '0.6rem',
+    color: C.textSecondary,
+    letterSpacing: '0.06em',
+    textTransform: 'uppercase',
+    marginBottom: 3,
+    fontFamily: C.fontSans
+  };
+  const row = u => /*#__PURE__*/React.createElement("div", {
+    key: u.id,
+    style: {
+      borderBottom: `1px solid ${C.border}`,
+      padding: '8px 0'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setOpenId(openId === u.id ? null : u.id),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.86rem',
+      fontWeight: 600,
+      color: C.textPrimary,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, nameOf(u)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      color: C.textSecondary,
+      marginTop: 1,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, u.email)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flexShrink: 0,
+      fontSize: '0.58rem',
+      fontWeight: 600,
+      letterSpacing: '0.06em',
+      color: u.status === 'active' ? C.green : u.status === 'pending' ? C.amber : C.red
+    }
+  }, STATUS_LABEL[u.status] || u.status), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flexShrink: 0,
+      fontSize: '0.6rem',
+      fontWeight: 600,
+      padding: '2px 7px',
+      borderRadius: 8,
+      background: C.surfaceHover,
+      color: C.gold
+    }
+  }, accessLabel(u.access)), /*#__PURE__*/React.createElement("i", {
+    className: `ti ti-chevron-${openId === u.id ? 'up' : 'down'}`,
+    style: {
+      fontSize: 14,
+      color: C.textMuted,
+      flexShrink: 0
+    }
+  })), openId === u.id && /*#__PURE__*/React.createElement(UserEditor, {
+    u: u,
+    users: users,
+    refresh: refresh,
+    setOpenId: setOpenId,
+    nameOf: nameOf,
+    inp: inp,
+    lbl: lbl
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    style: CARD
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-users",
+    style: {
+      fontSize: 14
+    }
+  }), "Manage Users"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAdding(a => !a),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      flexShrink: 0,
+      padding: '5px 10px',
+      borderRadius: 8,
+      border: `1px solid ${adding ? C.navy : C.border}`,
+      background: adding ? C.navy : C.surface,
+      color: adding ? '#fff' : C.gold,
+      fontSize: '0.7rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-user-plus",
+    style: {
+      fontSize: 13
+    }
+  }), "Add User")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: C.textSecondary,
+      marginBottom: 10,
+      lineHeight: 1.5
+    }
+  }, "Approve new sign-ins and set each person's access, title, employee ID, and reporting line."), adding && /*#__PURE__*/React.createElement(AddUserForm, {
+    users: users,
+    refresh: refresh,
+    onClose: () => setAdding(false),
+    nameOf: nameOf,
+    inp: inp,
+    lbl: lbl
+  }), pending.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.58rem',
+      fontWeight: 600,
+      color: C.amber,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      marginBottom: 2,
+      marginTop: adding ? 12 : 0
+    }
+  }, "Pending approval"), pending.map(row), others.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.58rem',
+      fontWeight: 600,
+      color: C.textMuted,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      margin: '12px 0 2px'
+    }
+  }, "Team"), others.map(row), users.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: C.textMuted,
+      fontSize: '0.8rem',
+      padding: '16px 0'
+    }
+  }, "No users yet."));
+}
+
+// Claude pricing — USD per 1,000,000 tokens, matched by model-id substring.
+// Update these when Anthropic changes prices; historical rows re-cost on view.
+const PRICING = {
+  'claude-3-5-haiku': {
+    in: 0.80,
+    out: 4.00
+  },
+  'claude-3-5-sonnet': {
+    in: 3.00,
+    out: 15.00
+  },
+  'claude-3-haiku': {
+    in: 0.25,
+    out: 1.25
+  },
+  'claude-3-opus': {
+    in: 15.00,
+    out: 75.00
+  },
+  'claude-haiku-4': {
+    in: 1.00,
+    out: 5.00
+  },
+  'claude-sonnet-4': {
+    in: 3.00,
+    out: 15.00
+  },
+  'claude-opus-4': {
+    in: 15.00,
+    out: 75.00
+  },
+  // OpenAI image generation is billed per-image, not per-token — this is a rough
+  // $/1M-token-equivalent so it slots into the same cost math (see generate-image edge fn).
+  'gpt-image-1.5': {
+    in: 5.00,
+    out: 32.00
+  }
+};
+const priceFor = model => {
+  const m = model || '';
+  const k = Object.keys(PRICING).find(x => m.includes(x));
+  return PRICING[k] || PRICING['claude-3-5-sonnet'];
+};
+const rowCost = r => {
+  const p = priceFor(r.model);
+  return (Number(r.input_tokens) || 0) / 1e6 * p.in + (Number(r.output_tokens) || 0) / 1e6 * p.out;
+};
+const fmtTok = n => {
+  n = Number(n) || 0;
+  return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
+};
+const fmtUsd = n => '$' + (Number(n) || 0).toFixed(2);
+
+// Friendly names for the feature tags written to usage_log by each surface.
+const FEATURE_LABEL = {
+  ai_chat: 'AI Chat',
+  kpi: 'KPI Entry',
+  add_todo: 'Add To-Do',
+  intake_form: 'Intake Forms',
+  tasks: 'Tasks',
+  crm_tasks: 'CRM Tasks',
+  voice_transcribe: 'Voice Transcribe',
+  chat_title: 'Chat Titles',
+  'image-generation': 'AI Images',
+  other: 'Other / untagged'
+};
+const featLabel = f => FEATURE_LABEL[f] || f || 'Other';
+const MONTHLY_CAP_USD = 20; // per-person estimated-spend cap (calendar month). Warn-only: over = flagged red, never blocked.
+
+// Admin-only AI usage + estimated cost, viewable per feature (tab) or per person.
+function AdminUsage() {
+  const [rows, setRows] = useState(null); // null = loading
+  const [users, setUsers] = useState([]);
+  const [days, setDays] = useState(30);
+  const [view, setView] = useState('feature'); // 'feature' | 'model' | 'user'
+  const [model, setModel] = useState(''); // active ai-chat model (ai_config row 1)
+  const [monthByUser, setMonthByUser] = useState({}); // user_id → {inTok,outTok,calls,cost} this calendar month
+  useEffect(() => {
+    const c = window.SupabaseAuth && window.SupabaseAuth._client;
+    if (!c) {
+      setRows([]);
+      return;
+    }
+    setRows(null);
+    Promise.all([c.rpc('usage_summary', {
+      days
+    }), ProfileDB.loadAll()]).then(([res, us]) => {
+      if (res.error) {
+        console.error('[Usage]', res.error.message);
+        setRows([]);
+      } else setRows(res.data || []);
+      setUsers(us || []);
+    });
+    c.from('ai_config').select('model').eq('id', 1).single().then(({
+      data
+    }) => {
+      if (data && data.model) setModel(data.model);
+    }).catch(() => {});
+    c.rpc('usage_this_month').then(({
+      data
+    }) => {
+      const m = {};
+      (data || []).forEach(r => {
+        if (!r.user_id) return; // never attribute system/null usage to a phantom person
+        const k = r.user_id;
+        if (!m[k]) m[k] = {
+          inTok: 0,
+          outTok: 0,
+          calls: 0,
+          cost: 0
+        };
+        m[k].inTok += Number(r.input_tokens) || 0;
+        m[k].outTok += Number(r.output_tokens) || 0;
+        m[k].calls += Number(r.calls) || 0;
+        m[k].cost += rowCost(r);
+      });
+      setMonthByUser(m);
+    }).catch(() => {});
+  }, [days]);
+  const nameOf = id => {
+    const u = users.find(x => x.id === id);
+    return u ? ((u.first_name || '') + ' ' + (u.last_name || '')).trim() || u.email : 'Unknown user';
+  };
+
+  // By person => current calendar month (the cap basis, so the number shown IS the number that flags).
+  // By feature / model => the selected rolling window (usage_summary).
+  const isUserView = view === 'user';
+  const groups = {};
+  if (isUserView) {
+    Object.entries(monthByUser).forEach(([uid, v]) => {
+      groups[uid] = {
+        ...v
+      };
+    });
+  } else {
+    (rows || []).forEach(r => {
+      const k = view === 'model' ? r.model || 'unknown' : r.feature || 'other';
+      if (!groups[k]) groups[k] = {
+        inTok: 0,
+        outTok: 0,
+        calls: 0,
+        cost: 0
+      };
+      groups[k].inTok += Number(r.input_tokens) || 0;
+      groups[k].outTok += Number(r.output_tokens) || 0;
+      groups[k].calls += Number(r.calls) || 0;
+      groups[k].cost += rowCost(r);
+    });
+  }
+  const list = Object.entries(groups).map(([k, v]) => ({
+    k,
+    ...v
+  })).sort((a, b) => b.cost - a.cost);
+  const labelOf = k => isUserView ? nameOf(k) : view === 'model' ? k : featLabel(k);
+  const total = list.reduce((s, u) => ({
+    inTok: s.inTok + u.inTok,
+    outTok: s.outTok + u.outTok,
+    calls: s.calls + u.calls,
+    cost: s.cost + u.cost
+  }), {
+    inTok: 0,
+    outTok: 0,
+    calls: 0,
+    cost: 0
+  });
+  const overCap = Object.entries(monthByUser).filter(([id, v]) => v.cost > MONTHLY_CAP_USD).map(([id, v]) => ({
+    id,
+    cost: v.cost
+  })).sort((a, b) => b.cost - a.cost);
+  const pill = (d, label) => /*#__PURE__*/React.createElement("button", {
+    key: d,
+    onClick: () => setDays(d),
+    style: {
+      padding: '5px 11px',
+      borderRadius: 8,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      fontSize: '0.72rem',
+      fontWeight: days === d ? 600 : 500,
+      border: `1px solid ${days === d ? C.navy : C.border}`,
+      background: days === d ? C.navy : 'none',
+      color: days === d ? '#fff' : C.textSecondary
+    }
+  }, label);
+  return /*#__PURE__*/React.createElement("div", {
+    style: CARD
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      marginBottom: 4,
+      fontFamily: C.fontSans,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-coin",
+    style: {
+      fontSize: 14
+    }
+  }), "AI Usage & Cost"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: C.textSecondary,
+      marginBottom: 8,
+      lineHeight: 1.5
+    }
+  }, "Estimated Claude spend, approximate (public token prices). Excludes voice-note transcription minutes (billed by OpenAI Whisper)."), model && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      color: C.textMuted,
+      marginBottom: 10,
+      fontFamily: C.fontSans
+    }
+  }, "Active AI Chat model: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.navy,
+      fontWeight: 600
+    }
+  }, model)), overCap.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 8,
+      background: '#FDECEA',
+      border: `1px solid ${C.red}55`,
+      borderRadius: 10,
+      padding: '8px 12px',
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-alert-triangle",
+    style: {
+      fontSize: 14,
+      color: C.red,
+      marginTop: 1,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.red,
+      fontFamily: C.fontSans,
+      lineHeight: 1.5
+    }
+  }, overCap.length === 1 ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, nameOf(overCap[0].id)), " is over the $", MONTHLY_CAP_USD, "/mo AI limit \u2014 ", fmtUsd(overCap[0].cost), " this month.") : /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", null, overCap.length, " people"), " are over the $", MONTHLY_CAP_USD, "/mo AI limit this month \u2014 switch to ", /*#__PURE__*/React.createElement("strong", null, "By person"), " to see who."))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6,
+      marginBottom: 8
+    }
+  }, [['feature', 'By feature'], ['model', 'By model'], ['user', 'By person']].map(([v, l]) => /*#__PURE__*/React.createElement("button", {
+    key: v,
+    onClick: () => setView(v),
+    style: {
+      padding: '5px 11px',
+      borderRadius: 8,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      fontSize: '0.72rem',
+      fontWeight: view === v ? 600 : 500,
+      border: `1px solid ${view === v ? C.gold : C.border}`,
+      background: view === v ? C.gold : 'none',
+      color: view === v ? '#fff' : C.textSecondary
+    }
+  }, l))), !isUserView && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6,
+      marginBottom: 12
+    }
+  }, [[7, '7 days'], [30, '30 days'], [90, '90 days']].map(([d, l]) => pill(d, l))), rows === null ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: C.textMuted,
+      fontSize: '0.8rem',
+      padding: '14px 0'
+    }
+  }, "Loading\u2026") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: '10px 12px',
+      background: C.bg,
+      borderRadius: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.58rem',
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      color: C.textMuted,
+      fontFamily: C.fontSans
+    }
+  }, "Total \xB7 ", isUserView ? 'this month' : days + 'd'), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '1.15rem',
+      fontWeight: 700,
+      color: C.navy,
+      fontFamily: C.fontSans
+    }
+  }, fmtUsd(total.cost))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'right',
+      fontSize: '0.7rem',
+      color: C.textSecondary,
+      fontFamily: C.fontSans,
+      lineHeight: 1.5
+    }
+  }, fmtTok(total.inTok), " in \xB7 ", fmtTok(total.outTok), " out", /*#__PURE__*/React.createElement("br", null), total.calls, " calls")), list.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: C.textMuted,
+      fontSize: '0.8rem',
+      padding: '12px 0'
+    }
+  }, "No AI usage in this period."), list.map(u => {
+    const over = isUserView && u.cost > MONTHLY_CAP_USD;
+    return /*#__PURE__*/React.createElement("div", {
+      key: u.k,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '8px 10px',
+        margin: '0 -10px',
+        borderBottom: `1px solid ${C.border}`,
+        background: over ? '#FDECEA' : 'transparent',
+        borderRadius: over ? 8 : 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.86rem',
+        fontWeight: 600,
+        color: over ? C.red : C.textPrimary,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5
+      }
+    }, over && /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-alert-triangle",
+      style: {
+        fontSize: 12,
+        color: C.red,
+        flexShrink: 0
+      }
+    }), labelOf(u.k)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.68rem',
+        color: over ? C.red : C.textSecondary,
+        marginTop: 1,
+        fontFamily: C.fontSans
+      }
+    }, `${fmtTok(u.inTok)} in · ${fmtTok(u.outTok)} out · ${u.calls} calls`, isUserView ? ' · this month' : '', over ? ` · over $${MONTHLY_CAP_USD} cap` : '')), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flexShrink: 0,
+        fontSize: '0.92rem',
+        fontWeight: 700,
+        color: over ? C.red : C.gold,
+        fontFamily: C.fontSans
+      }
+    }, fmtUsd(u.cost)));
+  })));
+}
+
+// ─── AI Chat Pills builder (admin) ────────────────────────────────
+function IconGridPicker({
+  dark,
+  value,
+  onChange
+}) {
+  const bord = dark ? '#152545' : C.border;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 7
+    }
+  }, PILL_ICONS.map(name => {
+    const on = value === name;
+    return /*#__PURE__*/React.createElement("button", {
+      key: name,
+      onClick: () => onChange(name),
+      style: {
+        width: 38,
+        height: 38,
+        borderRadius: 9,
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: on ? dark ? 'rgba(173,131,47,0.2)' : '#F3EBDA' : dark ? '#06101F' : '#F7F4EE',
+        border: on ? `2px solid ${dark ? C.gold : C.navy}` : `1px solid ${bord}`,
+        color: dark ? '#fff' : C.navy
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${name}`,
+      style: {
+        fontSize: 18
+      }
+    }));
+  }));
+}
+function PromptConfigEditor({
+  config,
+  setConfig,
+  inp,
+  lbl,
+  sub
+}) {
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "AI instruction"), /*#__PURE__*/React.createElement("textarea", {
+    value: config.prompt || '',
+    onChange: e => setConfig({
+      ...config,
+      prompt: e.target.value
+    }),
+    placeholder: "e.g. Ask me for this week's KPIs (calls, appointments, contracts) and format them into a clean summary.",
+    rows: 5,
+    style: {
+      ...inp,
+      resize: 'vertical',
+      lineHeight: 1.5
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      color: sub,
+      marginTop: 6,
+      lineHeight: 1.5,
+      fontFamily: C.fontSans
+    }
+  }, "Sent to the AI when the pill is tapped."));
+}
+
+// Task pill: the AI instruction (the "command") lives here, inside the pill's config.
+function TaskConfigEditor({
+  config,
+  setConfig,
+  inp,
+  lbl,
+  sub
+}) {
+  useEffect(() => {
+    if (config.instruction === undefined) setConfig({
+      ...config,
+      instruction: TASK_PILL_INSTRUCTION
+    });
+  }, []);
+  const instr = config.instruction !== undefined ? config.instruction : TASK_PILL_INSTRUCTION;
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Text box prefill ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(appears in the input when tapped)")), /*#__PURE__*/React.createElement("input", {
+    value: config.seed !== undefined ? config.seed : 'To Do: ',
+    onChange: e => setConfig({
+      ...config,
+      seed: e.target.value
+    }),
+    placeholder: "To Do: ",
+    style: inp
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...lbl,
+      marginTop: 14
+    }
+  }, "AI instruction ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(the command)")), /*#__PURE__*/React.createElement("textarea", {
+    value: instr,
+    onChange: e => setConfig({
+      ...config,
+      instruction: e.target.value
+    }),
+    rows: 12,
+    style: {
+      ...inp,
+      resize: 'vertical',
+      lineHeight: 1.5,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontSize: '0.72rem'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      color: sub,
+      marginTop: 6,
+      lineHeight: 1.5,
+      fontFamily: C.fontSans
+    }
+  }, "This exact instruction is sent to the AI when the pill is used. It must tell the AI to end every reply with an ", /*#__PURE__*/React.createElement("b", null, "ACTION"), " block \u2014 the app reads that block to create the task instantly."));
+}
+function FormConfigEditor({
+  config,
+  setConfig,
+  inp,
+  lbl,
+  sub,
+  bord
+}) {
+  const fields = config.fields || [];
+  const setFields = fs => setConfig({
+    ...config,
+    fields: fs
+  });
+  const update = (i, patch) => setFields(fields.map((f, idx) => idx === i ? {
+    ...f,
+    ...patch
+  } : f));
+  const add = () => setFields([...fields, {
+    key: '',
+    label: '',
+    kind: 'text'
+  }]);
+  const remove = i => setFields(fields.filter((_, idx) => idx !== i));
+  const small = {
+    ...inp,
+    padding: '7px 9px',
+    fontSize: '0.8rem'
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Fields"), fields.map((f, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      padding: 10,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: f.label,
+    onChange: e => update(i, {
+      label: e.target.value,
+      key: f.key || slugKey(e.target.value)
+    }),
+    placeholder: "Question / label",
+    style: {
+      ...small,
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => remove(i),
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: C.red,
+      fontSize: 16,
+      padding: 2
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: f.key,
+    onChange: e => update(i, {
+      key: e.target.value
+    }),
+    placeholder: "key",
+    style: {
+      ...small,
+      width: 110
+    }
+  }), /*#__PURE__*/React.createElement("select", {
+    value: f.kind,
+    onChange: e => update(i, {
+      kind: e.target.value
+    }),
+    style: {
+      ...small,
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "text"
+  }, "Text"), /*#__PURE__*/React.createElement("option", {
+    value: "number"
+  }, "Number"), /*#__PURE__*/React.createElement("option", {
+    value: "select"
+  }, "Choices"))), f.kind === 'select' && /*#__PURE__*/React.createElement("input", {
+    value: (f.options || []).join(', '),
+    onChange: e => update(i, {
+      options: e.target.value.split(',').map(s => s.trim()).filter(Boolean)
+    }),
+    placeholder: "Option A, Option B, Option C",
+    style: {
+      ...small,
+      marginTop: 6
+    }
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '7px 11px',
+      borderRadius: 9,
+      border: `1px dashed ${bord}`,
+      background: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontFamily: C.fontSans,
+      fontSize: '0.8rem',
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 14
+    }
+  }), "Add field"), /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Message template ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(use ", '{key}', ")")), /*#__PURE__*/React.createElement("textarea", {
+    value: config.template || '',
+    onChange: e => setConfig({
+      ...config,
+      template: e.target.value
+    }),
+    placeholder: "Create a listing presentation for {address}, listed at {price}.",
+    rows: 3,
+    style: {
+      ...inp,
+      resize: 'vertical',
+      lineHeight: 1.5
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      color: sub,
+      marginTop: 6,
+      lineHeight: 1.5,
+      fontFamily: C.fontSans
+    }
+  }, "On submit, values replace ", '{key}', " and the message is sent to the AI. Leave blank to send each field as \u201CLabel: value\u201D."));
+}
+function StepsConfigEditor({
+  config,
+  setConfig,
+  inp,
+  lbl,
+  sub,
+  bord
+}) {
+  const steps = config.steps || [];
+  const setSteps = ss => setConfig({
+    ...config,
+    steps: ss
+  });
+  const update = (i, patch) => setSteps(steps.map((s, idx) => idx === i ? {
+    ...s,
+    ...patch
+  } : s));
+  const add = () => setSteps([...steps, {
+    key: '',
+    question: ''
+  }]);
+  const remove = i => setSteps(steps.filter((_, idx) => idx !== i));
+  const move = (i, dir) => {
+    const j = i + dir;
+    if (j < 0 || j >= steps.length) return;
+    const a = steps.slice();
+    const t = a[i];
+    a[i] = a[j];
+    a[j] = t;
+    setSteps(a);
+  };
+  const small = {
+    ...inp,
+    padding: '7px 9px',
+    fontSize: '0.8rem'
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Intro ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(optional)")), /*#__PURE__*/React.createElement("input", {
+    value: config.intro || '',
+    onChange: e => setConfig({
+      ...config,
+      intro: e.target.value
+    }),
+    placeholder: "Let's build your report.",
+    style: inp
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...lbl,
+      marginTop: 14
+    }
+  }, "Questions"), steps.map((s, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      padding: 10,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6,
+      marginBottom: 6,
+      alignItems: 'flex-start'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: sub,
+      fontSize: '0.8rem',
+      fontWeight: 600,
+      paddingTop: 8
+    }
+  }, i + 1, "."), /*#__PURE__*/React.createElement("input", {
+    value: s.question,
+    onChange: e => update(i, {
+      question: e.target.value,
+      key: s.key || slugKey(e.target.value)
+    }),
+    placeholder: "What's the goal?",
+    style: {
+      ...small,
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => move(i, -1),
+    disabled: i === 0,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: i === 0 ? 'default' : 'pointer',
+      color: sub,
+      fontSize: 13,
+      padding: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-up"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => move(i, 1),
+    disabled: i === steps.length - 1,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: i === steps.length - 1 ? 'default' : 'pointer',
+      color: sub,
+      fontSize: 13,
+      padding: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-down"
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => remove(i),
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: C.red,
+      fontSize: 16,
+      padding: 2
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), /*#__PURE__*/React.createElement("input", {
+    value: s.key,
+    onChange: e => update(i, {
+      key: e.target.value
+    }),
+    placeholder: "key",
+    style: {
+      ...small,
+      width: 110
+    }
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '7px 11px',
+      borderRadius: 9,
+      border: `1px dashed ${bord}`,
+      background: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontFamily: C.fontSans,
+      fontSize: '0.8rem',
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 14
+    }
+  }), "Add question"), /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Final message template ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(use ", '{key}', ")")), /*#__PURE__*/React.createElement("textarea", {
+    value: config.template || '',
+    onChange: e => setConfig({
+      ...config,
+      template: e.target.value
+    }),
+    placeholder: "Write an EOD report. Goal: {goal}. Audience: {audience}.",
+    rows: 3,
+    style: {
+      ...inp,
+      resize: 'vertical',
+      lineHeight: 1.5
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      color: sub,
+      marginTop: 6,
+      lineHeight: 1.5,
+      fontFamily: C.fontSans
+    }
+  }, "After the last question, answers replace ", '{key}', " and the message is sent to the AI."));
+}
+function PillEditor({
+  dark,
+  pill,
+  onCancel,
+  onSave
+}) {
+  const [label, setLabel] = useState(pill?.label || '');
+  const [icon, setIcon] = useState(pill?.icon || 'ti-sparkles');
+  const [colorLight, setColorLight] = useState(pill?.colorLight || PILL_COLORS[0].l);
+  const [colorDark, setColorDark] = useState(pill?.colorDark || PILL_COLORS[0].d);
+  const [type, setType] = useState(pill?.type || 'prompt');
+  const [enabled, setEnabled] = useState(pill?.enabled !== false);
+  const [config, setConfig] = useState(pill?.config || {});
+  const [roles, setRoles] = useState(pill?.roles || []);
+  const [saving, setSaving] = useState(false);
+  const toggleRole = id => setRoles(prev => prev.includes(id) ? prev.filter(r => r !== id) : [...prev, id]);
+  const bord = dark ? '#152545' : C.border;
+  const cardBg = dark ? '#0A1730' : '#FFFFFF';
+  const txt = dark ? '#FFFFFF' : C.navy;
+  const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const inp = {
+    width: '100%',
+    padding: '9px 11px',
+    background: dark ? '#06101F' : C.surfaceHover,
+    border: `1px solid ${bord}`,
+    borderRadius: 9,
+    color: dark ? '#fff' : C.textPrimary,
+    fontSize: '0.85rem',
+    outline: 'none',
+    fontFamily: C.fontSans,
+    boxSizing: 'border-box'
+  };
+  const lbl = {
+    fontSize: '0.62rem',
+    color: sub,
+    letterSpacing: '0.07em',
+    textTransform: 'uppercase',
+    marginBottom: 5,
+    fontFamily: C.fontSans,
+    fontWeight: 600
+  };
+  const section = {
+    background: cardBg,
+    border: `1px solid ${bord}`,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12
+  };
+  function validate() {
+    if (!label.trim()) return 'Please enter a label.';
+    if (type === 'prompt' && !(config.prompt || '').trim()) return 'Please enter the AI instruction.';
+    if (type === 'task' && !((config.instruction !== undefined ? config.instruction : TASK_PILL_INSTRUCTION) || '').trim()) return 'Please enter the AI instruction.';
+    if (type === 'form') {
+      const fs = config.fields || [];
+      if (!fs.length) return 'Add at least one field.';
+      const keys = fs.map(f => (f.key || '').trim());
+      if (keys.some(k => !k)) return 'Every field needs a key.';
+      if (new Set(keys).size !== keys.length) return 'Field keys must be unique.';
+    }
+    if (type === 'steps') {
+      const ss = config.steps || [];
+      if (!ss.length) return 'Add at least one question.';
+      const keys = ss.map(s => (s.key || '').trim());
+      if (keys.some(k => !k)) return 'Every question needs a key.';
+      if (new Set(keys).size !== keys.length) return 'Question keys must be unique.';
+      if (ss.some(s => !(s.question || '').trim())) return 'Every step needs a question.';
+    }
+    return null;
+  }
+  async function submit() {
+    const err = validate();
+    if (err) {
+      alert(err);
+      return;
+    }
+    setSaving(true);
+    try {
+      await onSave({
+        label: label.trim(),
+        icon,
+        colorLight,
+        colorDark,
+        type,
+        enabled,
+        config,
+        roles
+      }, pill?.id);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: section
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Label"), /*#__PURE__*/React.createElement("input", {
+    value: label,
+    onChange: e => setLabel(e.target.value),
+    placeholder: "e.g. KPIs",
+    style: inp
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...lbl,
+      marginTop: 14
+    }
+  }, "Icon"), /*#__PURE__*/React.createElement(IconGridPicker, {
+    dark: dark,
+    value: icon,
+    onChange: setIcon
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...lbl,
+      marginTop: 14
+    }
+  }, "Color"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10
+    }
+  }, PILL_COLORS.map((c, i) => {
+    const on = colorLight === c.l && colorDark === c.d;
+    return /*#__PURE__*/React.createElement("button", {
+      key: i,
+      onClick: () => {
+        setColorLight(c.l);
+        setColorDark(c.d);
+      },
+      style: {
+        width: 30,
+        height: 30,
+        borderRadius: '50%',
+        cursor: 'pointer',
+        background: dark ? c.d : c.l,
+        border: on ? `2px solid ${dark ? '#fff' : C.navy}` : '2px solid transparent',
+        outline: on ? `2px solid ${dark ? c.d : c.l}` : 'none',
+        outlineOffset: 2
+      }
+    });
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...lbl,
+      marginBottom: 0
+    }
+  }, "Enabled"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEnabled(v => !v),
+    style: {
+      width: 44,
+      height: 26,
+      borderRadius: 13,
+      border: 'none',
+      cursor: 'pointer',
+      background: enabled ? dark ? C.gold : C.navy : dark ? '#1E3360' : '#D8D2C6',
+      position: 'relative',
+      transition: 'background 0.15s'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: 'absolute',
+      top: 3,
+      left: enabled ? 21 : 3,
+      width: 20,
+      height: 20,
+      borderRadius: '50%',
+      background: '#fff',
+      transition: 'left 0.15s'
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...lbl,
+      marginTop: 16
+    }
+  }, "Visible to"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 8
+    }
+  }, ACCESS_ROLES.map(r => {
+    const on = roles.includes(r.id);
+    return /*#__PURE__*/React.createElement("button", {
+      key: r.id,
+      type: "button",
+      onClick: () => toggleRole(r.id),
+      style: {
+        padding: '7px 12px',
+        borderRadius: 20,
+        cursor: 'pointer',
+        fontFamily: C.fontSans,
+        fontSize: '0.76rem',
+        fontWeight: on ? 600 : 500,
+        border: `1px solid ${on ? dark ? C.gold : C.navy : bord}`,
+        background: on ? dark ? C.gold : C.navy : 'transparent',
+        color: on ? '#fff' : sub
+      }
+    }, r.label);
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      color: sub,
+      marginTop: 8,
+      fontFamily: C.fontSans,
+      lineHeight: 1.5
+    }
+  }, roles.length ? 'Only shown to the selected roles (admins always see every pill).' : 'Shown to everyone.')), /*#__PURE__*/React.createElement("div", {
+    style: section
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "What happens when tapped"), /*#__PURE__*/React.createElement("select", {
+    value: type,
+    onChange: e => setType(e.target.value),
+    style: inp
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "prompt"
+  }, "Send an AI prompt"), /*#__PURE__*/React.createElement("option", {
+    value: "task"
+  }, "Create a task (AI)"), /*#__PURE__*/React.createElement("option", {
+    value: "form"
+  }, "Open a form"), /*#__PURE__*/React.createElement("option", {
+    value: "steps"
+  }, "Guided questions"), /*#__PURE__*/React.createElement("option", {
+    value: "calendar"
+  }, "Calendar brief (RSVP)")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14
+    }
+  }, type === 'prompt' && /*#__PURE__*/React.createElement(PromptConfigEditor, {
+    config: config,
+    setConfig: setConfig,
+    inp: inp,
+    lbl: lbl,
+    sub: sub
+  }), type === 'task' && /*#__PURE__*/React.createElement(TaskConfigEditor, {
+    config: config,
+    setConfig: setConfig,
+    inp: inp,
+    lbl: lbl,
+    sub: sub
+  }), type === 'form' && /*#__PURE__*/React.createElement(FormConfigEditor, {
+    config: config,
+    setConfig: setConfig,
+    inp: inp,
+    lbl: lbl,
+    sub: sub,
+    bord: bord
+  }), type === 'steps' && /*#__PURE__*/React.createElement(StepsConfigEditor, {
+    config: config,
+    setConfig: setConfig,
+    inp: inp,
+    lbl: lbl,
+    sub: sub,
+    bord: bord
+  }), type === 'calendar' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Range"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8
+    }
+  }, [{
+    v: 'daily',
+    t: "Today's brief"
+  }, {
+    v: 'weekly',
+    t: 'This week'
+  }].map(o => {
+    const on = (config.kind || 'daily') === o.v;
+    return /*#__PURE__*/React.createElement("button", {
+      key: o.v,
+      type: "button",
+      onClick: () => setConfig({
+        ...config,
+        kind: o.v
+      }),
+      style: {
+        flex: 1,
+        padding: '9px 10px',
+        borderRadius: 9,
+        cursor: 'pointer',
+        fontFamily: C.fontSans,
+        fontSize: '0.8rem',
+        fontWeight: on ? 600 : 500,
+        border: `1px solid ${on ? dark ? C.gold : C.navy : bord}`,
+        background: on ? dark ? C.gold : C.navy : 'transparent',
+        color: on ? '#fff' : sub
+      }
+    }, o.t);
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      color: sub,
+      marginTop: 10,
+      lineHeight: 1.5,
+      fontFamily: C.fontSans
+    }
+  }, "Pulls your Google Calendar and shows the schedule with tap-to-RSVP. No AI prompt needed. Tip: pick the calendar icon.")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    disabled: saving,
+    style: {
+      flex: 1,
+      padding: 12,
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 12,
+      fontSize: '0.9rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, saving ? 'Saving…' : 'Save pill'), /*#__PURE__*/React.createElement("button", {
+    onClick: onCancel,
+    style: {
+      flex: 1,
+      padding: 12,
+      background: 'none',
+      color: sub,
+      border: `1px solid ${bord}`,
+      borderRadius: 12,
+      fontSize: '0.9rem',
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Cancel")));
+}
+
+// Read-only description of a pill's BACKEND behaviour, derived from its
+// type + config — so the "How it's wired" view is always accurate to the code.
+function describePillWiring(pill) {
+  const t = pill.type,
+    cfg = pill.config || {};
+  const AI = 'ai-chat edge function → Claude (model from ai_config)';
+  if (t === 'newchat') return {
+    behavior: 'Starts a fresh conversation',
+    calls: 'Nothing',
+    reads: 'Nothing',
+    writes: 'Nothing',
+    cost: 'None',
+    output: 'A new, empty chat'
+  };
+  if (t === 'task') return {
+    behavior: 'Turns your message into a to-do (AI)',
+    calls: AI,
+    reads: 'What you type',
+    writes: 'Creates a task in the Tasks database',
+    cost: 'Add To-Do',
+    output: 'Confirms the task it created'
+  };
+  if (t === 'prompt' && cfg.kpi) return {
+    behavior: 'Logs KPIs (AI + CRM)',
+    calls: AI + ', then the Zoho CRM API',
+    reads: 'What you type + Zoho contacts (fuzzy match)',
+    writes: 'Logs the KPI activity to Zoho CRM',
+    cost: 'KPI Entry',
+    output: 'A summary card to confirm before it logs'
+  };
+  if (t === 'prompt') return {
+    behavior: 'Sends an AI prompt (instruction only)',
+    calls: AI,
+    reads: 'Only what you type',
+    writes: 'Nothing',
+    cost: 'AI Chat',
+    output: "Claude's reply, shaped by the instruction",
+    note: 'No app data is read or written — it just formats your input. To ground it in live data (e.g. the calendar), that data has to be wired in via code.'
+  };
+  if (t === 'calendar') return {
+    behavior: 'Shows your ' + (cfg.kind === 'weekly' ? "week's" : "day's") + ' schedule with tap-to-RSVP',
+    calls: 'google-calendar edge function → Google Calendar API',
+    reads: 'Your Google Calendar events (' + (cfg.kind === 'weekly' ? 'next 7 days' : 'today') + ')',
+    writes: 'Your RSVP (Yes/No) back to the event — notifies the organizer',
+    cost: 'None (native card, no AI)',
+    output: 'An interactive schedule card'
+  };
+  if (t === 'form') return {
+    behavior: 'Opens a structured form',
+    calls: 'Nothing (saved directly)',
+    reads: (cfg.fields || []).length + ' field(s) you fill in',
+    writes: 'Saves the form submission',
+    cost: 'None',
+    output: 'A saved form record'
+  };
+  if (t === 'steps') return {
+    behavior: 'Asks guided questions one at a time',
+    calls: 'Nothing (composed locally)',
+    reads: (cfg.steps || []).length + ' answer(s)',
+    writes: 'Composes your answers via the template',
+    cost: 'None',
+    output: 'A message built from your answers'
+  };
+  return {
+    behavior: pill.type || 'Unknown',
+    calls: '—',
+    reads: '—',
+    writes: '—',
+    cost: '—',
+    output: '—'
+  };
+}
+function PillRow({
+  dark,
+  pill,
+  first,
+  last,
+  onEdit,
+  onDelete,
+  onUp,
+  onDown
+}) {
+  const cardBg = dark ? '#0A1730' : '#FFFFFF';
+  const bord = dark ? '#152545' : C.border;
+  const txt = dark ? '#FFFFFF' : C.navy;
+  const sub = dark ? 'rgba(255,255,255,0.5)' : C.textSecondary;
+  const typeLabel = {
+    prompt: 'Prompt',
+    task: 'Task',
+    form: 'Form',
+    steps: 'Steps',
+    calendar: 'Calendar'
+  }[pill.type] || pill.type;
+  const rolesLabel = pill.roles && pill.roles.length ? pill.roles.map(id => (ACCESS_ROLES.find(r => r.id === id) || {}).label || id).join(' · ') : null;
+  const [open, setOpen] = useState(false);
+  const wiring = describePillWiring(pill);
+  const arrow = (dir, disabled, fn) => /*#__PURE__*/React.createElement("button", {
+    onClick: fn,
+    disabled: disabled,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: disabled ? 'default' : 'pointer',
+      color: disabled ? dark ? 'rgba(255,255,255,0.15)' : '#D8D2C6' : sub,
+      fontSize: 15,
+      padding: 0,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ti-chevron-${dir}`
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      background: cardBg,
+      border: `1px solid ${bord}`,
+      borderRadius: open ? '12px 12px 0 0' : 12,
+      padding: '10px 12px',
+      opacity: pill.enabled === false ? 0.55 : 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, arrow('up', first, onUp), arrow('down', last, onDown)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 30,
+      height: 30,
+      borderRadius: 7,
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: dark ? 'rgba(255,255,255,0.06)' : '#F3EFE7'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${pill.icon}`,
+    style: {
+      fontSize: 16,
+      color: dark ? pill.colorDark : pill.colorLight
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      cursor: 'pointer'
+    },
+    onClick: onEdit
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: '0.9rem',
+      fontWeight: 600,
+      color: txt,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, pill.label, pill.enabled === false && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.62rem',
+      color: sub,
+      fontWeight: 500
+    }
+  }, "  \xB7 off")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: '0.62rem',
+      color: sub,
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      marginTop: 1
+    }
+  }, typeLabel, rolesLabel ? ' · ' + rolesLabel : '')), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpen(o => !o),
+    title: "How it's wired",
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: open ? dark ? C.gold : C.navy : sub,
+      fontSize: 17,
+      padding: 3,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ti-${open ? 'chevron-up' : 'info-circle'}`
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: onEdit,
+    title: "Edit",
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontSize: 17,
+      padding: 3,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-pencil"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: onDelete,
+    title: "Delete",
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: C.red,
+      fontSize: 17,
+      padding: 3,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-trash"
+  }))), open && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: dark ? '#06101F' : C.surfaceHover,
+      border: `1px solid ${bord}`,
+      borderTop: 'none',
+      borderRadius: '0 0 12px 12px',
+      padding: '10px 14px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.58rem',
+      color: sub,
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      fontWeight: 600,
+      marginBottom: 8,
+      fontFamily: C.fontSans
+    }
+  }, "How it's wired"), [['Behavior', wiring.behavior], ['Reads', wiring.reads], ['Writes', wiring.writes], ['Calls', wiring.calls], ['Cost bucket', wiring.cost], ['Output', wiring.output]].map(([k, v]) => /*#__PURE__*/React.createElement("div", {
+    key: k,
+    style: {
+      display: 'flex',
+      gap: 8,
+      padding: '3px 0',
+      fontFamily: C.fontSans
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 86,
+      flexShrink: 0,
+      fontSize: '0.58rem',
+      color: sub,
+      textTransform: 'uppercase',
+      letterSpacing: '0.05em',
+      paddingTop: 2
+    }
+  }, k), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontSize: '0.74rem',
+      color: txt,
+      lineHeight: 1.45
+    }
+  }, v))), wiring.note && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      fontSize: '0.68rem',
+      color: sub,
+      fontStyle: 'italic',
+      lineHeight: 1.5,
+      fontFamily: C.fontSans
+    }
+  }, wiring.note)));
+}
+function WorkModeBuilder({
+  dark,
+  onClose,
+  onSaved
+}) {
+  const [pills, setPills] = useState(null);
+  const [editing, setEditing] = useState(null); // pill | { __new:true } | null
+  const refresh = () => PillDB.list().then(r => setPills(r || []));
+  useEffect(() => {
+    refresh();
+  }, []);
+  const bg = dark ? '#000D26' : C.bg;
+  const bord = dark ? '#152545' : C.border;
+  const txt = dark ? '#FFFFFF' : C.navy;
+  const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  async function savePill(obj, id) {
+    if (id) await PillDB.update(id, obj);else await PillDB.create({
+      ...obj,
+      sortOrder: pills ? pills.length : 0
+    });
+    setEditing(null);
+    await refresh();
+    onSaved && onSaved();
+  }
+  async function deletePill(id) {
+    if (!window.confirm('Delete this pill?')) return;
+    try {
+      await PillDB.remove(id);
+      await refresh();
+      onSaved && onSaved();
+    } catch (e) {
+      alert('Could not delete: ' + (e.message || e));
+    }
+  }
+  async function move(pill, dir) {
+    if (!pills) return;
+    const idx = pills.findIndex(p => p.id === pill.id);
+    const j = idx + dir;
+    if (idx < 0 || j < 0 || j >= pills.length) return;
+    const arr = pills.slice();
+    const t = arr[idx];
+    arr[idx] = arr[j];
+    arr[j] = t;
+    setPills(arr);
+    try {
+      await PillDB.reorder(arr.map(p => p.id));
+      onSaved && onSaved();
+    } catch (e) {
+      alert('Could not reorder: ' + (e.message || e));
+      refresh();
+    }
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 50,
+      background: bg,
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: 'calc(12px + env(safe-area-inset-top)) 16px 12px',
+      borderBottom: `1px solid ${bord}`,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: editing ? () => setEditing(null) : onClose,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: txt,
+      fontSize: 22,
+      display: 'flex',
+      alignItems: 'center',
+      padding: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontFamily: C.fontDisplay,
+      fontStyle: 'italic',
+      fontSize: '1.25rem',
+      color: txt
+    }
+  }, editing ? editing.__new ? 'New Pill' : 'Edit Pill' : 'AI Chat Pills'), !editing && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditing({
+      __new: true
+    }),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '7px 12px',
+      borderRadius: 20,
+      border: 'none',
+      cursor: 'pointer',
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      fontFamily: C.fontSans,
+      fontSize: '0.8rem',
+      fontWeight: 500
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 14
+    }
+  }), "Add")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      padding: '14px 16px 40px'
+    }
+  }, editing ? /*#__PURE__*/React.createElement(PillEditor, {
+    dark: dark,
+    pill: editing.__new ? null : editing,
+    onCancel: () => setEditing(null),
+    onSave: savePill
+  }) : pills === null ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: sub,
+      fontSize: '0.85rem',
+      padding: '40px 0'
+    }
+  }, "Loading\u2026") : pills.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: sub,
+      fontSize: '0.85rem',
+      padding: '40px 16px',
+      lineHeight: 1.6
+    }
+  }, "No pills yet.", /*#__PURE__*/React.createElement("br", null), "Tap ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: txt
+    }
+  }, "Add"), " to create your first pill.") : pills.map((p, i) => /*#__PURE__*/React.createElement(PillRow, {
+    key: p.id,
+    dark: dark,
+    pill: p,
+    first: i === 0,
+    last: i === pills.length - 1,
+    onEdit: () => setEditing(p),
+    onDelete: () => deletePill(p.id),
+    onUp: () => move(p, -1),
+    onDown: () => move(p, 1)
+  }))));
+}
+
+// ─── AI Chat pill runtime sheets (form / guided steps) ───────────
+function FormSheet({
+  dark,
+  pill,
+  onClose,
+  onSubmit
+}) {
+  const fields = pill.config && pill.config.fields || [];
+  const [vals, setVals] = useState(() => {
+    const o = {};
+    fields.forEach(f => {
+      o[f.key] = f.kind === 'select' ? f.options && f.options[0] || '' : '';
+    });
+    return o;
+  });
+  const bord = dark ? '#152545' : C.border;
+  const panelBg = dark ? '#0A1730' : '#FFFFFF';
+  const txt = dark ? '#fff' : C.navy;
+  const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const inp = {
+    width: '100%',
+    padding: '10px 12px',
+    background: dark ? '#06101F' : C.surfaceHover,
+    border: `1px solid ${bord}`,
+    borderRadius: 10,
+    color: dark ? '#fff' : C.textPrimary,
+    fontSize: '0.88rem',
+    outline: 'none',
+    fontFamily: C.fontSans,
+    boxSizing: 'border-box'
+  };
+  const lbl = {
+    fontSize: '0.66rem',
+    color: sub,
+    letterSpacing: '0.05em',
+    marginBottom: 5,
+    fontFamily: C.fontSans,
+    fontWeight: 600
+  };
+  function submit() {
+    for (const f of fields) {
+      if (f.required && !String(vals[f.key] || '').trim()) {
+        alert('Please fill in "' + (f.label || f.key) + '".');
+        return;
+      }
+    }
+    onSubmit(vals);
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 55,
+      background: 'rgba(0,13,38,0.5)',
+      display: 'flex',
+      alignItems: 'flex-end',
+      justifyContent: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: '100%',
+      maxWidth: 480,
+      background: panelBg,
+      borderTopLeftRadius: 18,
+      borderTopRightRadius: 18,
+      padding: '18px 18px calc(20px + env(safe-area-inset-bottom))',
+      maxHeight: '82vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${pill.icon}`,
+    style: {
+      fontSize: 20,
+      color: dark ? pill.colorDark : pill.colorLight
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontFamily: C.fontSans,
+      fontSize: '1rem',
+      fontWeight: 600,
+      color: txt
+    }
+  }, pill.label), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontSize: 20,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), fields.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: sub,
+      fontSize: '0.82rem',
+      marginBottom: 12
+    }
+  }, "This pill has no fields configured."), fields.map(f => /*#__PURE__*/React.createElement("div", {
+    key: f.key,
+    style: {
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, f.label || f.key, f.required && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.red
+    }
+  }, " *")), f.kind === 'select' ? /*#__PURE__*/React.createElement("select", {
+    value: vals[f.key],
+    onChange: e => setVals({
+      ...vals,
+      [f.key]: e.target.value
+    }),
+    style: inp
+  }, (f.options || []).map(o => /*#__PURE__*/React.createElement("option", {
+    key: o,
+    value: o
+  }, o))) : /*#__PURE__*/React.createElement("input", {
+    type: f.kind === 'number' ? 'number' : 'text',
+    value: vals[f.key],
+    onChange: e => setVals({
+      ...vals,
+      [f.key]: e.target.value
+    }),
+    style: inp
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    style: {
+      width: '100%',
+      padding: 12,
+      marginTop: 6,
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 12,
+      fontSize: '0.9rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Send")));
+}
+function StepSheet({
+  dark,
+  pill,
+  onClose,
+  onComplete
+}) {
+  const steps = pill.config && pill.config.steps || [];
+  const [idx, setIdx] = useState(0);
+  const [answers, setAnswers] = useState({});
+  const [val, setVal] = useState('');
+  const cur = steps[idx];
+  const bord = dark ? '#152545' : C.border;
+  const panelBg = dark ? '#0A1730' : '#FFFFFF';
+  const txt = dark ? '#fff' : C.navy;
+  const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const inp = {
+    width: '100%',
+    padding: '10px 12px',
+    background: dark ? '#06101F' : C.surfaceHover,
+    border: `1px solid ${bord}`,
+    borderRadius: 10,
+    color: dark ? '#fff' : C.textPrimary,
+    fontSize: '0.88rem',
+    outline: 'none',
+    fontFamily: C.fontSans,
+    boxSizing: 'border-box'
+  };
+  if (!cur) return null;
+  function next() {
+    const a = {
+      ...answers,
+      [cur.key]: val
+    };
+    setAnswers(a);
+    if (idx < steps.length - 1) {
+      setIdx(idx + 1);
+      setVal(a[steps[idx + 1].key] || '');
+    } else {
+      onComplete(a);
+    }
+  }
+  function back() {
+    if (idx === 0) return;
+    const a = {
+      ...answers,
+      [cur.key]: val
+    };
+    setAnswers(a);
+    setIdx(idx - 1);
+    setVal(a[steps[idx - 1].key] || '');
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 55,
+      background: 'rgba(0,13,38,0.5)',
+      display: 'flex',
+      alignItems: 'flex-end',
+      justifyContent: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: '100%',
+      maxWidth: 480,
+      background: panelBg,
+      borderTopLeftRadius: 18,
+      borderTopRightRadius: 18,
+      padding: '18px 18px calc(20px + env(safe-area-inset-bottom))'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${pill.icon}`,
+    style: {
+      fontSize: 20,
+      color: dark ? pill.colorDark : pill.colorLight
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontFamily: C.fontSans,
+      fontSize: '1rem',
+      fontWeight: 600,
+      color: txt
+    }
+  }, pill.label), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontSize: 20,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), pill.config.intro && idx === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: sub,
+      marginBottom: 10,
+      lineHeight: 1.5,
+      fontFamily: C.fontSans
+    }
+  }, pill.config.intro), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: '0.62rem',
+      color: sub,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      marginTop: 8,
+      marginBottom: 6
+    }
+  }, "Step ", idx + 1, " of ", steps.length), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: '0.95rem',
+      fontWeight: 500,
+      color: txt,
+      marginBottom: 10
+    }
+  }, cur.question), /*#__PURE__*/React.createElement("textarea", {
+    value: val,
+    onChange: e => setVal(e.target.value),
+    rows: 2,
+    style: {
+      ...inp,
+      resize: 'vertical',
+      lineHeight: 1.5
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginTop: 12
+    }
+  }, idx > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: back,
+    style: {
+      flex: 1,
+      padding: 11,
+      background: 'none',
+      color: sub,
+      border: `1px solid ${bord}`,
+      borderRadius: 12,
+      fontSize: '0.88rem',
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Back"), /*#__PURE__*/React.createElement("button", {
+    onClick: next,
+    style: {
+      flex: 2,
+      padding: 11,
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 12,
+      fontSize: '0.88rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, idx < steps.length - 1 ? 'Next' : 'Send'))));
+}
+
+// ─── Enter KPI inline cards (render inside the chat thread) ──────
+// Multi-select KPI chips for one person. selected = array of KPI_OPTIONS strings.
+function KpiChips({
+  selected,
+  onToggle,
+  dark
+}) {
+  const sel = selected || [];
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 6
+    }
+  }, KPI_OPTIONS.map(opt => {
+    const on = sel.includes(opt);
+    return /*#__PURE__*/React.createElement("button", {
+      key: opt,
+      type: "button",
+      onClick: () => onToggle(opt),
+      style: {
+        padding: '6px 11px',
+        borderRadius: 16,
+        cursor: 'pointer',
+        fontSize: '0.78rem',
+        fontWeight: 600,
+        fontFamily: C.fontSans,
+        border: on ? '1px solid transparent' : `1px solid ${dark ? '#1C2D4D' : C.border}`,
+        background: on ? dark ? C.gold : C.navy : dark ? '#0A1730' : '#FFFFFF',
+        color: on ? '#fff' : dark ? 'rgba(255,255,255,0.72)' : C.textPrimary,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        transition: 'all 0.12s ease'
+      }
+    }, on && /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-check",
+      style: {
+        fontSize: 13
+      }
+    }), opt);
+  }));
+}
+
+// The expanding inline form (form path). Starts compact (date, CTC, Person 1); grows via the buttons.
+function KpiInlineForm({
+  dark,
+  ownerName,
+  initial,
+  onReview,
+  onCancel
+}) {
+  const seed = initial || {};
+  const [kpiDate, setKpiDate] = useState(seed.kpi_date || kpiTodayStr());
+  const [ctcHours, setCtcHours] = useState(seed.ctc_hours == null ? '' : String(seed.ctc_hours));
+  const [persons, setPersons] = useState(() => {
+    const ps = (seed.persons || []).map(p => ({
+      name: p.name || '',
+      kpis: (p.kpis || []).slice(),
+      hotzone: p.hotzone_count == null ? '' : String(p.hotzone_count)
+    }));
+    return ps.length ? ps : [{
+      name: '',
+      kpis: [],
+      hotzone: ''
+    }];
+  });
+  const [others, setOthers] = useState(() => (seed.others || []).map(o => ({
+    kpi: o.kpi || '',
+    count: o.count == null ? '' : String(o.count)
+  })));
+  const [showOthers, setShowOthers] = useState((seed.others || []).length > 0);
+  // The Other-KPI chooser is only as good as Zoho's own picklist, so load
+  // it rather than shipping a copy that can go stale (see fetchOtherKpiOptions).
+  const [otherOpts, setOtherOpts] = useState(null); // null = still loading
+  const [otherOptsErr, setOtherOptsErr] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    fetchOtherKpiOptions().then(o => {
+      if (!cancelled) setOtherOpts(o);
+    }).catch(e => {
+      if (!cancelled) {
+        setOtherOpts([]);
+        setOtherOptsErr(e.message || String(e));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const bord = dark ? '#152545' : C.border;
+  const txt = dark ? '#fff' : C.navy;
+  const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const inp = {
+    width: '100%',
+    padding: '9px 11px',
+    background: dark ? '#06101F' : C.surfaceHover,
+    border: `1px solid ${bord}`,
+    borderRadius: 9,
+    color: dark ? '#fff' : C.textPrimary,
+    fontSize: '0.86rem',
+    outline: 'none',
+    fontFamily: C.fontSans,
+    boxSizing: 'border-box'
+  };
+  const lbl = {
+    fontSize: '0.62rem',
+    color: sub,
+    letterSpacing: '0.06em',
+    marginBottom: 4,
+    fontFamily: C.fontSans,
+    fontWeight: 700,
+    textTransform: 'uppercase'
+  };
+  const sectionLbl = {
+    fontSize: '0.6rem',
+    color: sub,
+    letterSpacing: '0.1em',
+    textTransform: 'uppercase',
+    fontWeight: 700,
+    margin: '14px 0 7px',
+    fontFamily: C.fontSans
+  };
+  const removeBtn = {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    color: sub,
+    fontSize: 15,
+    display: 'flex',
+    padding: 3
+  };
+  const ghostBtn = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    background: 'none',
+    border: `1px dashed ${bord}`,
+    borderRadius: 9,
+    padding: '8px 12px',
+    color: dark ? C.goldSoft : C.gold,
+    fontSize: '0.78rem',
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: C.fontSans
+  };
+  const updatePerson = (i, k, v) => setPersons(ps => ps.map((p, j) => j === i ? {
+    ...p,
+    [k]: v
+  } : p));
+  const toggleKpi = (i, opt) => setPersons(ps => ps.map((p, j) => {
+    if (j !== i) return p;
+    const has = p.kpis.includes(opt);
+    const kpis = has ? p.kpis.filter(k => k !== opt) : [...p.kpis, opt];
+    return {
+      ...p,
+      kpis,
+      ...(opt === 'Hotzone Action/s' && has ? {
+        hotzone: ''
+      } : {})
+    };
+  }));
+  const addPerson = () => setPersons(ps => ps.length < MAX_KPI_PERSONS ? [...ps, {
+    name: '',
+    kpis: [],
+    hotzone: ''
+  }] : ps);
+  const removePerson = i => setPersons(ps => ps.filter((_, j) => j !== i));
+  const updateOther = (i, k, v) => setOthers(os => os.map((o, j) => j === i ? {
+    ...o,
+    [k]: v
+  } : o));
+  const addOther = () => {
+    setShowOthers(true);
+    setOthers(os => os.length < MAX_OTHER_KPIS ? [...os, {
+      kpi: '',
+      count: ''
+    }] : os);
+  };
+  const removeOther = i => setOthers(os => os.filter((_, j) => j !== i));
+  function review() {
+    if (!kpiDate) {
+      alert('Please choose a KPI date.');
+      return;
+    }
+    const clean = persons.filter(p => p.name.trim() && p.kpis.length).map(p => ({
+      name: p.name.trim(),
+      kpis: p.kpis.slice(),
+      ...(p.kpis.includes('Hotzone Action/s') ? {
+        hotzone_count: Number(p.hotzone) || 0
+      } : {})
+    }));
+    if (!clean.length) {
+      alert('Add at least one person with a name and a KPI.');
+      return;
+    }
+    // A person typed without a KPI ticked (or a KPI ticked with no name)
+    // used to be dropped here without a word — say so instead.
+    const droppedPeople = persons.filter(p => (p.name.trim() || p.kpis.length) && !(p.name.trim() && p.kpis.length));
+    if (droppedPeople.length) {
+      alert(`${droppedPeople.length} person row${droppedPeople.length === 1 ? '' : 's'} ${droppedPeople.length === 1 ? 'is' : 'are'} incomplete — each needs BOTH a name and at least one KPI ticked. Fill them in or remove them.`);
+      return;
+    }
+    // Same for a half-filled Other KPI: refuse rather than quietly discard.
+    const partialOthers = others.filter(o => (o.kpi || o.count !== '') && !(o.kpi && o.count !== ''));
+    if (partialOthers.length) {
+      alert('Every Other KPI needs both an option chosen and a count. Fill them in or remove the row.');
+      return;
+    }
+    const cleanOthers = others.filter(o => o.kpi && o.count !== '').map(o => ({
+      kpi: o.kpi,
+      count: Number(o.count) || 0
+    }));
+    onReview({
+      owner: ownerName,
+      kpi_date: kpiDate,
+      ctc_hours: ctcHours === '' ? null : Number(ctcHours),
+      persons: clean,
+      others: cleanOthers
+    });
+  }
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 9
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "KPI Date"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: kpiDate,
+    onChange: e => setKpiDate(e.target.value),
+    style: inp
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "CTC Hours"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    step: "0.5",
+    value: ctcHours,
+    onChange: e => setCtcHours(e.target.value),
+    style: inp,
+    placeholder: "\u2014"
+  }))), persons.map((p, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      border: `1px solid ${bord}`,
+      borderRadius: 11,
+      padding: 11,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontSize: '0.68rem',
+      fontWeight: 700,
+      color: sub,
+      letterSpacing: '0.05em',
+      fontFamily: C.fontSans
+    }
+  }, "PERSON ", i + 1), persons.length > 1 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => removePerson(i),
+    style: removeBtn
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-trash"
+  }))), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    value: p.name,
+    onChange: e => updatePerson(i, 'name', e.target.value),
+    style: {
+      ...inp,
+      marginBottom: 9
+    },
+    placeholder: "Contact name"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...lbl,
+      marginBottom: 6
+    }
+  }, "Applicable KPIs"), /*#__PURE__*/React.createElement(KpiChips, {
+    selected: p.kpis,
+    onToggle: opt => toggleKpi(i, opt),
+    dark: dark
+  }), p.kpis.includes('Hotzone Action/s') && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 9
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Number of hotzone actions"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    value: p.hotzone,
+    onChange: e => updatePerson(i, 'hotzone', e.target.value),
+    style: inp,
+    placeholder: "e.g. 3"
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 7,
+      marginTop: 11
+    }
+  }, persons.length < MAX_KPI_PERSONS && /*#__PURE__*/React.createElement("button", {
+    onClick: addPerson,
+    style: ghostBtn
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus"
+  }), "Add another KPI"), !showOthers && /*#__PURE__*/React.createElement("button", {
+    onClick: addOther,
+    style: ghostBtn
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus"
+  }), "Add other KPIs")), showOthers && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: sectionLbl
+  }, "Other KPIs"), otherOpts === null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.76rem',
+      color: sub,
+      marginBottom: 8
+    }
+  }, "Loading options from Zoho\u2026"), otherOptsErr && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.76rem',
+      color: '#B91C1C',
+      marginBottom: 8,
+      lineHeight: 1.45
+    }
+  }, "Couldn\u2019t load the Other KPI list from Zoho, so these can\u2019t be submitted right now: ", otherOptsErr), others.map((o, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 2
+    }
+  }, /*#__PURE__*/React.createElement("select", {
+    value: o.kpi,
+    onChange: e => updateOther(i, 'kpi', e.target.value),
+    style: inp,
+    disabled: !otherOpts || !otherOpts.length
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\u2014 Choose \u2014"), (otherOpts || []).map(x => /*#__PURE__*/React.createElement("option", {
+    key: x,
+    value: x
+  }, x)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    value: o.count,
+    onChange: e => updateOther(i, 'count', e.target.value),
+    style: inp,
+    placeholder: "Count"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => removeOther(i),
+    style: removeBtn
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-trash"
+  })))), others.length < MAX_OTHER_KPIS && /*#__PURE__*/React.createElement("button", {
+    onClick: addOther,
+    style: ghostBtn
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus"
+  }), "Add other KPI")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 9,
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onCancel,
+    style: {
+      padding: '11px 14px',
+      background: 'none',
+      color: sub,
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      fontSize: '0.85rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    onClick: review,
+    style: {
+      flex: 1,
+      padding: 11,
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 10,
+      fontSize: '0.88rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6
+    }
+  }, "Review & Confirm ", /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-right",
+    style: {
+      fontSize: 16
+    }
+  }))));
+}
+
+// The review step. Each person is matched against Zoho Contacts here; submit is blocked
+// until every person is linked to a contact (picked from suggestions) or a new one is created.
+function KpiSummary({
+  dark,
+  payload,
+  onBack,
+  onConfirm
+}) {
+  const bord = dark ? '#152545' : C.border;
+  const txt = dark ? '#fff' : C.navy;
+  const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const green = dark ? '#5FCF99' : C.green;
+  const row = {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: '6px 0',
+    fontSize: '0.84rem',
+    fontFamily: C.fontSans
+  };
+  const persons = payload.persons || [];
+  const [res, setRes] = useState(() => persons.map(() => ({
+    status: 'loading',
+    matches: [],
+    chosenId: null,
+    chosenLabel: '',
+    mode: null,
+    creating: false,
+    error: ''
+  })));
+  const [submitting, setSubmitting] = useState(false);
+  const setOne = (i, patch) => setRes(r => r.map((x, j) => j === i ? {
+    ...x,
+    ...patch
+  } : x));
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      for (let i = 0; i < persons.length; i++) {
+        try {
+          const matches = await matchZohoContacts(persons[i].name);
+          if (!alive) return;
+          const top = matches[0];
+          // Auto-link a clearly dominant match, but keep it visible/changeable.
+          const strong = top && top.score >= 90 && (matches.length === 1 || !matches[1] || top.score - matches[1].score >= 15);
+          setOne(i, {
+            status: 'ready',
+            matches,
+            chosenId: strong ? top.id : null,
+            chosenLabel: strong ? top.full_name : '',
+            mode: strong ? 'match' : null
+          });
+        } catch (e) {
+          if (!alive) return;
+          setOne(i, {
+            status: 'ready',
+            error: 'CRM lookup failed'
+          });
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const pick = (i, m) => setOne(i, {
+    chosenId: m.id,
+    chosenLabel: m.full_name,
+    mode: 'match',
+    error: ''
+  });
+  const clearPick = i => setOne(i, {
+    chosenId: null,
+    chosenLabel: '',
+    mode: null
+  });
+  async function createFor(i) {
+    const nm = (persons[i].name || '').trim();
+    const parts = nm.split(/\s+/).filter(Boolean);
+    const first = parts.length > 1 ? parts[0] : '';
+    const last = parts.length > 1 ? parts.slice(1).join(' ') : parts[0] || nm;
+    setOne(i, {
+      creating: true,
+      error: ''
+    });
+    try {
+      const c = await createZohoContact(first, last);
+      setOne(i, {
+        creating: false,
+        chosenId: c.id,
+        chosenLabel: c.full_name || nm,
+        mode: 'created'
+      });
+    } catch (e) {
+      setOne(i, {
+        creating: false,
+        error: e.message || 'Could not create contact'
+      });
+    }
+  }
+  const anyBusy = res.some(x => x.status === 'loading' || x.creating);
+  const allResolved = res.length > 0 && res.every(x => x.chosenId);
+  async function confirm() {
+    if (!allResolved || submitting) return;
+    setSubmitting(true);
+    const resolved = persons.map((p, i) => ({
+      ...p,
+      contact_id: res[i].chosenId,
+      name: res[i].chosenLabel || p.name
+    }));
+    try {
+      await onConfirm(resolved);
+    } catch (e) {
+      setSubmitting(false);
+    }
+  }
+  const spin = {
+    animation: 'tmg-spin 0.8s linear infinite',
+    display: 'inline-block'
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.8rem',
+      color: sub,
+      fontFamily: C.fontSans,
+      marginBottom: 10
+    }
+  }, "Match each person to a contact, then confirm \u2014 once sent it can\u2019t be edited."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...row,
+      borderBottom: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: sub
+    }
+  }, "Owner"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: txt,
+      fontWeight: 600
+    }
+  }, payload.owner || '—')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...row,
+      borderBottom: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: sub
+    }
+  }, "Date"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: txt,
+      fontWeight: 600
+    }
+  }, payload.kpi_date || '—')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...row,
+      borderBottom: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: sub
+    }
+  }, "CTC Hours"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: txt,
+      fontWeight: 600
+    }
+  }, payload.ctc_hours == null ? '—' : payload.ctc_hours)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.6rem',
+      color: sub,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      fontWeight: 700,
+      margin: '14px 0 7px',
+      fontFamily: C.fontSans
+    }
+  }, "People (", persons.length, ")"), persons.map((p, i) => {
+    const st = res[i] || {};
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        border: `1px solid ${bord}`,
+        borderRadius: 10,
+        padding: '9px 11px',
+        marginBottom: 7
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.86rem',
+        fontWeight: 700,
+        color: txt,
+        fontFamily: C.fontSans,
+        marginBottom: 4
+      }
+    }, p.name || '—'), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 5,
+        marginBottom: 7
+      }
+    }, (p.kpis || []).map(k => /*#__PURE__*/React.createElement("span", {
+      key: k,
+      style: {
+        fontSize: '0.72rem',
+        fontWeight: 600,
+        color: dark ? C.goldSoft : C.gold,
+        background: dark ? 'rgba(173,131,47,0.16)' : '#F3EBDA',
+        borderRadius: 12,
+        padding: '3px 9px',
+        fontFamily: C.fontSans
+      }
+    }, k === 'Hotzone Action/s' ? 'Hotzone × ' + (p.hotzone_count || 0) : k))), st.status === 'loading' && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.76rem',
+        color: sub,
+        fontFamily: C.fontSans,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-loader-2",
+      style: spin
+    }), "Checking CRM\u2026"), st.status === 'ready' && st.chosenId && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 8,
+        fontSize: '0.78rem',
+        fontFamily: C.fontSans
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: green,
+        fontWeight: 600
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-circle-check-filled",
+      style: {
+        marginRight: 5
+      }
+    }), st.mode === 'created' ? 'New contact: ' : 'Linked: ', st.chosenLabel), /*#__PURE__*/React.createElement("button", {
+      onClick: () => clearPick(i),
+      style: {
+        background: 'none',
+        border: 'none',
+        color: sub,
+        fontSize: '0.74rem',
+        cursor: 'pointer',
+        textDecoration: 'underline',
+        fontFamily: C.fontSans
+      }
+    }, "change")), st.status === 'ready' && !st.chosenId && /*#__PURE__*/React.createElement("div", null, st.matches && st.matches.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.72rem',
+        color: sub,
+        fontFamily: C.fontSans,
+        fontWeight: 600
+      }
+    }, "Did you mean\u2026"), (st.matches || []).map(m => /*#__PURE__*/React.createElement("button", {
+      key: m.id,
+      onClick: () => pick(i, m),
+      style: {
+        textAlign: 'left',
+        width: '100%',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: 8,
+        padding: '7px 10px',
+        marginTop: 5,
+        borderRadius: 8,
+        cursor: 'pointer',
+        fontFamily: C.fontSans,
+        fontSize: '0.8rem',
+        border: `1px solid ${bord}`,
+        background: 'transparent',
+        color: txt
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 600
+      }
+    }, m.full_name, m.email ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: sub,
+        fontWeight: 400
+      }
+    }, " \xB7 ", m.email) : null), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: sub,
+        fontSize: '0.68rem'
+      }
+    }, m.score, "%"))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.72rem',
+        color: sub,
+        fontFamily: C.fontSans,
+        margin: '8px 0 0'
+      }
+    }, st.matches && st.matches.length ? 'None of these?' : 'No matching contact found.'), /*#__PURE__*/React.createElement("button", {
+      onClick: () => createFor(i),
+      disabled: st.creating,
+      style: {
+        marginTop: 5,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        background: 'none',
+        border: `1px dashed ${dark ? C.goldSoft : C.gold}`,
+        borderRadius: 8,
+        padding: '7px 11px',
+        color: dark ? C.goldSoft : C.gold,
+        fontSize: '0.78rem',
+        fontWeight: 600,
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, st.creating ? /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-loader-2",
+      style: spin
+    }) : /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-user-plus"
+    }), "Create contact \u201C", p.name, "\u201D"), st.error && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.74rem',
+        color: C.red,
+        marginTop: 5,
+        fontFamily: C.fontSans
+      }
+    }, st.error)));
+  }), (payload.others || []).length > 0 && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.6rem',
+      color: sub,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      fontWeight: 700,
+      margin: '12px 0 6px',
+      fontFamily: C.fontSans
+    }
+  }, "Other KPIs"), payload.others.map((o, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: row
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: txt
+    }
+  }, o.kpi), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: txt,
+      fontWeight: 600
+    }
+  }, o.count)))), !allResolved && !anyBusy && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: sub,
+      fontFamily: C.fontSans,
+      marginTop: 12
+    }
+  }, "Match or create a contact for each person to enable submit."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 9,
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    style: {
+      padding: '11px 14px',
+      background: 'none',
+      color: sub,
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      fontSize: '0.85rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-left",
+    style: {
+      fontSize: 16
+    }
+  }), "Back to edit"), /*#__PURE__*/React.createElement("button", {
+    onClick: confirm,
+    disabled: !allResolved || submitting,
+    style: {
+      flex: 1,
+      padding: 11,
+      background: !allResolved || submitting ? dark ? '#23344f' : '#C9C3B4' : dark ? C.gold : C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 10,
+      fontSize: '0.88rem',
+      fontWeight: 600,
+      cursor: !allResolved || submitting ? 'not-allowed' : 'pointer',
+      fontFamily: C.fontSans,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-check",
+    style: {
+      fontSize: 16
+    }
+  }), submitting ? 'Sending…' : 'Confirm' + (KPI_LIVE ? ' & send' : ''))));
+}
+
+// Wrapper card that hosts the Enter KPI flow inline in the chat thread. flow = { step, payload }.
+function KpiFlowCard({
+  dark,
+  flow,
+  pill,
+  ownerName,
+  onChoose,
+  onReview,
+  onBack,
+  onConfirm,
+  onCancel
+}) {
+  const panelBg = dark ? '#0A1730' : '#FFFFFF';
+  const bord = dark ? '#152545' : C.border;
+  const txt = dark ? '#fff' : C.navy;
+  const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const icon = pill && pill.icon || 'ti-chart-bar';
+  const choiceBtn = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+    padding: '13px 15px',
+    borderRadius: 11,
+    fontSize: '0.88rem',
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: C.fontSans,
+    marginTop: 9,
+    textAlign: 'left'
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'flex-start',
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: '92%',
+      maxWidth: 440,
+      background: panelBg,
+      border: `1px solid ${bord}`,
+      borderRadius: 16,
+      borderBottomLeftRadius: 4,
+      padding: 15,
+      boxShadow: '0 1px 2px rgba(0,26,74,0.05)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${icon}`,
+    style: {
+      fontSize: 18,
+      color: dark ? C.goldSoft : C.gold
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontFamily: C.fontSans,
+      fontSize: '0.95rem',
+      fontWeight: 600,
+      color: txt
+    }
+  }, "Enter KPI"), /*#__PURE__*/React.createElement("button", {
+    onClick: onCancel,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontSize: 18,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), flow.step === 'choice' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.85rem',
+      color: sub,
+      fontFamily: C.fontSans
+    }
+  }, "Would you like to fill out a form, or paste your notes?"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onChoose('form'),
+    style: {
+      ...choiceBtn,
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      border: '1px solid transparent'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-forms",
+    style: {
+      fontSize: 18
+    }
+  }), "Fill out a form"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onChoose('note'),
+    style: {
+      ...choiceBtn,
+      background: 'none',
+      color: txt,
+      border: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-notes",
+    style: {
+      fontSize: 18
+    }
+  }), "Paste your notes")), flow.step === 'form' && /*#__PURE__*/React.createElement(KpiInlineForm, {
+    dark: dark,
+    ownerName: ownerName,
+    initial: flow.payload,
+    onReview: onReview,
+    onCancel: onCancel
+  }), flow.step === 'summary' && /*#__PURE__*/React.createElement(KpiSummary, {
+    dark: dark,
+    payload: flow.payload,
+    onBack: onBack,
+    onConfirm: onConfirm
+  })));
+}
+
+// Admin screen (admin/operations) — separate from Settings, opened via the More menu.
+// Admin: per-tool role access. Left = tool, right = a roles multiselect dropdown.
+function TabAccess() {
+  const [cfg, setCfg] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    AccessDB.load().then(c => setCfg(normalizeAccess(c)));
+  }, []);
+  const toggle = (appId, roleId) => {
+    setSaved(false);
+    setCfg(prev => {
+      const cur = prev && prev[appId] || [];
+      const next = cur.includes(roleId) ? cur.filter(r => r !== roleId) : [...cur, roleId];
+      return {
+        ...prev,
+        [appId]: next
+      };
+    });
+  };
+  const summary = roles => {
+    const r = roles || [];
+    if (r.length >= ACCESS_ROLES.length) return 'All roles';
+    if (r.length === 0) return 'Admins only';
+    if (r.length === 1) {
+      const m = ACCESS_ROLES.find(x => x.id === r[0]);
+      return m ? m.label : '1 role';
+    }
+    return r.length + ' roles';
+  };
+  const save = async () => {
+    setSaving(true);
+    try {
+      await AccessDB.save(cfg);
+      setSaved(true);
+    } catch (e) {
+      alert('Could not save: ' + (e.message || e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const checkbox = on => /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 20,
+      height: 20,
+      borderRadius: 6,
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: on ? C.navy : C.surface,
+      border: on ? 'none' : `1.5px solid ${C.border}`
+    }
+  }, on && /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-check",
+    style: {
+      color: '#fff',
+      fontSize: 12
+    }
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    style: CARD
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      marginBottom: 3
+    }
+  }, "Tab Access"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: C.textSecondary,
+      marginBottom: 6,
+      lineHeight: 1.5
+    }
+  }, "For each tool, pick which roles can open it."), !cfg ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: C.textMuted,
+      padding: '12px 2px',
+      fontFamily: C.fontSans
+    }
+  }, "Loading\u2026") : /*#__PURE__*/React.createElement(React.Fragment, null, ACCESS_APPS.map(app => {
+    const roles = cfg[app.id] || [];
+    const isOpen = openId === app.id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: app.id
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 11,
+        padding: '11px 2px',
+        borderTop: `1px solid ${C.border}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 30,
+        height: 30,
+        borderRadius: 8,
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: C.surfaceHover
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${app.icon}`,
+      style: {
+        fontSize: 16,
+        color: C.gold
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        fontSize: '0.84rem',
+        fontWeight: 500,
+        color: C.navy,
+        fontFamily: C.fontSans
+      }
+    }, app.label), /*#__PURE__*/React.createElement("button", {
+      onClick: () => setOpenId(isOpen ? null : app.id),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        whiteSpace: 'nowrap',
+        padding: '7px 10px',
+        borderRadius: 9,
+        cursor: 'pointer',
+        fontFamily: C.fontSans,
+        fontSize: '0.76rem',
+        fontWeight: 600,
+        color: C.navy,
+        background: isOpen ? C.surface : C.surfaceHover,
+        border: `1.5px solid ${isOpen ? C.navy : C.border}`
+      }
+    }, summary(roles), /*#__PURE__*/React.createElement("i", {
+      className: `ti ti-chevron-${isOpen ? 'up' : 'down'}`,
+      style: {
+        fontSize: 14,
+        color: C.gold
+      }
+    }))), isOpen && /*#__PURE__*/React.createElement("div", {
+      style: {
+        margin: '0 0 8px 41px',
+        border: `1px solid ${C.border}`,
+        borderRadius: 10,
+        overflow: 'hidden',
+        boxShadow: '0 8px 24px rgba(0,26,74,0.13)'
+      }
+    }, ACCESS_ROLES.map(r => {
+      const on = roles.includes(r.id);
+      return /*#__PURE__*/React.createElement("button", {
+        key: r.id,
+        onClick: () => toggle(app.id, r.id),
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          width: '100%',
+          textAlign: 'left',
+          gap: 10,
+          padding: '10px 12px',
+          cursor: 'pointer',
+          background: C.surface,
+          border: 'none',
+          borderBottom: `1px solid ${C.bg}`,
+          fontFamily: C.fontSans
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: '0.8rem',
+          fontWeight: 500,
+          color: C.navy
+        }
+      }, r.label), checkbox(on));
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '8px 12px',
+        background: C.bg
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-lock",
+      style: {
+        fontSize: 12,
+        color: C.gold
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.68rem',
+        fontWeight: 500,
+        color: C.textMuted,
+        fontFamily: C.fontSans
+      }
+    }, "Admins \u2014 always on"))));
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: save,
+    disabled: saving,
+    style: {
+      width: '100%',
+      padding: 12,
+      marginTop: 14,
+      background: saved ? C.green : C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 12,
+      fontSize: '0.9rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      transition: 'background 200ms ease'
+    }
+  }, saving ? 'Saving…' : saved ? 'Saved ✓' : 'Save changes')));
+}
+function AdminTab({
+  onOpenBuilder
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '20px 16px 100px',
+      height: '100%',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '1.5rem',
+      fontWeight: 400,
+      fontStyle: 'italic',
+      color: C.navy,
+      marginBottom: 24,
+      fontFamily: C.fontDisplay
+    }
+  }, "Admin"), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...CARD,
+      cursor: 'pointer'
+    },
+    onClick: onOpenBuilder
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 11
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 34,
+      height: 34,
+      borderRadius: 9,
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: '#F3EBDA'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-layout-grid",
+    style: {
+      fontSize: 18,
+      color: C.gold
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans
+    }
+  }, "AI Chat Pills"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: C.textSecondary,
+      marginTop: 2,
+      lineHeight: 1.4
+    }
+  }, "Design the AI Chat quick-action shortcuts and what each one does.")), /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-right",
+    style: {
+      fontSize: 18,
+      color: C.textMuted,
+      flexShrink: 0
+    }
+  }))));
+}
+function DragReorderList({
+  items,
+  onReorder,
+  dark,
+  renderLabel,
+  onMoveItem,
+  moveIcon,
+  moveLabel
+}) {
+  const [dragIdx, setDragIdx] = useState(null);
+  const [overIdx, setOverIdx] = useState(null);
+  const listRef = useRef(null);
+  const rowHeight = 44;
+  const getIdxFromY = clientY => {
+    if (!listRef.current) return null;
+    const rect = listRef.current.getBoundingClientRect();
+    const y = clientY - rect.top;
+    return Math.max(0, Math.min(items.length - 1, Math.floor(y / rowHeight)));
+  };
+  const onPointerDown = (e, idx) => {
+    if (items[idx].locked) return;
+    e.preventDefault();
+    setDragIdx(idx);
+    setOverIdx(idx);
+    const onMove = ev => {
+      const cy = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      setOverIdx(getIdxFromY(cy));
+    };
+    const onUp = () => {
+      setDragIdx(d => {
+        setOverIdx(o => {
+          if (d !== null && o !== null && d !== o) {
+            const arr = [...items];
+            const [moved] = arr.splice(d, 1);
+            arr.splice(o, 0, moved);
+            onReorder(arr);
+          }
+          return null;
+        });
+        return null;
+      });
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  };
+  const borderCol = dark ? '#1E3360' : C.border;
+  const dragBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+  return /*#__PURE__*/React.createElement("div", {
+    ref: listRef,
+    "data-drag-list": true,
+    style: {
+      borderRadius: 10,
+      border: `1px solid ${borderCol}`,
+      overflow: 'hidden'
+    }
+  }, items.map((item, i) => {
+    const isDragging = dragIdx === i;
+    const isOver = overIdx === i && dragIdx !== null && dragIdx !== i;
+    return /*#__PURE__*/React.createElement("div", {
+      key: item.id,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        height: rowHeight,
+        padding: '0 12px',
+        background: isDragging ? dragBg : 'transparent',
+        borderBottom: i < items.length - 1 ? `1px solid ${borderCol}` : 'none',
+        borderTop: isOver && dragIdx > i ? `2px solid ${C.gold}` : 'none',
+        borderBottomColor: isOver && dragIdx < i ? C.gold : i < items.length - 1 ? borderCol : 'transparent',
+        borderBottomWidth: isOver && dragIdx < i ? 2 : 1,
+        opacity: isDragging ? 0.7 : 1,
+        touchAction: 'none',
+        userSelect: 'none',
+        WebkitUserSelect: 'none'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${item.locked ? 'ti-lock' : 'ti-grip-vertical'}`,
+      onPointerDown: e => onPointerDown(e, i),
+      style: {
+        fontSize: 14,
+        color: item.locked ? dark ? 'rgba(255,255,255,0.15)' : '#D5D0C6' : C.textMuted,
+        cursor: item.locked ? 'default' : 'grab',
+        touchAction: 'none',
+        padding: '4px 0'
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        minWidth: 0
+      }
+    }, renderLabel(item)), onMoveItem && !item.locked && /*#__PURE__*/React.createElement("button", {
+      onClick: () => onMoveItem(item),
+      title: moveLabel,
+      style: {
+        flexShrink: 0,
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        padding: '4px',
+        display: 'flex',
+        alignItems: 'center',
+        color: dark ? C.goldSoft : C.gold
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${moveIcon}`,
+      style: {
+        fontSize: 15
+      }
+    })));
+  }));
+}
+function SettingsTab({
+  historySide,
+  setHistorySide,
+  dark,
+  setDark,
+  fontScale,
+  setFontScale,
+  embedded,
+  navItems,
+  moreMenuItems,
+  onReorderNav,
+  onReorderMore,
+  onMoveToMore,
+  onMoveToNav
+}) {
+  const sideBtn = (val, label, icon) => {
+    const on = historySide === val;
+    return /*#__PURE__*/React.createElement("button", {
+      onClick: () => setHistorySide(val),
+      style: {
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        padding: '10px',
+        borderRadius: 10,
+        cursor: 'pointer',
+        border: `1px solid ${on ? C.navy : C.border}`,
+        background: on ? C.navy : C.surface,
+        color: on ? '#fff' : C.textSecondary,
+        fontFamily: C.fontSans,
+        fontSize: '0.85rem',
+        fontWeight: on ? 600 : 500
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${icon}`,
+      style: {
+        fontSize: 16
+      }
+    }), label);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: embedded ? {
+      padding: '0 16px 16px'
+    } : {
+      padding: '20px 16px 100px',
+      height: '100%',
+      overflowY: 'auto'
+    }
+  }, !embedded && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '1.5rem',
+      fontWeight: 400,
+      fontStyle: 'italic',
+      color: C.navy,
+      marginBottom: 24,
+      fontFamily: C.fontDisplay
+    }
+  }, "Settings"), /*#__PURE__*/React.createElement("div", {
+    style: CARD
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      marginBottom: 14
+    }
+  }, "Appearance"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.85rem',
+      color: C.textPrimary,
+      fontFamily: C.fontSans
+    }
+  }, "Dark mode"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setDark(d => !d),
+    title: dark ? 'Switch to light mode' : 'Switch to dark mode',
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '6px 12px',
+      borderRadius: 8,
+      border: `1px solid ${C.border}`,
+      background: C.surface,
+      color: C.textSecondary,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      fontSize: '0.8rem',
+      fontWeight: 500,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${dark ? 'ti-sun' : 'ti-moon'}`,
+    style: {
+      fontSize: 15
+    }
+  }), dark ? 'Light' : 'Dark')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 9
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.85rem',
+      color: C.textPrimary,
+      fontFamily: C.fontSans
+    }
+  }, "Text size"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      fontFamily: C.fontSans,
+      fontWeight: 600
+    }
+  }, Math.round((fontScale || 1) * 100), "%")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 11
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: C.textMuted,
+      fontFamily: C.fontSans,
+      fontWeight: 700,
+      flexShrink: 0
+    }
+  }, "A"), /*#__PURE__*/React.createElement("input", {
+    type: "range",
+    min: "0.85",
+    max: "1.35",
+    step: "0.05",
+    value: fontScale || 1,
+    onChange: e => setFontScale(parseFloat(e.target.value)),
+    style: {
+      flex: 1,
+      accentColor: C.navy,
+      cursor: 'pointer'
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 22,
+      color: C.textMuted,
+      fontFamily: C.fontSans,
+      fontWeight: 700,
+      flexShrink: 0
+    }
+  }, "A")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      marginTop: 9,
+      lineHeight: 1.5,
+      fontFamily: C.fontSans
+    }
+  }, "Adjusts the size of everything in the app.", (fontScale || 1) !== 1 && /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 ", /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFontScale(1),
+    style: {
+      background: 'none',
+      border: 'none',
+      padding: 0,
+      color: C.gold,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      fontSize: '0.72rem',
+      fontWeight: 600
+    }
+  }, "Reset to 100%"))), navItems && navItems.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 1,
+      background: dark ? '#1E3360' : C.border,
+      margin: '18px 0'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.85rem',
+      color: C.textPrimary,
+      fontFamily: C.fontSans,
+      marginBottom: 4
+    }
+  }, "Navigation bar"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      fontFamily: C.fontSans,
+      marginBottom: 10,
+      lineHeight: 1.5
+    }
+  }, "Drag to reorder. Tap ", /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-bar-down",
+    style: {
+      fontSize: 11
+    }
+  }), " to move to More."), /*#__PURE__*/React.createElement(DragReorderList, {
+    items: navItems,
+    onReorder: onReorderNav,
+    dark: dark,
+    onMoveItem: onMoveToMore,
+    moveIcon: "ti-arrow-bar-down",
+    moveLabel: "Move to More",
+    renderLabel: item => /*#__PURE__*/React.createElement(React.Fragment, null, item.img ? /*#__PURE__*/React.createElement("img", {
+      src: item.img,
+      style: {
+        width: 16,
+        height: 16,
+        objectFit: 'contain'
+      }
+    }) : /*#__PURE__*/React.createElement("i", {
+      className: `ti ${item.icon}`,
+      style: {
+        fontSize: 16,
+        color: dark ? C.goldSoft : C.gold
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.82rem',
+        color: C.textPrimary,
+        fontFamily: C.fontSans,
+        fontWeight: 500
+      }
+    }, item.label))
+  })), moreMenuItems && moreMenuItems.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.85rem',
+      color: C.textPrimary,
+      fontFamily: C.fontSans,
+      marginTop: 16,
+      marginBottom: 4
+    }
+  }, "More menu"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      fontFamily: C.fontSans,
+      marginBottom: 10,
+      lineHeight: 1.5
+    }
+  }, "Drag to reorder. Tap ", /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-bar-up",
+    style: {
+      fontSize: 11
+    }
+  }), " to move to navigation."), /*#__PURE__*/React.createElement(DragReorderList, {
+    items: moreMenuItems,
+    onReorder: onReorderMore,
+    dark: dark,
+    onMoveItem: onMoveToNav,
+    moveIcon: "ti-arrow-bar-up",
+    moveLabel: "Move to Navigation",
+    renderLabel: item => /*#__PURE__*/React.createElement(React.Fragment, null, item.img ? /*#__PURE__*/React.createElement("img", {
+      src: item.img,
+      style: {
+        width: 16,
+        height: 16,
+        objectFit: 'contain'
+      }
+    }) : /*#__PURE__*/React.createElement("i", {
+      className: `ti ${item.icon}`,
+      style: {
+        fontSize: 16,
+        color: dark ? C.goldSoft : C.gold
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.82rem',
+        color: C.textPrimary,
+        fontFamily: C.fontSans,
+        fontWeight: 500
+      }
+    }, item.label))
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: CARD
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      marginBottom: 6
+    }
+  }, "Chat History"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: C.textSecondary,
+      marginBottom: 12,
+      lineHeight: 1.5
+    }
+  }, "Which side the chat history panel opens from."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8
+    }
+  }, sideBtn('left', 'Left', 'ti-layout-sidebar-left-expand'), sideBtn('right', 'Right', 'ti-layout-sidebar-right-expand'))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => window.SupabaseAuth.signOut(),
+    style: {
+      width: '100%',
+      padding: 12,
+      background: 'none',
+      border: `1px solid ${C.red}`,
+      borderRadius: 12,
+      color: C.red,
+      fontSize: '15px',
+      cursor: 'pointer',
+      fontWeight: 500,
+      fontFamily: C.fontSans
+    }
+  }, "Sign out"));
+}
+
+// ─── Shared Drives (opened from the More menu) ───────────────────
+// ─── Company Directory + Profile (opened from the More menu) ─────
+// HYBRID source: the directory reads LIVE from the Supabase `profiles`
+// table (ProfileDB.loadAll) and merges it OVER this curated seed.
+//  • Curated photo / title / badge win for display.
+//  • Live data fills the per-person FIELDS (employee ID, reports-to,
+//    phone, email, location, timezone, pets) automatically once a
+//    person signs up or is set in Manage Users — no code edits needed.
+//  • People not yet signed up still show from this seed.
+//  • New sign-ups not in the seed are appended (active accounts only).
+// The website headshots are the curated `photo`; clear a person's
+// `photo` to fall back to their account avatar. See buildRoster() below.
+// People permanently excluded from the directory + any future roster,
+// even if they sign up later (matched on lowercased full name).
+const DIRECTORY_EXCLUDE = ['cassandra clemons', 'cassie clemons'];
+const TEAM = [{
+  id: 'tarek',
+  name: 'Tarek Morshed',
+  title: 'Chief Realty Officer',
+  photo: 'https://themorshedgroup.com/wp-content/uploads/2023/01/tarek-morshed-headshot.jpg',
+  badge: {
+    label: 'Principal',
+    lightBg: '#001A4A',
+    lightFg: '#C9A45A',
+    darkBg: '#C9A45A',
+    darkFg: '#001A4A'
+  },
+  employeeId: '',
+  reportsTo: '',
+  phone: '',
+  email: '',
+  location: '',
+  timezone: '',
+  pets: ''
+}, {
+  id: 'symon',
+  name: 'Symon Yongco',
+  title: 'Operations Manager',
+  photo: 'https://themorshedgroup.com/wp-content/uploads/2025/01/Hidenori-Symon-Yongco-headshot.jpg',
+  badge: {
+    label: 'Admin',
+    lightBg: '#F3EBDA',
+    lightFg: '#AD832F',
+    darkBg: 'rgba(173,131,47,0.2)',
+    darkFg: '#C9A45A'
+  },
+  employeeId: 'TMG-03',
+  reportsTo: '',
+  phone: '(512) 643-6688',
+  email: 'manager@themorshedgroup.com',
+  location: 'Manila, Philippines',
+  timezone: 'Asia/Manila',
+  pets: '🐶 Dog'
+}, {
+  id: 'brad',
+  name: 'Brad Baker',
+  title: 'Real Estate Professional',
+  photo: 'https://themorshedgroup.com/wp-content/uploads/2023/01/Brad-Baker-headshot-1.jpg',
+  badge: null,
+  employeeId: '',
+  reportsTo: '',
+  phone: '',
+  email: '',
+  location: '',
+  timezone: '',
+  pets: ''
+}, {
+  id: 'brett',
+  name: 'Brett Silverman',
+  title: 'Commercial Advisor',
+  photo: 'https://themorshedgroup.com/wp-content/uploads/2025/09/Brett-Silverman-headshot.jpg',
+  badge: null,
+  employeeId: '',
+  reportsTo: '',
+  phone: '',
+  email: '',
+  location: '',
+  timezone: '',
+  pets: ''
+}, {
+  id: 'kyle',
+  name: 'Kyle Baird',
+  title: 'Real Estate Professional',
+  photo: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Kyle-Baird-headshot.jpg',
+  badge: null,
+  employeeId: '',
+  reportsTo: '',
+  phone: '',
+  email: '',
+  location: '',
+  timezone: '',
+  pets: ''
+}, {
+  id: 'alexandra',
+  name: 'Alexandra Machado',
+  title: 'Transaction Coordinator',
+  photo: 'https://themorshedgroup.com/wp-content/uploads/2025/04/Alexandra-Machado-headshot.jpg',
+  badge: null,
+  employeeId: '',
+  reportsTo: '',
+  phone: '',
+  email: '',
+  location: '',
+  timezone: '',
+  pets: ''
+}, {
+  id: 'luciana',
+  name: 'Luciana Pilco',
+  title: 'Executive Assistant',
+  photo: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Luciana-Pilco-headshot.jpg',
+  badge: null,
+  employeeId: '',
+  reportsTo: '',
+  phone: '',
+  email: '',
+  location: '',
+  timezone: '',
+  pets: ''
+}];
+
+// Avatar with an initials fallback when no photo/account-avatar exists.
+function Avatar({
+  photo,
+  name,
+  size
+}) {
+  if (photo) return /*#__PURE__*/React.createElement("img", {
+    src: photo,
+    alt: name,
+    style: {
+      width: size,
+      height: size,
+      borderRadius: '50%',
+      objectFit: 'cover',
+      flexShrink: 0
+    }
+  });
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: size,
+      height: size,
+      borderRadius: '50%',
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: C.navy,
+      color: C.goldSoft,
+      fontFamily: "'Jost', sans-serif",
+      fontWeight: 600,
+      fontSize: Math.round(size * 0.4)
+    }
+  }, (name || '?').trim().charAt(0).toUpperCase());
+}
+
+// Merge live Supabase profiles OVER the curated TEAM seed (see note above).
+function buildRoster(profiles) {
+  profiles = profiles || [];
+  const fullName = p => ((p.first_name || '') + ' ' + (p.last_name || '')).trim();
+  const petsText = v => Array.isArray(v) ? v.map(petLabel).join('  ') : v || '';
+  const locationText = p => {
+    if (!p) return '';
+    const c = COUNTRIES.find(x => x.c === p.country);
+    const cn = c ? c.n : p.country || '';
+    const city = p.timezone ? tzCity(p.timezone) : '';
+    return [city, cn].filter(Boolean).join(', ');
+  };
+  const byId = {},
+    byName = {},
+    byEmail = {};
+  profiles.forEach(p => {
+    byId[p.id] = p;
+    const nm = fullName(p).toLowerCase();
+    if (nm) byName[nm] = p;
+    if (p.email) byEmail[p.email.toLowerCase()] = p;
+  });
+  const reportsName = id => {
+    const m = id ? byId[id] : null;
+    return m ? fullName(m) || m.email || '' : '';
+  };
+  const used = new Set();
+
+  // Curated seed (fixed order), each enriched by its matching live profile.
+  const seeded = TEAM.map(s => {
+    const live = s.email && byEmail[s.email.toLowerCase()] || byName[s.name.toLowerCase()] || null;
+    if (live) used.add(live.id);
+    return {
+      id: s.id,
+      name: s.name,
+      title: s.title || live && live.title || '',
+      photo: s.photo || live && live.avatar_url || '',
+      badge: s.badge,
+      employeeId: live && live.employee_id || s.employeeId || '',
+      reportsTo: live && reportsName(live.reports_to) || s.reportsTo || '',
+      phone: live && live.phone || s.phone || '',
+      email: live && live.email || s.email || '',
+      location: live && locationText(live) || s.location || '',
+      timezone: live && live.timezone || s.timezone || '',
+      pets: (live && live.pets && live.pets.length ? petsText(live.pets) : '') || s.pets || ''
+    };
+  });
+
+  // New sign-ups not already in the curated seed (active accounts only).
+  const extras = profiles.filter(p => !used.has(p.id) && p.status === 'active' && (fullName(p) || p.email) && !DIRECTORY_EXCLUDE.includes(fullName(p).trim().toLowerCase())).map(p => ({
+    id: p.id,
+    name: fullName(p) || p.email,
+    title: p.title || '',
+    photo: p.avatar_url || '',
+    badge: hasAdmin(p.access) ? {
+      label: 'Admin',
+      lightBg: '#F3EBDA',
+      lightFg: '#AD832F',
+      darkBg: 'rgba(173,131,47,0.2)',
+      darkFg: '#C9A45A'
+    } : null,
+    employeeId: p.employee_id || '',
+    reportsTo: reportsName(p.reports_to),
+    phone: p.phone || '',
+    email: p.email || '',
+    location: locationText(p),
+    timezone: p.timezone || '',
+    pets: petsText(p.pets)
+  })).sort((a, b) => a.name.localeCompare(b.name));
+  return seeded.concat(extras);
+}
+function ProfileView({
+  person,
+  dark,
+  onBack
+}) {
+  const J = "'Jost', sans-serif";
+  const p = person;
+  const ink = dark ? '#fff' : '#001A4A';
+  const role = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+  const keyC = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+  const valC = dark ? '#fff' : '#001A4A';
+  const muted = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+  const bord = dark ? '#0D1E3A' : '#F0EBE3';
+  const rows = [['Employee ID', p.employeeId], ['Title', p.title], ['Reports to', p.reportsTo], ['Phone', p.phone], ['Email', p.email], ['Location', p.location], ['Local time', p.timezone ? localTimeIn(p.timezone) : ''], ['Pets', p.pets]];
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '11px 14px 0',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    "aria-label": "Back to directory",
+    style: {
+      background: 'none',
+      border: 'none',
+      padding: 0,
+      display: 'flex',
+      alignItems: 'center',
+      cursor: 'pointer',
+      color: ink
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 18
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 13,
+      fontWeight: 600,
+      color: ink
+    }
+  }, "Directory")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 13,
+      padding: '16px 16px 14px'
+    }
+  }, /*#__PURE__*/React.createElement(Avatar, {
+    photo: p.photo,
+    name: p.name,
+    size: 60
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 16,
+      fontWeight: 600,
+      lineHeight: 1.1,
+      color: ink
+    }
+  }, p.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      marginTop: 3,
+      color: role
+    }
+  }, p.title)), p.badge && /*#__PURE__*/React.createElement("span", {
+    style: {
+      flexShrink: 0,
+      fontFamily: J,
+      fontSize: 7,
+      letterSpacing: '0.12em',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      padding: '3px 9px',
+      borderRadius: 11,
+      background: dark ? p.badge.darkBg : p.badge.lightBg,
+      color: dark ? p.badge.darkFg : p.badge.lightFg
+    }
+  }, p.badge.label)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto'
+    }
+  }, rows.map((r, idx) => {
+    const empty = !r[1];
+    const isEmail = r[0] === 'Email';
+    return /*#__PURE__*/React.createElement("div", {
+      key: idx,
+      style: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '11px 16px',
+        borderBottom: `1px solid ${bord}`,
+        gap: 12
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        color: keyC,
+        flexShrink: 0
+      }
+    }, r[0]), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: isEmail ? 8.5 : 10,
+        fontWeight: 600,
+        textAlign: 'right',
+        color: empty ? muted : valC,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, empty ? '—' : contactLink(r[0], r[1])));
+  })));
+}
+
+// ─── App Roadmap (admin-only, in More) — quarter-grouped PM table ─────
+// Data model (flat, families contiguous): { id, name, status, type,
+// dueDate|null, parentId|null, order }. Groups are DERIVED from dueDate
+// (quarter/month) — no separate quarter field. Light mode only (per spec).
+const RM_STATUS = [{
+  id: 'todo',
+  label: 'To Do',
+  bg: '#F1EFE8',
+  text: '#5F5E5A',
+  dot: '#888780'
+}, {
+  id: 'in_progress',
+  label: 'In Progress',
+  bg: '#E6F1FB',
+  text: '#185FA5',
+  dot: '#185FA5'
+}, {
+  id: 'done',
+  label: 'Completed',
+  bg: '#E6F2EC',
+  text: '#0F6E56',
+  dot: '#0F6E56'
+}, {
+  id: 'stuck',
+  label: 'Stuck',
+  bg: '#FCEBEB',
+  text: '#A32D2D',
+  dot: '#A32D2D'
+}];
+const RM_TYPES = [{
+  id: 'mvp',
+  label: 'MVP',
+  bg: '#001A4A',
+  text: '#FFFFFF'
+}, {
+  id: 'v2',
+  label: 'V2',
+  bg: '#F3EBDA',
+  text: '#AD832F'
+}, {
+  id: 'future',
+  label: 'Future',
+  bg: '#F0EBE3',
+  text: '#888888'
+}];
+const rmStatus = id => RM_STATUS.find(s => s.id === id) || RM_STATUS[0];
+const rmType = id => RM_TYPES.find(t => t.id === id) || RM_TYPES[0];
+const RM_DIFF = [{
+  id: 'easy',
+  label: 'Easy',
+  bg: '#E6F2EC',
+  text: '#0F6E56'
+}, {
+  id: 'normal',
+  label: 'Normal',
+  bg: '#FAEEDA',
+  text: '#BA7517'
+}, {
+  id: 'hard',
+  label: 'Hard',
+  bg: '#FCEBEB',
+  text: '#A32D2D'
+}];
+const rmDiff = id => RM_DIFF.find(d => d.id === id) || RM_DIFF[1];
+const rmPad = n => String(n).padStart(2, '0');
+const RM_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function rmBucketKey(dateStr, groupBy) {
+  const p = dateStr.split('-');
+  const y = +p[0],
+    mo = +p[1]; // mo 1..12
+  if (groupBy === 'month') return y + '-' + rmPad(mo);
+  const q = Math.floor((mo - 1) / 3) + 1;
+  return y + '-Q' + q;
+}
+function rmGroupInfo(key, groupBy) {
+  if (groupBy === 'month') {
+    const p = key.split('-');
+    const y = +p[0],
+      mo = +p[1];
+    return {
+      label: RM_MON[mo - 1] + ' ' + y,
+      hint: '',
+      dropDate: y + '-' + rmPad(mo) + '-01'
+    };
+  }
+  const p = key.split('-Q');
+  const y = +p[0],
+    q = +p[1];
+  const sm = (q - 1) * 3; // 0-based start month
+  return {
+    label: 'Q' + q + ' ' + y,
+    hint: RM_MON[sm] + ' – ' + RM_MON[sm + 2],
+    dropDate: y + '-' + rmPad(sm + 1) + '-01'
+  };
+}
+function rmNormalize(rows) {
+  const parents = rows.filter(r => !r.parentId);
+  const out = [];
+  parents.forEach((p, pi) => {
+    out.push({
+      ...p,
+      parentId: null,
+      order: pi
+    });
+    rows.filter(r => r.parentId === p.id).forEach((c, ci) => out.push({
+      ...c,
+      order: ci
+    }));
+  });
+  // keep any orphaned children as top-level so nothing is silently dropped
+  rows.filter(r => r.parentId && !parents.some(p => p.id === r.parentId)).forEach((c, i) => out.push({
+    ...c,
+    parentId: null,
+    order: parents.length + i
+  }));
+  return out;
+}
+function rmBlocks(rows) {
+  const blocks = [];
+  let cur = null;
+  rows.forEach(r => {
+    if (!r.parentId) {
+      cur = {
+        pid: r.id,
+        items: [r]
+      };
+      blocks.push(cur);
+    } else if (cur && r.parentId === cur.pid) {
+      cur.items.push(r);
+    } else {
+      blocks.push({
+        pid: r.id,
+        items: [r]
+      });
+      cur = null;
+    }
+  });
+  return blocks;
+}
+function rmGroups(rows, groupBy) {
+  const parents = rows.filter(r => !r.parentId);
+  const fam = p => ({
+    parent: p,
+    children: rows.filter(r => r.parentId === p.id)
+  });
+  const families = parents.map(fam);
+  if (groupBy === 'none') {
+    const sorted = families.slice().sort((a, b) => {
+      const da = a.parent.dueDate,
+        db = b.parent.dueDate;
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return da < db ? -1 : da > db ? 1 : 0;
+    });
+    return [{
+      key: '__all',
+      flat: true,
+      families: sorted
+    }];
+  }
+  const map = new Map();
+  families.forEach(f => {
+    const key = f.parent.dueDate ? rmBucketKey(f.parent.dueDate, groupBy) : '__unscheduled';
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(f);
+  });
+  const dated = [...map.keys()].filter(k => k !== '__unscheduled').sort();
+  const groups = dated.map(k => ({
+    key: k,
+    info: rmGroupInfo(k, groupBy),
+    families: map.get(k)
+  }));
+  if (map.has('__unscheduled')) groups.push({
+    key: '__unscheduled',
+    unscheduled: true,
+    families: map.get('__unscheduled')
+  });
+  return groups;
+}
+function rmGroupProgress(group) {
+  let total = 0,
+    done = 0;
+  group.families.forEach(f => {
+    total++;
+    if (f.parent.status === 'done') done++;
+    f.children.forEach(c => {
+      total++;
+      if (c.status === 'done') done++;
+    });
+  });
+  return total ? Math.round(done / total * 100) : 0;
+}
+function rmMoveFamily(rows, dragId, targetId, pos, newDue) {
+  const blocks = rmBlocks(rows);
+  const di = blocks.findIndex(b => b.pid === dragId);
+  if (di < 0) return rows;
+  const dblock = blocks.splice(di, 1)[0];
+  if (newDue !== undefined) dblock.items[0] = {
+    ...dblock.items[0],
+    dueDate: newDue
+  };
+  const ti = blocks.findIndex(b => b.pid === targetId);
+  if (ti < 0) blocks.push(dblock);else blocks.splice(pos === 'after' ? ti + 1 : ti, 0, dblock);
+  return rmNormalize(blocks.reduce((a, b) => a.concat(b.items), []));
+}
+function rmMoveToGroupEnd(rows, dragId, newDue) {
+  const blocks = rmBlocks(rows);
+  const di = blocks.findIndex(b => b.pid === dragId);
+  if (di < 0) return rows;
+  const dblock = blocks.splice(di, 1)[0];
+  dblock.items[0] = {
+    ...dblock.items[0],
+    dueDate: newDue
+  };
+  blocks.push(dblock);
+  return rmNormalize(blocks.reduce((a, b) => a.concat(b.items), []));
+}
+function AppRoadmap({
+  dark,
+  onBack
+}) {
+  const J = "'Jost', sans-serif";
+  const user = window.SupabaseAuth && window.SupabaseAuth._state && window.SupabaseAuth._state.session && window.SupabaseAuth._state.session.user || null;
+  const [rows, setRows] = useState([]);
+  const [projectId, setProjectId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [groupBy, setGroupBy] = useState('quarter');
+  const [collapsedP, setCollapsedP] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('tmg-rm-collapsedP') || '{}') || {};
+    } catch (e) {
+      return {};
+    }
+  });
+  const [collapsedG, setCollapsedG] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('tmg-rm-collapsedG') || '{}') || {};
+    } catch (e) {
+      return {};
+    }
+  });
+  const [menu, setMenu] = useState(null); // { id, field }
+  const [newTitle, setNewTitle] = useState('');
+  const [focusId, setFocusId] = useState(null);
+  const [editId, setEditId] = useState(null);
+  const [dragId, setDragId] = useState(null);
+  const [dropHint, setDropHint] = useState(null);
+  useEffect(() => {
+    let c = false;
+    RoadmapDB.load().then(({
+      projectId: pid,
+      rows: r
+    }) => {
+      if (!c) {
+        setProjectId(pid);
+        setRows(rmNormalize(r));
+        setLoading(false);
+      }
+    }).catch(() => {
+      if (!c) setLoading(false);
+    });
+    return () => {
+      c = true;
+    };
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem('tmg-rm-collapsedP', JSON.stringify(collapsedP));
+    } catch (e) {}
+  }, [collapsedP]);
+  useEffect(() => {
+    try {
+      localStorage.setItem('tmg-rm-collapsedG', JSON.stringify(collapsedG));
+    } catch (e) {}
+  }, [collapsedG]);
+  const todayISO = (() => {
+    const d = new Date();
+    return d.getFullYear() + '-' + rmPad(d.getMonth() + 1) + '-' + rmPad(d.getDate());
+  })();
+  const fmtDate = s => {
+    try {
+      return new Date(s + 'T00:00:00').toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric'
+      });
+    } catch (e) {
+      return s;
+    }
+  };
+  const updateRow = (id, patch) => {
+    setRows(prev => prev.map(r => r.id === id ? {
+      ...r,
+      ...patch
+    } : r));
+    RoadmapDB.update(id, patch);
+  };
+  const addSiblingAfter = async row => {
+    if (!projectId) return;
+    const created = await RoadmapDB.insert(projectId, {
+      name: '',
+      status: 'todo',
+      type: 'mvp',
+      dueDate: row.parentId ? null : row.dueDate,
+      parentId: row.parentId,
+      order: 0
+    }, user);
+    if (!created) return;
+    const idx = rows.findIndex(r => r.id === row.id);
+    if (idx < 0) return;
+    const copy = rows.slice();
+    copy.splice(idx + 1, 0, created);
+    const next = rmNormalize(copy);
+    setRows(next);
+    RoadmapDB.persistOrder(next);
+    setFocusId(created.id);
+  };
+  const deleteRow = id => {
+    const row = rows.find(r => r.id === id);
+    if (!row) return;
+    const toDelete = row.parentId ? [id] : [id, ...rows.filter(r => r.parentId === id).map(r => r.id)];
+    const next = rmNormalize(row.parentId ? rows.filter(r => r.id !== id) : rows.filter(r => r.id !== id && r.parentId !== id));
+    setRows(next);
+    RoadmapDB.delete(toDelete);
+    RoadmapDB.persistOrder(next);
+  };
+  const moveRow = (id, newParentId) => {
+    const np = newParentId || null;
+    const next = rmNormalize(rows.map(r => r.id === id ? {
+      ...r,
+      parentId: np
+    } : np && r.parentId === id ? {
+      ...r,
+      parentId: np
+    } : r));
+    setRows(next);
+    RoadmapDB.persistOrder(next);
+  };
+  const addTab = async () => {
+    const n = newTitle.trim();
+    if (!n || !projectId) return;
+    setNewTitle('');
+    const created = await RoadmapDB.insert(projectId, {
+      name: n,
+      status: 'todo',
+      type: 'mvp',
+      dueDate: null,
+      parentId: null,
+      order: rows.filter(r => !r.parentId).length
+    }, user);
+    if (created) setRows(prev => rmNormalize(prev.concat([created])));
+  };
+  const addSub = async pid => {
+    if (!projectId) return;
+    const created = await RoadmapDB.insert(projectId, {
+      name: '',
+      status: 'todo',
+      type: 'mvp',
+      dueDate: null,
+      parentId: pid,
+      order: 0
+    }, user);
+    if (!created) return;
+    const blocks = rmBlocks(rows);
+    const b = blocks.find(x => x.pid === pid);
+    if (!b) return;
+    b.items.push(created);
+    const next = rmNormalize(blocks.reduce((a, x) => a.concat(x.items), []));
+    setRows(next);
+    RoadmapDB.persistOrder(next);
+    setCollapsedP(c => {
+      const n = {
+        ...c
+      };
+      delete n[pid];
+      return n;
+    });
+  };
+
+  // drag (parents only)
+  const isParent = id => rows.some(r => r.id === id && !r.parentId);
+  const onDragStart = (e, id) => {
+    setDragId(id);
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', id);
+    } catch (_) {}
+  };
+  const onRowOver = (e, id) => {
+    if (!dragId || !isParent(id) || id === dragId) return;
+    e.preventDefault();
+    const r = e.currentTarget.getBoundingClientRect();
+    setDropHint({
+      id,
+      pos: e.clientY - r.top < r.height / 2 ? 'before' : 'after'
+    });
+  };
+  const onRowDrop = (e, targetId) => {
+    e.preventDefault();
+    const dId = dragId,
+      hint = dropHint;
+    setDragId(null);
+    setDropHint(null);
+    if (!dId || !isParent(targetId) || dId === targetId) return;
+    const target = rows.find(r => r.id === targetId),
+      dragged = rows.find(r => r.id === dId);
+    if (!target || !dragged) return;
+    const tB = target.dueDate ? rmBucketKey(target.dueDate, groupBy) : '__unscheduled';
+    const dB = dragged.dueDate ? rmBucketKey(dragged.dueDate, groupBy) : '__unscheduled';
+    let newDue;
+    if (tB !== dB) newDue = target.dueDate ? rmGroupInfo(tB, groupBy).dropDate : null;
+    const next = rmMoveFamily(rows, dId, targetId, hint && hint.pos === 'after' ? 'after' : 'before', newDue);
+    setRows(next);
+    RoadmapDB.persistOrder(next);
+  };
+  const onGroupDrop = (e, key) => {
+    e.preventDefault();
+    const dId = dragId;
+    setDragId(null);
+    setDropHint(null);
+    if (!dId) return;
+    const newDue = key === '__unscheduled' ? null : rmGroupInfo(key, groupBy).dropDate;
+    const next = rmMoveToGroupEnd(rows, dId, newDue);
+    setRows(next);
+    RoadmapDB.persistOrder(next);
+  };
+  const groups = rmGroups(rows, groupBy);
+  const tabCount = rows.filter(r => !r.parentId).length;
+  const subtitle = tabCount + ' tabs · ' + (groupBy === 'none' ? 'flat list' : 'grouped by due date');
+
+  // ── palette (light only) ──
+  const NAVY = '#001A4A',
+    GOLD = '#AD832F',
+    PAPER = '#FCFBF8',
+    LINE = '#EDE7DC',
+    MUTE = '#B4B2A9';
+  const COLS = '1fr 130px 80px 88px 96px 68px';
+  if (loading) {
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        height: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: PAPER,
+        fontFamily: J,
+        fontSize: 13,
+        color: MUTE
+      }
+    }, "Loading\u2026");
+  }
+  const seg = (id, label) => {
+    const on = groupBy === id;
+    return /*#__PURE__*/React.createElement("button", {
+      key: id,
+      onClick: () => setGroupBy(id),
+      style: {
+        padding: '5px 12px',
+        border: 'none',
+        borderRadius: 7,
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 11,
+        fontWeight: on ? 600 : 500,
+        background: on ? NAVY : 'transparent',
+        color: on ? '#fff' : '#6B6B6B'
+      }
+    }, label);
+  };
+  const statusPill = r => {
+    const s = rmStatus(r.status),
+      open = menu && menu.id === r.id && menu.field === 'status';
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        position: 'relative',
+        display: 'inline-block'
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setMenu(open ? null : {
+        id: r.id,
+        field: 'status'
+      }),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        width: 112,
+        boxSizing: 'border-box',
+        padding: '5px 8px',
+        borderRadius: 8,
+        border: 'none',
+        cursor: 'pointer',
+        background: s.bg,
+        color: s.text,
+        fontFamily: J,
+        fontSize: 11,
+        fontWeight: 600
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 7,
+        height: 7,
+        borderRadius: '50%',
+        background: s.dot,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        textAlign: 'left',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, s.label), /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-chevron-down",
+      style: {
+        fontSize: 12,
+        opacity: 0.7
+      }
+    })), open && /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        top: 'calc(100% + 4px)',
+        left: 0,
+        zIndex: 40,
+        background: '#fff',
+        border: `1px solid ${LINE}`,
+        borderRadius: 9,
+        boxShadow: '0 10px 28px rgba(0,26,74,0.16)',
+        padding: 4,
+        width: 138
+      }
+    }, RM_STATUS.map(o => /*#__PURE__*/React.createElement("button", {
+      key: o.id,
+      onClick: () => {
+        updateRow(r.id, {
+          status: o.id
+        });
+        setMenu(null);
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        width: '100%',
+        textAlign: 'left',
+        padding: '7px 8px',
+        borderRadius: 6,
+        border: 'none',
+        background: r.status === o.id ? '#F5F0E8' : 'transparent',
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 11,
+        fontWeight: 600,
+        color: o.text
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 8,
+        height: 8,
+        borderRadius: '50%',
+        background: o.dot
+      }
+    }), o.label))));
+  };
+  const typeBadge = r => {
+    const t = rmType(r.type),
+      open = menu && menu.id === r.id && menu.field === 'type';
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        position: 'relative',
+        display: 'inline-block'
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setMenu(open ? null : {
+        id: r.id,
+        field: 'type'
+      }),
+      style: {
+        padding: '4px 9px',
+        borderRadius: 7,
+        border: 'none',
+        cursor: 'pointer',
+        background: t.bg,
+        color: t.text,
+        fontFamily: J,
+        fontSize: 9,
+        fontWeight: 600,
+        letterSpacing: '0.03em'
+      }
+    }, t.label), open && /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        top: 'calc(100% + 4px)',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 40,
+        background: '#fff',
+        border: `1px solid ${LINE}`,
+        borderRadius: 9,
+        boxShadow: '0 10px 28px rgba(0,26,74,0.16)',
+        padding: 4,
+        width: 92
+      }
+    }, RM_TYPES.map(o => /*#__PURE__*/React.createElement("button", {
+      key: o.id,
+      onClick: () => {
+        updateRow(r.id, {
+          type: o.id
+        });
+        setMenu(null);
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: '100%',
+        padding: '6px 6px',
+        borderRadius: 6,
+        border: 'none',
+        background: r.type === o.id ? '#F5F0E8' : 'transparent',
+        cursor: 'pointer',
+        marginBottom: 2
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        padding: '3px 9px',
+        borderRadius: 6,
+        background: o.bg,
+        color: o.text,
+        fontFamily: J,
+        fontSize: 9,
+        fontWeight: 600
+      }
+    }, o.label)))));
+  };
+  const diffBadge = r => {
+    const d = rmDiff(r.difficulty),
+      open = menu && menu.id === r.id && menu.field === 'difficulty';
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        position: 'relative',
+        display: 'inline-block'
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setMenu(open ? null : {
+        id: r.id,
+        field: 'difficulty'
+      }),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        width: 84,
+        boxSizing: 'border-box',
+        padding: '4px 8px',
+        borderRadius: 7,
+        border: 'none',
+        cursor: 'pointer',
+        background: d.bg,
+        color: d.text,
+        fontFamily: J,
+        fontSize: 9.5,
+        fontWeight: 600
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        textAlign: 'left'
+      }
+    }, d.label), /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-chevron-down",
+      style: {
+        fontSize: 11,
+        opacity: 0.7
+      }
+    })), open && /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        top: 'calc(100% + 4px)',
+        left: 0,
+        zIndex: 40,
+        background: '#fff',
+        border: `1px solid ${LINE}`,
+        borderRadius: 9,
+        boxShadow: '0 10px 28px rgba(0,26,74,0.16)',
+        padding: 4,
+        width: 104
+      }
+    }, RM_DIFF.map(o => /*#__PURE__*/React.createElement("button", {
+      key: o.id,
+      onClick: () => {
+        updateRow(r.id, {
+          difficulty: o.id
+        });
+        setMenu(null);
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        width: '100%',
+        textAlign: 'left',
+        padding: '6px 7px',
+        borderRadius: 6,
+        border: 'none',
+        background: (r.difficulty || 'normal') === o.id ? '#F5F0E8' : 'transparent',
+        cursor: 'pointer',
+        marginBottom: 2
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        padding: '3px 9px',
+        borderRadius: 6,
+        background: o.bg,
+        color: o.text,
+        fontFamily: J,
+        fontSize: 9.5,
+        fontWeight: 600
+      }
+    }, o.label)))));
+  };
+  const dueCell = r => {
+    const past = r.dueDate && r.dueDate < todayISO;
+    const danger = r.status === 'stuck' || past;
+    if (r.dueDate) {
+      return /*#__PURE__*/React.createElement("label", {
+        onClick: e => {
+          const inp = e.currentTarget.querySelector('input');
+          if (inp && inp.showPicker) {
+            try {
+              inp.showPicker();
+            } catch (er) {}
+          }
+        },
+        style: {
+          position: 'relative',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '4px 8px',
+          borderRadius: 7,
+          border: `1px solid ${danger ? '#F0997B' : '#E4DFD4'}`,
+          background: '#fff',
+          cursor: 'pointer',
+          maxWidth: '100%',
+          boxSizing: 'border-box'
+        }
+      }, /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-calendar-event",
+        style: {
+          fontSize: 12,
+          color: danger ? '#A32D2D' : GOLD,
+          flexShrink: 0
+        }
+      }), /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: J,
+          fontSize: 10.5,
+          fontWeight: 500,
+          color: danger ? '#A32D2D' : '#6B6B6B',
+          whiteSpace: 'nowrap'
+        }
+      }, fmtDate(r.dueDate)), /*#__PURE__*/React.createElement("input", {
+        type: "date",
+        value: r.dueDate,
+        onChange: e => updateRow(r.id, {
+          dueDate: e.target.value || null
+        }),
+        style: {
+          position: 'absolute',
+          inset: 0,
+          opacity: 0,
+          width: '100%',
+          cursor: 'pointer'
+        }
+      }));
+    }
+    return /*#__PURE__*/React.createElement("label", {
+      onClick: e => {
+        const inp = e.currentTarget.querySelector('input');
+        if (inp && inp.showPicker) {
+          try {
+            inp.showPicker();
+          } catch (er) {}
+        }
+      },
+      style: {
+        position: 'relative',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '4px 8px',
+        borderRadius: 7,
+        border: '1px dashed #D8CDB8',
+        cursor: 'pointer',
+        boxSizing: 'border-box'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-plus",
+      style: {
+        fontSize: 12,
+        color: '#C4A97A'
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 500,
+        color: '#C4A97A',
+        whiteSpace: 'nowrap'
+      }
+    }, "Set date"), /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      value: "",
+      onChange: e => updateRow(r.id, {
+        dueDate: e.target.value || null
+      }),
+      style: {
+        position: 'absolute',
+        inset: 0,
+        opacity: 0,
+        width: '100%',
+        cursor: 'pointer'
+      }
+    }));
+  };
+  const renderRow = (r, opts) => {
+    const isSub = !!r.parentId,
+      hasKids = opts.hasKids,
+      expanded = opts.expanded;
+    const kids = isSub ? [] : rows.filter(x => x.parentId === r.id);
+    const kpct = kids.length ? Math.round(kids.filter(x => x.status === 'done').length / kids.length * 100) : 0;
+    return /*#__PURE__*/React.createElement("div", {
+      key: r.id,
+      className: "rm-row",
+      onDragOver: !isSub ? e => onRowOver(e, r.id) : undefined,
+      onDrop: !isSub ? e => onRowDrop(e, r.id) : undefined,
+      onClick: e => {
+        if (e.target.closest('button, input, select, textarea, label, a, .rm-grip')) return;
+        setEditId(r.id);
+      },
+      style: {
+        position: 'relative',
+        cursor: 'pointer',
+        display: 'grid',
+        gridTemplateColumns: COLS,
+        alignItems: 'center',
+        gap: 8,
+        padding: '9px 20px',
+        borderBottom: '1px solid #F4EFE7',
+        background: isSub ? '#FBF9F4' : 'transparent',
+        borderTop: dropHint && dropHint.id === r.id && dropHint.pos === 'before' ? `2px solid ${NAVY}` : '2px solid transparent',
+        boxShadow: dropHint && dropHint.id === r.id && dropHint.pos === 'after' ? `inset 0 -2px 0 ${NAVY}` : 'none'
+      }
+    }, !isSub && /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-grip-vertical rm-grip",
+      draggable: true,
+      onDragStart: e => onDragStart(e, r.id),
+      onDragEnd: () => {
+        setDragId(null);
+        setDropHint(null);
+      },
+      style: {
+        position: 'absolute',
+        left: 4,
+        top: '50%',
+        transform: 'translateY(-50%)',
+        fontSize: 14,
+        color: '#D4CFC2',
+        cursor: 'grab',
+        zIndex: 1
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        minWidth: 0,
+        paddingLeft: isSub ? 34 : 0
+      }
+    }, !isSub && (hasKids ? /*#__PURE__*/React.createElement("button", {
+      onClick: () => setCollapsedP(c => ({
+        ...c,
+        [r.id]: !c[r.id]
+      })),
+      "aria-label": "Toggle subtasks",
+      style: {
+        width: 18,
+        flexShrink: 0,
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: GOLD,
+        display: 'flex'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ti-chevron-${expanded ? 'down' : 'right'}`,
+      style: {
+        fontSize: 14
+      }
+    })) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 18,
+        flexShrink: 0
+      }
+    })), isSub && /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-corner-down-right",
+      style: {
+        fontSize: 13,
+        color: '#C9C2B2',
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("input", {
+      value: r.name,
+      ref: el => {
+        if (el && focusId === r.id) {
+          el.focus();
+          setFocusId(null);
+        }
+      },
+      onChange: e => updateRow(r.id, {
+        name: e.target.value
+      }),
+      onKeyDown: e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addSiblingAfter(r);
+        }
+      },
+      placeholder: isSub ? 'Subtask' : 'Tab name',
+      style: {
+        flex: '0 1 auto',
+        fieldSizing: 'content',
+        minWidth: 60,
+        maxWidth: 240,
+        border: 'none',
+        outline: 'none',
+        background: 'transparent',
+        fontFamily: J,
+        fontSize: 13,
+        fontWeight: isSub ? 400 : 500,
+        color: NAVY,
+        padding: 0
+      }
+    }), !isSub && kids.length > 0 && /*#__PURE__*/React.createElement("div", {
+      title: kids.filter(x => x.status === 'done').length + '/' + kids.length + ' subtasks done',
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5,
+        flexShrink: 0,
+        marginLeft: 8
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 44,
+        height: 5,
+        borderRadius: 3,
+        background: '#F0EBE3',
+        overflow: 'hidden'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: kpct + '%',
+        height: '100%',
+        background: '#0F6E56'
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8.5,
+        fontWeight: 700,
+        color: kpct ? '#0F6E56' : '#C9C2B2'
+      }
+    }, kpct, "%"))), /*#__PURE__*/React.createElement("div", null, statusPill(r)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        justifyContent: 'center'
+      }
+    }, typeBadge(r)), /*#__PURE__*/React.createElement("div", null, diffBadge(r)), /*#__PURE__*/React.createElement("div", null, dueCell(r)), /*#__PURE__*/React.createElement("div", {
+      className: "rm-actions",
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'flex-end',
+        gap: 2
+      }
+    }, !isSub && /*#__PURE__*/React.createElement("button", {
+      className: "rm-actbtn",
+      onClick: () => addSub(r.id),
+      "aria-label": "Add subtask",
+      title: "Add subtask",
+      style: {
+        width: 20,
+        height: 20,
+        borderRadius: 5,
+        border: 'none',
+        background: 'none',
+        cursor: 'pointer',
+        color: MUTE,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-plus",
+      style: {
+        fontSize: 13
+      }
+    })), /*#__PURE__*/React.createElement("button", {
+      className: "rm-actbtn",
+      onClick: () => {
+        if (window.confirm('Delete \"' + (r.name || 'this item') + '\"' + (isSub ? '' : ' and its subtasks') + '?')) deleteRow(r.id);
+      },
+      "aria-label": "Delete",
+      title: "Delete",
+      style: {
+        width: 20,
+        height: 20,
+        borderRadius: 5,
+        border: 'none',
+        background: 'none',
+        cursor: 'pointer',
+        color: MUTE,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-x",
+      style: {
+        fontSize: 13
+      }
+    }))));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: PAPER
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `.rm-row:hover{background:#FBF8F2 !important;} .rm-row .rm-grip{opacity:0;transition:opacity .12s;} .rm-row:hover .rm-grip{opacity:1;} .rm-row .rm-actions{opacity:0;transition:opacity .12s;} .rm-row:hover .rm-actions{opacity:1;} .rm-actbtn:hover{background:#F0EBE3 !important;} @media (hover: none){.rm-row .rm-actions,.rm-row .rm-grip{opacity:1 !important;}}`), menu && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setMenu(null),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 39
+    }
+  }), editId && (() => {
+    const er = rows.find(x => x.id === editId);
+    if (!er) return null;
+    const isSubE = !!er.parentId;
+    const topTabs = rows.filter(x => !x.parentId && x.id !== editId);
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      onClick: () => setEditId(null),
+      style: {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 80,
+        background: 'rgba(0,13,38,0.4)'
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'fixed',
+        zIndex: 81,
+        left: '50%',
+        top: '50%',
+        transform: 'translate(-50%, -50%)',
+        width: '88%',
+        maxWidth: 380,
+        background: '#FCFBF8',
+        border: `1px solid ${LINE}`,
+        borderRadius: 16,
+        boxShadow: '0 18px 50px rgba(0,26,74,0.22)',
+        padding: 18,
+        maxHeight: '86%',
+        overflowY: 'auto'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 15,
+        fontWeight: 600,
+        color: NAVY
+      }
+    }, "Edit ", isSubE ? 'subtask' : 'tab'), /*#__PURE__*/React.createElement("button", {
+      onClick: () => setEditId(null),
+      "aria-label": "Close",
+      style: {
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        color: MUTE,
+        display: 'flex'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-x",
+      style: {
+        fontSize: 18
+      }
+    }))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.12em',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        color: GOLD,
+        marginBottom: 5
+      }
+    }, "Name"), /*#__PURE__*/React.createElement("input", {
+      value: er.name,
+      onChange: e => updateRow(er.id, {
+        name: e.target.value
+      }),
+      style: {
+        width: '100%',
+        boxSizing: 'border-box',
+        padding: '9px 11px',
+        borderRadius: 9,
+        border: `1px solid ${LINE}`,
+        background: '#fff',
+        color: NAVY,
+        fontFamily: J,
+        fontSize: 13,
+        outline: 'none',
+        marginBottom: 14
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.12em',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        color: GOLD,
+        marginBottom: 6
+      }
+    }, "Status"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 6,
+        marginBottom: 14
+      }
+    }, RM_STATUS.map(o => {
+      const on = er.status === o.id;
+      return /*#__PURE__*/React.createElement("button", {
+        key: o.id,
+        onClick: () => updateRow(er.id, {
+          status: o.id
+        }),
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '6px 10px',
+          borderRadius: 8,
+          cursor: 'pointer',
+          fontFamily: J,
+          fontSize: 10,
+          fontWeight: on ? 700 : 500,
+          border: `1px solid ${on ? o.dot : LINE}`,
+          background: on ? o.bg : 'transparent',
+          color: o.text
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          width: 6,
+          height: 6,
+          borderRadius: '50%',
+          background: o.dot
+        }
+      }), o.label);
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.12em',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        color: GOLD,
+        marginBottom: 6
+      }
+    }, "Type"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 6,
+        marginBottom: 14
+      }
+    }, RM_TYPES.map(o => {
+      const on = er.type === o.id;
+      return /*#__PURE__*/React.createElement("button", {
+        key: o.id,
+        onClick: () => updateRow(er.id, {
+          type: o.id
+        }),
+        style: {
+          padding: '6px 12px',
+          borderRadius: 8,
+          cursor: 'pointer',
+          fontFamily: J,
+          fontSize: 10,
+          fontWeight: on ? 700 : 500,
+          border: `1px solid ${on ? 'transparent' : LINE}`,
+          background: on ? o.bg : 'transparent',
+          color: on ? o.text : '#888'
+        }
+      }, o.label);
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.12em',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        color: GOLD,
+        marginBottom: 6
+      }
+    }, "Difficulty"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 6,
+        marginBottom: 14
+      }
+    }, RM_DIFF.map(o => {
+      const on = (er.difficulty || 'normal') === o.id;
+      return /*#__PURE__*/React.createElement("button", {
+        key: o.id,
+        onClick: () => updateRow(er.id, {
+          difficulty: o.id
+        }),
+        style: {
+          padding: '6px 12px',
+          borderRadius: 8,
+          cursor: 'pointer',
+          fontFamily: J,
+          fontSize: 10,
+          fontWeight: on ? 700 : 500,
+          border: `1px solid ${on ? 'transparent' : LINE}`,
+          background: on ? o.bg : 'transparent',
+          color: on ? o.text : '#888'
+        }
+      }, o.label);
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.12em',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        color: GOLD,
+        marginBottom: 6
+      }
+    }, "Due date"), /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      value: er.dueDate || '',
+      onClick: e => {
+        try {
+          e.currentTarget.showPicker();
+        } catch (err) {}
+      },
+      onChange: e => updateRow(er.id, {
+        dueDate: e.target.value || null
+      }),
+      style: {
+        width: '100%',
+        boxSizing: 'border-box',
+        padding: '8px 11px',
+        borderRadius: 9,
+        border: `1px solid ${LINE}`,
+        background: '#fff',
+        color: NAVY,
+        fontFamily: J,
+        fontSize: 12,
+        outline: 'none',
+        marginBottom: 14
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.12em',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        color: GOLD,
+        marginBottom: 6
+      }
+    }, "Move under"), /*#__PURE__*/React.createElement("select", {
+      value: er.parentId || '',
+      onChange: e => moveRow(er.id, e.target.value),
+      style: {
+        width: '100%',
+        boxSizing: 'border-box',
+        padding: '9px 11px',
+        borderRadius: 9,
+        border: `1px solid ${LINE}`,
+        background: '#fff',
+        color: NAVY,
+        fontFamily: J,
+        fontSize: 12,
+        outline: 'none',
+        marginBottom: 18
+      }
+    }, /*#__PURE__*/React.createElement("option", {
+      value: ""
+    }, "\\u2014 Top level (its own tab) \\u2014"), topTabs.map(t => /*#__PURE__*/React.createElement("option", {
+      key: t.id,
+      value: t.id
+    }, t.name || '(untitled)'))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.12em',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        color: GOLD,
+        marginBottom: 6
+      }
+    }, "Notes"), /*#__PURE__*/React.createElement("textarea", {
+      value: er.notes || '',
+      onChange: e => updateRow(er.id, {
+        notes: e.target.value
+      }),
+      rows: 5,
+      placeholder: "Add notes\\u2026",
+      style: {
+        width: '100%',
+        boxSizing: 'border-box',
+        padding: '9px 11px',
+        borderRadius: 9,
+        border: `1px solid ${LINE}`,
+        background: '#fff',
+        color: NAVY,
+        fontFamily: J,
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        outline: 'none',
+        resize: 'vertical',
+        minHeight: 90,
+        marginBottom: 18
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        if (window.confirm('Delete "' + (er.name || 'this item') + '"' + (isSubE ? '' : ' and its subtasks') + '?')) {
+          deleteRow(er.id);
+          setEditId(null);
+        }
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5,
+        padding: '10px 12px',
+        borderRadius: 10,
+        border: '1px solid #F0D9D9',
+        background: 'none',
+        color: '#DC2626',
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 12,
+        fontWeight: 600
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-trash",
+      style: {
+        fontSize: 14
+      }
+    }), "Delete"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => setEditId(null),
+      style: {
+        flex: 1,
+        padding: 10,
+        borderRadius: 10,
+        border: 'none',
+        background: NAVY,
+        color: '#fff',
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 13,
+        fontWeight: 600
+      }
+    }, "Done"))));
+  })(), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '11px 16px 12px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 120
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 19,
+      fontWeight: 600,
+      color: NAVY
+    }
+  }, "App Masterplan"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      marginTop: 1,
+      color: MUTE
+    }
+  }, subtitle)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 9.5,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      color: MUTE,
+      fontWeight: 600
+    }
+  }, "Group by"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 2,
+      padding: 3,
+      borderRadius: 9,
+      background: '#F0EBE3'
+    }
+  }, seg('quarter', 'Quarter'), seg('month', 'Month'), seg('none', 'None')))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, 1fr)',
+      gap: 8,
+      padding: '0 16px 12px'
+    }
+  }, (() => {
+    const now = new Date();
+    return [0, 1, 2, 3].map(i => {
+      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+      const y = d.getFullYear(),
+        mo = d.getMonth();
+      let total = 0,
+        done = 0;
+      rows.forEach(r => {
+        if (!r.dueDate) return;
+        const pp = r.dueDate.split('-');
+        if (+pp[0] === y && +pp[1] - 1 === mo) {
+          total++;
+          if (r.status === 'done') done++;
+        }
+      });
+      const pct = total ? Math.round(done / total * 100) : 0,
+        empty = total === 0;
+      const label = d.toLocaleString('en-US', {
+        month: 'long'
+      });
+      return /*#__PURE__*/React.createElement("div", {
+        key: i,
+        style: {
+          background: '#FFFFFF',
+          border: `1px solid ${LINE}`,
+          borderRadius: 12,
+          padding: '10px 11px'
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          alignItems: 'baseline',
+          justifyContent: 'space-between',
+          gap: 4
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: J,
+          fontSize: 11,
+          fontWeight: 600,
+          color: NAVY,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }
+      }, label), /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: J,
+          fontSize: 14,
+          fontWeight: 700,
+          color: empty ? '#C9C2B2' : NAVY
+        }
+      }, empty ? '\u2014' : pct + '%')), /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: 7,
+          height: 6,
+          borderRadius: 4,
+          background: '#F0EBE3',
+          overflow: 'hidden'
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          width: pct + '%',
+          height: '100%',
+          background: '#0F6E56'
+        }
+      })), /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: 5,
+          fontFamily: J,
+          fontSize: 8.5,
+          color: MUTE
+        }
+      }, empty ? 'No tabs' : done + ' / ' + total + ' done'));
+    });
+  })()), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: COLS,
+      gap: 8,
+      alignItems: 'center',
+      padding: '7px 20px',
+      background: '#F5F0E8',
+      borderTop: `1px solid ${LINE}`,
+      borderBottom: `1px solid ${LINE}`
+    }
+  }, ['Tab', 'Status', 'Type', 'Difficulty', 'Due'].map((h, i) => /*#__PURE__*/React.createElement("span", {
+    key: h,
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      letterSpacing: '0.16em',
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      color: GOLD,
+      textAlign: i === 2 ? 'center' : 'left'
+    }
+  }, h)), /*#__PURE__*/React.createElement("span", null)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto',
+      overflowX: 'auto',
+      WebkitOverflowScrolling: 'touch'
+    }
+  }, groups.map(g => {
+    const gcoll = !!collapsedG[g.key];
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: g.key
+    }, !g.flat && (g.unscheduled ? /*#__PURE__*/React.createElement("div", {
+      onDragOver: e => {
+        if (dragId) e.preventDefault();
+      },
+      onDrop: e => onGroupDrop(e, g.key),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 20px',
+        background: '#F7F3EC',
+        borderBottom: `1px solid ${LINE}`
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setCollapsedG(c => ({
+        ...c,
+        [g.key]: !c[g.key]
+      })),
+      style: {
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: '#9A7B3A',
+        display: 'flex'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ti-chevron-${gcoll ? 'right' : 'down'}`,
+      style: {
+        fontSize: 14
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 13,
+        fontWeight: 600,
+        color: '#9A7B3A'
+      }
+    }, "Unscheduled"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 700,
+        color: '#9A7B3A',
+        background: '#EFE6D4',
+        borderRadius: 20,
+        padding: '1px 8px'
+      }
+    }, g.families.length), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        color: '#C4A97A',
+        fontStyle: 'italic'
+      }
+    }, "Set a due date to schedule")) : /*#__PURE__*/React.createElement("div", {
+      onDragOver: e => {
+        if (dragId) e.preventDefault();
+      },
+      onDrop: e => onGroupDrop(e, g.key),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 20px',
+        background: '#FAF6EF',
+        borderBottom: `1px solid ${LINE}`
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setCollapsedG(c => ({
+        ...c,
+        [g.key]: !c[g.key]
+      })),
+      style: {
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        color: GOLD,
+        display: 'flex'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ti-chevron-${gcoll ? 'right' : 'down'}`,
+      style: {
+        fontSize: 14
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 13,
+        fontWeight: 600,
+        color: NAVY
+      }
+    }, g.info.label), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        color: MUTE
+      }
+    }, g.info.hint), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 700,
+        color: GOLD,
+        background: '#F3EBDA',
+        borderRadius: 20,
+        padding: '1px 8px'
+      }
+    }, g.families.length), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 7
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 64,
+        height: 5,
+        borderRadius: 4,
+        background: '#F0EBE3',
+        overflow: 'hidden'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: rmGroupProgress(g) + '%',
+        height: '100%',
+        background: '#0F6E56'
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 700,
+        color: '#0F6E56',
+        width: 30,
+        textAlign: 'right'
+      }
+    }, rmGroupProgress(g), "%")))), !gcoll && g.families.map(f => {
+      const exp = !collapsedP[f.parent.id],
+        kids = f.children.length > 0;
+      return /*#__PURE__*/React.createElement(React.Fragment, {
+        key: f.parent.id
+      }, renderRow(f.parent, {
+        hasKids: kids,
+        expanded: exp
+      }), kids && exp && f.children.map(c => renderRow(c, {})), exp && kids && /*#__PURE__*/React.createElement("div", {
+        className: "rm-row",
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '6px 20px 6px 74px',
+          borderBottom: '1px solid #F4EFE7',
+          background: '#FBF9F4'
+        }
+      }, /*#__PURE__*/React.createElement("button", {
+        onClick: () => addSub(f.parent.id),
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          cursor: 'pointer',
+          color: '#C4A97A',
+          fontFamily: J,
+          fontSize: 11,
+          fontWeight: 500
+        }
+      }, /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-plus",
+        style: {
+          fontSize: 13
+        }
+      }), "Add subtask")));
+    }));
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      padding: '14px 20px 24px'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: newTitle,
+    onChange: e => setNewTitle(e.target.value),
+    onKeyDown: e => {
+      if (e.key === 'Enter') addTab();
+    },
+    placeholder: "Add a tab...",
+    style: {
+      flex: 1,
+      minWidth: 0,
+      padding: '9px 12px',
+      borderRadius: 10,
+      border: `1px solid #E4DFD4`,
+      background: '#fff',
+      color: NAVY,
+      fontFamily: J,
+      fontSize: 12,
+      outline: 'none'
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: addTab,
+    style: {
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '0 16px',
+      borderRadius: 10,
+      border: 'none',
+      background: NAVY,
+      color: '#fff',
+      cursor: 'pointer',
+      fontFamily: J,
+      fontSize: 12,
+      fontWeight: 600
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 14
+    }
+  }), "Add"))));
+}
+
+// ─── Exp Survey (opened from the More menu, under Company Directory) ─
+// Contents of the "TMG Experience Survey URL & QR Code" PDF: the survey
+// link + a self-contained QR (generated for the same URL; no external call).
+function ExpSurvey({
+  dark,
+  onBack
+}) {
+  const J = "'Jost', sans-serif";
+  const SURVEY_URL = 'http://www.themorshedgroup.com/survey';
+  const QR = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMzAiIGhlaWdodD0iMzMwIiBjbGFzcz0ic2Vnbm8iPjxnIHRyYW5zZm9ybT0ic2NhbGUoMTApIj48cGF0aCBmaWxsPSIjZmZmIiBkPSJNMCAwaDMzdjMzaC0zM3oiLz48cGF0aCBjbGFzcz0icXJsaW5lIiBzdHJva2U9IiMwMDFhNGEiIGQ9Ik0yIDIuNWg3bTEgMGgxbTEgMGg1bTEgMGgxbTIgMGgybTEgMGg3bS0yOSAxaDFtNSAwaDFtMSAwaDFtMSAwaDNtMSAwaDFtMSAwaDFtNSAwaDFtNSAwaDFtLTI5IDFoMW0xIDBoM20xIDBoMW0yIDBoMW0xIDBoNG01IDBoMW0xIDBoMW0xIDBoM20xIDBoMW0tMjkgMWgxbTEgMGgzbTEgMGgxbTEgMGgzbTEgMGgxbTIgMGgxbTEgMGgxbTQgMGgxbTEgMGgzbTEgMGgxbS0yOSAxaDFtMSAwaDNtMSAwaDFtMiAwaDFtMSAwaDJtMSAwaDNtMiAwaDFtMiAwaDFtMSAwaDNtMSAwaDFtLTI5IDFoMW01IDBoMW0yIDBoMW0yIDBoMm0yIDBoNG0yIDBoMW01IDBoMW0tMjkgMWg3bTEgMGgxbTEgMGgxbTEgMGgxbTEgMGgxbTEgMGgxbTEgMGgxbTEgMGgxbTEgMGg3bS0yMSAxaDFtMSAwaDFtMSAwaDFtMSAwaDVtLTE5IDFoMW0xIDBoMm0xIDBoM20yIDBoMW0yIDBoMW0zIDBoM20yIDBoMW0yIDBoMW0xIDBoMm0tMjkgMWgxbTEgMGgybTEgMGgxbTQgMGgybTEgMGgxbTIgMGgxbTIgMGg2bTMgMGgxbS0yOSAxaDJtMSAwaDVtMSAwaDJtMiAwaDFtMyAwaDJtMyAwaDJtMiAwaDJtLTI4IDFoM20xIDBoMW02IDBoMW0zIDBoMm0xIDBoM20xIDBoMm0xIDBoMW0yIDBoMW0tMjggMWgzbTEgMGgzbTIgMGgxbTEgMGgxbTEgMGg0bTUgMGgxbTEgMGgybS0yNyAxaDJtMiAwaDJtMyAwaDFtMiAwaDFtMSAwaDZtMiAwaDFtNCAwaDJtLTI5IDFoM20xIDBoMW0xIDBoM20xIDBoMm0xIDBoMW01IDBoMW0xIDBoMm0xIDBoNW0tMjkgMWgzbTUgMGgybTEgMGgybTEgMGgzbTEgMGgxbTQgMGgxbTMgMGgxbS0yOCAxaDFtMyAwaDNtMSAwaDFtMiAwaDJtMSAwaDFtMSAwaDFtMiAwaDNtMSAwaDJtMiAwaDFtLTI3IDFoMm0yIDBoMW0xIDBoNG0zIDBoMm0xIDBoMW0yIDBoMW01IDBoMm0tMjggMWgxbTUgMGg0bTMgMGg1bTIgMGgxbTEgMGgybTEgMGgybS0yNSAxaDJtNCAwaDFtNCAwaDNtMSAwaDFtMSAwaDNtNCAwaDFtLTI2IDFoMTFtMSAwaDJtMiAwaDEwbS0xOSAxaDFtMSAwaDFtMSAwaDFtMyAwaDFtMSAwaDNtMyAwaDVtLTI5IDFoN20xIDBoMW0xIDBoMm0yIDBoMW0xIDBoMW0yIDBoMm0xIDBoMW0xIDBoMm0xIDBoMW0tMjggMWgxbTUgMGgxbTEgMGgzbTEgMGg0bTIgMGgxbTEgMGgxbTMgMGgxbTIgMGgybS0yOSAxaDFtMSAwaDNtMSAwaDFtMiAwaDJtMSAwaDFtNCAwaDFtMiAwaDdtLTI3IDFoMW0xIDBoM20xIDBoMW0xIDBoM20yIDBoMW0xIDBoMW01IDBoMW0yIDBoM20xIDBoMW0tMjkgMWgxbTEgMGgzbTEgMGgxbTEgMGg0bTEgMGgybTIgMGgzbTMgMGgxbTIgMGgxbTEgMGgxbS0yOSAxaDFtNSAwaDFtNSAwaDVtMiAwaDJtMSAwaDJtMSAwaDFtMSAwaDFtLTI4IDFoN20xIDBoMW0xIDBoMW00IDBoMW0yIDBoNW0yIDBoMW0xIDBoMSIvPjwvZz48L3N2Zz4K';
+  const titleC = dark ? '#fff' : '#001A4A';
+  const subC = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
+  const backC = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const sectionC = dark ? '#C9A45A' : '#AD832F';
+  const cardBord = dark ? '#152545' : '#EDE7DC';
+  const gold = dark ? '#C9A45A' : '#AD832F';
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      position: 'relative',
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      padding: '34px 18px 28px',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      textAlign: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 22,
+      fontWeight: 600,
+      color: titleC,
+      lineHeight: 1.2,
+      marginBottom: 8
+    }
+  }, "TMG Experience Survey"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      color: subC,
+      lineHeight: 1.6,
+      maxWidth: 280,
+      marginBottom: 22
+    }
+  }, "Scan the QR code or tap the link below to share your experience with The Morshed Group."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#FFFFFF',
+      borderRadius: 18,
+      border: `1px solid ${cardBord}`,
+      padding: 18,
+      boxShadow: dark ? 'none' : '0 8px 24px rgba(0,26,74,0.08)',
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: QR,
+    alt: "TMG Experience Survey QR code",
+    style: {
+      display: 'block',
+      width: 224,
+      height: 224
+    }
+  })), /*#__PURE__*/React.createElement("a", {
+    href: SURVEY_URL,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+      fontFamily: J,
+      fontSize: 13,
+      fontWeight: 600,
+      color: gold,
+      textDecoration: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-link",
+    style: {
+      fontSize: 15
+    }
+  }), "themorshedgroup.com/survey"))));
+}
+function CompanyDirectory({
+  dark,
+  onBack
+}) {
+  const J = "'Jost', sans-serif";
+  const [query, setQuery] = useState('');
+  const [profiles, setProfiles] = useState([]);
+  const [selId, setSelId] = useState(null);
+  const [anim, setAnim] = useState(false);
+  useEffect(() => {
+    ProfileDB.loadAll().then(setProfiles);
+  }, []);
+  const open = p => {
+    setSelId(p.id);
+    setAnim(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => setAnim(true)));
+  };
+  const close = () => {
+    setAnim(false);
+    setTimeout(() => setSelId(null), 220);
+  };
+  const roster = buildRoster(profiles);
+  const sel = selId ? roster.find(p => p.id === selId) : null;
+  const q = query.trim().toLowerCase();
+  const shown = roster.filter(p => !q || p.name.toLowerCase().indexOf(q) > -1);
+  const titleC = dark ? '#fff' : '#001A4A';
+  const subC = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const backC = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const searchBg = dark ? '#0A1730' : '#F0EBE3';
+  const searchFg = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const sectionC = dark ? '#C9A45A' : '#AD832F';
+  const bord = dark ? '#0D1E3A' : '#F0EBE3';
+  const nameC = dark ? '#fff' : '#001A4A';
+  const roleC = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+  const chevC = dark ? 'rgba(255,255,255,0.25)' : '#D4D0CC';
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      position: 'relative',
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '11px 14px 7px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    "aria-label": "Back to More menu",
+    style: {
+      background: 'none',
+      border: 'none',
+      padding: 0,
+      display: 'flex',
+      alignItems: 'center',
+      cursor: 'pointer',
+      color: backC
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 16
+    }
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 16,
+      fontWeight: 600,
+      color: titleC
+    }
+  }, "Company Directory"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      marginTop: 1,
+      color: subC
+    }
+  }, roster.length, " team members"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      margin: '0 14px 10px',
+      borderRadius: 11,
+      padding: '8px 11px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7,
+      background: searchBg
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-search",
+    style: {
+      fontSize: 13,
+      color: searchFg
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: query,
+    onChange: e => setQuery(e.target.value),
+    placeholder: "Search team...",
+    style: {
+      flex: 1,
+      minWidth: 0,
+      border: 'none',
+      outline: 'none',
+      background: 'transparent',
+      fontFamily: J,
+      fontSize: 9,
+      color: searchFg
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '4px 14px 6px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-users",
+    style: {
+      fontSize: 10,
+      color: sectionC
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 7,
+      letterSpacing: '0.18em',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      color: sectionC
+    }
+  }, "The A Team")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto'
+    }
+  }, shown.map(p => /*#__PURE__*/React.createElement("div", {
+    key: p.id,
+    onClick: () => open(p),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 11,
+      padding: '8px 14px',
+      borderBottom: `1px solid ${bord}`,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement(Avatar, {
+    photo: p.photo,
+    name: p.name,
+    size: 42
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      color: nameC,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, p.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.04em',
+      color: roleC,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, p.title)), p.badge && /*#__PURE__*/React.createElement("span", {
+    style: {
+      flexShrink: 0,
+      fontFamily: J,
+      fontSize: 6,
+      letterSpacing: '0.1em',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      padding: '2px 6px',
+      borderRadius: 8,
+      background: dark ? p.badge.darkBg : p.badge.lightBg,
+      color: dark ? p.badge.darkFg : p.badge.lightFg
+    }
+  }, p.badge.label), /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-right",
+    style: {
+      fontSize: 14,
+      color: chevC,
+      flexShrink: 0
+    }
+  }))))), sel && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      inset: 0,
+      transform: anim ? 'translateX(0)' : 'translateX(100%)',
+      transition: 'transform 220ms ease',
+      background: dark ? '#000D26' : '#FCFBF8'
+    }
+  }, /*#__PURE__*/React.createElement(ProfileView, {
+    person: sel,
+    dark: dark,
+    onBack: close
+  })));
+}
+
+// Embeds the standalone SFFU app (same origin + same Supabase login) as a TMG view.
+// The header row drives SFFU's actions via postMessage; SFFU keeps its own settings.
+// Bump SFFU_VERSION when sffu/index.html changes to bust the iframe cache.
+const SFFU_VERSION = '20260702b';
+function SffuFrame({
+  dark,
+  onBack
+}) {
+  const J = "'Jost', sans-serif";
+  const frameRef = useRef(null);
+  const src = 'sffu/index.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + SFFU_VERSION;
+  const ink = dark ? '#fff' : '#001A4A';
+  const send = action => {
+    try {
+      const w = frameRef.current && frameRef.current.contentWindow;
+      if (w) w.postMessage({
+        tmg: 'sffu',
+        action
+      }, location.origin);
+    } catch (e) {}
+  };
+  const actBtn = (action, icon, label) => /*#__PURE__*/React.createElement("button", {
+    onClick: () => send(action),
+    title: label,
+    "aria-label": label,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      padding: '5px 6px',
+      color: dark ? '#C9A45A' : '#AD832F',
+      fontSize: 19,
+      lineHeight: 1,
+      display: 'flex',
+      alignItems: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${icon}`
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: dark ? '#000D26' : '#FCFBF8'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '7px 8px 7px 12px',
+      borderBottom: `1px solid ${dark ? '#0D1E3A' : '#E4DFD4'}`,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontFamily: J,
+      fontSize: 13,
+      fontWeight: 600,
+      letterSpacing: '0.02em',
+      color: ink,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, "Showing Feedback Follow-Up"), actBtn('add-property', 'ti-home-plus', 'Add Property'), actBtn('add-showing', 'ti-calendar-plus', 'Add Showing'), actBtn('toggle-settings', 'ti-settings', 'Settings')), /*#__PURE__*/React.createElement("iframe", {
+    ref: frameRef,
+    src: src,
+    title: "SFFU",
+    style: {
+      flex: 1,
+      width: '100%',
+      border: 'none',
+      display: 'block'
+    }
+  }));
+}
+
+// Time Off lives in its own /timeoff.html; the More item embeds it in an iframe inside
+// the app frame (top bar + bottom nav stay). Bump TIMEOFF_VERSION when timeoff.html changes.
+const TIMEOFF_VERSION = '20260625d';
+function TimeOffFrame({
+  dark,
+  onBack
+}) {
+  const ink = dark ? '#fff' : '#001A4A';
+  const src = 'timeoff.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + TIMEOFF_VERSION;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: dark ? '#000D26' : '#FCFBF8'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '7px 8px 7px 10px',
+      borderBottom: `1px solid ${dark ? '#0D1E3A' : '#E4DFD4'}`,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    "aria-label": "Back",
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      padding: 0,
+      display: 'flex',
+      alignItems: 'center',
+      color: dark ? '#C9A45A' : '#AD832F'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 20
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontFamily: "'Jost', sans-serif",
+      fontSize: 13,
+      fontWeight: 600,
+      letterSpacing: '0.02em',
+      color: ink
+    }
+  }, "Time Off")), /*#__PURE__*/React.createElement("iframe", {
+    src: src,
+    title: "Time Off",
+    style: {
+      flex: 1,
+      width: '100%',
+      border: 'none',
+      display: 'block'
+    }
+  }));
+}
+function SharedDrivesTab({
+  dark,
+  onBack
+}) {
+  const J = "'Jost', sans-serif";
+  const [query, setQuery] = useState('');
+  const [soon, setSoon] = useState(null); // original index of a no-link tile that was tapped
+
+  // Team folder shortcuts — order is intentional.
+  const FOLDERS = [{
+    label: 'Admin',
+    icon: 'ti-shield-cog',
+    url: 'https://drive.google.com/drive/folders/0AIiIG3gT96ExUk9PVA'
+  }, {
+    label: 'Agents',
+    icon: 'ti-users',
+    url: 'https://drive.google.com/drive/folders/0AMl7XFfbMPqdUk9PVA'
+  }, {
+    label: 'Branding & Marketing',
+    icon: 'ti-speakerphone',
+    url: 'https://drive.google.com/drive/folders/0AA4zo3e6c8nNUk9PVA'
+  }, {
+    label: 'Business Development',
+    icon: 'ti-trending-up',
+    url: 'https://drive.google.com/drive/folders/0AKsuXd-f3QhGUk9PVA'
+  }, {
+    label: 'Commercial',
+    icon: 'ti-building-skyscraper',
+    url: 'https://drive.google.com/drive/folders/0AMbAqnSD3pfzUk9PVA'
+  }, {
+    label: 'Market Stats & Articles',
+    icon: 'ti-chart-line',
+    url: 'https://drive.google.com/drive/folders/0AIIojuvq1TrcUk9PVA'
+  }, {
+    label: 'Operations',
+    icon: 'ti-settings',
+    url: 'https://drive.google.com/drive/folders/0ABlMJKBUlkz0Uk9PVA'
+  }, {
+    label: 'Processes & Templates',
+    icon: 'ti-clipboard-list',
+    url: 'https://drive.google.com/drive/folders/0AJp5UcOX72HgUk9PVA'
+  }];
+  const q = query.trim().toLowerCase();
+  const shown = FOLDERS.map((f, i) => ({
+    ...f,
+    i
+  })).filter(f => !q || f.label.toLowerCase().includes(q));
+  const headingC = dark ? '#fff' : '#001A4A';
+  const subC = dark ? 'rgba(255,255,255,0.35)' : '#B4B2A9';
+  const searchBg = dark ? '#0A1730' : '#F0EBE3';
+  const searchFg = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const sectionC = dark ? '#C9A45A' : '#AD832F';
+  const tileBg = dark ? '#0A1730' : '#fff';
+  const tileBord = dark ? '#152545' : '#EDE7DC';
+  const iconBg = dark ? 'rgba(201,164,90,0.14)' : '#001A4A';
+  const labelC = dark ? '#fff' : '#001A4A';
+  const metaC = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const arrowC = dark ? 'rgba(255,255,255,0.25)' : '#D4D0CC';
+  const tileStyle = {
+    position: 'relative',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: 10,
+    borderRadius: 14,
+    padding: '14px 12px',
+    border: `1px solid ${tileBord}`,
+    background: tileBg,
+    cursor: 'pointer',
+    textDecoration: 'none'
+  };
+  const tileInner = f => /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-up-right",
+    style: {
+      position: 'absolute',
+      top: 14,
+      right: 12,
+      fontSize: 13,
+      color: arrowC
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 42,
+      height: 42,
+      borderRadius: 11,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: iconBg
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${f.icon}`,
+    style: {
+      fontSize: 21,
+      color: '#C9A45A'
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      letterSpacing: '0.02em',
+      lineHeight: 1.3,
+      color: labelC
+    }
+  }, f.label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.04em',
+      color: metaC
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-folder",
+    style: {
+      fontSize: 9
+    }
+  }), soon === f.i ? 'Link coming soon' : 'Drive folder'));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '12px 16px 8px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    "aria-label": "Back to More menu",
+    style: {
+      background: 'none',
+      border: 'none',
+      padding: 0,
+      margin: 0,
+      display: 'flex',
+      alignItems: 'center',
+      cursor: 'pointer',
+      color: headingC
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 22
+    }
+  })), /*#__PURE__*/React.createElement("a", {
+    href: "https://drive.google.com/drive/shared-drives",
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      fontFamily: J,
+      fontSize: 17,
+      fontWeight: 600,
+      letterSpacing: '0.02em',
+      color: headingC,
+      textDecoration: 'none'
+    }
+  }, "Shared Drives")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      letterSpacing: '0.04em',
+      marginTop: 2,
+      paddingLeft: 30,
+      color: subC
+    }
+  }, "Quick access to team folders")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      margin: '0 16px 12px',
+      borderRadius: 12,
+      padding: '9px 12px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      background: searchBg
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-search",
+    style: {
+      fontSize: 14,
+      color: searchFg
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: query,
+    onChange: e => setQuery(e.target.value),
+    placeholder: "Search folders...",
+    style: {
+      flex: 1,
+      minWidth: 0,
+      border: 'none',
+      outline: 'none',
+      background: 'transparent',
+      fontFamily: J,
+      fontSize: 10,
+      color: searchFg
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '0 16px 8px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-folders",
+    style: {
+      fontSize: 11,
+      color: sectionC
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.18em',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      color: sectionC
+    }
+  }, "All Folders")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto',
+      padding: '0 16px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1fr 1fr',
+      gap: 10
+    }
+  }, shown.map(f => f.url ? /*#__PURE__*/React.createElement("a", {
+    key: f.i,
+    href: f.url,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: tileStyle
+  }, tileInner(f)) : /*#__PURE__*/React.createElement("div", {
+    key: f.i,
+    onClick: () => setSoon(f.i),
+    style: tileStyle
+  }, tileInner(f)))), shown.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      letterSpacing: '0.04em',
+      color: subC,
+      padding: '8px 2px'
+    }
+  }, "No folders match \u201C", query, "\u201D.")));
+}
+
+// ─── Placeholder (not-yet-built tabs) ────────────────────────────
+function Placeholder({
+  title
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      textAlign: 'center',
+      padding: '0 24px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '1.7rem',
+      fontWeight: 400,
+      fontStyle: 'italic',
+      color: C.navy,
+      fontFamily: C.fontDisplay
+    }
+  }, title), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: C.textMuted,
+      marginTop: 8,
+      letterSpacing: '0.06em',
+      textTransform: 'uppercase'
+    }
+  }, "Coming soon"));
+}
+
+// ─── Chat (Team Chat) Tab — preview mockup ───────────────────────
+const TCHAT_PHOTOS = {
+  tarek: 'https://themorshedgroup.com/wp-content/uploads/2023/01/tarek-morshed-headshot.jpg',
+  symon: 'https://themorshedgroup.com/wp-content/uploads/2025/01/Hidenori-Symon-Yongco-headshot.jpg',
+  brad: 'https://themorshedgroup.com/wp-content/uploads/2023/01/Brad-Baker-headshot-1.jpg',
+  brett: 'https://themorshedgroup.com/wp-content/uploads/2025/09/Brett-Silverman-headshot.jpg',
+  kyle: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Kyle-Baird-headshot.jpg',
+  alex: 'https://themorshedgroup.com/wp-content/uploads/2025/04/Alexandra-Machado-headshot.jpg',
+  luciana: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Luciana-Pilco-headshot.jpg'
+};
+function ChatTab({
+  dark
+}) {
+  const J = "'Jost', sans-serif";
+  const bg = dark ? '#000D26' : '#FCFBF8';
+  const bannerBg = dark ? '#7F1D1D' : '#9B1C1C';
+  const headTitle = dark ? '#FFFFFF' : '#001A4A';
+  const composeBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+  const composeCol = dark ? '#C9A45A' : '#AD832F';
+  const searchBg = dark ? '#0A1730' : '#F5F2EE';
+  const searchCol = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
+  const pinnedBord = dark ? '#0D1E3A' : '#F0EBE3';
+  const pinnedLabel = dark ? '#C9A45A' : '#AD832F';
+  const pinnedName = dark ? 'rgba(255,255,255,0.6)' : '#001A4A';
+  const rowBord = dark ? '#0D1E3A' : '#F5F2EE';
+  const threadName = dark ? '#FFFFFF' : '#001A4A';
+  const previewCol = dark ? 'rgba(255,255,255,0.35)' : '#888888';
+  const timeCol = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const seg = (t, key) => /*#__PURE__*/React.createElement("span", {
+    key: key,
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      letterSpacing: '0.16em',
+      fontWeight: 500,
+      color: '#fff',
+      textTransform: 'uppercase'
+    }
+  }, t);
+  const sep = key => /*#__PURE__*/React.createElement("span", {
+    key: key,
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: 'rgba(255,255,255,0.45)'
+    }
+  }, "\xB7");
+  const PinnedContact = ({
+    photo,
+    name,
+    online,
+    unread,
+    onClick
+  }) => /*#__PURE__*/React.createElement("div", {
+    onClick: onClick,
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 4,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative',
+      width: 44,
+      height: 44
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: photo,
+    alt: name,
+    style: {
+      width: 44,
+      height: 44,
+      borderRadius: '50%',
+      objectFit: 'cover',
+      display: 'block'
+    }
+  }), online && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      bottom: 0,
+      right: 0,
+      width: 10,
+      height: 10,
+      borderRadius: '50%',
+      background: '#3DAF7E',
+      border: `2px solid ${bg}`
+    }
+  }), unread > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: -2,
+      right: -2,
+      minWidth: 16,
+      height: 16,
+      borderRadius: 8,
+      background: '#AD832F',
+      color: '#fff',
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 600,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '0 4px'
+    }
+  }, unread)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 500,
+      letterSpacing: '0.06em',
+      color: pinnedName
+    }
+  }, name));
+  const Single = ({
+    photo
+  }) => /*#__PURE__*/React.createElement("img", {
+    src: photo,
+    style: {
+      width: 36,
+      height: 36,
+      borderRadius: '50%',
+      objectFit: 'cover',
+      flexShrink: 0,
+      display: 'block'
+    }
+  });
+  const Group = ({
+    a,
+    b
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative',
+      width: 36,
+      height: 36,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: a,
+    style: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: 22,
+      height: 22,
+      borderRadius: '50%',
+      objectFit: 'cover',
+      border: `2px solid ${bg}`
+    }
+  }), /*#__PURE__*/React.createElement("img", {
+    src: b,
+    style: {
+      position: 'absolute',
+      bottom: 0,
+      right: 0,
+      width: 22,
+      height: 22,
+      borderRadius: '50%',
+      objectFit: 'cover',
+      border: `2px solid ${bg}`
+    }
+  }));
+  const Emoji = ({
+    e
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 36,
+      height: 36,
+      borderRadius: '50%',
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: dark ? '#0A1730' : '#F5F2EE',
+      fontSize: 18
+    }
+  }, e);
+
+  // Thread-view tokens
+  const tvBarBg = dark ? '#070F1E' : '#FFFFFF';
+  const tvBarBord = dark ? '#0D1E3A' : '#F0EBE3';
+  const tvMsgBg = dark ? '#070F1E' : '#FCFBF8';
+  const tvBackCol = dark ? 'rgba(255,255,255,0.3)' : 'rgba(0,26,74,0.4)';
+  const tvActionCol = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const tvDivLine = dark ? '#0D1E3A' : '#E4DFD4';
+  const tvDivText = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
+  const tvTimeCol = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const theirBg = dark ? '#0A1E44' : '#FFFFFF';
+  const theirCol = dark ? '#FFFFFF' : '#001A4A';
+  const theirBord = dark ? 'none' : '1px solid #E4DFD4';
+  const mineBg = dark ? '#AD832F' : '#001A4A';
+  const reactBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+  const reactCol = dark ? '#C9A45A' : '#AD832F';
+  const senderGold = dark ? '#C9A45A' : '#AD832F';
+  const senderMuted = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
+  const inBarBg = dark ? '#070F1E' : '#F5F0E8';
+  const inBarBord = dark ? '#0D1E3A' : '#E0D8CC';
+  const inFieldBg = dark ? '#0A1730' : '#FFFFFF';
+  const inFieldBord = dark ? '#152545' : '#E0D8CC';
+  const inPlaceCol = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
+  const sendBg = dark ? '#AD832F' : '#001A4A';
+  const [shown, setShown] = useState(null);
+  const [open, setOpen] = useState(false);
+  const openThread = t => {
+    if (t) {
+      setShown(t);
+      setOpen(true);
+    }
+  };
+  const back = () => setOpen(false);
+  const SENDERS = {
+    tarek: {
+      name: 'Tarek',
+      photo: TCHAT_PHOTOS.tarek
+    },
+    brad: {
+      name: 'Brad',
+      photo: TCHAT_PHOTOS.brad
+    },
+    brett: {
+      name: 'Brett',
+      photo: TCHAT_PHOTOS.brett
+    },
+    kyle: {
+      name: 'Kyle',
+      photo: TCHAT_PHOTOS.kyle
+    },
+    me: {
+      name: 'You',
+      photo: TCHAT_PHOTOS.symon
+    }
+  };
+  const VIEW = {
+    t2: {
+      status: 'Online',
+      date: 'Today',
+      messages: [{
+        from: 'tarek',
+        text: 'Can you pull the Forest Hill offer summary before the 3pm call?',
+        time: '9:41 AM'
+      }, {
+        from: 'me',
+        text: "On it — I'll have it in the shared drive by 2:30.",
+        time: '9:43 AM'
+      }, {
+        from: 'tarek',
+        text: "Perfect. Also — what's the status on the Jinx Ave feedback follow-up?",
+        time: '9:44 AM'
+      }, {
+        from: 'me',
+        text: 'SFFU triggered the follow-up 2hrs post-showing. 3 of 5 buyers have responded. The team is handling the rest.',
+        time: '9:46 AM'
+      }, {
+        from: 'tarek',
+        text: "Good. Let's debrief after the call.",
+        time: '9:48 AM',
+        reaction: {
+          emoji: '👍',
+          count: 1
+        }
+      }]
+    },
+    t1: {
+      members: 'Tarek, Brad, Brett, Kyle',
+      date: 'Today',
+      messages: [{
+        from: 'tarek',
+        text: "New showing booked on Jinx Ave — 2pm tomorrow. Let's make sure the prep is solid.",
+        time: '10:02 AM'
+      }, {
+        from: 'brad',
+        text: "On it — I'll confirm the property access and lockbox code.",
+        time: '10:14 AM'
+      }, {
+        from: 'me',
+        text: "SFFU will auto-trigger the feedback form 2hrs after the showing ends. I'll monitor response rate.",
+        time: '10:17 AM'
+      }, {
+        from: 'brad',
+        text: 'FYI — Westlake closing docs are signed and in. Commission hits end of week.',
+        time: '10:22 AM',
+        reaction: {
+          emoji: '🎉',
+          count: 4
+        }
+      }, {
+        from: 'brett',
+        text: 'Commercial comp deck for Thursday is updated — shared in Drive.',
+        time: '10:31 AM'
+      }]
+    },
+    t5: {
+      date: 'Yesterday',
+      messages: [{
+        from: 'brett',
+        text: 'Sent the commercial comp report over — let me know if you need anything adjusted before the client meeting.',
+        time: 'Yesterday'
+      }, {
+        from: 'me',
+        text: "Got it, looks solid. I'll flag anything before EOD.",
+        time: 'Yesterday'
+      }]
+    }
+  };
+  const threads = [{
+    id: 'c1',
+    kind: 'channel',
+    emoji: '📣',
+    name: 'Announcements',
+    preview: 'Tarek: Q3 kickoff is set for July 8 — details inside',
+    time: '9:15a',
+    unread: 0
+  }, {
+    id: 'c2',
+    kind: 'channel',
+    emoji: '🏅',
+    name: 'Great Shares',
+    preview: 'Brett: Closed the Mueller condo! 🎉',
+    time: 'Yest',
+    unread: 0
+  }, {
+    id: 'c3',
+    kind: 'channel',
+    emoji: '😂',
+    name: 'Memes',
+    preview: 'Brad: when the buyer ghosts after 3 showings 💀',
+    time: 'Mon',
+    unread: 0
+  }, {
+    id: 't1',
+    kind: 'group',
+    a: TCHAT_PHOTOS.tarek,
+    b: TCHAT_PHOTOS.brad,
+    name: 'TMG Agents',
+    preview: 'Brad: New showing on Jinx Ave just booked...',
+    time: '10:02a',
+    unread: 1
+  }, {
+    id: 't2',
+    kind: 'dm',
+    photo: TCHAT_PHOTOS.tarek,
+    name: 'Tarek',
+    preview: "Let's sync on the Forest Hill offer at 3...",
+    time: '9:48a',
+    unread: 0
+  }, {
+    id: 't3',
+    kind: 'dm',
+    photo: TCHAT_PHOTOS.brad,
+    name: 'Brad',
+    preview: 'Westlake closing docs are signed and in...',
+    time: '8:30a',
+    unread: 2
+  }, {
+    id: 't5',
+    kind: 'dm',
+    photo: TCHAT_PHOTOS.brett,
+    name: 'Brett',
+    preview: 'Sent the commercial comp report over...',
+    time: 'Yest',
+    unread: 0
+  }, {
+    id: 't6',
+    kind: 'group',
+    a: TCHAT_PHOTOS.alex,
+    b: TCHAT_PHOTOS.luciana,
+    name: 'Ops & Admin',
+    preview: 'Luciana: Screening shortlist is ready...',
+    time: 'Mon',
+    unread: 0
+  }, {
+    id: 't7',
+    kind: 'dm',
+    photo: TCHAT_PHOTOS.alex,
+    name: 'Alexa',
+    preview: '3 files cleared to close this week...',
+    time: 'Mon',
+    unread: 0
+  }, {
+    id: 't8',
+    kind: 'dm',
+    photo: TCHAT_PHOTOS.kyle,
+    name: 'Kyle',
+    preview: 'Following up on the Forest Hill listing...',
+    time: 'Sun',
+    unread: 0
+  }, {
+    id: 't9',
+    kind: 'dm',
+    photo: TCHAT_PHOTOS.luciana,
+    name: 'Luciana',
+    preview: "Calendar's updated for next week's listings...",
+    time: 'Sun',
+    unread: 0
+  }];
+  const byId = id => threads.find(x => x.id === id);
+  const listAvatar = t => t.kind === 'channel' ? /*#__PURE__*/React.createElement(Emoji, {
+    e: t.emoji
+  }) : t.kind === 'group' ? /*#__PURE__*/React.createElement(Group, {
+    a: t.a,
+    b: t.b
+  }) : /*#__PURE__*/React.createElement(Single, {
+    photo: t.photo
+  });
+  const headerAvatar = (t, view) => {
+    if (t.kind === 'group') return /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'relative',
+        width: 32,
+        height: 32,
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("img", {
+      src: t.a,
+      style: {
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: 20,
+        height: 20,
+        borderRadius: '50%',
+        objectFit: 'cover',
+        border: `1.5px solid ${tvBarBg}`
+      }
+    }), /*#__PURE__*/React.createElement("img", {
+      src: t.b,
+      style: {
+        position: 'absolute',
+        bottom: 0,
+        right: 0,
+        width: 20,
+        height: 20,
+        borderRadius: '50%',
+        objectFit: 'cover',
+        border: `1.5px solid ${tvBarBg}`
+      }
+    }));
+    if (t.kind === 'channel') return /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 32,
+        height: 32,
+        borderRadius: '50%',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: dark ? '#0A1730' : '#F5F2EE',
+        fontSize: 16
+      }
+    }, t.emoji);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'relative',
+        width: 32,
+        height: 32,
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("img", {
+      src: t.photo,
+      style: {
+        width: 32,
+        height: 32,
+        borderRadius: '50%',
+        objectFit: 'cover',
+        display: 'block'
+      }
+    }), view && view.status === 'Online' && /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        bottom: 0,
+        right: 0,
+        width: 8,
+        height: 8,
+        borderRadius: '50%',
+        background: '#3DAF7E',
+        border: `1.5px solid ${tvBarBg}`
+      }
+    }));
+  };
+  const statusLine = (t, view) => {
+    if (t.kind === 'dm' && view && view.status === 'Online') return /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.1em',
+        color: '#3DAF7E',
+        marginTop: 1
+      }
+    }, "\u25CF Online");
+    if (t.kind !== 'dm' && view && view.members) return /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.1em',
+        color: senderMuted,
+        marginTop: 1,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, view.members);
+    return null;
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: bannerBg,
+      padding: '9px 16px',
+      textAlign: 'center',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      letterSpacing: '0.14em',
+      textTransform: 'uppercase',
+      color: '#fff'
+    }
+  }, "Coming Soon \xB7 Team Chat \xB7 Q3 2026")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      position: 'relative',
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      inset: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      background: bg
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '10px 14px 8px',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 13,
+      fontWeight: 600,
+      color: headTitle
+    }
+  }, "Chats"), /*#__PURE__*/React.createElement("button", {
+    style: {
+      width: 28,
+      height: 28,
+      borderRadius: '50%',
+      border: 'none',
+      cursor: 'pointer',
+      background: composeBg,
+      color: composeCol,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-edit",
+    style: {
+      fontSize: 15
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      margin: '0 14px 10px',
+      background: searchBg,
+      borderRadius: 10,
+      padding: '7px 10px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-search",
+    style: {
+      fontSize: 14,
+      color: searchCol
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: searchCol
+    }
+  }, "Search")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '0 14px 10px',
+      borderBottom: `1px solid ${pinnedBord}`,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.18em',
+      fontWeight: 500,
+      color: pinnedLabel,
+      marginBottom: 8
+    }
+  }, "PINNED"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(PinnedContact, {
+    photo: TCHAT_PHOTOS.tarek,
+    name: "Tarek",
+    online: true,
+    unread: 3,
+    onClick: () => openThread(byId('t2'))
+  }), /*#__PURE__*/React.createElement(PinnedContact, {
+    photo: TCHAT_PHOTOS.brett,
+    name: "Brett",
+    onClick: () => openThread(byId('t5'))
+  }), /*#__PURE__*/React.createElement(PinnedContact, {
+    photo: TCHAT_PHOTOS.alex,
+    name: "Alexa",
+    onClick: () => openThread(byId('t7'))
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch'
+    }
+  }, threads.map((t, i) => /*#__PURE__*/React.createElement("div", {
+    key: t.id,
+    onClick: () => openThread(t),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '9px 14px',
+      cursor: 'pointer',
+      borderBottom: i === threads.length - 1 ? 'none' : `1px solid ${rowBord}`
+    }
+  }, listAvatar(t), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 600,
+      color: threadName,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, t.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: previewCol,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      marginTop: 2
+    }
+  }, t.preview)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flexShrink: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'flex-end',
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: timeCol
+    }
+  }, t.time), t.unread > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      minWidth: 16,
+      height: 16,
+      borderRadius: 8,
+      background: '#AD832F',
+      color: '#fff',
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 600,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '0 4px'
+    }
+  }, t.unread)))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      inset: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      background: tvMsgBg,
+      transform: open ? 'translateX(0)' : 'translateX(100%)',
+      transition: 'transform 220ms ease',
+      boxShadow: open && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none',
+      pointerEvents: open ? 'auto' : 'none'
+    }
+  }, shown && (() => {
+    const view = VIEW[shown.id];
+    const msgs = view && view.messages || [];
+    const isGroup = shown.kind !== 'dm';
+    const lastTheir = [...msgs].reverse().find(m => m.from !== 'me');
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 9,
+        padding: '10px 14px',
+        borderBottom: `1px solid ${tvBarBord}`,
+        background: tvBarBg,
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: back,
+      style: {
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        padding: 0,
+        color: tvBackCol,
+        display: 'flex',
+        alignItems: 'center',
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-chevron-left",
+      style: {
+        fontSize: 16
+      }
+    })), headerAvatar(shown, view), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 11,
+        fontWeight: 600,
+        color: dark ? '#fff' : '#001A4A',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, shown.name), statusLine(shown, view)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 9,
+        color: tvActionCol,
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-phone",
+      style: {
+        fontSize: 15
+      }
+    }), /*#__PURE__*/React.createElement("i", {
+      className: `ti ${isGroup ? 'ti-info-circle' : 'ti-video'}`,
+      style: {
+        fontSize: 15
+      }
+    }))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        overflowY: 'auto',
+        WebkitOverflowScrolling: 'touch',
+        padding: '10px 12px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        background: tvMsgBg
+      }
+    }, msgs.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        height: 1,
+        background: tvDivLine
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 7,
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        color: tvDivText
+      }
+    }, view.date), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        height: 1,
+        background: tvDivLine
+      }
+    })), msgs.map((m, i) => {
+      const mine = m.from === 'me';
+      const prev = msgs[i - 1];
+      const showSender = isGroup && !mine && (!prev || prev.from !== m.from);
+      const s = SENDERS[m.from] || SENDERS.me;
+      const recent = lastTheir && m.from === lastTheir.from;
+      return /*#__PURE__*/React.createElement("div", {
+        key: i,
+        style: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 3
+        }
+      }, showSender && /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontFamily: J,
+          fontSize: 7,
+          letterSpacing: '0.1em',
+          fontWeight: 600,
+          marginBottom: 2,
+          marginLeft: 28,
+          color: recent ? senderGold : senderMuted
+        }
+      }, s.name), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          flexDirection: mine ? 'row-reverse' : 'row',
+          alignItems: 'flex-end',
+          gap: 6
+        }
+      }, /*#__PURE__*/React.createElement("img", {
+        src: mine ? SENDERS.me.photo : s.photo,
+        style: {
+          width: 22,
+          height: 22,
+          borderRadius: '50%',
+          objectFit: 'cover',
+          flexShrink: 0,
+          display: 'block'
+        }
+      }), /*#__PURE__*/React.createElement("div", {
+        style: {
+          maxWidth: '78%',
+          padding: '7px 9px',
+          fontFamily: J,
+          fontSize: 9,
+          lineHeight: 1.45,
+          borderRadius: mine ? '12px 12px 3px 12px' : '12px 12px 12px 3px',
+          background: mine ? mineBg : theirBg,
+          color: mine ? '#fff' : theirCol,
+          border: mine ? 'none' : theirBord
+        }
+      }, m.text)), /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontFamily: J,
+          fontSize: 7,
+          color: tvTimeCol,
+          textAlign: mine ? 'right' : 'left',
+          marginLeft: mine ? 0 : 28,
+          marginRight: mine ? 28 : 0
+        }
+      }, m.time), m.reaction && /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 3,
+          alignSelf: 'flex-start',
+          marginLeft: 28,
+          marginTop: 2,
+          padding: '2px 6px',
+          borderRadius: 10,
+          fontFamily: J,
+          fontSize: 8,
+          background: reactBg,
+          color: reactCol
+        }
+      }, m.reaction.emoji, " ", m.reaction.count));
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flexShrink: 0,
+        borderTop: `1px solid ${inBarBord}`,
+        background: inBarBg,
+        padding: '8px 12px 10px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 7
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        borderRadius: 20,
+        height: 34,
+        padding: '0 10px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        background: inFieldBg,
+        border: `1px solid ${inFieldBord}`
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        fontFamily: J,
+        fontSize: 9,
+        color: inPlaceCol,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, "Message ", shown.name, "..."), /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-paperclip",
+      style: {
+        fontSize: 14,
+        color: inPlaceCol,
+        flexShrink: 0
+      }
+    })), /*#__PURE__*/React.createElement("button", {
+      style: {
+        width: 30,
+        height: 30,
+        borderRadius: '50%',
+        border: 'none',
+        cursor: 'pointer',
+        flexShrink: 0,
+        background: sendBg,
+        color: '#fff',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-arrow-up",
+      style: {
+        fontSize: 13
+      }
+    }))));
+  })())));
+}
+
+// ─── Calls Tab — live Zoho touch-call list ───────────────────────
+//  Real data, not a mockup: this agent's Call tasks for the previous
+//  workday / today / next workday, pulled from the same zoho-crm edge
+//  function the KPI flow already uses. Tier (A/B/C/EO) is parsed off the
+//  subject with the exact same rule /crm-tasks uses, so a contact's grade
+//  here always matches the grade on the CRM page.
+const CALL_HOLIDAYS = ['2026-09-07', '2026-10-12', '2026-11-11', '2026-11-26', '2026-12-25', '2027-01-01', '2027-01-18', '2027-02-15', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06', '2027-10-11', '2027-11-11', '2027-11-25', '2027-12-24'];
+const cIso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+function cIsWorkday(d) {
+  const dow = d.getDay();
+  if (dow === 0 || dow === 6) return false;
+  return !CALL_HOLIDAYS.includes(cIso(d));
+}
+const cNextWorkday = d => {
+  const x = new Date(d);
+  while (!cIsWorkday(x)) x.setDate(x.getDate() + 1);
+  return x;
+};
+const cPrevWorkday = d => {
+  const x = new Date(d);
+  while (!cIsWorkday(x)) x.setDate(x.getDate() - 1);
+  return x;
+};
+// Same rule as /crm-tasks: not anchored to the start of the subject, since
+// real subjects carry prefixes like "Initial B Touch Call: …".
+function callTier(subject) {
+  const m = /\b([A-Za-z]{1,3})\s+Touch Call\b/i.exec(subject || '');
+  return m ? m[1].toUpperCase() : 'Other';
+}
+function isCallTask(t, typeField) {
+  const type = ((t[typeField] || t.Task_Type || '') + '').toLowerCase();
+  return type === 'call' || /touch call/i.test(t.Subject || '');
+}
+// DC-neutral Zoho gateway link — resolves the logged-in user's org server
+// side. Guarded to real numeric record ids so a missing id degrades to
+// plain text instead of a dead link.
+const zohoContactUrl = id => id && /^\d+$/.test(String(id)) ? 'https://crm.zoho.com/crm/EntityInfo.do?module=Contacts&id=' + encodeURIComponent(id) : null;
+
+// The "Task Type" field is a custom field, so its api-name is org-specific.
+// Resolve it once and cache for a day (same discovery /crm-tasks does).
+const CALL_TYPEFIELD_KEY = 'tmg-tasks-typefield';
+async function resolveTaskTypeField() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CALL_TYPEFIELD_KEY) || 'null');
+    if (raw && raw.api && Date.now() - raw.at < 86400000) return raw.api;
+  } catch (e) {}
+  let api = 'Task_Type';
+  try {
+    const {
+      ok,
+      data
+    } = await callZoho({
+      action: 'get_fields',
+      module: 'Tasks'
+    });
+    if (ok) {
+      const f = (data.fields || []).find(x => /task\s*type/i.test(x.field_label || ''));
+      if (f && f.api_name) api = f.api_name;
+    }
+  } catch (e) {}
+  try {
+    localStorage.setItem(CALL_TYPEFIELD_KEY, JSON.stringify({
+      api,
+      at: Date.now()
+    }));
+  } catch (e) {}
+  return api;
+}
+
+// localhost has no Zoho connection, so the preview runs off a fixture that
+// has the same shape a real search_tasks response returns.
+const callsIsDev = () => window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
+function devCalls(iso, n, seed) {
+  const names = ['Steve Johnson', 'Jonathan Hewitt', 'Nick Spiller', 'Courtney Gill', 'Adriana Culling', 'Daksha Patel', 'Chris Gober', 'Ariana Hall', 'Jeremy Bell', 'Michael Beeler'];
+  const tiers = ['A', 'B', 'C', 'A', 'B', 'EO', 'C', 'A', 'B', 'C'];
+  return Array.from({
+    length: n
+  }, (_, i) => {
+    const k = (seed + i) % names.length;
+    return {
+      id: 'dev-' + iso + '-' + i,
+      Subject: tiers[k] + ' Touch Call: ' + names[k],
+      Status: seed === 0 && i % 3 === 0 ? 'Completed' : 'Not Started',
+      Due_Date: iso,
+      Task_Type: 'Call',
+      Who_Id: {
+        id: '55000000000000' + String(100 + k),
+        name: names[k]
+      }
+    };
+  });
+}
+
+// Zoho stores phone numbers however they were typed. Display them as
+// 512-555-1234 when it really is a US 10-digit number (or 11 with a
+// leading 1), and print anything else back verbatim rather than mangling
+// an extension or an international number. The tel: link always uses the
+// RAW value, never this.
+function formatPhone(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return s;
+  const d = s.replace(/\D/g, '');
+  const ten = d.length === 11 && d[0] === '1' ? d.slice(1) : d;
+  if (ten.length !== 10) return s;
+  return ten.slice(0, 3) + '-' + ten.slice(3, 6) + '-' + ten.slice(6);
+}
+
+// Per-contact detail (phone, email, spouse) for the call list. A NEW key,
+// deliberately not the old tmg-call-phones one: every device already holds
+// that as { id: "512-555-1234" }, so widening it in place would make every
+// existing entry read as a string where the code now expects an object.
+const CALL_CONTACT_KEY = 'tmg-call-contacts-v1';
+function loadContactCache() {
+  try {
+    const m = JSON.parse(localStorage.getItem(CALL_CONTACT_KEY) || '{}');
+    return m && typeof m === 'object' ? m : {};
+  } catch (e) {
+    return {};
+  }
+}
+function saveContactCache(m) {
+  try {
+    localStorage.setItem(CALL_CONTACT_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
+
+// What was logged against a given call, so the row can show a ribbon.
+// Device-local on purpose: reading it back from Zoho means two GETs per
+// contact through an unfiltered 50-row related list, which is far too
+// expensive to pay on every paint. Pruned at 30 days so it can't grow
+// without bound.
+const CALL_LOGGED_KEY = 'tmg-call-logged-v1';
+function loadLoggedCache() {
+  try {
+    const m = JSON.parse(localStorage.getItem(CALL_LOGGED_KEY) || '{}') || {};
+    const cut = Date.now() - 30 * 86400000;
+    let changed = false;
+    Object.keys(m).forEach(k => {
+      if (!m[k] || !m[k].at || m[k].at < cut) {
+        delete m[k];
+        changed = true;
+      }
+    });
+    if (changed) {
+      try {
+        localStorage.setItem(CALL_LOGGED_KEY, JSON.stringify(m));
+      } catch (e) {}
+    }
+    return m;
+  } catch (e) {
+    return {};
+  }
+}
+function saveLoggedCache(m) {
+  try {
+    localStorage.setItem(CALL_LOGGED_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
+
+// Zoho Reports tallies the Tasks module BY TASK TYPE, and those types ARE
+// the KPIs — so the type written on a task is literally the number that
+// shows up in the report. That makes a hardcoded list unacceptable (the
+// Other-KPI list made exactly that mistake and went stale silently): the
+// options come live from Zoho's own picklist, cached for a day.
+const TASK_TYPES_KEY = 'tmg-task-types-v1';
+async function resolveTaskTypes() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TASK_TYPES_KEY) || 'null');
+    if (raw && raw.api && Array.isArray(raw.options) && raw.options.length && Date.now() - raw.at < 86400000) return raw;
+  } catch (e) {}
+  const stash = out => {
+    try {
+      localStorage.setItem(TASK_TYPES_KEY, JSON.stringify(out));
+    } catch (e) {}
+    return out;
+  };
+  if (callsIsDev()) return stash({
+    api: 'Task_Type',
+    options: ['Call', 'Notes', 'Hotzone Action', 'Pop-by', 'Lunch', 'Email', 'Meeting'],
+    at: Date.now()
+  });
+  const {
+    ok,
+    data
+  } = await callZoho({
+    action: 'get_fields',
+    module: 'Tasks'
+  });
+  if (!ok) throw new Error(data && data.error || 'Could not read the Task Type list from Zoho.');
+  const f = (data.fields || []).find(x => /task\s*type/i.test(x.field_label || ''));
+  if (!f || !f.api_name) throw new Error('Zoho has no "Task Type" field on Tasks.');
+  const options = (f.picklist_values || []).filter(v => v && !/^-?\s*none\s*-?$/i.test(v));
+  if (!options.length) throw new Error('Zoho returned no Task Type options.');
+  return stash({
+    api: f.api_name,
+    options,
+    at: Date.now()
+  });
+}
+
+// The day list is a LIVE WORKLIST, so it gets a deliberately SHORT cache:
+// long enough that flipping to another tab and back stops re-querying Zoho
+// four times, short enough that it can never show a call somebody already
+// closed. A long cache would be wrong here for exactly the reason the tab
+// exists — its job is being current, and Zoho books the next call by
+// workflow, so new rows appear on their own. The pulls that CAN sit for a
+// long time (contact phone/email/spouse, and the capacity pull) already do.
+const CALL_DAY_KEY = 'tmg-calls-day-v1';
+const CALL_DAY_TTL = 5 * 60 * 1000;
+// Only the fields this tab actually reads. A raw Zoho task carries a
+// Description that can run to pages, and localStorage is a ~5MB budget
+// shared with every other cache in the app.
+const trimTask = t => ({
+  id: t.id,
+  Subject: t.Subject || '',
+  Status: t.Status || '',
+  Due_Date: t.Due_Date || null,
+  Owner: t.Owner ? {
+    id: t.Owner.id || null,
+    name: t.Owner.name || null
+  } : null,
+  Who_Id: t.Who_Id ? {
+    id: t.Who_Id.id || null,
+    name: t.Who_Id.name || null
+  } : null
+});
+function loadDayCache(sig) {
+  try {
+    const c = JSON.parse(localStorage.getItem(CALL_DAY_KEY) || 'null');
+    // The signature pins the cache to one owner-scope AND one calendar day,
+    // so it can never be served across a date rollover or to the wrong view.
+    if (!c || c.sig !== sig || !c.at || Date.now() - c.at > CALL_DAY_TTL) return null;
+    if (!c.buckets || !c.overdue) return null;
+    return c;
+  } catch (e) {
+    return null;
+  }
+}
+function saveDayCache(sig, payload, at) {
+  try {
+    const b = payload.buckets || {};
+    localStorage.setItem(CALL_DAY_KEY, JSON.stringify({
+      sig,
+      // `at` is the time the data was FETCHED, carried through every
+      // optimistic patch — otherwise ticking calls would keep renewing the
+      // lease and a stale list could live forever.
+      at: at || Date.now(),
+      buckets: {
+        yesterday: (b.yesterday || []).map(trimTask),
+        today: (b.today || []).map(trimTask),
+        tomorrow: (b.tomorrow || []).map(trimTask)
+      },
+      overdue: {
+        count: payload.overdue.count,
+        capped: !!payload.overdue.capped,
+        list: (payload.overdue.list || []).map(trimTask)
+      },
+      clipped: payload.clipped || {}
+    }));
+  } catch (e) {/* quota — just skip caching this round */}
+}
+
+// A write does NOT invalidate everything equally, and treating it as if it
+// did is expensive: /crm-tasks's two caches hold ALL open tasks, so any
+// write makes them wrong and they never expire on their own — but the
+// capacity pull holds only OPEN CALLS. Logging a completed pop-by cannot
+// affect it at all, and completing a call only takes one row out. Throwing
+// that away meant re-paging ten pages of tasks out of Zoho after every
+// single tick, so it is patched in place instead.
+function bustCrmTaskCaches() {
+  ['tmg_crmtasks_cache_open', 'tmg_crmtasks_cache_full'].forEach(k => {
+    try {
+      localStorage.removeItem(k);
+    } catch (e) {}
+  });
+}
+function patchOrgCache(fn) {
+  try {
+    const c = loadOrgCache();
+    if (!c) return;
+    const next = fn(c.calls || []);
+    // cachedAt is carried through unchanged, so "loaded 20m ago" stays true.
+    if (next) localStorage.setItem(CALL_ORG_KEY, JSON.stringify({
+      ...c,
+      calls: next
+    }));
+  } catch (e) {}
+}
+async function setTaskStatus(id, status, task) {
+  if (callsIsDev()) {
+    await new Promise(r => setTimeout(r, 260));
+    return;
+  }
+  const {
+    ok,
+    data
+  } = await safeZoho({
+    action: 'update_record',
+    module: 'Tasks',
+    id,
+    record: {
+      Status: status
+    }
+  });
+  if (!ok) throw new Error(data && data.error || 'Zoho would not update that task.');
+  bustCrmTaskCaches();
+  const done = /completed/i.test(status);
+  patchOrgCache(list => {
+    if (done) return list.filter(c => c.id !== id);
+    if (!task || list.some(c => c.id === id)) return list;
+    return list.concat([{
+      id: task.id,
+      Subject: task.Subject || '',
+      Status: status,
+      Due_Date: (task.Due_Date || '').slice(0, 10),
+      owner: task.Owner && task.Owner.name || 'Unassigned',
+      cid: task.Who_Id && task.Who_Id.id || null,
+      cname: task.Who_Id && task.Who_Id.name || ''
+    }]);
+  });
+}
+
+// Logging 5 of something creates 5 task rows, because that is how the Zoho
+// report counts them — one row per activity, grouped by Task Type. There is
+// no count field on a task to put a 5 into.
+//
+// Who_Id goes out as { id } (the shape create_agent_kpi already proves Zoho
+// accepts for a lookup in this org). /crm-tasks's create drawer sends a bare
+// id string instead, and nobody has verified which one this org's Tasks
+// module actually takes — so the FIRST create is a probe: if it's rejected
+// we retry that one with the bare string and use whichever shape stuck for
+// the rest. One request to find out, not N.
+const LOG_MAX_TASKS = 20;
+const activitySubject = (type, contactName) => type + ': ' + String(contactName || '').trim();
+
+// The log sheet offers exactly these four, in this order. It still reads
+// Zoho's live Task Type picklist for the VALUE it writes — that string is
+// what the report groups by, so it must be Zoho's own, never one typed
+// here — and these patterns only decide which of Zoho's options are
+// offered. Matching is loose so a rename like "Pop By" or "Note" still
+// resolves; anything the picklist genuinely doesn't have is called out in
+// the sheet rather than silently missing.
+//
+// Hotzone is the one that requires a count: a hotzone push is a batch, and
+// the number is the whole point of logging it. That mirrors the daily KPI
+// form, which also refuses to submit hotzone without being told how many.
+const LOG_ACTIVITIES = [{
+  key: 'notes',
+  label: 'Notes',
+  match: /^notes?\b/i,
+  requireCount: false
+}, {
+  key: 'hotzone',
+  label: 'Hotzone Action',
+  match: /hot\s*-?\s*zone/i,
+  requireCount: true
+}, {
+  key: 'popby',
+  label: 'Pop-by',
+  match: /^pop[\s-]?by/i,
+  requireCount: false
+}, {
+  key: 'lunch',
+  label: 'Lunch',
+  match: /^lunch\b/i,
+  requireCount: false
+}];
+
+// callZoho REJECTS on a transport failure rather than returning
+// { ok:false } — and an agent on cellular is exactly where that happens.
+// Left unwrapped inside a Promise.all it takes the whole batch down, so the
+// siblings that DID land in Zoho are never counted, never cache-busted and
+// never shown — and the obvious retry writes every one of them a second
+// time. Since Zoho Reports tallies Tasks rows by Task Type, those duplicates
+// become inflated KPI numbers. Every write below goes through this.
+async function safeZoho(payload) {
+  try {
+    return await callZoho(payload);
+  } catch (e) {
+    return {
+      ok: false,
+      network: true,
+      data: {
+        error: 'No connection — ' + (e && e.message || String(e))
+      }
+    };
+  }
+}
+
+// Logging 5 of something creates 5 task rows, because that is how the Zoho
+// report counts them — one row per activity, grouped by Task Type. There is
+// no count field on a task to put a 5 into.
+//
+// Who_Id goes out as { id } (the shape create_agent_kpi already proves Zoho
+// accepts for a lookup in this org). /crm-tasks's create drawer sends a bare
+// id string instead, and nobody has verified which one this org's Tasks
+// module actually takes — so the FIRST create is a probe: if Zoho REFUSES it
+// we retry that one with the bare string and use whichever shape stuck for
+// the rest. A network failure is never retried that way, because the record
+// may well have landed and a retry would duplicate it.
+async function createActivityTasks({
+  items,
+  typeField,
+  contact,
+  dateIso,
+  ownerId
+}) {
+  const jobs = [];
+  (items || []).forEach(it => {
+    for (let i = 0; i < it.count; i++) jobs.push(it.type);
+  });
+  if (!jobs.length) return {
+    made: 0,
+    byType: []
+  };
+  if (jobs.length > LOG_MAX_TASKS) throw new Error('That would create ' + jobs.length + ' tasks at once. Keep it to ' + LOG_MAX_TASKS + ' or fewer.');
+  if (callsIsDev()) {
+    await new Promise(r => setTimeout(r, 420));
+    return {
+      made: jobs.length,
+      byType: (items || []).map(it => ({
+        type: it.type,
+        count: it.count
+      }))
+    };
+  }
+  let whoShape = 'object';
+  const build = type => {
+    const rec = {
+      Subject: activitySubject(type, contact.name),
+      Status: 'Completed',
+      Due_Date: dateIso
+    };
+    if (typeField) rec[typeField] = type;
+    if (contact.id) rec.Who_Id = whoShape === 'object' ? {
+      id: contact.id
+    } : contact.id;
+    // The call's own owner IS the agent, so copying it off the source task
+    // credits the right person without needing the users.READ scope this
+    // org's Zoho grant doesn't have. Left unset, Zoho assigns every task to
+    // the API connection owner instead.
+    if (ownerId) rec.Owner = {
+      id: ownerId
+    };
+    return rec;
+  };
+
+  // Tallied BY TYPE rather than just counted, so a run that dies halfway can
+  // say exactly which rows landed and the caller can retry only the rest.
+  const landed = {};
+  const madeCount = () => Object.keys(landed).reduce((n, k) => n + landed[k], 0);
+  const byType = () => Object.keys(landed).map(type => ({
+    type,
+    count: landed[type]
+  }));
+  const stop = msg => {
+    if (madeCount()) bustCrmTaskCaches();
+    const err = new Error(msg);
+    err.partial = {
+      made: madeCount(),
+      byType: byType()
+    };
+    throw err;
+  };
+  const post = type => safeZoho({
+    action: 'create_record',
+    module: 'Tasks',
+    record: build(type)
+  }).then(r => ({
+    type,
+    r
+  }));
+  let first = await post(jobs[0]);
+  if (!first.r.ok && !first.r.network && contact.id) {
+    whoShape = 'string';
+    first = await post(jobs[0]);
+  }
+  if (!first.r.ok) stop(first.r.data && first.r.data.error || 'Zoho would not create that task.');
+  landed[jobs[0]] = 1;
+  const rest = jobs.slice(1);
+  for (let i = 0; i < rest.length; i += 4) {
+    const res = await Promise.all(rest.slice(i, i + 4).map(post));
+    res.forEach(x => {
+      if (x.r.ok) landed[x.type] = (landed[x.type] || 0) + 1;
+    });
+    const bad = res.find(x => !x.r.ok);
+    // Partial success is reported as partial success — never as a clean
+    // "done" for work Zoho refused, and never as a bare error that hides
+    // the rows it already wrote.
+    if (bad) stop('Created ' + madeCount() + ' of ' + jobs.length + ', then it stopped: ' + (bad.r.data && bad.r.data.error || 'unknown error'));
+  }
+  bustCrmTaskCaches();
+  return {
+    made: jobs.length,
+    byType: byType()
+  };
+}
+
+// ─── Call capacity: cadence math + projection ────────────────────
+//  Ported verbatim (same constants, same rules) from /crm-tasks so the
+//  numbers on this tab and the numbers on the CRM Capacity grid can never
+//  disagree. Touch-call cadence = expected gap in days from one call to the
+//  next, by the CONTACT owner and the touch class. Tarek runs a longer
+//  cadence than everyone else.
+const CALL_INTERVALS = {
+  tarek: {
+    A: 45,
+    B: 90,
+    C: 120
+  },
+  other: {
+    A: 30,
+    B: 60,
+    C: 90
+  }
+};
+const cParse = s => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || '');
+  return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+};
+const cDateOnly = s => {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s || '');
+  return m ? m[1] : null;
+};
+function cAddDays(iso, days) {
+  const b = cDateOnly(iso);
+  if (!b) return null;
+  const p = b.split('-').map(Number);
+  const d = new Date(Date.UTC(p[0], p[1] - 1, p[2]));
+  if (isNaN(d)) return null;
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+// The A/B/C intervals are fixed day counts, so "last call + interval" lands
+// on a weekend or holiday about 2 days in 7 by construction. Every date the
+// cadence produces goes through here so nothing is ever projected onto a
+// day nobody is working.
+function cCadenceDate(iso, days) {
+  const raw = cAddDays(iso, days);
+  if (!raw) return raw;
+  const d = cParse(raw);
+  return d ? cIso(cNextWorkday(d)) : raw;
+}
+
+// A booked call is not the end of a contact's cadence — once it's made the
+// NEXT touch lands `interval` days later, and so on. Counting only calls
+// that exist as Zoho tasks today makes future months look wide open when
+// the cadence is already rolling into them. One chain per CONTACT, seeded
+// from their LAST booked call, so a contact with two calls on the board
+// isn't counted twice.
+//
+// A contact whose last call is overdue or sits on a weekend/holiday is not
+// projected at all — that date is about to be re-slotted, so the next touch
+// genuinely isn't knowable. They're counted as `unprojected` and reported
+// instead. EO and unclassified calls have no interval, so they project
+// nothing.
+const CALL_PROJECTION_MAX_HOPS = 60;
+function projectCallCadence(calls, endIso, todayIso) {
+  const latest = new Map();
+  (calls || []).forEach(t => {
+    if (!t.Due_Date || /completed/i.test(t.Status || '')) return;
+    const tier = callTier(t.Subject);
+    if (!CALL_INTERVALS.other[tier]) return;
+    const key = t.cid || t.cname || t.id;
+    const prev = latest.get(key);
+    if (!prev || t.Due_Date > prev.iso) latest.set(key, {
+      iso: t.Due_Date,
+      tier,
+      owner: t.owner,
+      name: t.cname || t.Subject,
+      cid: t.cid
+    });
+  });
+  const out = {}; // owner -> 'YYYY-MM-DD' -> [{ name, tier, cid }]
+  let unprojected = 0;
+  latest.forEach(seed => {
+    const bucket = /tarek/i.test(seed.owner || '') ? 'tarek' : 'other';
+    const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[seed.tier];
+    if (!interval) return;
+    const seedDate = cParse(seed.iso);
+    if (seed.iso < todayIso || !seedDate || !cIsWorkday(seedDate)) {
+      unprojected++;
+      return;
+    }
+    let cur = seed.iso;
+    for (let hop = 1; hop <= CALL_PROJECTION_MAX_HOPS; hop++) {
+      cur = cCadenceDate(cur, interval);
+      if (!cur || cur > endIso) break;
+      const byOwner = out[seed.owner] = out[seed.owner] || {};
+      (byOwner[cur] = byOwner[cur] || []).push({
+        name: seed.name,
+        tier: seed.tier,
+        cid: seed.cid
+      });
+    }
+  });
+  return {
+    byOwner: out,
+    unprojected
+  };
+}
+
+// Same load bands /crm-tasks uses: 0 blank, 1-4 light, 5-7 comfortable, 8+
+// overloaded. Kept pastel — this is meant to be scanned, not to shout.
+function capTone(n, dark) {
+  if (!n) return {
+    bg: 'transparent',
+    fg: dark ? 'rgba(255,255,255,0.35)' : '#B4B2A9'
+  };
+  if (n >= 8) return dark ? {
+    bg: 'rgba(248,113,113,0.22)',
+    fg: '#F87171'
+  } : {
+    bg: '#FBE3E0',
+    fg: '#A5342A'
+  };
+  if (n >= 5) return dark ? {
+    bg: 'rgba(93,202,165,0.18)',
+    fg: '#5DCAA5'
+  } : {
+    bg: '#E2F3E8',
+    fg: '#1E6B40'
+  };
+  return dark ? {
+    bg: 'rgba(201,164,90,0.20)',
+    fg: '#C9A45A'
+  } : {
+    bg: '#FFF3D6',
+    fg: '#8A6100'
+  };
+}
+// Projected load reads as diagonal hatching, not another flat tint — a
+// pattern says "predicted, not booked" without muddying the load colour
+// underneath it.
+const capHatch = dark => dark ? 'repeating-linear-gradient(45deg, rgba(201,164,90,0.20) 0, rgba(201,164,90,0.20) 1.5px, transparent 1.5px, transparent 6px)' : 'repeating-linear-gradient(45deg, rgba(0,26,74,0.13) 0, rgba(0,26,74,0.13) 1.5px, transparent 1.5px, transparent 6px)';
+const CAL_MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const CAL_DOW = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+// ─── Team-wide open calls (capacity source) ──────────────────────
+//  The per-day search the call list uses is capped at 200 rows and can't
+//  page, which is fine for one day but useless for a whole month. So the
+//  Capacity view pulls the org's OPEN tasks through list_tasks the same way
+//  /crm-tasks does — page-number paging, Completed excluded server-side —
+//  then keeps only the calls. It's ~10 sequential requests, so it loads
+//  once on demand and is cached; there's a Refresh for when it's stale.
+const CALL_ORG_KEY = 'tmg-calls-org-v1';
+function loadOrgCache() {
+  try {
+    const p = JSON.parse(localStorage.getItem(CALL_ORG_KEY) || 'null');
+    if (!p || !Array.isArray(p.calls) || !p.cachedAt) return null;
+    return p;
+  } catch (e) {
+    return null;
+  }
+}
+function saveOrgCache(payload) {
+  try {
+    localStorage.setItem(CALL_ORG_KEY, JSON.stringify({
+      ...payload,
+      cachedAt: Date.now()
+    }));
+  } catch (e) {/* quota — just skip caching this round */}
+}
+function callAgo(ms) {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return m + 'm ago';
+  const h = Math.round(m / 60);
+  if (h < 24) return h + 'h ago';
+  return Math.round(h / 24) + 'd ago';
+}
+// Zoho's Search API (which list_tasks uses whenever status_not is set)
+// never hands back a page_token and stops returning rows past ~2,000, so
+// page 11+ comes back empty even while more_records is still true. That
+// ceiling is real and shared with /crm-tasks — surfaced as `capped` rather
+// than quietly showing a short month.
+const ORG_PAGE_CEILING = 10;
+async function fetchOrgOpenCalls(typeField, onProgress) {
+  let all = [],
+    page = 1,
+    token = null,
+    more = true,
+    capped = false;
+  while (more) {
+    const args = {
+      action: 'list_tasks',
+      per_page: 200,
+      status_not: 'Completed',
+      fields: ['Owner', 'Subject', 'Status', 'Due_Date', 'Who_Id', typeField].filter(Boolean)
+    };
+    if (token) args.page_token = token;else args.page = page;
+    const res = await callZoho(args);
+    if (!res.ok) {
+      if (page === 1 && !token) throw new Error(res.data && res.data.error || 'Could not load team calls.');
+      break;
+    }
+    all = all.concat(res.data && res.data.tasks || []);
+    onProgress && onProgress(all.length);
+    more = !!(res.data.info && res.data.info.more_records);
+    token = res.data.info && res.data.info.next_page_token || null;
+    if (more && !token && page >= ORG_PAGE_CEILING) {
+      capped = true;
+      break;
+    }
+    page++;
+  }
+  // The paged result set isn't frozen between requests, so the same record
+  // can arrive on two pages — dedupe before anything counts them.
+  const seen = new Set();
+  const calls = [];
+  all.forEach(t => {
+    if (!t || !t.id || seen.has(t.id)) return;
+    seen.add(t.id);
+    if (!isCallTask(t, typeField)) return;
+    calls.push({
+      id: t.id,
+      Subject: t.Subject || '',
+      Status: t.Status || '',
+      Due_Date: (t.Due_Date || '').slice(0, 10),
+      owner: t.Owner && t.Owner.name || 'Unassigned',
+      cid: t.Who_Id && t.Who_Id.id || null,
+      cname: t.Who_Id && t.Who_Id.name || ''
+    });
+  });
+  return {
+    calls,
+    capped
+  };
+}
+// Preview fixture — localhost has no Zoho connection.
+function devOrgCalls() {
+  const owners = ['Tarek Morshed', 'Kyle Baird', 'Brett Sanders'];
+  const names = ['Steve Johnson', 'Jonathan Hewitt', 'Nick Spiller', 'Courtney Gill', 'Adriana Culling', 'Daksha Patel', 'Chris Gober', 'Ariana Hall', 'Jeremy Bell', 'Michael Beeler', 'Melissa Hudgens', 'Grant Hudgens'];
+  const tiers = ['A', 'B', 'C', 'EO'];
+  const out = [];
+  const start = new Date();
+  start.setDate(1);
+  for (let i = 0; i < 260; i++) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i * 3 % 90);
+    const k = i % names.length,
+      tier = tiers[i % tiers.length];
+    out.push({
+      id: 'dev-org-' + i,
+      Subject: tier + ' Touch Call: ' + names[k],
+      Status: 'Not Started',
+      Due_Date: cIso(cNextWorkday(d)),
+      owner: owners[i % owners.length],
+      cid: '5500000000000' + String(1000 + k),
+      cname: names[k]
+    });
+  }
+  return out;
+}
+function CallsTab({
+  dark,
+  ownerName,
+  isAdmin
+}) {
+  const J = "'Jost', sans-serif";
+  const [view, setView] = useState('list'); // 'list' | 'capacity' (admin only)
+  const [agent, setAgent] = useState(''); // '' = all agents; otherwise an owner name
+  const [collapsed, setCollapsed] = useState({}); // owner -> true, in the grouped "all agents" list
+  const [day, setDay] = useState('today');
+  const [briefOpen, setBriefOpen] = useState(() => localStorage.getItem('tmg-coach-open') !== 'false');
+  useEffect(() => {
+    localStorage.setItem('tmg-coach-open', briefOpen ? 'true' : 'false');
+  }, [briefOpen]);
+  const [buckets, setBuckets] = useState(null); // { yesterday:[], today:[], tomorrow:[] } | null while loading
+  const [overdue, setOverdue] = useState(null); // { list, count, capped } | null
+  const [clipped, setClipped] = useState({}); // per-bucket "Zoho page was full" flag
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [contacts, setContacts] = useState(loadContactCache);
+  const contactsRef = useRef(contacts);
+  useEffect(() => {
+    contactsRef.current = contacts;
+  }, [contacts]);
+  const [logged, setLogged] = useState(loadLoggedCache); // taskId -> { at, items:[{type,count}] }
+  const [rowBusy, setRowBusy] = useState({}); // taskId -> true while a write is in flight
+  const [rowErr, setRowErr] = useState({}); // taskId -> message, shown on the row itself
+  const [sheet, setSheet] = useState(null); // { task, contact } | null — the + popup
+  const [dataAt, setDataAt] = useState(0); // when the shown day data was FETCHED, not last touched
+
+  // A phone PWA sits on this tab for days at a time, so "today" cannot be
+  // frozen at mount — it would quietly come to mean yesterday, and this
+  // value now decides the Due_Date stamped on tasks written to Zoho, not
+  // just what the tab displays. Re-checked whenever the app comes back to
+  // the foreground, and on a slow timer for a phone left awake.
+  const [dayStamp, setDayStamp] = useState(() => cIso(new Date()));
+  useEffect(() => {
+    const check = () => {
+      const now = cIso(new Date());
+      setDayStamp(d => d === now ? d : now);
+    };
+    const onVis = () => {
+      if (!document.hidden) check();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    const iv = setInterval(check, 300000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      clearInterval(iv);
+    };
+  }, []);
+
+  // "Yesterday"/"Tomorrow" mean the previous/next WORKDAY, not the raw
+  // calendar day — otherwise the tab is empty every Monday, since cadence
+  // dates are snapped off weekends and federal holidays.
+  const dates = useMemo(() => {
+    const t = new Date();
+    t.setHours(0, 0, 0, 0);
+    const p = new Date(t);
+    p.setDate(p.getDate() - 1);
+    const n = new Date(t);
+    n.setDate(n.getDate() + 1);
+    return {
+      yesterday: cIso(cPrevWorkday(p)),
+      today: cIso(t),
+      tomorrow: cIso(cNextWorkday(n))
+    };
+  }, [dayStamp]);
+
+  // An agent sees only their own calls. myName falls back to 'Me' when the
+  // profile has no name — filtering on that would substring-match real
+  // names like "Mel", so we'd rather show nothing and say why.
+  // An ADMIN gets the whole team: the same queries run WITHOUT the owner
+  // filter (the edge function applies that filter to the page it fetched,
+  // so dropping it costs nothing extra), and the picking happens here.
+  const myOwner = ownerName && ownerName !== 'Me' && ownerName.trim() ? ownerName.trim() : '';
+  const team = !!isAdmin;
+
+  // Pins the cache to one owner-scope and one calendar day.
+  const daySig = (team ? 'team' : 'me:' + myOwner) + '|' + dates.today;
+  async function load(force) {
+    if (!team && !myOwner) {
+      setBuckets({
+        yesterday: [],
+        today: [],
+        tomorrow: []
+      });
+      setOverdue({
+        list: [],
+        count: 0,
+        capped: false
+      });
+      return;
+    }
+    if (!force && !callsIsDev()) {
+      const c = loadDayCache(daySig);
+      if (c) {
+        setBuckets(c.buckets);
+        setOverdue(c.overdue);
+        setClipped(c.clipped || {});
+        setDataAt(c.at);
+        setErr('');
+        setRowErr({});
+        return;
+      }
+    }
+    setBusy(true);
+    setErr('');
+    setRowErr({});
+    if (callsIsDev()) {
+      await new Promise(r => setTimeout(r, 250));
+      // Namespaced ids: both owners' fixtures come off the same generator,
+      // so without this they collide and a write meant for one row patches
+      // two. Real Zoho ids are unique.
+      const stamp = (list, o) => list.map(t => ({
+        ...t,
+        id: t.id + '-' + o.split(' ')[0].toLowerCase(),
+        Owner: {
+          name: o,
+          id: '5500000000009' + String(o.length)
+        }
+      }));
+      const spread = (iso, n, seed) => team ? stamp(devCalls(iso, n, seed), 'Tarek Morshed').concat(stamp(devCalls(iso, Math.max(1, n - 2), seed + 4), 'Kyle Baird')) : stamp(devCalls(iso, n, seed), myOwner || 'Me');
+      setBuckets({
+        yesterday: spread(dates.yesterday, 6, 0),
+        today: spread(dates.today, 5, 3),
+        tomorrow: spread(dates.tomorrow, 4, 6)
+      });
+      const od = spread(dates.yesterday, 8, 2);
+      setOverdue({
+        list: od,
+        count: od.length,
+        capped: false
+      });
+      setBusy(false);
+      return;
+    }
+    try {
+      const typeField = await resolveTaskTypeField();
+      // Filtering Task_Type server-side keeps a single day well under the
+      // search API's 200-row ceiling. If the resolved api-name is wrong for
+      // this org the query 400s — so fall back to no type filter and sort
+      // calls out client-side rather than showing an error.
+      const run = async useType => {
+        const q = extra => callZoho(Object.assign({
+          action: 'search_tasks',
+          per_page: 200
+        }, team ? {} : {
+          owner: myOwner
+        }, useType ? {
+          type: 'Call',
+          type_field: typeField
+        } : {}, extra));
+        return Promise.all([q({
+          due_on: dates.yesterday
+        }), q({
+          due_on: dates.today
+        }), q({
+          due_on: dates.tomorrow
+        }), q({
+          due_before: dates.today,
+          status_not: 'Completed'
+        })]);
+      };
+      let res = await run(true);
+      if (res.some(r => !r.ok)) res = await run(false);
+      const bad = res.find(r => !r.ok);
+      if (bad) throw new Error(bad.data && bad.data.error || 'Could not load calls.');
+      const norm = r => (r.data && r.data.tasks || []).filter(t => isCallTask(t, typeField));
+      const full = r => (r.data && r.data.tasks || []).length >= 200;
+      setBuckets({
+        yesterday: norm(res[0]),
+        today: norm(res[1]),
+        tomorrow: norm(res[2])
+      });
+      // Zoho's search API caps a response at 200 rows, so a full page means
+      // the day may be clipped. Say so rather than quietly showing a short list.
+      setClipped({
+        yesterday: full(res[0]),
+        today: full(res[1]),
+        tomorrow: full(res[2])
+      });
+      const od = norm(res[3]);
+      const overdueNext = {
+        list: od,
+        count: od.length,
+        capped: (res[3].data && res[3].data.tasks || []).length >= 200
+      };
+      setOverdue(overdueNext);
+      const now = Date.now();
+      setDataAt(now);
+      saveDayCache(daySig, {
+        buckets: {
+          yesterday: norm(res[0]),
+          today: norm(res[1]),
+          tomorrow: norm(res[2])
+        },
+        overdue: overdueNext,
+        clipped: {
+          yesterday: full(res[0]),
+          today: full(res[1]),
+          tomorrow: full(res[2])
+        }
+      }, now);
+    } catch (e) {
+      setErr(e && e.message || String(e));
+      setBuckets({
+        yesterday: [],
+        today: [],
+        tomorrow: []
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+  useEffect(() => {
+    load();
+  }, [myOwner, team, dates.today]);
+
+  // Write-through: a ticked call has to survive into the cache, or the next
+  // visit inside the TTL would serve the pre-tick list straight back.
+  // dataAt is passed along so patching never extends the cache's life.
+  useEffect(() => {
+    if (!buckets || !overdue || busy || !dataAt || callsIsDev()) return;
+    saveDayCache(daySig, {
+      buckets,
+      overdue,
+      clipped
+    }, dataAt);
+  }, [buckets, overdue, clipped, daySig, busy, dataAt]);
+  const ownerOf = t => t.Owner && t.Owner.name || 'Unassigned';
+
+  // The agent picker is built from the people who actually own calls in
+  // Zoho — not from the TMG staff list — so the names always match what
+  // the owner filter is comparing against, and nobody with calls is
+  // missing from the dropdown.
+  const agents = useMemo(() => {
+    if (!team) return [];
+    const set = new Set();
+    if (buckets) ['yesterday', 'today', 'tomorrow'].forEach(k => (buckets[k] || []).forEach(t => set.add(ownerOf(t))));
+    if (overdue && overdue.list) overdue.list.forEach(t => set.add(ownerOf(t)));
+    return Array.from(set).sort();
+  }, [team, buckets, overdue]);
+  const mine = list => agent ? (list || []).filter(t => ownerOf(t) === agent) : list || [];
+  const shown = buckets ? mine(buckets[day] || []) : null;
+  const overdueShown = overdue ? mine(overdue.list || []).length : 0;
+  const shownKey = shown ? shown.map(t => t.Who_Id && t.Who_Id.id || '').join(',') : '';
+  useEffect(() => {
+    if (!shownKey) return;
+    const cache = contactsRef.current;
+    const ids = Array.from(new Set(shownKey.split(',').filter(Boolean)));
+    // Two independent gaps, tracked separately. A cached entry that is
+    // missing `detail` was never successfully looked up; one missing the
+    // `spouse` KEY was never asked about a spouse. Both matter, because a
+    // stored null is indistinguishable from a real answer and this cache is
+    // never re-checked otherwise — one flaky moment would blank a contact's
+    // phone, email or spouse on that device permanently.
+    const needDetail = ids.filter(id => !cache[id] || !cache[id].detail);
+    const needSpouse = ids.filter(id => !cache[id] || !('spouse' in cache[id]));
+    if (!needDetail.length && !needSpouse.length) return;
+    let dead = false;
+    const merge = out => setContacts(p => {
+      const m = {
+        ...p
+      };
+      Object.keys(out).forEach(id => {
+        if (out[id]) m[id] = Object.assign({}, m[id], out[id]);
+      });
+      saveContactCache(m);
+      return m;
+    });
+    if (callsIsDev()) {
+      const out = {};
+      ids.forEach((id, i) => {
+        out[id] = {
+          detail: true,
+          phone: i % 5 === 4 ? null : String(5122000000 + i * 3737),
+          email: i % 4 === 3 ? null : 'contact' + i + '@example.com',
+          spouse: i % 3 === 0 ? {
+            id: '55000000000009' + String(100 + i),
+            name: 'Pat Example'
+          } : null
+        };
+      });
+      merge(out);
+      return;
+    }
+    (async () => {
+      // Spouse is one request per 60 contacts (the action's own cap), not a
+      // per-contact fan-out — and it is PAGED rather than truncated, so
+      // contact 61 is actually asked about instead of being recorded as
+      // having no spouse forever.
+      for (let i = 0; i < needSpouse.length; i += 60) {
+        const chunk = needSpouse.slice(i, i + 60);
+        try {
+          const r = await callZoho({
+            action: 'spouse_links',
+            contact_ids: chunk
+          });
+          if (dead) return;
+          // Only write the spouse key for a chunk Zoho actually answered.
+          if (r.ok && r.data && r.data.links) {
+            const out = {};
+            chunk.forEach(id => {
+              out[id] = {
+                spouse: r.data.links[id] || null
+              };
+            });
+            merge(out);
+          }
+        } catch (e) {/* leave this chunk unasked so a later visit retries it */}
+        if (dead) return;
+      }
+      for (let i = 0; i < needDetail.length; i += 6) {
+        const got = await Promise.all(needDetail.slice(i, i + 6).map(async id => {
+          try {
+            // phone AND email off the same call — email was already being
+            // fetched here and thrown away.
+            const r = await callZoho({
+              action: 'get_contact',
+              id
+            });
+            if (!r.ok) return [id, null];
+            const c = r.data && r.data.contact || null;
+            return [id, {
+              detail: true,
+              phone: c && c.phone || null,
+              email: c && c.email || null
+            }];
+          } catch (e) {
+            return [id, null];
+          } // a failure caches NOTHING, so it is retried
+        }));
+        if (dead) return;
+        // Persisted per batch, not once at the end: switching day tabs
+        // mid-fetch used to throw away everything already looked up.
+        const out = {};
+        got.forEach(([id, v]) => {
+          out[id] = v;
+        });
+        merge(out);
+      }
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [shownKey]);
+
+  // ── Writes ────────────────────────────────────────────────────
+  // The day queries carry no status filter, so a completed call correctly
+  // STAYS on the list and just changes state — patching in place is both
+  // cheaper and more correct than re-running four searches. The overdue
+  // query DOES filter on status, so its list has to be patched too or the
+  // header count contradicts the rows underneath it.
+  function patchTask(task, status) {
+    setBuckets(b => {
+      if (!b) return b;
+      const n = {};
+      ['yesterday', 'today', 'tomorrow'].forEach(k => {
+        n[k] = (b[k] || []).map(t => t.id === task.id ? {
+          ...t,
+          Status: status
+        } : t);
+      });
+      return n;
+    });
+    setOverdue(o => {
+      if (!o) return o;
+      const wasOverdue = (task.Due_Date || '').slice(0, 10) < dates.today;
+      let list = (o.list || []).filter(t => t.id !== task.id);
+      if (!/completed/i.test(status) && wasOverdue) list = list.concat([{
+        ...task,
+        Status: status
+      }]);
+      return {
+        ...o,
+        list,
+        count: list.length
+      };
+    });
+  }
+  async function toggleDone(t) {
+    if (rowBusy[t.id]) return; // double-tap guard, keyed per row so two calls can still be worked at once
+    const next = /completed/i.test(t.Status || '') ? 'Not Started' : 'Completed';
+    setRowBusy(b => ({
+      ...b,
+      [t.id]: true
+    }));
+    setRowErr(e => {
+      const n = {
+        ...e
+      };
+      delete n[t.id];
+      return n;
+    });
+    try {
+      await setTaskStatus(t.id, next, t);
+      patchTask(t, next);
+    } catch (e) {
+      // Never a silent success: the row keeps its old state and says why.
+      setRowErr(er => ({
+        ...er,
+        [t.id]: e && e.message || String(e)
+      }));
+    } finally {
+      setRowBusy(b => {
+        const n = {
+          ...b
+        };
+        delete n[t.id];
+        return n;
+      });
+    }
+  }
+  function onLogged(task, items) {
+    setLogged(m => {
+      const prev = m[task.id];
+      // Logging twice on one call adds up rather than replacing, so the
+      // ribbon matches what actually went into Zoho.
+      const merged = {};
+      (prev && prev.items || []).concat(items).forEach(it => {
+        merged[it.type] = (merged[it.type] || 0) + it.count;
+      });
+      const next = {
+        ...m,
+        [task.id]: {
+          at: Date.now(),
+          items: Object.keys(merged).map(type => ({
+            type,
+            count: merged[type]
+          }))
+        }
+      };
+      saveLoggedCache(next);
+      return next;
+    });
+  }
+  const bannerBg = dark ? '#0A1E44' : '#001A4A';
+  const headTitle = dark ? '#FFFFFF' : '#001A4A';
+  const addBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+  const addCol = dark ? '#C9A45A' : '#AD832F';
+  const navInBg = dark ? '#0A1730' : '#F5F2EE';
+  const navInCol = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
+  const navOnBg = dark ? '#AD832F' : '#001A4A';
+  const rowBord = dark ? '#0D1E3A' : '#F5F2EE';
+  const nameCol = dark ? '#FFFFFF' : '#001A4A';
+  const callBtnBg = dark ? '#AD832F' : '#001A4A';
+  const coachBg = dark ? '#040C1C' : '#FCFBF8';
+  const coachBord = dark ? '#0D1E3A' : '#F0EBE3';
+  const coachLabel = dark ? '#C9A45A' : '#AD832F';
+  const mutedCol = dark ? 'rgba(255,255,255,0.4)' : '#888888';
+  const initials = n => (n || '?').split(' ').map(p => p[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
+  const statusOf = t => {
+    const done = /completed/i.test(t.Status || '');
+    if (done) return 'completed';
+    const due = (t.Due_Date || '').slice(0, 10);
+    return due && due < dates.today ? 'missed' : 'pending';
+  };
+  const toneOf = g => ({
+    A: {
+      bg: dark ? '#0A1E44' : '#EEF2F8',
+      col: dark ? '#C9A45A' : '#001A4A'
+    },
+    B: {
+      bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA',
+      col: dark ? '#C9A45A' : '#AD832F'
+    },
+    C: {
+      bg: dark ? '#0A1730' : '#F5F2EE',
+      col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B'
+    }
+  })[g] || {
+    bg: dark ? '#0A1730' : '#F5F2EE',
+    col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B'
+  };
+  const badgeOf = g => ({
+    A: {
+      bg: dark ? '#C9A45A' : '#001A4A',
+      col: dark ? '#001A4A' : '#C9A45A'
+    },
+    B: {
+      bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA',
+      col: dark ? '#C9A45A' : '#AD832F'
+    },
+    C: {
+      bg: dark ? '#0A1730' : '#F5F2EE',
+      col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B'
+    }
+  })[g] || {
+    bg: dark ? '#0A1730' : '#F5F2EE',
+    col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B'
+  };
+  const statusInfo = s => ({
+    completed: {
+      icon: 'ti-phone-check',
+      col: dark ? '#5DCAA5' : '#0F6E56',
+      num: mutedCol
+    },
+    missed: {
+      icon: 'ti-phone-x',
+      col: dark ? '#F87171' : '#9B1C1C',
+      num: dark ? '#F87171' : '#9B1C1C'
+    },
+    pending: {
+      icon: 'ti-phone',
+      col: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9',
+      num: mutedCol
+    }
+  })[s];
+
+  // Deterministic brief off the real list — highest tier first, EO last,
+  // matching the priority order the CRM cadence packer uses.
+  const RANK = {
+    A: 0,
+    B: 1,
+    C: 2,
+    EO: 3,
+    Other: 4
+  };
+  const brief = useMemo(() => {
+    if (!buckets) return [];
+    const list = mine(buckets.today || []);
+    const who = agent ? agent.split(' ')[0] + ' has' : team ? 'The team has' : '';
+    const lines = [];
+    const mix = {};
+    list.forEach(t => {
+      const g = callTier(t.Subject);
+      mix[g] = (mix[g] || 0) + 1;
+    });
+    const mixTxt = ['A', 'B', 'C', 'EO'].filter(g => mix[g]).map(g => mix[g] + ' ' + g).join(' · ');
+    const openList = list.filter(t => !/completed/i.test(t.Status || ''));
+    if (!list.length) lines.push(who ? who + ' no calls on the board for today.' : 'No calls on the board for today.');else lines.push((who ? who + ' ' : '') + list.length + ' call' + (list.length === 1 ? '' : 's') + ' today' + (mixTxt ? ' — ' + mixTxt : '') + '. ' + (list.length - openList.length) + ' already logged.');
+    const top = openList.slice().sort((a, b) => (RANK[callTier(a.Subject)] ?? 9) - (RANK[callTier(b.Subject)] ?? 9))[0];
+    if (top) lines.push('Start with ' + (top.Who_Id && top.Who_Id.name || top.Subject) + ' — ' + callTier(top.Subject) + ' touch' + (team && !agent ? ' (' + ownerOf(top) + ')' : '') + '.');
+    if (overdueShown) lines.push(overdueShown + (overdue && overdue.capped ? '+' : '') + ' call' + (overdueShown === 1 ? '' : 's') + ' still overdue. Clear the oldest tier-A ones first.');
+    return lines;
+  }, [buckets, overdue, agent, team]);
+  const botMsg = (t, key) => /*#__PURE__*/React.createElement("div", {
+    key: key,
+    style: {
+      alignSelf: 'flex-start',
+      marginRight: '8%',
+      background: dark ? '#0A1E44' : '#F3EBDA',
+      color: dark ? '#fff' : '#001A4A',
+      borderRadius: '8px 8px 8px 2px',
+      padding: '6px 8px',
+      fontFamily: J,
+      fontSize: 8,
+      lineHeight: 1.45
+    }
+  }, t);
+  const todayCount = buckets ? mine(buckets.today || []).length : null;
+
+  // One call row, shared by the flat list and the per-agent groups.
+  // Layout: name + tags (tier, spouse) on the first line, phone + email on
+  // the second, then the log ribbon. Controls on the right are done / log /
+  // dial — the tier moved OFF the right edge, since it describes the person,
+  // not the button next to it.
+  const callRow = (t, last) => {
+    const grade = callTier(t.Subject);
+    const cname = t.Who_Id && t.Who_Id.name || t.Subject || 'Unknown';
+    const cid = t.Who_Id && t.Who_Id.id;
+    const av = toneOf(grade),
+      bd = badgeOf(grade),
+      st = statusInfo(statusOf(t));
+    // `undefined` = not looked up yet, `null` = looked up and the contact
+    // genuinely has nothing on file — they read differently.
+    const info = cid && contacts[cid] || null;
+    const looked = !cid || !!(info && info.detail);
+    const phone = info && info.phone;
+    const email = info && info.email;
+    const spouse = info && info.spouse;
+    const href = zohoContactUrl(cid);
+    const spouseHref = spouse && zohoContactUrl(spouse.id);
+    const done = /completed/i.test(t.Status || '');
+    const busyRow = !!rowBusy[t.id];
+    const mark = logged[t.id];
+    const problem = rowErr[t.id];
+    const ctrl = {
+      width: 26,
+      height: 26,
+      borderRadius: '50%',
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      border: 'none',
+      padding: 0,
+      cursor: 'pointer'
+    };
+    return /*#__PURE__*/React.createElement("div", {
+      key: t.id,
+      style: {
+        padding: '8px 14px',
+        borderBottom: last ? 'none' : `1px solid ${rowBord}`,
+        opacity: busyRow ? 0.55 : 1
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 34,
+        height: 34,
+        borderRadius: '50%',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: av.bg,
+        color: av.col,
+        fontFamily: J,
+        fontSize: 11,
+        fontWeight: 600
+      }
+    }, initials(cname)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5,
+        flexWrap: 'wrap'
+      }
+    }, href ? /*#__PURE__*/React.createElement("a", {
+      href: href,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 600,
+        color: nameCol,
+        textDecoration: done ? 'line-through' : 'none',
+        maxWidth: '100%',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, cname) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 600,
+        color: nameCol,
+        textDecoration: done ? 'line-through' : 'none',
+        maxWidth: '100%',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, cname), /*#__PURE__*/React.createElement("span", {
+      title: 'Client classification: ' + (grade === 'Other' ? 'not classified' : grade),
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 700,
+        lineHeight: 1,
+        padding: '3px 6px',
+        borderRadius: 20,
+        background: bd.bg,
+        color: bd.col,
+        flexShrink: 0
+      }
+    }, grade === 'Other' ? 'No class' : grade), spouse && spouse.name && (spouseHref ? /*#__PURE__*/React.createElement("a", {
+      href: spouseHref,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: 'Spouse: ' + spouse.name,
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 600,
+        lineHeight: 1,
+        padding: '3px 6px',
+        borderRadius: 20,
+        background: navInBg,
+        color: mutedCol,
+        textDecoration: 'none',
+        flexShrink: 0,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3,
+        maxWidth: 140,
+        overflow: 'hidden',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-heart",
+      style: {
+        fontSize: 9
+      }
+    }), spouse.name) : /*#__PURE__*/React.createElement("span", {
+      title: 'Spouse: ' + spouse.name,
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 600,
+        lineHeight: 1,
+        padding: '3px 6px',
+        borderRadius: 20,
+        background: navInBg,
+        color: mutedCol,
+        flexShrink: 0,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-heart",
+      style: {
+        fontSize: 9
+      }
+    }), spouse.name))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        marginTop: 3,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${st.icon}`,
+      style: {
+        fontSize: 11,
+        color: st.col,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        color: st.num,
+        flexShrink: 0
+      }
+    }, phone ? formatPhone(phone) : looked ? 'No number' : '…'), email && /*#__PURE__*/React.createElement("a", {
+      href: 'mailto:' + email,
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        color: mutedCol,
+        textDecoration: 'none',
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, "\xB7 ", email), team && !agent && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        color: mutedCol,
+        flexShrink: 0
+      }
+    }, "\xB7 ", ownerOf(t)))), /*#__PURE__*/React.createElement("button", {
+      onClick: () => toggleDone(t),
+      disabled: busyRow,
+      title: done ? 'Mark as not started again' : 'Mark this call completed in Zoho',
+      style: {
+        ...ctrl,
+        background: done ? dark ? 'rgba(93,202,165,0.22)' : '#E2F3E8' : navInBg,
+        color: done ? dark ? '#5DCAA5' : '#0F6E56' : navInCol,
+        cursor: busyRow ? 'default' : 'pointer'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ti-${busyRow ? 'loader-2' : 'check'}`,
+      style: {
+        fontSize: 14
+      }
+    })), /*#__PURE__*/React.createElement("button", {
+      onClick: () => cid && setSheet({
+        task: t,
+        contact: {
+          id: cid,
+          name: cname
+        }
+      }),
+      disabled: !cid,
+      title: cid ? 'Log other activity for this contact' : 'This task has no contact attached, so there is nothing to log against',
+      style: {
+        ...ctrl,
+        background: addBg,
+        color: addCol,
+        opacity: cid ? 1 : 0.4,
+        cursor: cid ? 'pointer' : 'default'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-plus",
+      style: {
+        fontSize: 14
+      }
+    })), phone ? /*#__PURE__*/React.createElement("a", {
+      href: 'tel:' + String(phone).replace(/[^\d+]/g, ''),
+      title: "Call",
+      style: {
+        ...ctrl,
+        background: callBtnBg,
+        color: '#fff',
+        textDecoration: 'none'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-phone",
+      style: {
+        fontSize: 12
+      }
+    })) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        ...ctrl,
+        background: navInBg,
+        color: navInCol,
+        cursor: 'default'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-phone-off",
+      style: {
+        fontSize: 12
+      }
+    }))), mark && mark.items && mark.items.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5,
+        flexWrap: 'wrap',
+        marginTop: 6,
+        marginLeft: 44,
+        padding: '4px 8px',
+        borderRadius: 7,
+        background: done ? dark ? 'rgba(93,202,165,0.12)' : '#F0F8F3' : navInBg
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-checks",
+      style: {
+        fontSize: 11,
+        color: dark ? '#5DCAA5' : '#0F6E56'
+      }
+    }), mark.items.map(it => /*#__PURE__*/React.createElement("span", {
+      key: it.type,
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 600,
+        color: headTitle,
+        background: dark ? '#0A1E44' : '#FFFFFF',
+        border: `1px solid ${dark ? '#0D1E3A' : '#EDE7DC'}`,
+        borderRadius: 20,
+        padding: '2px 7px'
+      }
+    }, it.count, " ", it.type))), problem && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 6,
+        marginLeft: 44,
+        fontFamily: J,
+        fontSize: 8,
+        color: dark ? '#F87171' : '#9B1C1C',
+        lineHeight: 1.5
+      }
+    }, problem));
+  };
+
+  // With "All agents" picked, the day's calls are grouped under a tappable
+  // per-agent header — that's the drop-down-per-agent view, without having
+  // to switch the picker back and forth to see who is carrying what.
+  const groupedRows = () => {
+    const by = {};
+    (shown || []).forEach(t => {
+      const o = ownerOf(t);
+      (by[o] = by[o] || []).push(t);
+    });
+    const names = Object.keys(by).sort();
+    return names.map(o => {
+      const list = by[o];
+      const shut = !!collapsed[o];
+      const od = overdue ? (overdue.list || []).filter(t => ownerOf(t) === o).length : 0;
+      return /*#__PURE__*/React.createElement("div", {
+        key: o
+      }, /*#__PURE__*/React.createElement("div", {
+        onClick: () => setCollapsed(c => ({
+          ...c,
+          [o]: !shut
+        })),
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '7px 14px',
+          cursor: 'pointer',
+          background: dark ? '#0A1730' : '#F9F7F4',
+          borderBottom: `1px solid ${rowBord}`,
+          position: 'sticky',
+          top: 0,
+          zIndex: 1
+        }
+      }, /*#__PURE__*/React.createElement("i", {
+        className: `ti ti-chevron-${shut ? 'right' : 'down'}`,
+        style: {
+          fontSize: 12,
+          color: mutedCol
+        }
+      }), /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: J,
+          fontSize: 10,
+          fontWeight: 600,
+          color: headTitle,
+          flex: 1,
+          minWidth: 0,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }
+      }, o), od > 0 && /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: J,
+          fontSize: 8,
+          fontWeight: 600,
+          color: dark ? '#F87171' : '#9B1C1C'
+        }
+      }, od, " overdue"), /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: J,
+          fontSize: 8,
+          fontWeight: 700,
+          color: addCol,
+          background: addBg,
+          borderRadius: 20,
+          padding: '2px 8px'
+        }
+      }, list.length)), !shut && list.map((t, i) => callRow(t, i === list.length - 1)));
+    });
+  };
+
+  // Agent picker — drives the call list, and Capacity builds the same
+  // control off its own (wider) owner list.
+  const agentPicker = /*#__PURE__*/React.createElement(AgentPicker, {
+    dark: dark,
+    agent: agent,
+    setAgent: setAgent,
+    agents: agents
+  });
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: bannerBg,
+      padding: '9px 16px',
+      textAlign: 'center',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 600,
+      letterSpacing: '0.14em',
+      textTransform: 'uppercase',
+      color: '#fff'
+    }
+  }, buckets === null ? 'Loading calls…' : todayCount + ' today' + (overdueShown ? '  ·  ' + overdueShown + (overdue && overdue.capped ? '+' : '') + ' overdue' : '') + (team ? '  ·  ' + (agent || 'All agents') : ''))), team && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      background: dark ? '#040C1C' : '#FCFBF8',
+      borderBottom: `1px solid ${coachBord}`,
+      flexShrink: 0
+    }
+  }, [['list', 'Call List'], ['capacity', 'Capacity']].map(([id, label]) => {
+    const on = view === id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: id,
+      onClick: () => setView(id),
+      style: {
+        flex: 1,
+        textAlign: 'center',
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 9,
+        letterSpacing: '0.16em',
+        fontWeight: 500,
+        textTransform: 'uppercase',
+        padding: '9px 4px 8px',
+        color: on ? dark ? '#C9A45A' : '#001A4A' : dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9',
+        borderBottom: `2px solid ${on ? dark ? '#C9A45A' : '#AD832F' : 'transparent'}`,
+        marginBottom: -1
+      }
+    }, label);
+  })), team && view === 'capacity' ? /*#__PURE__*/React.createElement(CapacityView, {
+    dark: dark,
+    agent: agent,
+    setAgent: setAgent,
+    agents: agents
+  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '9px 14px 7px',
+      gap: 10,
+      flexShrink: 0
+    }
+  }, team ? agentPicker : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 13,
+      fontWeight: 600,
+      color: headTitle
+    }
+  }, "Call List"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => !busy && load(true),
+    disabled: busy,
+    title: "Refresh from Zoho",
+    style: {
+      width: 24,
+      height: 24,
+      borderRadius: '50%',
+      border: 'none',
+      cursor: busy ? 'default' : 'pointer',
+      opacity: busy ? 0.5 : 1,
+      background: addBg,
+      color: addCol,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-refresh",
+    style: {
+      fontSize: 12
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      margin: '0 14px 10px',
+      borderRadius: 10,
+      overflow: 'hidden',
+      display: 'flex',
+      flexShrink: 0
+    }
+  }, ['yesterday', 'today', 'tomorrow'].map(d => {
+    const on = day === d;
+    const n = buckets ? mine(buckets[d] || []).length : null;
+    return /*#__PURE__*/React.createElement("button", {
+      key: d,
+      onClick: () => setDay(d),
+      style: {
+        flex: 1,
+        padding: '6px 4px',
+        textAlign: 'center',
+        border: 'none',
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 8,
+        letterSpacing: '0.14em',
+        fontWeight: 500,
+        textTransform: 'uppercase',
+        background: on ? navOnBg : navInBg,
+        color: on ? '#fff' : navInCol,
+        borderRadius: on ? 8 : 0
+      }
+    }, d, n === null ? '' : ' ' + n);
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch'
+    }
+  }, err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '14px',
+      fontFamily: J,
+      fontSize: 9,
+      color: dark ? '#F87171' : '#9B1C1C'
+    }
+  }, err), !err && buckets === null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '20px 14px',
+      textAlign: 'center',
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol
+    }
+  }, "Loading\u2026"), !err && buckets !== null && !team && !myOwner && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '20px 14px',
+      textAlign: 'center',
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol
+    }
+  }, "Add your first and last name in your profile to see your calls."), !err && buckets !== null && (team || myOwner) && shown.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '20px 14px',
+      textAlign: 'center',
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol
+    }
+  }, "No calls scheduled for ", day, agent ? ' — ' + agent : '', "."), !err && clipped[day] && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '7px 14px',
+      fontFamily: J,
+      fontSize: 8,
+      color: dark ? '#F87171' : '#9B1C1C'
+    }
+  }, "Zoho returned a full page for this day \u2014 the list may be incomplete. Check /crm-tasks for the full view."), !err && buckets !== null && (team && !agent ? groupedRows() : shown.map((t, i) => callRow(t, i === shown.length - 1)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flexShrink: 0,
+      background: coachBg,
+      borderTop: `1px solid ${coachBord}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '7px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-sparkles",
+    style: {
+      fontSize: 11,
+      color: coachLabel
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.16em',
+      fontWeight: 500,
+      color: coachLabel,
+      textTransform: 'uppercase'
+    }
+  }, "Call Brief")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setBriefOpen(o => !o),
+    style: {
+      width: 22,
+      height: 22,
+      borderRadius: '50%',
+      border: 'none',
+      cursor: 'pointer',
+      background: addBg,
+      color: addCol,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ti-chevron-${briefOpen ? 'down' : 'up'}`,
+    style: {
+      fontSize: 13
+    }
+  }))), briefOpen && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '7px 12px 9px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, brief.length ? brief.map((l, i) => botMsg(l, 'b' + i)) : botMsg('Loading the board…', 'b0')))), sheet && /*#__PURE__*/React.createElement(LogActivitySheet, {
+    dark: dark,
+    task: sheet.task,
+    contact: sheet.contact,
+    ownerId: sheet.task.Owner && sheet.task.Owner.id || null,
+    onLogged: items => onLogged(sheet.task, items),
+    onError: msg => setRowErr(e => ({
+      ...e,
+      [sheet.task.id]: msg
+    })),
+    onClose: () => setSheet(null)
+  }));
+}
+
+// ─── Log activity (the + on a call row) ──────────────────────────
+//  Logs the OTHER things an agent did for this contact. Each one becomes
+//  its own Zoho task — Completed, dated today, attached to the same
+//  contact — because the Zoho report tallies the Tasks module by Task Type
+//  and counts rows. "5 hotzone actions" is therefore 5 rows, not one row
+//  carrying a 5.
+//
+//  The list of activities is NOT hardcoded. It is this org's live Task Type
+//  picklist with the call types removed (the row itself is the call), so a
+//  type added in Zoho Setup shows up here on its own.
+function LogActivitySheet({
+  dark,
+  task,
+  contact,
+  ownerId,
+  onLogged,
+  onError,
+  onClose
+}) {
+  const J = "'Jost', sans-serif";
+  const [meta, setMeta] = useState(null); // { api, options } | null while loading
+  const [loadErr, setLoadErr] = useState('');
+  const [sel, setSel] = useState({}); // type -> count
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const m = await resolveTaskTypes();
+        if (!dead) setMeta(m);
+      } catch (e) {
+        if (!dead) setLoadErr(e && e.message || String(e));
+      }
+    })();
+    return () => {
+      dead = true;
+    };
+  }, []);
+  const headTitle = dark ? '#FFFFFF' : '#001A4A';
+  const mutedCol = dark ? 'rgba(255,255,255,0.4)' : '#888888';
+  const bord = dark ? '#0D1E3A' : '#EDE7DC';
+  const panelBg = dark ? '#0A1730' : '#FFFFFF';
+  const fieldBg = dark ? '#040C1C' : '#FCFBF8';
+  const addBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+  const addCol = dark ? '#C9A45A' : '#AD832F';
+  const redCol = dark ? '#F87171' : '#9B1C1C';
+  const goBg = dark ? '#AD832F' : '#001A4A';
+
+  // Each offered activity paired with the real picklist string Zoho will
+  // store. Call types can never appear here anyway — the row IS the call.
+  const picklist = (meta && meta.options || []).filter(o => !/call/i.test(o));
+  const offered = LOG_ACTIVITIES.map(a => ({
+    ...a,
+    type: picklist.find(o => a.match.test(o))
+  })).filter(a => a.type);
+  const absent = LOG_ACTIVITIES.filter(a => !picklist.some(o => a.match.test(o)));
+  const chosen = offered.filter(a => sel[a.type] !== undefined);
+  // A required-count row sits at '' until a number is typed — checked, but
+  // not yet loggable.
+  const unfilled = chosen.filter(a => !(Number(sel[a.type]) > 0));
+  const items = chosen.filter(a => Number(sel[a.type]) > 0).map(a => ({
+    type: a.type,
+    count: Number(sel[a.type])
+  }));
+  const total = items.reduce((n, it) => n + it.count, 0);
+  const overCap = total > LOG_MAX_TASKS;
+  const canAdd = !!items.length && !unfilled.length && !overCap;
+  function toggle(a) {
+    setSel(s => {
+      const n = {
+        ...s
+      };
+      // `!== undefined`, not truthiness — '' is a checked-but-empty
+      // required row, and treating it as unchecked would re-add it.
+      if (n[a.type] !== undefined) delete n[a.type];else n[a.type] = a.requireCount ? '' : 1;
+      return n;
+    });
+  }
+  function setCount(a, v) {
+    const digits = String(v == null ? '' : v).replace(/[^\d]/g, '');
+    if (!digits) {
+      setSel(s => ({
+        ...s,
+        [a.type]: a.requireCount ? '' : 1
+      }));
+      return;
+    }
+    const n = Math.max(1, Math.min(LOG_MAX_TASKS, parseInt(digits, 10)));
+    setSel(s => ({
+      ...s,
+      [a.type]: n
+    }));
+  }
+  async function submit() {
+    if (busy || !canAdd) return; // double-submit guard, and no writing a half-filled row
+    setBusy(true);
+    setErr('');
+    try {
+      const res = await createActivityTasks({
+        items,
+        typeField: meta && meta.api,
+        contact,
+        dateIso: cIso(new Date()),
+        ownerId
+      });
+      onLogged(res.byType && res.byType.length ? res.byType : items);
+      onClose();
+    } catch (e) {
+      // Whatever DID land is recorded on the row and subtracted from the
+      // selection, so the obvious next tap writes only the remainder
+      // instead of duplicating rows Zoho already has. Inflated task rows
+      // are inflated KPI numbers, so this matters more than tidiness.
+      const p = e && e.partial;
+      if (p && p.made) {
+        onLogged(p.byType);
+        setSel(sl => {
+          const n = {
+            ...sl
+          };
+          p.byType.forEach(it => {
+            const left = (n[it.type] || 0) - it.count;
+            if (left > 0) n[it.type] = left;else delete n[it.type];
+          });
+          return n;
+        });
+      }
+      const msg = e && e.message || String(e);
+      setErr(msg);
+      onError && onError(msg); // also surfaced on the row, in case this sheet is gone
+    } finally {
+      setBusy(false);
+    }
+  }
+  const btn = {
+    flex: 1,
+    padding: '10px 0',
+    borderRadius: 10,
+    border: 'none',
+    fontFamily: J,
+    fontSize: 10,
+    fontWeight: 600,
+    cursor: 'pointer'
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: () => {
+      if (!busy) onClose();
+    },
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 70,
+      background: 'rgba(0,13,38,0.35)',
+      display: 'flex',
+      alignItems: 'flex-end',
+      justifyContent: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: '100%',
+      maxWidth: 480,
+      background: panelBg,
+      borderTopLeftRadius: 18,
+      borderTopRightRadius: 18,
+      padding: '16px 16px calc(18px + env(safe-area-inset-bottom))',
+      maxHeight: '82vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      marginBottom: 2
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      fontWeight: 600,
+      color: headTitle
+    }
+  }, "Log activity"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    disabled: busy,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: busy ? 'default' : 'pointer',
+      opacity: busy ? 0.4 : 1,
+      color: mutedCol
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x",
+    style: {
+      fontSize: 15
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol,
+      marginBottom: 12,
+      lineHeight: 1.5
+    }
+  }, "For ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: headTitle
+    }
+  }, contact.name), " \u2014 each one becomes its own task in Zoho, dated ", cIso(new Date()), " and already marked complete."), loadErr && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: redCol,
+      lineHeight: 1.5,
+      marginBottom: 10
+    }
+  }, "Couldn't load the activity list from Zoho, so nothing can be logged right now: ", loadErr), !loadErr && !meta && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol,
+      padding: '14px 0'
+    }
+  }, "Loading the activity list from Zoho\u2026"), !loadErr && meta && offered.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: redCol,
+      lineHeight: 1.5
+    }
+  }, "Zoho's Task Type list has none of Notes, Hotzone Action, Pop-by or Lunch on it, so there's nothing to log here."), !loadErr && meta && offered.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, offered.map(a => {
+    const on = sel[a.type] !== undefined;
+    const needs = on && a.requireCount && !(Number(sel[a.type]) > 0);
+    return /*#__PURE__*/React.createElement("div", {
+      key: a.key,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '9px 11px',
+        border: `1px solid ${needs ? redCol : on ? addCol : bord}`,
+        borderRadius: 10,
+        background: on ? addBg : fieldBg
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      onClick: () => toggle(a),
+      style: {
+        flex: 1,
+        minWidth: 0,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        cursor: 'pointer'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ti-${on ? 'square-check' : 'square'}`,
+      style: {
+        fontSize: 16,
+        color: on ? addCol : mutedCol,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: on ? 600 : 500,
+        color: headTitle,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, a.type), needs && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 600,
+        color: redCol,
+        flexShrink: 0
+      }
+    }, "how many?")), /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      inputMode: "numeric",
+      min: "1",
+      max: LOG_MAX_TASKS,
+      value: on ? sel[a.type] : '',
+      disabled: !on,
+      placeholder: needs ? '?' : '',
+      onChange: e => setCount(a, e.target.value),
+      style: {
+        width: 52,
+        textAlign: 'center',
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 600,
+        color: headTitle,
+        background: on ? dark ? '#040C1C' : '#FFFFFF' : 'transparent',
+        border: `1px solid ${needs ? redCol : on ? bord : 'transparent'}`,
+        borderRadius: 8,
+        padding: '6px 4px',
+        flexShrink: 0
+      }
+    }));
+  }), absent.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: addCol,
+      lineHeight: 1.5,
+      marginTop: 2
+    }
+  }, "Not in Zoho's Task Type list, so ", absent.length === 1 ? 'it is' : 'they are', " not offered: ", absent.map(a => a.label).join(', '), ". Add ", absent.length === 1 ? 'it' : 'them', " in Zoho Setup and ", absent.length === 1 ? 'it' : 'they', " will appear here.")), items.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      padding: '9px 11px',
+      borderRadius: 10,
+      background: fieldBg,
+      border: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.12em',
+      textTransform: 'uppercase',
+      color: mutedCol,
+      marginBottom: 5
+    }
+  }, "Will create ", total, " task", total === 1 ? '' : 's'), items.map(it => /*#__PURE__*/React.createElement("div", {
+    key: it.type,
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: headTitle,
+      lineHeight: 1.6
+    }
+  }, it.count, " \xD7 ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 600
+    }
+  }, activitySubject(it.type, contact.name))))), unfilled.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      fontFamily: J,
+      fontSize: 8,
+      color: redCol,
+      lineHeight: 1.5
+    }
+  }, unfilled.map(a => a.type).join(' and '), " needs a number before ", unfilled.length === 1 ? 'it' : 'they', " can be logged."), overCap && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      fontFamily: J,
+      fontSize: 8,
+      color: redCol,
+      lineHeight: 1.5
+    }
+  }, "That's ", total, " tasks in one go. Keep it to ", LOG_MAX_TASKS, " or fewer."), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      fontFamily: J,
+      fontSize: 9,
+      color: redCol,
+      lineHeight: 1.5
+    }
+  }, err), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    disabled: busy,
+    style: {
+      ...btn,
+      background: fieldBg,
+      color: headTitle,
+      border: `1px solid ${bord}`
+    }
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    disabled: busy || !canAdd,
+    style: {
+      ...btn,
+      background: goBg,
+      color: '#fff',
+      opacity: busy || !canAdd ? 0.45 : 1,
+      cursor: busy || !canAdd ? 'default' : 'pointer'
+    }
+  }, busy ? 'Adding…' : 'Add' + (total ? ' ' + total : '')))));
+}
+
+// ─── Call Capacity (admin) ───────────────────────────────────────
+//  The phone-sized counterpart to the /crm-tasks Capacity grid: same load
+//  bands, same ✕ on non-working days, same projected-cadence hatching — but
+//  one month at a time in a 7-column calendar instead of a wide
+//  person × day matrix, because that grid can't be read on a phone.
+// The picker is one control shared by both views, so switching agents on
+// the call list keeps the same person selected in Capacity and back again.
+function AgentPicker({
+  dark,
+  agent,
+  setAgent,
+  agents
+}) {
+  return /*#__PURE__*/React.createElement("select", {
+    value: agent,
+    onChange: e => setAgent(e.target.value),
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontFamily: "'Jost', sans-serif",
+      fontSize: 9,
+      fontWeight: 600,
+      color: dark ? '#FFFFFF' : '#001A4A',
+      background: dark ? '#040C1C' : '#FFFFFF',
+      border: `1px solid ${dark ? '#0D1E3A' : '#EDE7DC'}`,
+      borderRadius: 8,
+      padding: '6px 8px',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "All agents", agents.length ? ' (' + agents.length + ')' : ''), agents.map(a => /*#__PURE__*/React.createElement("option", {
+    key: a,
+    value: a
+  }, a)));
+}
+function CapacityView({
+  dark,
+  agent,
+  setAgent,
+  agents
+}) {
+  const J = "'Jost', sans-serif";
+  const [calls, setCalls] = useState(null); // trimmed org-wide open calls | null while loading
+  const [capped, setCapped] = useState(false);
+  const [cachedAt, setCachedAt] = useState(null);
+  const [progress, setProgress] = useState(0);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [anchor, setAnchor] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d;
+  });
+  const [showProjected, setShowProjected] = useState(true);
+  const [openDay, setOpenDay] = useState(null); // 'YYYY-MM-DD' | null
+
+  const headTitle = dark ? '#FFFFFF' : '#001A4A';
+  const mutedCol = dark ? 'rgba(255,255,255,0.4)' : '#888888';
+  const bord = dark ? '#0D1E3A' : '#EDE7DC';
+  const surfaceBg = dark ? '#040C1C' : '#FFFFFF';
+  const addBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+  const addCol = dark ? '#C9A45A' : '#AD832F';
+  const redCol = dark ? '#F87171' : '#9B1C1C';
+  async function load(force) {
+    setErr('');
+    if (!force) {
+      const c = loadOrgCache();
+      if (c) {
+        setCalls(c.calls);
+        setCapped(!!c.capped);
+        setCachedAt(c.cachedAt);
+        return;
+      }
+    }
+    setBusy(true);
+    setProgress(0);
+    if (callsIsDev()) {
+      await new Promise(r => setTimeout(r, 400));
+      const d = devOrgCalls();
+      setCalls(d);
+      setCapped(false);
+      setCachedAt(Date.now());
+      setBusy(false);
+      return;
+    }
+    try {
+      const typeField = await resolveTaskTypeField();
+      const {
+        calls: got,
+        capped: cap
+      } = await fetchOrgOpenCalls(typeField, setProgress);
+      setCalls(got);
+      setCapped(cap);
+      setCachedAt(Date.now());
+      saveOrgCache({
+        calls: got,
+        capped: cap
+      });
+    } catch (e) {
+      setErr(e && e.message || String(e));
+      setCalls([]);
+    } finally {
+      setBusy(false);
+    }
+  }
+  useEffect(() => {
+    load(false);
+  }, []);
+  const todayIso = useMemo(() => cIso(new Date()), []);
+  const year = anchor.getFullYear(),
+    month = anchor.getMonth();
+  const monthKey = year + '-' + String(month + 1).padStart(2, '0');
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const endIso = cIso(new Date(year, month + 1, 0));
+
+  // Everyone who owns an open call, so the picker in this view lists the
+  // whole roster rather than only whoever happens to have a call this month.
+  const owners = useMemo(() => Array.from(new Set((calls || []).map(c => c.owner))).sort(), [calls]);
+  const pickable = useMemo(() => Array.from(new Set((agents || []).concat(owners))).sort(), [agents, owners]);
+  const booked = useMemo(() => {
+    const out = {}; // owner -> iso -> [call]
+    (calls || []).forEach(c => {
+      if (!c.Due_Date) return;
+      const byOwner = out[c.owner] = out[c.owner] || {};
+      (byOwner[c.Due_Date] = byOwner[c.Due_Date] || []).push(c);
+    });
+    return out;
+  }, [calls]);
+  const projection = useMemo(() => showProjected ? projectCallCadence(calls, endIso, todayIso) : {
+    byOwner: {},
+    unprojected: 0
+  }, [calls, endIso, todayIso, showProjected]);
+  const monthTotals = useMemo(() => {
+    const inMonth = iso => iso && iso.slice(0, 7) === monthKey;
+    return owners.map(o => {
+      const b = Object.keys(booked[o] || {}).filter(inMonth).reduce((n, k) => n + booked[o][k].length, 0);
+      const pm = projection.byOwner[o] || {};
+      const p = Object.keys(pm).filter(inMonth).reduce((n, k) => n + pm[k].length, 0);
+      return {
+        owner: o,
+        booked: b,
+        projected: p
+      };
+    }).sort((a, b) => b.booked + b.projected - (a.booked + a.projected));
+  }, [owners, booked, projection, monthKey]);
+  const dayBooked = iso => agent ? (booked[agent] || {})[iso] || [] : [];
+  const dayProjected = iso => agent ? (projection.byOwner[agent] || {})[iso] || [] : [];
+  const navBtn = {
+    width: 26,
+    height: 26,
+    borderRadius: '50%',
+    border: 'none',
+    cursor: 'pointer',
+    background: addBg,
+    color: addCol,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0
+  };
+  const lead = new Date(year, month, 1).getDay(); // blank cells before the 1st
+  const cells = Array.from({
+    length: lead
+  }, () => null).concat(Array.from({
+    length: daysInMonth
+  }, (_, i) => i + 1));
+  const openList = openDay ? dayBooked(openDay) : [];
+  const openProj = openDay ? dayProjected(openDay) : [];
+  const openTally = {};
+  openList.forEach(c => {
+    const t = callTier(c.Subject);
+    openTally[t] = (openTally[t] || 0) + 1;
+  });
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '9px 14px 6px',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement(AgentPicker, {
+    dark: dark,
+    agent: agent,
+    setAgent: setAgent,
+    agents: pickable
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => !busy && load(true),
+    disabled: busy,
+    title: "Refresh from Zoho",
+    style: {
+      ...navBtn,
+      opacity: busy ? 0.5 : 1
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-refresh",
+    style: {
+      fontSize: 12
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 12,
+      padding: '2px 14px 8px',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAnchor(new Date(year, month - 1, 1)),
+    style: navBtn
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 13
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      color: headTitle,
+      minWidth: 118,
+      textAlign: 'center'
+    }
+  }, CAL_MON[month], " ", year), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAnchor(new Date(year, month + 1, 1)),
+    style: navBtn
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-right",
+    style: {
+      fontSize: 13
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      padding: '0 14px 14px'
+    }
+  }, err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '14px 0',
+      fontFamily: J,
+      fontSize: 9,
+      color: redCol
+    }
+  }, err), !err && calls === null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '28px 0',
+      textAlign: 'center',
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol
+    }
+  }, "Loading the team's open calls\u2026", progress ? ' ' + progress.toLocaleString() + ' so far' : ''), !err && calls !== null && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      marginBottom: 9,
+      fontFamily: J,
+      fontSize: 8,
+      color: mutedCol,
+      cursor: 'pointer',
+      userSelect: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: showProjected,
+    onChange: e => setShowProjected(e.target.checked),
+    style: {
+      accentColor: dark ? '#C9A45A' : '#001A4A',
+      cursor: 'pointer',
+      width: 12,
+      height: 12
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 14,
+      height: 14,
+      background: capHatch(dark),
+      border: `1px solid ${bord}`,
+      borderRadius: 3,
+      display: 'inline-block',
+      flexShrink: 0
+    }
+  }), "Show where each contact's next touch lands"), capped && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: redCol,
+      marginBottom: 8,
+      lineHeight: 1.5
+    }
+  }, "Zoho stops paging open tasks at 2,000 records, so the months below may be missing calls. /crm-tasks hits the same ceiling."), showProjected && projection.unprojected > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: addCol,
+      marginBottom: 8,
+      lineHeight: 1.5
+    }
+  }, projection.unprojected, " contact", projection.unprojected === 1 ? '' : 's', " can't be projected \u2014 their last call is overdue or lands on a weekend/holiday, so there's no reliable date to count forward from. Reschedule them in Cadence Health on /crm-tasks."), !agent ? ( /* No agent picked — the month at a glance, per person. */
+  monthTotals.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '24px 0',
+      textAlign: 'center',
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol
+    }
+  }, "No open calls found.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.14em',
+      textTransform: 'uppercase',
+      color: mutedCol,
+      marginBottom: 2
+    }
+  }, "Tap a person for their calendar"), monthTotals.map(r => {
+    return /*#__PURE__*/React.createElement("div", {
+      key: r.owner,
+      onClick: () => setAgent(r.owner),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '9px 11px',
+        border: `1px solid ${bord}`,
+        borderRadius: 10,
+        background: surfaceBg,
+        cursor: 'pointer'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 600,
+        color: headTitle,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, r.owner), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 700,
+        color: headTitle,
+        background: dark ? '#0A1E44' : '#F5F2EE',
+        borderRadius: 20,
+        padding: '3px 9px'
+      }
+    }, r.booked, " booked"), r.projected > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 700,
+        color: mutedCol,
+        background: capHatch(dark),
+        border: `1px solid ${bord}`,
+        borderRadius: 20,
+        padding: '3px 9px'
+      }
+    }, "+", r.projected), /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-chevron-right",
+      style: {
+        fontSize: 13,
+        color: mutedCol,
+        flexShrink: 0
+      }
+    }));
+  }))) :
+  /*#__PURE__*/
+  /* One agent — the month as a calendar. Capped in width so the
+     day cells stay square-ish and readable on a wide screen
+     instead of stretching into billboards. */
+  React.createElement("div", {
+    style: {
+      maxWidth: 420,
+      margin: '0 auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(7, 1fr)',
+      gap: 3,
+      marginBottom: 4
+    }
+  }, CAL_DOW.map((d, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      textAlign: 'center',
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 700,
+      color: i === 0 || i === 6 ? redCol : mutedCol
+    }
+  }, d))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(7, 1fr)',
+      gap: 3
+    }
+  }, cells.map((d, i) => {
+    if (d === null) return /*#__PURE__*/React.createElement("div", {
+      key: 'b' + i
+    });
+    const iso = monthKey + '-' + String(d).padStart(2, '0');
+    const n = dayBooked(iso).length;
+    const p = dayProjected(iso).length;
+    const off = !cIsWorkday(new Date(year, month, d));
+    const tone = capTone(n, dark);
+    // Booked calls keep the solid load colour. A day with
+    // nothing booked but cadence heading for it gets the
+    // hatch only — it isn't real load yet, it just isn't as
+    // free as a blank cell makes it look.
+    const base = n ? tone.bg : 'transparent';
+    const bg = p ? capHatch(dark) + ', ' + base : base;
+    const openable = n || p;
+    return /*#__PURE__*/React.createElement("div", {
+      key: iso,
+      onClick: () => openable && setOpenDay(iso),
+      style: {
+        position: 'relative',
+        aspectRatio: '1 / 1',
+        minHeight: 34,
+        borderRadius: 7,
+        border: `1px solid ${iso === todayIso ? dark ? '#C9A45A' : '#001A4A' : bord}`,
+        background: bg,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: openable ? 'pointer' : 'default'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        top: 2,
+        left: 4,
+        fontFamily: J,
+        fontSize: 7,
+        fontWeight: 600,
+        color: off ? redCol : mutedCol
+      }
+    }, d), n ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 12,
+        fontWeight: 700,
+        color: tone.fg,
+        lineHeight: 1
+      }
+    }, n) : null, p ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 7,
+        fontWeight: 700,
+        color: headTitle,
+        opacity: 0.45,
+        lineHeight: 1.4
+      }
+    }, n ? '+' : '', p) : null, off && /*#__PURE__*/React.createElement("span", {
+      style: {
+        position: 'absolute',
+        inset: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 17,
+        fontWeight: 800,
+        color: redCol,
+        opacity: 0.42,
+        pointerEvents: 'none'
+      }
+    }, "\u2715"));
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 10,
+      marginTop: 12,
+      fontFamily: J,
+      fontSize: 8,
+      color: mutedCol
+    }
+  }, [['1–4', 1], ['5–7', 5], ['8+', 8]].map(([lab, n]) => {
+    const t = capTone(n, dark);
+    return /*#__PURE__*/React.createElement("span", {
+      key: lab,
+      style: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 11,
+        height: 11,
+        borderRadius: 3,
+        background: t.bg,
+        border: `1px solid ${bord}`,
+        display: 'inline-block'
+      }
+    }), lab, " calls");
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: redCol,
+      fontWeight: 800
+    }
+  }, "\u2715"), " weekend / holiday"))), cachedAt && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      fontFamily: J,
+      fontSize: 8,
+      color: mutedCol,
+      textAlign: 'center'
+    }
+  }, "Team calls loaded ", callAgo(cachedAt), calls ? ' · ' + calls.length.toLocaleString() + ' open' : ''))), openDay && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setOpenDay(null),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 60,
+      background: 'rgba(0,13,38,0.35)',
+      display: 'flex',
+      alignItems: 'flex-end',
+      justifyContent: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: '100%',
+      maxWidth: 480,
+      background: dark ? '#0A1730' : '#FFFFFF',
+      borderTopLeftRadius: 18,
+      borderTopRightRadius: 18,
+      padding: '16px 16px calc(18px + env(safe-area-inset-bottom))',
+      maxHeight: '78vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      marginBottom: 3
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      fontWeight: 600,
+      color: headTitle
+    }
+  }, agent), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpenDay(null),
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: mutedCol
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x",
+    style: {
+      fontSize: 15
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol,
+      marginBottom: 10
+    }
+  }, CAL_MON[month], " ", Number(openDay.slice(8)), " \u2014 ", openList.length, " booked", openProj.length ? ' · ' + openProj.length + ' projected' : ''), Object.keys(openTally).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 5,
+      marginBottom: 11
+    }
+  }, Object.keys(openTally).sort().map(t => /*#__PURE__*/React.createElement("span", {
+    key: t,
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 700,
+      color: addCol,
+      background: addBg,
+      borderRadius: 20,
+      padding: '2px 9px'
+    }
+  }, t, ": ", openTally[t]))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, openList.map(c => {
+    const href = zohoContactUrl(c.cid);
+    const label = c.cname || c.Subject;
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.id,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 8,
+        padding: '8px 10px',
+        border: `1px solid ${bord}`,
+        borderRadius: 8
+      }
+    }, href ? /*#__PURE__*/React.createElement("a", {
+      href: href,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 600,
+        color: headTitle,
+        textDecoration: 'none',
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, label) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 600,
+        color: headTitle,
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, label), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 700,
+        color: addCol,
+        background: addBg,
+        borderRadius: 20,
+        padding: '2px 8px',
+        flexShrink: 0
+      }
+    }, callTier(c.Subject)));
+  })), openProj.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 13
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 700,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      color: mutedCol
+    }
+  }, "Projected by cadence (", openProj.length, ")"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: mutedCol,
+      margin: '3px 0 7px',
+      lineHeight: 1.5
+    }
+  }, "Not on the board yet \u2014 this is where each contact's next touch lands if the calls before it happen on time."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, openProj.map((c, i) => {
+    const href = zohoContactUrl(c.cid);
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 8,
+        padding: '8px 10px',
+        border: `1px dashed ${bord}`,
+        borderRadius: 8,
+        opacity: 0.8
+      }
+    }, href ? /*#__PURE__*/React.createElement("a", {
+      href: href,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        color: headTitle,
+        textDecoration: 'none',
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, c.name) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        color: headTitle,
+        minWidth: 0,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, c.name), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 700,
+        color: mutedCol,
+        background: dark ? '#040C1C' : '#F5F2EE',
+        borderRadius: 20,
+        padding: '2px 8px',
+        flexShrink: 0
+      }
+    }, c.tier));
+  }))))));
+}
+
+// ─── KPIs Tab — preview mockup ───────────────────────────────────
+function KpisTab({
+  dark
+}) {
+  const J = "'Jost', sans-serif";
+  const CG = "'Cormorant Garamond', Georgia, serif";
+  const [sub, setSub] = useState('kpis');
+  const [kpiView, setKpiView] = useState('weekly');
+  const [kpiAnchor, setKpiAnchor] = useState(() => new Date());
+  const [dropOpen, setDropOpen] = useState(false);
+  const [kpiVisible, setKpiVisible] = useState([true, true, true, true, true, true]);
+  const KPI_DEFS = [{
+    label: 'Calls',
+    color: '#2563EB'
+  }, {
+    label: 'Notes',
+    color: '#16A34A'
+  }, {
+    label: 'Hotzone Actions',
+    color: '#D97706'
+  }, {
+    label: 'Pop-bys',
+    color: '#9333EA'
+  }, {
+    label: 'Lunch',
+    color: '#DC2626'
+  }, {
+    label: 'Agent Training',
+    color: '#0D9488'
+  }];
+  const CHART_WEEKS = ['5/4', '5/11', '5/18', '5/25'];
+  const CHART_DATA = [[160, 160, 165, 140], [142, 100, 100, null], [127, 127, 147, null], [120, 160, 160, null], [0, 100, 100, null], [200, 300, 300, null]];
+  const getKpiLabel = (anchor, view) => {
+    if (view === 'yearly') return String(anchor.getFullYear());
+    if (view === 'monthly') {
+      const q = Math.floor(anchor.getMonth() / 3) + 1;
+      return 'Q' + q + ' ' + anchor.getFullYear();
+    }
+    return anchor.toLocaleDateString('en-US', {
+      month: 'long',
+      year: 'numeric'
+    });
+  };
+  const navKpiPeriod = dir => {
+    const d = new Date(kpiAnchor);
+    if (kpiView === 'yearly') d.setFullYear(d.getFullYear() + dir);else if (kpiView === 'monthly') d.setMonth(d.getMonth() + dir);else d.setDate(d.getDate() + dir * 7);
+    setKpiAnchor(d);
+  };
+  const green = dark ? '#5DCAA5' : '#0F6E56';
+  const red = dark ? '#F87171' : '#9B1C1C';
+  const gold = dark ? '#C9A45A' : '#AD832F';
+  const ink = dark ? '#FFFFFF' : '#001A4A';
+  const muted = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
+  const faint = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
+  const cardBg = dark ? '#0A1730' : '#FFFFFF';
+  const cardBord = dark ? '#0D1E3A' : '#E4DFD4';
+  const goldCardBg = dark ? '#0A1E44' : '#F3EBDA';
+  const bannerBg = dark ? '#7F1D1D' : '#9B1C1C';
+  const subBarBg = dark ? '#070F1E' : '#FFFFFF';
+  const subBarBord = dark ? '#0D1E3A' : '#F0EBE3';
+  const seg = (t, key) => /*#__PURE__*/React.createElement("span", {
+    key: key,
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      letterSpacing: '0.16em',
+      fontWeight: 500,
+      color: '#fff',
+      textTransform: 'uppercase'
+    }
+  }, t);
+  const sep = key => /*#__PURE__*/React.createElement("span", {
+    key: key,
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: 'rgba(255,255,255,0.4)'
+    }
+  }, "\xB7");
+  const statLbl = {
+    fontFamily: J,
+    fontSize: 7,
+    letterSpacing: '0.14em',
+    fontWeight: 500,
+    textTransform: 'uppercase',
+    color: muted
+  };
+  const ctcCell = w => ({
+    width: w,
+    textAlign: 'right',
+    display: 'inline-block',
+    fontFamily: J
+  });
+  const Header = ({
+    icon,
+    label
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      margin: '0 0 8px'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${icon}`,
+    style: {
+      fontSize: 11,
+      color: gold
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.2em',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      color: gold
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      height: 1,
+      background: dark ? '#0D1E3A' : '#E4DFD4'
+    }
+  }));
+  const StatCard = ({
+    label,
+    value,
+    sub: subTxt,
+    subColor,
+    valColor,
+    bg,
+    bord
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderRadius: 6,
+      padding: '9px 10px',
+      background: bg,
+      border: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: statLbl
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: CG,
+      fontStyle: 'italic',
+      fontSize: 16,
+      color: valColor || ink,
+      marginTop: 2,
+      lineHeight: 1.1
+    }
+  }, value), subTxt && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 7,
+      color: subColor,
+      marginTop: 2
+    }
+  }, subTxt));
+  const accountability = [{
+    name: 'Luciana',
+    right: '100% wk · 96% YTD',
+    pct: 96,
+    c: green
+  }, {
+    name: 'Symon',
+    right: '98% YTD',
+    pct: 98,
+    c: green
+  }, {
+    name: 'Alexa',
+    right: '95% YTD',
+    pct: 95,
+    c: green
+  }, {
+    name: 'Brett',
+    right: '75% YTD',
+    pct: 75,
+    c: gold
+  }, {
+    name: 'Tarek',
+    right: '36% YTD',
+    pct: 36,
+    c: red
+  }, {
+    name: 'Brad',
+    right: '18% YTD',
+    pct: 18,
+    c: red
+  }];
+  const ctc = [{
+    name: 'Tarek',
+    v: ['6', '9.0', '9.0'],
+    red: false
+  }, {
+    name: 'Brad',
+    v: ['6', '7.8', '4.9'],
+    red: false
+  }, {
+    name: 'Brett',
+    v: ['6', '7.2', '6.9'],
+    red: false
+  }, {
+    name: 'Kyle',
+    v: ['0', '0.0', '1.8'],
+    red: true
+  }];
+  const weekly = [{
+    name: 'Tarek',
+    tag: 'Focused · Empowered · Accountable',
+    rows: [{
+      m: 'Calls',
+      s: '0',
+      g: '20',
+      y: '157%',
+      sc: red,
+      yc: green
+    }, {
+      m: 'Notes',
+      s: '14',
+      g: '12',
+      y: '104%',
+      sc: green,
+      yc: green
+    }, {
+      m: 'Pop-bys',
+      s: '6',
+      g: '5',
+      y: '161%',
+      sc: green,
+      yc: green
+    }, {
+      m: 'Agent Training',
+      s: '3',
+      g: '1',
+      y: '249%',
+      sc: green,
+      yc: green
+    }]
+  }, {
+    name: 'Brad',
+    tag: 'Bold · Confident · Value-additive',
+    rows: [{
+      m: 'Calls',
+      s: '110',
+      g: '20',
+      y: '148%',
+      sc: green,
+      yc: green
+    }, {
+      m: 'Notes',
+      s: '28',
+      g: '10',
+      y: '71%',
+      sc: green,
+      yc: red
+    }, {
+      m: 'Hotzone',
+      s: '22',
+      g: '20',
+      y: '84%',
+      sc: green,
+      yc: red
+    }, {
+      m: 'Pop-bys',
+      s: '12',
+      g: '2',
+      y: '155%',
+      sc: green,
+      yc: green
+    }]
+  }];
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: bannerBg,
+      padding: '9px 16px',
+      textAlign: 'center',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      letterSpacing: '0.14em',
+      textTransform: 'uppercase',
+      color: '#fff'
+    }
+  }, "Coming Soon \xB7 KPIs \xB7 Q3 2026")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      background: subBarBg,
+      borderBottom: `1px solid ${subBarBord}`,
+      flexShrink: 0
+    }
+  }, [['kpis', 'KPIs'], ['scorecard', 'Scorecard']].map(([id, label]) => {
+    const on = sub === id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: id,
+      onClick: () => setSub(id),
+      style: {
+        flex: 1,
+        textAlign: 'center',
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 9,
+        letterSpacing: '0.16em',
+        fontWeight: 500,
+        textTransform: 'uppercase',
+        padding: '9px 4px 8px',
+        color: on ? dark ? '#C9A45A' : '#001A4A' : dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9',
+        borderBottom: `2px solid ${on ? dark ? '#C9A45A' : '#AD832F' : 'transparent'}`,
+        marginBottom: -1
+      }
+    }, label);
+  })), sub === 'kpis' ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '8px 12px',
+      borderBottom: '0.5px solid #F0EBE3'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setKpiAnchor(new Date()),
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      fontWeight: 600,
+      color: '#185FA5',
+      background: '#EEF3FB',
+      border: '0.5px solid #C5D8F0',
+      borderRadius: 6,
+      padding: '3px 8px',
+      cursor: 'pointer'
+    }
+  }, "This Period"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => navKpiPeriod(-1),
+    style: {
+      width: 20,
+      height: 20,
+      border: '0.5px solid #E4DFD4',
+      background: '#FCFBF8',
+      color: '#6B6B6B',
+      borderRadius: '4px 0 0 4px',
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 0,
+      fontFamily: 'serif',
+      fontSize: 13
+    }
+  }, "\u2039"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => navKpiPeriod(1),
+    style: {
+      width: 20,
+      height: 20,
+      border: '0.5px solid #E4DFD4',
+      borderLeft: 'none',
+      background: '#FCFBF8',
+      color: '#6B6B6B',
+      borderRadius: '0 4px 4px 0',
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 0,
+      fontFamily: 'serif',
+      fontSize: 13
+    }
+  }, "\u203A")), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      color: '#001A4A',
+      flex: 1
+    }
+  }, getKpiLabel(kpiAnchor, kpiView)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      background: '#F0EBE3',
+      borderRadius: 6,
+      padding: 2,
+      gap: 1
+    }
+  }, [['weekly', 'Weekly'], ['monthly', 'Monthly'], ['yearly', 'Yearly']].map(([id, lbl]) => /*#__PURE__*/React.createElement("button", {
+    key: id,
+    onClick: () => id !== 'yearly' && setKpiView(id),
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 600,
+      padding: '3px 7px',
+      borderRadius: 4,
+      border: 'none',
+      cursor: id === 'yearly' ? 'default' : 'pointer',
+      background: kpiView === id ? '#001A4A' : 'transparent',
+      color: kpiView === id ? '#fff' : id === 'yearly' ? '#C4B9A8' : '#888'
+    }
+  }, lbl)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '8px 12px',
+      borderBottom: '0.5px solid #F0EBE3',
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setDropOpen(o => !o),
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      background: '#F3EBDA',
+      border: '0.5px solid #E8D9BC',
+      borderRadius: 7,
+      padding: '5px 10px',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      fontWeight: 600,
+      color: '#AD832F'
+    }
+  }, kpiVisible.every(Boolean) ? 'All 6 KPIs' : kpiVisible.filter(Boolean).length + ' KPIs selected'), /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-down",
+    style: {
+      fontSize: 10,
+      color: '#AD832F',
+      transform: dropOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+      transition: 'transform 0.2s'
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: '#B4B2A9'
+    }
+  }, "Tap to show/hide metrics")), dropOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setDropOpen(false),
+    style: {
+      position: 'fixed',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      zIndex: 49
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: 'calc(100% + 2px)',
+      left: 12,
+      zIndex: 50,
+      background: '#fff',
+      border: '1px solid #EDE7DC',
+      borderRadius: 10,
+      padding: '6px 0',
+      boxShadow: '0 4px 16px rgba(0,26,74,.12)',
+      minWidth: 200
+    }
+  }, KPI_DEFS.map((kpi, ki) => /*#__PURE__*/React.createElement("div", {
+    key: ki,
+    onClick: () => {
+      const v = [...kpiVisible];
+      v[ki] = !v[ki];
+      setKpiVisible(v);
+    },
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '9px 14px',
+      cursor: 'pointer'
+    },
+    onMouseEnter: e => e.currentTarget.style.background = '#F9F6F0',
+    onMouseLeave: e => e.currentTarget.style.background = ''
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 15,
+      height: 15,
+      borderRadius: 4,
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      border: kpiVisible[ki] ? `1.5px solid ${kpi.color}` : '1.5px solid #C4B9A8',
+      background: kpiVisible[ki] ? kpi.color : 'transparent'
+    }
+  }, kpiVisible[ki] && /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-check",
+    style: {
+      fontSize: 9,
+      color: '#fff'
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 8,
+      height: 8,
+      borderRadius: '50%',
+      background: kpi.color,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 500,
+      color: '#001A4A'
+    }
+  }, kpi.label)))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '10px 12px 6px',
+      borderBottom: '0.5px solid #F0EBE3'
+    }
+  }, (() => {
+    /* ── Dynamic Y-axis ── */
+    const visVals = CHART_DATA.flatMap((d, ki) => kpiVisible[ki] ? d.filter(v => v !== null) : []);
+    const dataMin = visVals.length ? Math.min(...visVals) : 50;
+    const dataMax = visVals.length ? Math.max(...visVals) : 100;
+    const yMin = Math.max(0, Math.floor((dataMin - 15) / 25) * 25);
+    const yMax = Math.min(300, Math.ceil((dataMax + 15) / 25) * 25);
+    const yRange = yMax === yMin ? 25 : yMax - yMin;
+    const ticks = [];
+    for (let t = yMin; t <= yMax; t += 25) ticks.push(t);
+
+    /* ── SVG coordinate helpers ── */
+    const PL = 30,
+      PR = 272,
+      PT = 8,
+      PB = 106;
+    const PW = PR - PL,
+      PH = PB - PT;
+    const cx = i => PL + i / (CHART_WEEKS.length - 1) * PW;
+    const cy = v => PB - (v - yMin) / yRange * PH;
+    const y100 = cy(100);
+    return /*#__PURE__*/React.createElement("svg", {
+      width: "100%",
+      viewBox: "0 0 340 120",
+      style: {
+        display: 'block'
+      }
+    }, y100 > PT && /*#__PURE__*/React.createElement("rect", {
+      x: PL,
+      y: PT,
+      width: PW,
+      height: Math.min(y100, PB) - PT,
+      fill: "rgba(220,252,231,0.30)"
+    }), y100 < PB && /*#__PURE__*/React.createElement("rect", {
+      x: PL,
+      y: Math.max(y100, PT),
+      width: PW,
+      height: PB - Math.max(y100, PT),
+      fill: "rgba(254,226,226,0.25)"
+    }), ticks.map((t, i) => /*#__PURE__*/React.createElement("line", {
+      key: i,
+      x1: PL,
+      y1: cy(t),
+      x2: PR,
+      y2: cy(t),
+      stroke: "#F0EBE3",
+      strokeWidth: "0.5",
+      strokeDasharray: "3 2"
+    })), ticks.map((t, i) => /*#__PURE__*/React.createElement("text", {
+      key: i,
+      x: PL - 3,
+      y: cy(t) + 2.5,
+      style: {
+        fontSize: 6,
+        fill: '#B4B2A9',
+        fontFamily: "'Jost',sans-serif"
+      },
+      textAnchor: "end"
+    }, t, "%")), /*#__PURE__*/React.createElement("line", {
+      x1: PL,
+      y1: y100,
+      x2: PR,
+      y2: y100,
+      stroke: "#AD832F",
+      strokeWidth: "1.5",
+      strokeDasharray: "6 3"
+    }), /*#__PURE__*/React.createElement("text", {
+      x: PR + 4,
+      y: y100 + 3,
+      style: {
+        fontSize: 7,
+        fill: '#AD832F',
+        fontFamily: "'Jost',sans-serif",
+        fontWeight: 600
+      }
+    }, "Goal 100%"), KPI_DEFS.map((kpi, ki) => {
+      if (!kpiVisible[ki]) return null;
+      const pts = CHART_DATA[ki].reduce((acc, v, i) => v !== null ? acc + (acc ? ' ' : '') + cx(i) + ',' + cy(v) : acc, '');
+      if (!pts) return null;
+      return /*#__PURE__*/React.createElement("polyline", {
+        key: ki,
+        points: pts,
+        fill: "none",
+        stroke: kpi.color,
+        strokeWidth: "1.5",
+        strokeLinejoin: "round",
+        strokeLinecap: "round"
+      });
+    }), CHART_WEEKS.map((w, i) => /*#__PURE__*/React.createElement("text", {
+      key: i,
+      x: cx(i),
+      y: "116",
+      style: {
+        fontSize: 6,
+        fill: '#B4B2A9',
+        fontFamily: "'Jost',sans-serif"
+      },
+      textAnchor: "middle"
+    }, w)));
+  })(), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: '4px 12px',
+      marginTop: 4
+    }
+  }, KPI_DEFS.map((kpi, ki) => !kpiVisible[ki] ? null : /*#__PURE__*/React.createElement("div", {
+    key: ki,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 12,
+      height: 2,
+      borderRadius: 1,
+      background: kpi.color
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 7.5,
+      color: '#6B6B6B'
+    }
+  }, kpi.label)))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      padding: '8px 12px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 7,
+      letterSpacing: '0.14em',
+      fontWeight: 500,
+      textTransform: 'uppercase',
+      color: '#B4B2A9',
+      marginBottom: 8
+    }
+  }, "% Achievement \xB7 ", getKpiLabel(kpiAnchor, kpiView)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '90px repeat(' + CHART_WEEKS.length + ', 1fr)',
+      gap: '3px 4px',
+      marginBottom: 6,
+      paddingBottom: 5,
+      borderBottom: '1px solid #F0EBE3'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 7,
+      letterSpacing: '0.1em',
+      color: '#B4B2A9',
+      textTransform: 'uppercase'
+    }
+  }, "Metric"), CHART_WEEKS.map(w => /*#__PURE__*/React.createElement("span", {
+    key: w,
+    style: {
+      fontFamily: J,
+      fontSize: 7,
+      color: '#B4B2A9',
+      textAlign: 'right'
+    }
+  }, w))), KPI_DEFS.map((kpi, ki) => !kpiVisible[ki] ? null : /*#__PURE__*/React.createElement("div", {
+    key: ki,
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '90px repeat(' + CHART_WEEKS.length + ', 1fr)',
+      gap: '3px 4px',
+      padding: '5px 0',
+      borderBottom: '1px solid #F5F2EE',
+      alignItems: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: kpi.color,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: '#001A4A',
+      fontWeight: 500
+    }
+  }, kpi.label)), CHART_DATA[ki].map((v, i) => /*#__PURE__*/React.createElement("span", {
+    key: i,
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      textAlign: 'right',
+      fontWeight: 600,
+      color: v === null ? '#C4B9A8' : v >= 100 ? '#0F6E56' : v >= 75 ? '#B45309' : '#9B1C1C'
+    }
+  }, v === null ? '—' : v + '%')))))) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      padding: '10px 14px 6px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'right',
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.12em',
+      marginBottom: 10,
+      color: faint
+    }
+  }, "As of 06/08/26"), /*#__PURE__*/React.createElement(Header, {
+    icon: "ti-currency-dollar",
+    label: "Sales Goals"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderRadius: 6,
+      padding: '9px 10px',
+      border: `1px solid ${cardBord}`,
+      background: cardBg,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: statLbl
+  }, "Annual Goal"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: CG,
+      fontStyle: 'italic',
+      fontSize: 20,
+      color: ink,
+      lineHeight: 1.1
+    }
+  }, "$100M")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: statLbl
+  }, "Current"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: CG,
+      fontStyle: 'italic',
+      fontSize: 16,
+      color: gold,
+      lineHeight: 1.1
+    }
+  }, "$17.6M")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: statLbl
+  }, "Pending"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: CG,
+      fontStyle: 'italic',
+      fontSize: 16,
+      color: ink,
+      lineHeight: 1.1
+    }
+  }, "$12.8M"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 4,
+      borderRadius: 2,
+      marginTop: 8,
+      background: dark ? '#0D1E3A' : '#F3EBDA'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 4,
+      borderRadius: 2,
+      width: '17.6%',
+      background: '#AD832F'
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'right',
+      fontFamily: J,
+      fontSize: 7,
+      marginTop: 3,
+      color: faint
+    }
+  }, "17.6% to goal")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1fr 1fr',
+      gap: 6,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(StatCard, {
+    label: "Avg Sale Price",
+    value: "$1.30M",
+    sub: "\u2193 $197K vs goal",
+    subColor: red,
+    bg: dark ? '#0A1730' : '#F3EBDA',
+    bord: cardBord
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "Days to Close",
+    value: "105",
+    sub: "\u2191 15 ahead",
+    subColor: green,
+    bg: dark ? '#0A1730' : '#F3EBDA',
+    bord: cardBord
+  })), /*#__PURE__*/React.createElement(Header, {
+    icon: "ti-check",
+    label: "Accountability"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, accountability.map(a => /*#__PURE__*/React.createElement("div", {
+    key: a.name,
+    style: {
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'baseline'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      fontWeight: 500,
+      color: ink
+    }
+  }, a.name), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: a.c
+    }
+  }, a.right)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 4,
+      borderRadius: 2,
+      marginTop: 3,
+      background: dark ? '#0A1E44' : '#F3EBDA'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 4,
+      borderRadius: 2,
+      width: a.pct + '%',
+      background: a.c
+    }
+  }))))), /*#__PURE__*/React.createElement(Header, {
+    icon: "ti-clock",
+    label: "CTC Hours"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'flex-end',
+      marginBottom: 5
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...ctcCell(44),
+      fontSize: 7,
+      letterSpacing: '0.12em',
+      color: faint
+    }
+  }, "LAST WK"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...ctcCell(40),
+      fontSize: 7,
+      letterSpacing: '0.12em',
+      color: faint
+    }
+  }, "Q AVE"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...ctcCell(34),
+      fontSize: 7,
+      letterSpacing: '0.12em',
+      color: faint
+    }
+  }, "YTD")), ctc.map(r => {
+    const sc = r.red ? red : dark ? 'rgba(255,255,255,0.7)' : '#001A4A';
+    return /*#__PURE__*/React.createElement("div", {
+      key: r.name,
+      style: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '5px 0',
+        borderBottom: `1px solid ${dark ? '#0D1E3A' : '#F0EBE3'}`
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 9,
+        color: r.red ? red : ink
+      }
+    }, r.name), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...ctcCell(44),
+        fontSize: 8.5,
+        color: sc
+      }
+    }, r.v[0]), /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...ctcCell(40),
+        fontSize: 8.5,
+        color: sc
+      }
+    }, r.v[1]), /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...ctcCell(34),
+        fontSize: 8.5,
+        color: sc
+      }
+    }, r.v[2])));
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      padding: '6px 8px',
+      borderRadius: 4,
+      marginTop: 6,
+      marginBottom: 14,
+      background: dark ? '#0A1E44' : '#F3EBDA'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 500,
+      color: dark ? 'rgba(255,255,255,0.6)' : '#001A4A'
+    }
+  }, "Team Last Wk"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: CG,
+      fontStyle: 'italic',
+      fontSize: 14,
+      color: gold
+    }
+  }, "7.4"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 500,
+      color: dark ? 'rgba(255,255,255,0.6)' : '#001A4A'
+    }
+  }, "Q Ave"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: CG,
+      fontStyle: 'italic',
+      fontSize: 14,
+      color: gold
+    }
+  }, "5.0")), /*#__PURE__*/React.createElement(Header, {
+    icon: "ti-chart-bar",
+    label: "Weekly KPIs"
+  }), weekly.map(agent => /*#__PURE__*/React.createElement("div", {
+    key: agent.name,
+    style: {
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      fontWeight: 600,
+      letterSpacing: '0.1em',
+      color: ink
+    }
+  }, agent.name), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 7,
+      letterSpacing: '0.1em',
+      padding: '2px 6px',
+      borderRadius: 2,
+      background: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA',
+      color: gold
+    }
+  }, agent.tag)), agent.rows.map((row, ri) => /*#__PURE__*/React.createElement("div", {
+    key: row.m,
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: '5px 0',
+      borderBottom: ri === agent.rows.length - 1 ? 'none' : `1px solid ${dark ? '#0D1E3A' : '#F5F2EE'}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: muted
+    }
+  }, row.m), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: row.sc,
+      fontWeight: 600
+    }
+  }, row.s), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: muted
+    }
+  }, " / ", row.g, " \xB7 "), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: row.yc,
+      fontWeight: 600
+    }
+  }, row.y)))))), /*#__PURE__*/React.createElement(Header, {
+    icon: "ti-trending-up",
+    label: "Finance Health"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1fr 1fr',
+      gap: 6,
+      paddingBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement(StatCard, {
+    label: "YTD Revenue",
+    value: "$398K",
+    bg: cardBg,
+    bord: cardBord
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "Run Rate",
+    value: "$2.39M",
+    sub: "87% to goal",
+    subColor: green,
+    bg: cardBg,
+    bord: cardBord
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "Margin",
+    value: "8%",
+    sub: "\u2193 7% vs goal",
+    subColor: red,
+    bg: cardBg,
+    bord: cardBord
+  }), /*#__PURE__*/React.createElement(StatCard, {
+    label: "Margin w/ SD",
+    value: "27%",
+    sub: "\u2191 12% vs goal",
+    subColor: green,
+    valColor: green,
+    bg: goldCardBg,
+    bord: cardBord
+  }))));
+}
+
+// ─── Health Goals ────────────────────────────────────────────────
+// Goals live in Zoho's Health_Goals module (owner, goal text, month,
+// status) and round-trip both ways. The weekly ticks do NOT: that module
+// has no per-week fields, so they're app-only (health_goal_weeks, keyed
+// by the Zoho record id).
+const HG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const HG_STATUSES = ['In Progress', 'Catching Up', 'Success', 'Failed'];
+const HG_STATUS_COLOR = {
+  'In Progress': '#185FA5',
+  'Catching Up': '#B07A00',
+  'Success': '#0F6E56',
+  'Failed': '#9B1C1C'
+};
+
+// The roster is FIXED: every month shows these rows, in this order, whether
+// or not that person has logged a goal in Zoho yet (an empty month is a
+// full table of dashes, not a blank page). `from`/`until` are YYYY-MM
+// bounds — from is inclusive, until is exclusive — so roster changes are
+// dated instead of retroactive: August still shows Luciana, September
+// shows Angelica in her place and adds Camila.
+const HG_ROSTER = [{
+  key: 'tarek',
+  name: 'Tarek',
+  emails: ['tarek@themorshedgroup.com']
+}, {
+  key: 'brad',
+  name: 'Brad',
+  emails: ['brad@themorshedgroup.com']
+}, {
+  key: 'brett',
+  name: 'Brett',
+  emails: ['brett@themorshedgroup.com']
+}, {
+  key: 'kyle',
+  name: 'Kyle',
+  emails: ['kyle@themorshedgroup.com']
+},
+// Symon's app login and his Zoho user are different addresses.
+{
+  key: 'symon',
+  name: 'Symon',
+  emails: ['symon@themorshedgroup.com', 'manager@themorshedgroup.com']
+}, {
+  key: 'luciana',
+  name: 'Luciana',
+  emails: ['ea@themorshedgroup.com'],
+  until: '2026-09'
+},
+// No address on file for Angelica yet — she matches on first name until
+// she has a profile, then add it here.
+{
+  key: 'angelica',
+  name: 'Angelica',
+  emails: [],
+  from: '2026-09'
+}, {
+  key: 'alexa',
+  name: 'Alexa',
+  emails: ['alexandra@themorshedgroup.com'],
+  alsoNames: ['alexandra']
+}, {
+  key: 'gustavo',
+  name: 'Gustavo',
+  emails: ['gustavo@themorshedgroup.com']
+}, {
+  key: 'camila',
+  name: 'Camila',
+  emails: ['camila@themorshedgroup.com'],
+  from: '2026-09'
+}];
+const hgStamp = (y, m) => y * 12 + m; // comparable month number
+const hgParse = s => {
+  const p = String(s).split('-');
+  return hgStamp(Number(p[0]), Number(p[1]) - 1);
+};
+function hgRoster(year, monthIdx) {
+  const at = hgStamp(year, monthIdx);
+  return HG_ROSTER.filter(p => (!p.from || at >= hgParse(p.from)) && (!p.until || at < hgParse(p.until)));
+}
+// Does this Zoho record belong to this roster person? Email first (the
+// reliable key), first name as the fallback for anyone without one on file.
+function hgOwns(person, rec) {
+  const em = (rec.ownerEmail || '').toLowerCase();
+  if (em && (person.emails || []).indexOf(em) !== -1) return true;
+  const first = (rec.owner || '').trim().split(/\s+/)[0].toLowerCase();
+  if (!first) return false;
+  return first === person.name.toLowerCase() || (person.alsoNames || []).indexOf(first) !== -1;
+}
+
+// The Monday-start weeks that BELONG to a month: the ones whose Thursday
+// falls inside it (the ISO rule). That's always 4 or 5 — a week split
+// across two months counts once, for the month holding most of it — which
+// is how the team already tracks it (August 2026 = Aug 3/10/17/24, four
+// weeks, not the six weeks that merely touch the month).
+function hgWeeks(year, monthIdx) {
+  const cur = new Date(year, monthIdx, 1);
+  cur.setDate(cur.getDate() - (cur.getDay() + 6) % 7); // back up to Monday
+  const out = [];
+  for (let i = 0; i < 6; i++) {
+    const thu = new Date(cur);
+    thu.setDate(thu.getDate() + 3);
+    if (thu.getFullYear() === year && thu.getMonth() === monthIdx) {
+      const s = new Date(cur);
+      const e = new Date(cur);
+      e.setDate(e.getDate() + 6);
+      out.push({
+        start: s,
+        end: e
+      });
+    }
+    cur.setDate(cur.getDate() + 7);
+  }
+  return out;
+}
+const hgFmt = d => d.toLocaleDateString('en-US', {
+  month: 'short',
+  day: 'numeric'
+});
+
+// Last-known goals + marks, so reopening the tab paints immediately instead
+// of waiting on Zoho. Read-through only: every open still refetches, and
+// the cache is rewritten from whatever comes back.
+const HG_CACHE_KEY = 'tmg-health-goals-v1';
+function hgCache() {
+  try {
+    const c = JSON.parse(localStorage.getItem(HG_CACHE_KEY) || 'null');
+    if (c && Array.isArray(c.rows)) return {
+      rows: c.rows,
+      ticks: c.ticks || {}
+    };
+  } catch (e) {}
+  return {
+    rows: null,
+    ticks: {}
+  };
+}
+function HealthGoalsTab({
+  dark,
+  ownerName,
+  ownerEmail,
+  isAdmin
+}) {
+  const J = "'Jost', sans-serif";
+  const now = new Date();
+  const [monthIdx, setMonthIdx] = useState(now.getMonth());
+  const [year, setYear] = useState(now.getFullYear());
+  // Seeded from the last visit's data so the table is on screen instantly:
+  // Zoho takes ~2s to answer and the marks another ~0.7s, which was ~3s of
+  // empty screen on every open. Cached data renders first, the live fetch
+  // then quietly replaces it (nothing here is edited often enough for a
+  // few-seconds-stale first paint to mislead anyone).
+  const [rows, setRows] = useState(() => hgCache().rows); // null = never loaded
+  const [ticks, setTicks] = useState(() => hgCache().ticks);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [newGoal, setNewGoal] = useState('');
+  const monthName = HG_MONTHS[monthIdx];
+  const weeks = hgWeeks(year, monthIdx);
+  const ink = dark ? '#FFFFFF' : '#001A4A';
+  const muted = dark ? 'rgba(255,255,255,0.45)' : '#6B6B6B';
+  const gold = dark ? '#C9A45A' : '#AD832F';
+  const line = dark ? '#152545' : '#EDE7DC';
+  const cardBg = dark ? '#0A1730' : '#FFFFFF';
+  const headBg = dark ? '#070F1E' : '#FAF8F3';
+  const pageBg = dark ? '#050B16' : '#FCFBF8';
+  const load = async () => {
+    // No setRows(null): blanking the table to a spinner on every refresh is
+    // the thing that made this feel slow. Cached rows stay up, "Updating…"
+    // says why they might change.
+    setBusy(true);
+    setNote('');
+    // Both fetches at once — the marks don't depend on the goals list, so
+    // waiting for Zoho first just added its ~2s to the ~0.7s query.
+    const [zoho, marks] = await Promise.all([callZoho({
+      action: 'list_tasks',
+      module: 'Health_Goals',
+      per_page: 200,
+      fields: ['Owner', 'Health_Goal_s', 'Month_of', 'Goal_Status', 'Created_Time'],
+      sort_by: 'Created_Time',
+      sort_order: 'desc'
+    }), (async () => {
+      const c = window.SupabaseAuth && window.SupabaseAuth._client;
+      if (!c) return null;
+      return await c.from('health_goal_weeks').select('zoho_id, week, done');
+    })()]);
+    setBusy(false);
+    if (marks && !marks.error) {
+      const m = {};
+      (marks.data || []).forEach(w => {
+        m[w.zoho_id + ':' + w.week] = !!w.done;
+      });
+      setTicks(m);
+    }
+    const {
+      ok,
+      data
+    } = zoho;
+    if (!ok) {
+      setNote(data.error || 'Could not load health goals from Zoho.');
+      setRows(r => r || []);
+      return;
+    }
+    const list = (data.tasks || []).map(r => ({
+      id: r.id,
+      owner: r.Owner && (r.Owner.name || r.Owner.email) || '—',
+      ownerEmail: r.Owner && r.Owner.email || '',
+      goal: r.Health_Goal_s || '',
+      month: r.Month_of || '',
+      // Month_of is just a month name — no year on the module — so the
+      // year a record was logged in is the only thing separating
+      // "August" 2026 from "August" 2027.
+      createdYear: r.Created_Time ? new Date(r.Created_Time).getFullYear() : null,
+      status: r.Goal_Status && r.Goal_Status !== '-None-' ? r.Goal_Status : ''
+    }));
+    setRows(list);
+  };
+  useEffect(() => {
+    load();
+  }, []);
+
+  // Keep the cache in step with what's on screen, so a tick made now is
+  // still ticked on the next open's first paint.
+  useEffect(() => {
+    if (rows === null) return;
+    try {
+      localStorage.setItem(HG_CACHE_KEY, JSON.stringify({
+        rows,
+        ticks
+      }));
+    } catch (e) {}
+  }, [rows, ticks]);
+
+  // Editing someone else's health goal isn't yours to do — own rows only
+  // (admins can fix anyone's). Matched against the roster person as well as
+  // the Zoho record, since a row can exist with no record behind it.
+  const me = {
+    owner: ownerName,
+    ownerEmail: ownerEmail
+  };
+  // Strictly "this row is mine" — separate from canEdit, because Add Goal
+  // always files under the signed-in user, so an admin must not be offered
+  // it on someone else's row.
+  const isMine = (person, rec) => !!person && hgOwns(person, me) || !!rec && (!!ownerEmail && !!rec.ownerEmail && rec.ownerEmail.toLowerCase() === ownerEmail.toLowerCase() || !!ownerName && !!rec.owner && rec.owner.toLowerCase() === ownerName.toLowerCase());
+  const canEdit = (person, rec) => isAdmin || !!person && hgOwns(person, me) || !!rec && (!!ownerEmail && !!rec.ownerEmail && rec.ownerEmail.toLowerCase() === ownerEmail.toLowerCase() || !!ownerName && !!rec.owner && rec.owner.toLowerCase() === ownerName.toLowerCase());
+
+  // Three states, cycled by clicking: blank (nothing said yet) -> check
+  // (hit it) -> X (missed it) -> blank. Blank is the ABSENCE of a row, so
+  // "not marked yet" and "marked as missed" stay different things —
+  // a future week shouldn't look like a failure.
+  const setMark = (key, v) => setTicks(t => {
+    const n = {
+      ...t
+    };
+    if (v === undefined) delete n[key];else n[key] = v;
+    return n;
+  });
+  const toggleWeek = async (row, week) => {
+    const key = row.id + ':' + week;
+    const prev = ticks[key];
+    const next = prev === undefined ? true : prev === true ? false : undefined;
+    setMark(key, next);
+    const c = window.SupabaseAuth && window.SupabaseAuth._client;
+    if (!c) return;
+    const {
+      error
+    } = next === undefined ? await c.from('health_goal_weeks').delete().eq('zoho_id', row.id).eq('week', week) : await c.from('health_goal_weeks').upsert({
+      zoho_id: row.id,
+      week,
+      done: next,
+      updated_at: new Date().toISOString()
+    }, {
+      onConflict: 'zoho_id,week'
+    });
+    if (error) {
+      setMark(key, prev);
+      setNote('Could not save that mark: ' + error.message);
+    }
+  };
+  const changeStatus = async (row, status) => {
+    const prev = row.status;
+    setRows(rs => rs.map(r => r.id === row.id ? {
+      ...r,
+      status
+    } : r));
+    const {
+      ok,
+      data
+    } = await callZoho({
+      action: 'update_record',
+      module: 'Health_Goals',
+      id: row.id,
+      record: {
+        Goal_Status: status
+      }
+    });
+    if (!ok) {
+      setRows(rs => rs.map(r => r.id === row.id ? {
+        ...r,
+        status: prev
+      } : r));
+      setNote(data.error || 'Could not save the status to Zoho.');
+    }
+  };
+  const addGoal = async () => {
+    const goal = newGoal.trim();
+    if (!goal) return;
+    setSaving(true);
+    setNote('');
+    const {
+      ok,
+      data
+    } = await callZoho({
+      action: 'create_health_goal',
+      goal,
+      month: monthName,
+      status: 'In Progress',
+      owner_email: ownerEmail
+    });
+    setSaving(false);
+    if (!ok) {
+      setNote(data.error || 'Could not save to Zoho.');
+      return;
+    }
+    if (data.owner_warning) setNote(data.owner_warning);
+    setNewGoal('');
+    setAdding(false);
+    load();
+  };
+  const stepMonth = dir => {
+    let m = monthIdx + dir,
+      y = year;
+    if (m < 0) {
+      m = 11;
+      y -= 1;
+    } else if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+    setMonthIdx(m);
+    setYear(y);
+  };
+
+  // One row per roster member, in roster order, record or no record —
+  // then anything logged in Zoho by someone off the roster, so a goal is
+  // never silently hidden just because the person isn't listed.
+  const rowsFor = (y, m) => {
+    const mName = HG_MONTHS[m];
+    const monthRecs = (rows || []).filter(r => r.month === mName && (r.createdYear === null || r.createdYear === y || m === 0 && r.createdYear === y - 1));
+    const claimed = {};
+    return hgRoster(y, m).map(person => {
+      const rec = monthRecs.filter(r => !claimed[r.id] && hgOwns(person, r))[0] || null;
+      if (rec) claimed[rec.id] = true;
+      return {
+        key: person.key,
+        person,
+        rec
+      };
+    }).concat(monthRecs.filter(r => !claimed[r.id]).map(r => ({
+      key: r.id,
+      person: null,
+      rec: r
+    })));
+  };
+  // The month before the one on screen, shown underneath it — last month is
+  // what you actually compare this month against, and it's usually the one
+  // still being filled in when a new month has just started.
+  const prevIdx = monthIdx === 0 ? 11 : monthIdx - 1;
+  const prevYear = monthIdx === 0 ? year - 1 : year;
+  const th = {
+    fontFamily: J,
+    fontSize: 8,
+    letterSpacing: '0.14em',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    color: muted,
+    padding: '8px 10px',
+    textAlign: 'left',
+    verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
+    borderBottom: `1px solid ${line}`
+  };
+  // Middle, not top: a three-line goal shouldn't leave that row's name,
+  // marks and status stranded at the top of a tall cell.
+  const td = {
+    fontFamily: J,
+    fontSize: 12,
+    color: ink,
+    padding: '10px',
+    borderBottom: `1px solid ${line}`,
+    verticalAlign: 'middle'
+  };
+
+  // One table per month, so the current month can sit above last month's
+  // without the two sharing any state.
+  const monthTable = (y, m) => {
+    const weeks = hgWeeks(y, m);
+    const shown = rowsFor(y, m);
+    return /*#__PURE__*/React.createElement("table", {
+      style: {
+        borderCollapse: 'collapse',
+        minWidth: '100%',
+        background: cardBg
+      }
+    }, /*#__PURE__*/React.createElement("thead", {
+      style: {
+        background: headBg
+      }
+    }, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+      style: {
+        ...th,
+        minWidth: 96,
+        position: 'sticky',
+        left: 0,
+        zIndex: 2,
+        background: headBg
+      }
+    }, "Name"), /*#__PURE__*/React.createElement("th", {
+      style: {
+        ...th,
+        minWidth: 150
+      }
+    }, "Goal"), weeks.map((w, i) => /*#__PURE__*/React.createElement("th", {
+      key: i,
+      style: {
+        ...th,
+        textAlign: 'center'
+      }
+    }, "Week ", i + 1, /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 8,
+        letterSpacing: 0,
+        textTransform: 'none',
+        fontWeight: 400
+      }
+    }, hgFmt(w.start), "\u2013", hgFmt(w.end)))), /*#__PURE__*/React.createElement("th", {
+      style: {
+        ...th,
+        textAlign: 'center'
+      }
+    }, "Done"), /*#__PURE__*/React.createElement("th", {
+      style: {
+        ...th,
+        minWidth: 120
+      }
+    }, "Status"))), /*#__PURE__*/React.createElement("tbody", null, shown.map(({
+      key,
+      person,
+      rec
+    }) => {
+      const mine = canEdit(person, rec);
+      const label = person ? person.name : rec.owner;
+      const hit = rec ? weeks.filter((w, i) => ticks[rec.id + ':' + (i + 1)] === true).length : 0;
+      const dash = /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: muted
+        }
+      }, "\u2014");
+      return /*#__PURE__*/React.createElement("tr", {
+        key: key
+      }, /*#__PURE__*/React.createElement("td", {
+        style: {
+          ...td,
+          fontWeight: 600,
+          whiteSpace: 'nowrap',
+          position: 'sticky',
+          left: 0,
+          zIndex: 1,
+          background: cardBg
+        }
+      }, label), /*#__PURE__*/React.createElement("td", {
+        style: {
+          ...td,
+          whiteSpace: 'pre-wrap',
+          minWidth: 150,
+          maxWidth: 240
+        }
+      }, rec ? rec.goal || dash : isMine(person, rec) ? /*#__PURE__*/React.createElement("span", {
+        onClick: () => setAdding(true),
+        style: {
+          color: gold,
+          cursor: 'pointer',
+          fontWeight: 600
+        }
+      }, "+ Add your goal") : dash), weeks.map((w, i) => {
+        // No goal logged = nothing to tick: dashes, like the
+        // paper version of this table.
+        if (!rec) return /*#__PURE__*/React.createElement("td", {
+          key: i,
+          style: {
+            ...td,
+            textAlign: 'center',
+            color: muted
+          }
+        }, "\u2014");
+        const mark = ticks[rec.id + ':' + (i + 1)]; // true | false | undefined
+        const on = mark === true,
+          off = mark === false;
+        return /*#__PURE__*/React.createElement("td", {
+          key: i,
+          style: {
+            ...td,
+            textAlign: 'center'
+          }
+        }, /*#__PURE__*/React.createElement("div", {
+          onClick: () => {
+            if (mine) toggleWeek(rec, i + 1);
+          },
+          title: mine ? on ? 'Achieved — click for missed' : off ? 'Missed — click to clear' : 'Not marked — click for achieved' : 'Only ' + label + ' can mark this',
+          style: {
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 18,
+            height: 18,
+            borderRadius: 5,
+            cursor: mine ? 'pointer' : 'not-allowed',
+            opacity: mine ? 1 : 0.5,
+            border: `1.5px solid ${on ? '#0F6E56' : off ? '#9B1C1C' : dark ? '#2A3A5A' : '#C4B9A8'}`,
+            background: on ? '#0F6E56' : off ? '#9B1C1C' : 'transparent'
+          }
+        }, (on || off) && /*#__PURE__*/React.createElement("i", {
+          className: on ? 'ti ti-check' : 'ti ti-x',
+          style: {
+            fontSize: 11,
+            color: '#fff'
+          }
+        })));
+      }), /*#__PURE__*/React.createElement("td", {
+        style: {
+          ...td,
+          textAlign: 'center',
+          fontWeight: 600,
+          whiteSpace: 'nowrap',
+          color: rec ? ink : muted
+        }
+      }, rec ? hit + '/' + weeks.length : '—'), /*#__PURE__*/React.createElement("td", {
+        style: td
+      }, rec ? /*#__PURE__*/React.createElement("select", {
+        value: rec.status,
+        disabled: !mine,
+        onChange: e => changeStatus(rec, e.target.value),
+        style: {
+          fontFamily: J,
+          fontSize: 11,
+          fontWeight: 600,
+          color: HG_STATUS_COLOR[rec.status] || muted,
+          background: cardBg,
+          border: `1px solid ${line}`,
+          borderRadius: 6,
+          padding: '5px 7px',
+          cursor: mine ? 'pointer' : 'not-allowed'
+        }
+      }, /*#__PURE__*/React.createElement("option", {
+        value: ""
+      }, "\u2014"), HG_STATUSES.map(s => /*#__PURE__*/React.createElement("option", {
+        key: s,
+        value: s
+      }, s))) : dash));
+    })));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: pageBg
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '10px 14px',
+      borderBottom: `1px solid ${line}`,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => stepMonth(-1),
+    style: {
+      width: 24,
+      height: 24,
+      border: `1px solid ${line}`,
+      background: cardBg,
+      color: muted,
+      borderRadius: '5px 0 0 5px',
+      cursor: 'pointer',
+      padding: 0,
+      fontFamily: 'serif',
+      fontSize: 14
+    }
+  }, "\u2039"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => stepMonth(1),
+    style: {
+      width: 24,
+      height: 24,
+      border: `1px solid ${line}`,
+      borderLeft: 'none',
+      background: cardBg,
+      color: muted,
+      borderRadius: '0 5px 5px 0',
+      cursor: 'pointer',
+      padding: 0,
+      fontFamily: 'serif',
+      fontSize: 14
+    }
+  }, "\u203A")), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 13,
+      fontWeight: 600,
+      color: ink
+    }
+  }, monthName, " ", year), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontFamily: J,
+      fontSize: 10,
+      color: muted
+    }
+  }, busy && rows !== null ? 'Updating…' : ''), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAdding(a => !a),
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      color: '#fff',
+      background: dark ? '#AD832F' : '#001A4A',
+      border: 'none',
+      borderRadius: 7,
+      padding: '6px 11px',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 13
+    }
+  }), "Add Goal")), adding && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '12px 14px',
+      borderBottom: `1px solid ${line}`,
+      background: cardBg,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      letterSpacing: '0.14em',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      color: gold,
+      marginBottom: 6
+    }
+  }, "New goal for ", monthName), /*#__PURE__*/React.createElement("textarea", {
+    value: newGoal,
+    onChange: e => setNewGoal(e.target.value),
+    placeholder: "e.g. Gym 3x a week + no soda",
+    rows: 3,
+    style: {
+      width: '100%',
+      boxSizing: 'border-box',
+      fontFamily: J,
+      fontSize: 12,
+      color: ink,
+      background: dark ? '#050B16' : '#FCFBF8',
+      border: `1px solid ${line}`,
+      borderRadius: 8,
+      padding: 9,
+      resize: 'vertical'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginTop: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: addGoal,
+    disabled: saving || !newGoal.trim(),
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      color: '#fff',
+      background: saving || !newGoal.trim() ? '#B4B2A9' : dark ? '#AD832F' : '#001A4A',
+      border: 'none',
+      borderRadius: 7,
+      padding: '7px 14px',
+      cursor: saving || !newGoal.trim() ? 'default' : 'pointer'
+    }
+  }, saving ? 'Saving…' : 'Save to Zoho'), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setAdding(false);
+      setNewGoal('');
+    },
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 500,
+      color: muted,
+      background: 'none',
+      border: `1px solid ${line}`,
+      borderRadius: 7,
+      padding: '7px 14px',
+      cursor: 'pointer'
+    }
+  }, "Cancel"))), note && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '8px 14px',
+      background: dark ? 'rgba(155,28,28,0.2)' : '#FCEBEB',
+      color: dark ? '#F87171' : '#9B1C1C',
+      fontFamily: J,
+      fontSize: 11,
+      flexShrink: 0
+    }
+  }, note), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflow: 'auto',
+      WebkitOverflowScrolling: 'touch'
+    }
+  }, rows === null ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      color: muted,
+      padding: 20
+    }
+  }, "Loading health goals\u2026") : /*#__PURE__*/React.createElement(React.Fragment, null, monthTable(year, monthIdx), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '18px 14px 8px'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      letterSpacing: '0.14em',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      color: gold
+    }
+  }, HG_MONTHS[prevIdx], " ", prevYear), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      height: 1,
+      background: line
+    }
+  })), monthTable(prevYear, prevIdx)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: muted,
+      padding: '12px 14px 20px'
+    }
+  }, "Click a week to cycle it: blank \u2192 \u2713 achieved \u2192 \u2715 missed \u2192 blank. Weekly marks are saved in the app only \u2014 the goal, month and status sync with Zoho.")));
+}
+
+// ─── Bottom Nav ──────────────────────────────────────────────────
+const TABS = [{
+  id: 'chat',
+  label: 'AI',
+  icon: 'ti-sparkles'
+}, {
+  id: 'teamchat',
+  label: 'Chat',
+  icon: 'ti-message'
+}, {
+  id: 'calls',
+  label: 'Calls',
+  icon: 'ti-phone'
+}, {
+  id: 'kpis',
+  label: 'KPIs',
+  icon: 'ti-chart-bar'
+}, {
+  id: 'deals',
+  label: 'Deals',
+  icon: 'ti-currency-dollar'
+}, {
+  id: 'more',
+  label: 'More',
+  icon: 'ti-dots'
+}];
+
+// The "Get Started" guide embeds the standalone /get-started/ install page (in
+// ?embed=1 light mode) via an iframe, so its rich phone mockups render exactly as
+// designed — the note sanitizer would otherwise strip their <svg>/<style>. The page
+// postMessages its content height; we size the iframe to it (no inner scrollbar).
+function GuideEmbed({
+  src
+}) {
+  const [h, setH] = useState(680);
+  useEffect(() => {
+    function onMsg(e) {
+      if (e.origin !== window.location.origin) return;
+      const d = e.data;
+      if (d && d.type === 'tmg-gs-embed-height' && typeof d.height === 'number') {
+        const next = Math.max(320, Math.min(Math.round(d.height) + 8, 24000));
+        // Dead-band: ignore tiny deltas so height can't oscillate/creep.
+        setH(prev => Math.abs(next - prev) <= 2 ? prev : next);
+      }
+    }
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+  return /*#__PURE__*/React.createElement("iframe", {
+    src: src,
+    title: "Get Started \u2014 install guide",
+    scrolling: "no",
+    style: {
+      width: '100%',
+      height: h + 'px',
+      border: 'none',
+      background: 'transparent',
+      display: 'block'
+    }
+  });
+}
+
+// ─── Guide tab — read-only split view; the right pane embeds the selected
+// guide's standalone HTML page (?embed=1 light mode). List is static (GUIDES);
+// no Supabase, no in-app editor — guides are HTML files edited + pushed.
+function GuideTab({
+  dark,
+  profile,
+  isAdmin
+}) {
+  const initSlug = () => {
+    try {
+      const pm = (location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i);
+      const hm = (location.hash || '').match(/guide\/([a-z0-9-]+)/i);
+      const sl = pm ? pm[1] : hm ? hm[1] : null;
+      return sl && GUIDES.find(g => g.slug === sl) ? sl : null;
+    } catch (e) {
+      return null;
+    }
+  };
+  const [selectedSlug, setSelectedSlug] = useState(initSlug);
+  const [search, setSearch] = useState('');
+  const [searchFocus, setSearchFocus] = useState(false);
+  const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
+  const [copied, setCopied] = useState(false);
+  const [dotsOpen, setDotsOpen] = useState(false);
+  useEffect(() => {
+    const f = () => setWide(window.innerWidth >= 769);
+    window.addEventListener('resize', f);
+    return () => window.removeEventListener('resize', f);
+  }, []);
+  useEffect(() => {
+    const onPop = () => {
+      try {
+        const pm = (location.pathname || '').match(/^\/guide\/([a-z0-9-]+)/i);
+        setSelectedSlug(pm && GUIDES.find(g => g.slug === pm[1]) ? pm[1] : null);
+      } catch (e) {}
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+  const sel = GUIDES.find(g => g.slug === selectedSlug) || null;
+  const q = search.trim().toLowerCase();
+  const matches = g => !q || ((g.emoji || '') + ' ' + g.title + ' ' + g.description).toLowerCase().includes(q);
+  const groups = GUIDE_SECTIONS.map(sec => ({
+    sec,
+    items: GUIDES.filter(g => (g.section || 'App Guides') === sec && matches(g))
+  })).filter(g => g.items.length);
+  const selectGuide = slug => {
+    setSelectedSlug(slug);
+    setDotsOpen(false);
+    try {
+      const url = slug ? '/guide/' + slug : '/guide';
+      if (slug) history.pushState(null, '', url);else history.replaceState(null, '', url);
+    } catch (e) {}
+  };
+  const copyLink = slug => {
+    try {
+      navigator.clipboard.writeText('app.themorshedgroup.com/guide/' + slug);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch (e) {}
+  };
+  const embedSrc = u => u + (u.indexOf('?') === -1 ? '?embed=1' : '&embed=1');
+  const HAIR = '0.5px solid #EDE7DC';
+
+  // ── List / sidebar ──
+  const listPane = /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: wide ? 220 : '100%',
+      flexShrink: 0,
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: '#F5F0E8',
+      borderRight: wide ? HAIR : 'none'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '12px 14px 8px',
+      borderBottom: HAIR
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: wide ? 16 : 18,
+      fontWeight: 600,
+      color: '#001A4A'
+    }
+  }, "Guide")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '7px 10px',
+      borderBottom: HAIR,
+      background: '#F5F0E8'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      background: searchFocus ? '#fff' : '#EDE7DC',
+      border: searchFocus ? '0.5px solid #E4DFD4' : '0.5px solid transparent',
+      borderRadius: 8,
+      padding: '5px 9px'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-search",
+    style: {
+      fontSize: 12,
+      color: '#B4B2A9'
+    },
+    "aria-hidden": "true"
+  }), /*#__PURE__*/React.createElement("input", {
+    value: search,
+    onChange: e => setSearch(e.target.value),
+    onFocus: () => setSearchFocus(true),
+    onBlur: () => setSearchFocus(false),
+    placeholder: "Search",
+    style: {
+      flex: 1,
+      border: 'none',
+      outline: 'none',
+      background: 'transparent',
+      fontFamily: C.fontSans,
+      fontSize: 10,
+      color: '#001A4A'
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto',
+      background: '#F5F0E8'
+    }
+  }, !groups.length && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 16,
+      fontFamily: C.fontSans,
+      fontSize: 10,
+      color: '#B4B2A9'
+    }
+  }, "No guides found."), groups.map(g => /*#__PURE__*/React.createElement("div", {
+    key: g.sec
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '8px 12px 3px',
+      fontFamily: C.fontSans,
+      fontSize: 7,
+      fontWeight: 700,
+      letterSpacing: '0.18em',
+      textTransform: 'uppercase',
+      color: '#B4B2A9'
+    }
+  }, g.sec), g.items.map(n => {
+    const on = n.slug === selectedSlug;
+    return /*#__PURE__*/React.createElement("div", {
+      key: n.slug,
+      className: "guide-note-item",
+      onClick: () => selectGuide(n.slug),
+      style: {
+        padding: '9px 12px',
+        borderBottom: HAIR,
+        cursor: 'pointer',
+        background: on ? '#fff' : 'transparent',
+        borderRight: on ? '2.5px solid #AD832F' : '2.5px solid transparent'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: C.fontSans,
+        fontSize: 12,
+        fontWeight: 600,
+        color: '#001A4A',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        marginBottom: 2
+      }
+    }, (n.emoji ? n.emoji + ' ' : '') + n.title), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: C.fontSans,
+        fontSize: 9,
+        color: '#9A958A',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, n.description || '—'));
+  })))), wide && /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: HAIR,
+      padding: '7px 12px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-notes",
+    style: {
+      fontSize: 12,
+      color: '#AD832F'
+    },
+    "aria-hidden": "true"
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 9,
+      color: '#B4B2A9'
+    }
+  }, GUIDES.length, " guide", GUIDES.length === 1 ? '' : 's')));
+  const dotsMenu = sel ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setDotsOpen(false),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 60
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: 30,
+      right: 0,
+      zIndex: 61,
+      background: '#fff',
+      border: '0.5px solid #E4DFD4',
+      borderRadius: 10,
+      boxShadow: '0 8px 24px rgba(0,26,74,.14)',
+      padding: 4,
+      minWidth: 130
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      copyLink(sel.slug);
+      setDotsOpen(false);
+    },
+    style: dotsItem
+  }, "Copy link"))) : null;
+
+  // ── Right pane: embeds the guide's HTML page ──
+  const notePane = /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: '#fff'
+    }
+  }, !sel && wide && /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-book",
+    style: {
+      fontSize: 34,
+      color: '#E4DFD4'
+    },
+    "aria-hidden": "true"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 12,
+      fontStyle: 'italic',
+      color: '#C4BFBA'
+    }
+  }, "Select a guide to read.")), sel && /*#__PURE__*/React.createElement(React.Fragment, null, !wide && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '9px 12px',
+      borderBottom: HAIR,
+      background: '#fff'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => selectGuide(null),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 3,
+      border: 'none',
+      background: 'none',
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      fontSize: 11,
+      fontWeight: 500,
+      color: '#185FA5',
+      padding: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 14
+    },
+    "aria-hidden": "true"
+  }), "Guide"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setDotsOpen(o => !o),
+    style: {
+      width: 26,
+      height: 26,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: '#F3EBDA',
+      border: '0.5px solid #E8D9BC',
+      borderRadius: 7,
+      cursor: 'pointer',
+      color: '#AD832F',
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-dots",
+    "aria-hidden": "true"
+  })), dotsOpen && dotsMenu)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '14px 16px 10px',
+      borderBottom: HAIR,
+      background: '#fff',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 18,
+      fontWeight: 600,
+      color: '#001A4A',
+      lineHeight: 1.2,
+      marginBottom: 4
+    }
+  }, (sel.emoji ? sel.emoji + ' ' : '') + sel.title), /*#__PURE__*/React.createElement("div", {
+    onClick: () => copyLink(sel.slug),
+    title: "Copy link",
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      fontFamily: C.fontSans,
+      fontSize: 9,
+      color: '#B4B2A9',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-link",
+    style: {
+      fontSize: 10,
+      color: '#AD832F'
+    },
+    "aria-hidden": "true"
+  }), /*#__PURE__*/React.createElement("span", null, copied ? 'Copied to clipboard!' : 'app.themorshedgroup.com/guide/' + sel.slug))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto',
+      padding: sel.url ? 0 : '14px 16px 18px',
+      background: '#fff'
+    }
+  }, sel.url ? /*#__PURE__*/React.createElement(GuideEmbed, {
+    src: embedSrc(sel.url)
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: 220,
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-notes",
+    style: {
+      fontSize: 32,
+      color: '#E4DFD4'
+    },
+    "aria-hidden": "true"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 12,
+      fontStyle: 'italic',
+      color: '#C4BFBA'
+    }
+  }, "This guide is coming soon.")))));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'row',
+      background: '#F5F0E8',
+      fontFamily: C.fontSans
+    }
+  }, (wide || !sel) && listPane, (wide || sel) && notePane);
+}
+const dotsItem = {
+  display: 'block',
+  width: '100%',
+  textAlign: 'left',
+  border: 'none',
+  background: 'none',
+  cursor: 'pointer',
+  fontFamily: C.fontSans,
+  fontSize: 11,
+  color: '#001A4A',
+  padding: '8px 10px',
+  borderRadius: 7
+};
+
+// Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
+function BottomZone({
+  active,
+  activeMoreView,
+  tabs,
+  onChange,
+  dark,
+  isWide,
+  onOpenAttach,
+  pendingAttachments,
+  onRemoveAttach,
+  input,
+  setInput,
+  onSend,
+  loading,
+  zoneRef
+}) {
+  const navTabs = tabs || TABS;
+  const isAI = active === 'chat';
+  const pending = pendingAttachments || [];
+
+  // Auto-grow the message box with its content, up to 6 lines, then scroll.
+  const taRef = useRef(null);
+  React.useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    // Reset to 0 (not 'auto') before measuring — 'auto' lets the browser's own <textarea
+    // rows> sizing kick in first, which is taller than our line-height and defeats the collapse.
+    el.style.height = '0px';
+    const max = 136; // 6 lines @ 20px line-height, no vertical padding to account for
+    el.style.height = Math.min(el.scrollHeight, max) + 'px';
+    el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
+  }, [input, isAI]);
+  function onKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      onSend();
+    }
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    ref: zoneRef,
+    style: {
+      position: 'fixed',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      zIndex: 50,
+      borderTop: `1px solid ${dark ? '#0D1E3A' : '#E0D8CC'}`,
+      background: dark ? '#000D26' : '#FCFBF8',
+      padding: '6px 14px calc(7px + env(safe-area-inset-bottom))',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10
+    }
+  }, isAI && pending.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 8
+    }
+  }, pending.map(a => /*#__PURE__*/React.createElement("div", {
+    key: a.id,
+    style: {
+      position: 'relative'
+    }
+  }, a.kind === 'image' ? /*#__PURE__*/React.createElement("img", {
+    src: a.previewUrl,
+    alt: a.name,
+    style: {
+      width: 46,
+      height: 46,
+      borderRadius: 10,
+      objectFit: 'cover',
+      display: 'block',
+      border: `1px solid ${dark ? '#152545' : '#E0D8CC'}`
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 46,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '0 10px',
+      borderRadius: 10,
+      maxWidth: 160,
+      background: dark ? '#0A1730' : '#FFFFFF',
+      border: `1px solid ${dark ? '#152545' : '#E0D8CC'}`
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${a.kind === 'pdf' ? 'ti-file-type-pdf' : attFileIcon(a.name)}`,
+    style: {
+      fontSize: 18,
+      color: C.gold,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.7rem',
+      color: dark ? '#fff' : C.textPrimary,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      fontFamily: C.fontSans
+    }
+  }, a.name)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onRemoveAttach(a.id),
+    style: {
+      position: 'absolute',
+      top: -6,
+      right: -6,
+      width: 18,
+      height: 18,
+      borderRadius: '50%',
+      border: '2px solid ' + (dark ? '#000D26' : '#FCFBF8'),
+      cursor: 'pointer',
+      background: C.navy,
+      color: '#fff',
+      fontSize: 9,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))))), isAI && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      minHeight: isWide ? 44 : 40,
+      borderRadius: isWide ? 24 : 22,
+      overflow: 'hidden',
+      background: '#fff',
+      border: `1px solid ${AI_UI.border}`
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `.tmg-ai-input::placeholder{color:#A9ADD6;opacity:1;}`), /*#__PURE__*/React.createElement("textarea", {
+    ref: taRef,
+    className: "tmg-ai-input",
+    value: input,
+    onChange: e => setInput(e.target.value),
+    onKeyDown: onKeyDown,
+    placeholder: "Message TMG assistant...",
+    style: {
+      flex: 1,
+      minWidth: 0,
+      border: 'none',
+      outline: 'none',
+      background: 'transparent',
+      padding: '0 8px 0 14px',
+      margin: 0,
+      fontFamily: "'Jost', sans-serif",
+      fontSize: isWide ? 12 : 10,
+      lineHeight: '20px',
+      color: '#001A4A',
+      resize: 'none',
+      boxSizing: 'border-box',
+      display: 'block',
+      height: 20,
+      maxHeight: 136
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: onOpenAttach,
+    title: "Attach file or photo",
+    style: {
+      flexShrink: 0,
+      width: 32,
+      height: isWide ? 36 : 32,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: AI_UI.primary,
+      opacity: 0.7,
+      fontSize: 17
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-paperclip"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: onSend,
+    disabled: loading,
+    style: {
+      flexShrink: 0,
+      width: isWide ? 36 : 32,
+      height: isWide ? 36 : 32,
+      marginRight: 4,
+      borderRadius: '50%',
+      border: 'none',
+      background: AI_UI.primary,
+      color: '#fff',
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: 16
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-up"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      background: dark ? '#0A1730' : '#001A4A',
+      borderRadius: 40,
+      padding: 4,
+      width: '100%'
+    }
+  }, navTabs.map(({
+    id,
+    label,
+    icon,
+    img
+  }) => {
+    const coreNavIds = ['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'];
+    const isActive = active === id || active === 'more' && !coreNavIds.includes(id) && id !== 'more' && activeMoreView === id;
+    const activeColor = dark ? '#FFFFFF' : '#001A4A';
+    const inactiveColor = dark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.28)';
+    const color = isActive ? activeColor : inactiveColor;
+    return /*#__PURE__*/React.createElement("button", {
+      key: id,
+      onClick: () => onChange(id),
+      style: {
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 3,
+        padding: '7px 1px',
+        borderRadius: 28,
+        border: 'none',
+        cursor: 'pointer',
+        background: isActive ? dark ? '#AD832F' : '#FFFFFF' : 'transparent',
+        transition: 'background 0.2s ease'
+      }
+    }, img ? /*#__PURE__*/React.createElement("img", {
+      src: img,
+      style: {
+        width: 18,
+        height: 18,
+        objectFit: 'contain',
+        display: 'block',
+        opacity: isActive ? 1 : 0.35
+      }
+    }) : /*#__PURE__*/React.createElement("i", {
+      className: `ti ${icon}`,
+      style: {
+        fontSize: 18,
+        display: 'block',
+        color,
+        lineHeight: 1
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: "'Jost', sans-serif",
+        fontSize: 7,
+        fontWeight: 500,
+        letterSpacing: '0.11em',
+        color
+      }
+    }, label));
+  })));
+}
+
+// ─── Top Bar ─────────────────────────────────────────────────────
+function TopBar({
+  dark,
+  onToggleDark,
+  onCalendar,
+  calendarOpen,
+  onTasks,
+  tasksOpen,
+  onDecisions,
+  decisionsOpen,
+  avatar,
+  name,
+  dotColor,
+  onProfile
+}) {
+  // Gold-tinted rounded-square chip; the active (open-popout) icon gets a brighter
+  // fill + a gold ring so you can see which popout is currently open.
+  const iconBtn = (onClick, iconClass, title, active) => /*#__PURE__*/React.createElement("button", {
+    onClick: onClick,
+    title: title,
+    "aria-label": title,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 32,
+      height: 32,
+      borderRadius: 9,
+      cursor: 'pointer',
+      padding: 0,
+      background: active ? 'rgba(201,164,90,0.30)' : 'rgba(201,164,90,0.16)',
+      border: 'none',
+      boxShadow: active ? '0 0 0 2px #C9A45A' : 'none',
+      color: '#C9A45A',
+      fontSize: 16,
+      lineHeight: 1,
+      transition: 'background 0.15s, box-shadow 0.15s'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: iconClass
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '12px 16px',
+      paddingTop: 'calc(12px + env(safe-area-inset-top))',
+      background: dark ? '#0A1730' : '#001A4A',
+      backdropFilter: 'blur(20px) saturate(180%)',
+      WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+      borderBottom: '1px solid rgba(255,255,255,0.08)',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: "/m-monogram.png",
+    alt: "",
+    style: {
+      height: 22,
+      width: 'auto',
+      display: 'block'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 22,
+      fontSize: '14.4px',
+      lineHeight: '22px',
+      fontWeight: 600,
+      color: C.gold,
+      letterSpacing: '0.18em',
+      textTransform: 'uppercase',
+      fontFamily: "'Jost', sans-serif",
+      whiteSpace: 'nowrap'
+    }
+  }, "TMG APP")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10
+    }
+  }, iconBtn(onTasks, 'ti ti-checklist', 'Tasks', tasksOpen), /*#__PURE__*/React.createElement("button", {
+    onClick: onDecisions,
+    title: "Decisions",
+    "aria-label": "Decisions",
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 32,
+      height: 32,
+      borderRadius: 9,
+      cursor: 'pointer',
+      padding: 0,
+      background: decisionsOpen ? 'rgba(201,164,90,0.30)' : 'rgba(201,164,90,0.16)',
+      border: 'none',
+      boxShadow: decisionsOpen ? '0 0 0 2px #C9A45A' : 'none',
+      color: '#C9A45A',
+      transition: 'background 0.15s, box-shadow 0.15s'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: "17",
+    height: "17",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2.2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M12 4v6"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M9 7l3-3 3 3"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M4 13l-2 2 2 2"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M2 15h7"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M20 13l2 2-2 2"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M22 15h-7"
+  }))), iconBtn(onCalendar, 'ti ti-calendar', 'Calendar', calendarOpen), /*#__PURE__*/React.createElement("button", {
+    onClick: onProfile,
+    "aria-label": "Your profile",
+    style: {
+      position: 'relative',
+      width: 32,
+      height: 32,
+      borderRadius: 9,
+      border: 'none',
+      padding: 0,
+      cursor: 'pointer',
+      background: 'rgba(201,164,90,0.16)',
+      flexShrink: 0
+    }
+  }, avatar ? /*#__PURE__*/React.createElement("img", {
+    src: avatar,
+    alt: "",
+    style: {
+      width: 32,
+      height: 32,
+      borderRadius: 9,
+      objectFit: 'cover',
+      display: 'block'
+    }
+  }) : /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'flex',
+      width: 32,
+      height: 32,
+      borderRadius: 9,
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: C.goldSoft,
+      fontFamily: C.fontSans,
+      fontWeight: 600,
+      fontSize: 13
+    }
+  }, (name || '?').trim().charAt(0).toUpperCase()), /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: 'absolute',
+      right: -2,
+      bottom: -2,
+      width: 11,
+      height: 11,
+      borderRadius: '50%',
+      background: dotColor,
+      border: `2px solid ${dark ? '#0A1730' : '#001A4A'}`
+    }
+  }))));
+}
+
+// ─── Profile / status panel (right slide-out) ───────────────────
+// One cohesive TMG-branded card: accent bar · merged identity header
+// (no role badge) · status controls · Details · Edit. Appearance /
+// Chat History / Sign out stay BELOW the card (Settings-embedded).
+function ProfilePanel({
+  dark,
+  user,
+  profile,
+  name,
+  avatar,
+  away,
+  statusText,
+  statusEmoji,
+  onToggleAway,
+  onOpenStatus,
+  onClose,
+  historySide,
+  setHistorySide,
+  setDark,
+  fontScale,
+  setFontScale,
+  navItems,
+  moreMenuItems,
+  onReorderNav,
+  onReorderMore,
+  onMoveToMore,
+  onMoveToNav
+}) {
+  const J = "'Jost', sans-serif";
+  const [me, setMe] = useState(profile || null);
+  const [allUsers, setAllUsers] = useState([]);
+  const [editing, setEditing] = useState(false);
+  const [first, setFirst] = useState(profile && profile.first_name || '');
+  const [last, setLast] = useState(profile && profile.last_name || '');
+  const [phone, setPhone] = useState(profile && profile.phone || '');
+  const [country, setCountry] = useState(profile && profile.country || '');
+  const [timezone, setTimezone] = useState(profile && profile.timezone || '');
+  const [dob, setDob] = useState(profile && profile.dob || '');
+  const [pets, setPets] = useState(profile && profile.pets || []);
+  const [saving, setSaving] = useState(false);
+  const [gcalState, setGcalState] = useState('checking'); // checking | connected | disconnected
+  useEffect(() => {
+    ProfileDB.loadAll().then(setAllUsers);
+  }, []);
+  // Best-effort Google connection status: the 'calendars' action returns the account's
+  // calendars when connected, or needs_connect (412) when not.
+  useEffect(() => {
+    let c = false;
+    callCalendar({
+      action: 'calendars'
+    }).then(({
+      ok,
+      data
+    }) => {
+      if (!c) setGcalState(ok && Array.isArray(data.calendars) && data.calendars.length ? 'connected' : 'disconnected');
+    }).catch(() => {
+      if (!c) setGcalState('disconnected');
+    });
+    return () => {
+      c = true;
+    };
+  }, []);
+  const email = me && me.email || user && user.email || '';
+  const roleLine = me && me.title || '';
+  const managerName = id => {
+    if (!id) return '';
+    const m = allUsers.find(u => u.id === id);
+    return m ? ((m.first_name || '') + ' ' + (m.last_name || '')).trim() || m.email : '';
+  };
+  const locationText = () => {
+    if (!me) return '';
+    const c = COUNTRIES.find(x => x.c === me.country);
+    const cn = c ? c.n : me.country || '';
+    const city = me.timezone ? tzCity(me.timezone) : '';
+    return [city, cn].filter(Boolean).join(', ');
+  };
+  async function saveMine() {
+    setSaving(true);
+    try {
+      await ProfileDB.updateMine({
+        first_name: first,
+        last_name: last,
+        phone,
+        country,
+        timezone,
+        dob: dob || null,
+        pets
+      });
+      setMe(prev => ({
+        ...(prev || {}),
+        first_name: first,
+        last_name: last,
+        phone,
+        country,
+        timezone,
+        dob: dob || null,
+        pets
+      }));
+      setEditing(false);
+    } catch (e) {
+      alert('Could not save: ' + (e.message || e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── spec palette ──
+  const panelBg = dark ? '#070F1E' : '#FCFBF8';
+  const panelBorder = dark ? '#152545' : '#EDE7DC';
+  const ink = dark ? '#fff' : '#001A4A';
+  const keyMuted = dark ? 'rgba(255,255,255,0.4)' : '#9A958A';
+  const valMuted = dark ? 'rgba(255,255,255,0.4)' : '#B4B2A9';
+  const rowBorder = dark ? '#0D1E3A' : '#F0EBE3';
+  const gold = dark ? '#C9A45A' : '#AD832F';
+  const ruleCol = dark ? '#152545' : '#EDE7DC';
+  const ctrlBg = dark ? '#0A1730' : '#FFFFFF';
+  const ctrlBorder = dark ? '#152545' : '#E0D8CC';
+  const awayBorder = dark ? '#152545' : '#EDE7DC';
+  const slideBg = dark ? '#04091B' : '#F2EEE6';
+  const accentBar = dark ? 'linear-gradient(90deg, #AD832F, #C9A45A)' : 'linear-gradient(90deg, #001A4A, #AD832F)';
+  const presence = away ? '#E0A93B' : dark ? '#5DCAA5' : '#3DAF7E';
+  const presenceTxt = away ? 'AWAY' : 'ACTIVE';
+  const inputStyle = {
+    width: '100%',
+    padding: '10px 12px',
+    background: ctrlBg,
+    border: `1px solid ${ctrlBorder}`,
+    borderRadius: 10,
+    color: ink,
+    fontSize: 13,
+    outline: 'none',
+    fontFamily: J
+  };
+  const detailRow = (label, value, opts) => {
+    opts = opts || {};
+    return /*#__PURE__*/React.createElement("div", {
+      key: label,
+      style: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '10px 0',
+        borderBottom: opts.last ? 'none' : `1px solid ${rowBorder}`
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        color: keyMuted,
+        flexShrink: 0
+      }
+    }, label), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: opts.small ? 8.5 : 10,
+        fontWeight: 600,
+        color: opts.muted ? valMuted : ink,
+        textAlign: 'right',
+        marginLeft: 12,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, value));
+  };
+  const mgr = managerName(me && me.reports_to);
+  const loc = locationText();
+  const petStr = me && me.pets && me.pets.length ? me.pets.map(petLabel).join('   ') : '';
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 70,
+      background: 'rgba(0,0,0,0.4)'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      width: '88%',
+      maxWidth: 390,
+      zIndex: 71,
+      background: slideBg,
+      boxShadow: '-12px 0 30px rgba(0,0,0,0.28)',
+      display: 'flex',
+      flexDirection: 'column',
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      overscrollBehavior: 'contain',
+      transform: 'translateZ(0)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 'calc(14px + env(safe-area-inset-top)) 16px 0'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderRadius: 18,
+      overflow: 'hidden',
+      border: `1px solid ${panelBorder}`,
+      boxShadow: '0 12px 40px rgba(0,26,74,0.12)',
+      background: panelBg
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 4,
+      background: accentBar
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 13,
+      padding: '18px 18px 16px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative',
+      flexShrink: 0
+    }
+  }, avatar ? /*#__PURE__*/React.createElement("img", {
+    src: avatar,
+    alt: "",
+    style: {
+      width: 58,
+      height: 58,
+      borderRadius: '50%',
+      objectFit: 'cover'
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 58,
+      height: 58,
+      borderRadius: '50%',
+      background: C.navy,
+      color: C.goldSoft,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontFamily: J,
+      fontWeight: 600,
+      fontSize: 22
+    }
+  }, (name || '?').trim().charAt(0).toUpperCase()), /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: 'absolute',
+      right: 2,
+      bottom: 2,
+      width: 14,
+      height: 14,
+      borderRadius: '50%',
+      background: presence,
+      border: `2.5px solid ${panelBg}`
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 16,
+      fontWeight: 600,
+      color: ink,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, name), roleLine && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: keyMuted,
+      marginTop: 2,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, roleLine), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: presence
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      letterSpacing: '0.08em',
+      fontWeight: 500,
+      color: presence
+    }
+  }, presenceTxt))), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    "aria-label": "Close",
+    style: {
+      flexShrink: 0,
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: valMuted,
+      fontSize: 17,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), !editing ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '0 14px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onOpenStatus,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      width: '100%',
+      textAlign: 'left',
+      borderRadius: 11,
+      border: `1px solid ${ctrlBorder}`,
+      background: ctrlBg,
+      padding: '10px 12px',
+      marginBottom: 8,
+      cursor: 'pointer',
+      fontFamily: J,
+      fontSize: 10,
+      color: statusText || statusEmoji ? ink : keyMuted
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-mood-smile",
+    style: {
+      fontSize: 15,
+      color: gold
+    }
+  }), statusText ? (statusEmoji ? statusEmoji + ' ' : '') + statusText : "What's your status?"), /*#__PURE__*/React.createElement("button", {
+    onClick: onToggleAway,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      width: '100%',
+      textAlign: 'left',
+      borderRadius: 11,
+      border: `1px solid ${awayBorder}`,
+      background: ctrlBg,
+      padding: '9px 12px',
+      cursor: 'pointer',
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 500,
+      color: ink
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-clock-pause",
+    style: {
+      fontSize: 15,
+      color: away ? '#E0A93B' : gold
+    }
+  }), away ? 'Set yourself as active' : 'Set yourself as away')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '6px 18px 8px'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 7,
+      letterSpacing: '0.18em',
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      color: gold
+    }
+  }, "Details"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      height: 1,
+      background: ruleCol
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '0 18px'
+    }
+  }, detailRow('Employee ID', me && me.employee_id || '—', {
+    muted: !(me && me.employee_id)
+  }), detailRow('Title', roleLine || '—', {
+    muted: !roleLine
+  }), detailRow('Reports to', mgr || '—', {
+    muted: !mgr
+  }), detailRow('Phone', me && me.phone ? contactLink('Phone', me.phone) : '—', {
+    muted: !(me && me.phone)
+  }), detailRow('Email', email ? contactLink('Email', email) : '—', {
+    small: true,
+    muted: !email
+  }), detailRow('Location', loc || '—', {
+    muted: !loc
+  }), detailRow('Local time', me && me.timezone ? localTimeIn(me.timezone) : '—', {
+    muted: !(me && me.timezone)
+  }), detailRow('Pets', petStr || '—', {
+    last: true,
+    muted: !petStr
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '14px 18px 18px'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setFirst(me && me.first_name || '');
+      setLast(me && me.last_name || '');
+      setPhone(me && me.phone || '');
+      setCountry(me && me.country || '');
+      setTimezone(me && me.timezone || '');
+      setDob(me && me.dob || '');
+      setPets(me && me.pets || []);
+      setEditing(true);
+    },
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      width: '100%',
+      padding: 13,
+      borderRadius: 11,
+      border: 'none',
+      cursor: 'pointer',
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      letterSpacing: '0.06em',
+      background: dark ? '#AD832F' : '#001A4A',
+      color: '#fff'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-pencil",
+    style: {
+      fontSize: 14
+    }
+  }), "Edit my info"))) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '4px 18px 18px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    placeholder: "First name",
+    value: first,
+    onChange: e => setFirst(e.target.value),
+    style: inputStyle
+  }), /*#__PURE__*/React.createElement("input", {
+    placeholder: "Last name",
+    value: last,
+    onChange: e => setLast(e.target.value),
+    style: inputStyle
+  }), /*#__PURE__*/React.createElement("input", {
+    placeholder: "Phone",
+    value: phone,
+    onChange: e => setPhone(e.target.value),
+    style: inputStyle
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: keyMuted,
+      marginTop: 2
+    }
+  }, "Location"), /*#__PURE__*/React.createElement("select", {
+    value: country,
+    onChange: e => {
+      setCountry(e.target.value);
+      setTimezone('');
+    },
+    style: inputStyle
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Country\u2026"), COUNTRIES.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c.c,
+    value: c.c
+  }, c.n))), country && (COUNTRY_TZ[country] || []).length > 0 && /*#__PURE__*/React.createElement("select", {
+    value: timezone,
+    onChange: e => setTimezone(e.target.value),
+    style: inputStyle
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "City / time zone\u2026"), (COUNTRY_TZ[country] || []).map(z => /*#__PURE__*/React.createElement("option", {
+    key: z,
+    value: z
+  }, tzCity(z)))), timezone && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: keyMuted
+    }
+  }, "Local time: ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: ink
+    }
+  }, localTimeIn(timezone))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: keyMuted,
+      marginTop: 2
+    }
+  }, "Date of birth ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      opacity: 0.7
+    }
+  }, "(optional)")), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: dob || '',
+    onChange: e => setDob(e.target.value),
+    style: inputStyle
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: keyMuted,
+      marginTop: 2
+    }
+  }, "Pets"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 6
+    }
+  }, PETS.map(p => {
+    const on = pets.includes(p.k);
+    return /*#__PURE__*/React.createElement("button", {
+      key: p.k,
+      type: "button",
+      onClick: () => setPets(on ? pets.filter(x => x !== p.k) : [...pets, p.k]),
+      style: {
+        padding: '7px 11px',
+        borderRadius: 20,
+        border: `1px solid ${on ? C.navy : ctrlBorder}`,
+        background: on ? C.navy : ctrlBg,
+        color: on ? '#fff' : keyMuted,
+        fontSize: 12,
+        cursor: 'pointer',
+        fontFamily: J
+      }
+    }, p.e, " ", p.label);
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: saveMine,
+    disabled: saving,
+    style: {
+      flex: 1,
+      padding: 11,
+      background: dark ? '#AD832F' : C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 11,
+      fontSize: 13,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: J
+    }
+  }, saving ? 'Saving…' : 'Save'), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditing(false),
+    style: {
+      flex: 1,
+      padding: 11,
+      background: 'none',
+      color: keyMuted,
+      border: `1px solid ${ctrlBorder}`,
+      borderRadius: 11,
+      fontSize: 13,
+      cursor: 'pointer',
+      fontFamily: J
+    }
+  }, "Cancel")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: keyMuted,
+      lineHeight: 1.4
+    }
+  }, "Employee ID, title, reports-to, and access are set by an admin.")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: ctrlBg,
+      border: dark ? `1px solid ${panelBorder}` : 'none',
+      boxShadow: dark ? 'none' : '0 2px 8px rgba(0,26,74,0.07), 0 1px 2px rgba(0,26,74,0.04)',
+      borderRadius: 14,
+      padding: 16,
+      margin: '14px 16px 0'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      color: ink
+    }
+  }, "Google Email, Calendar & Tasks"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      marginLeft: 'auto',
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 600,
+      letterSpacing: '0.04em',
+      color: gcalState === 'connected' ? presence : keyMuted
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 5,
+      height: 5,
+      borderRadius: '50%',
+      background: gcalState === 'connected' ? presence : valMuted
+    }
+  }), gcalState === 'checking' ? '…' : gcalState === 'connected' ? 'CONNECTED' : 'NOT CONNECTED')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 5,
+      marginBottom: 12
+    }
+  }, ['Gmail is read to update CTC files or connect it to tasks', 'Google Calendar is shown in the Calendar tab', 'TMG App tasks are synced to your Google Tasks'].map((line, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: 'flex',
+      gap: 6,
+      fontFamily: J,
+      fontSize: 10,
+      color: keyMuted,
+      lineHeight: 1.5
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: gold,
+      flexShrink: 0
+    }
+  }, "\u2022"), /*#__PURE__*/React.createElement("span", null, line)))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      try {
+        window.SupabaseAuth.connectCalendar();
+      } catch (e) {}
+    },
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      width: '100%',
+      padding: 12,
+      borderRadius: 11,
+      border: `1px solid ${ctrlBorder}`,
+      cursor: 'pointer',
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      letterSpacing: '0.04em',
+      background: dark ? '#0A1730' : '#FCFBF8',
+      color: ink
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-brand-google",
+    style: {
+      fontSize: 14,
+      color: gold
+    }
+  }), gcalState === 'connected' ? 'Reconnect Google Calendar & Tasks' : 'Connect Google Calendar & Tasks')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      paddingTop: 14
+    }
+  }, /*#__PURE__*/React.createElement(SettingsTab, {
+    embedded: true,
+    historySide: historySide,
+    setHistorySide: setHistorySide,
+    dark: dark,
+    setDark: setDark,
+    fontScale: fontScale,
+    setFontScale: setFontScale,
+    navItems: navItems,
+    moreMenuItems: moreMenuItems,
+    onReorderNav: onReorderNav,
+    onReorderMore: onReorderMore,
+    onMoveToMore: onMoveToMore,
+    onMoveToNav: onMoveToNav
+  }))));
+}
+
+// ─── Set-status sheet ────────────────────────────────────────────
+function StatusModal({
+  dark,
+  initialText,
+  initialEmoji,
+  onSave,
+  onClose
+}) {
+  const J = "'Jost', sans-serif";
+  const [text, setText] = useState(initialText || '');
+  const [emoji, setEmoji] = useState(initialEmoji || '');
+  const ink = dark ? '#fff' : '#001A4A';
+  const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+  const bord = dark ? '#152545' : '#E4DFD4';
+  const accent = dark ? '#7A9AFF' : '#2A4FA4';
+  const SUGGEST = [{
+    e: '📅',
+    t: 'In a meeting'
+  }, {
+    e: '🍔',
+    t: 'Out at lunch'
+  }, {
+    e: '🚌',
+    t: 'Commuting'
+  }, {
+    e: '🏡',
+    t: 'Working remotely'
+  }, {
+    e: '🤒',
+    t: 'Out sick'
+  }, {
+    e: '🏖️',
+    t: 'On vacation'
+  }];
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 80,
+      background: 'rgba(0,0,0,0.5)'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      left: 0,
+      right: 0,
+      bottom: 0,
+      zIndex: 81,
+      maxHeight: '88%',
+      background: dark ? '#0A1730' : '#FFFFFF',
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '14px 16px'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      fontFamily: J,
+      fontSize: 15,
+      color: accent
+    }
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onSave(text.trim(), emoji),
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      fontFamily: J,
+      fontSize: 15,
+      fontWeight: 600,
+      color: accent
+    }
+  }, "Done")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '0 16px 24px',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 22,
+      fontWeight: 600,
+      color: ink,
+      marginBottom: 6
+    }
+  }, "Set your status"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 13,
+      color: sub,
+      lineHeight: 1.5,
+      marginBottom: 16
+    }
+  }, "Let your team know what you're up to."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      border: `1px solid ${bord}`,
+      borderRadius: 12,
+      padding: '4px 8px 4px 4px',
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: emoji,
+    onChange: e => setEmoji(e.target.value.slice(0, 4)),
+    placeholder: "\uD83D\uDE42",
+    style: {
+      width: 44,
+      height: 40,
+      textAlign: 'center',
+      fontSize: 20,
+      border: 'none',
+      outline: 'none',
+      background: 'transparent'
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: text,
+    onChange: e => setText(e.target.value),
+    placeholder: "What's your status?",
+    style: {
+      flex: 1,
+      minWidth: 0,
+      border: 'none',
+      outline: 'none',
+      background: 'transparent',
+      fontFamily: J,
+      fontSize: 15,
+      color: ink
+    }
+  }), (text || emoji) && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setText('');
+      setEmoji('');
+    },
+    "aria-label": "Clear",
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontSize: 18,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      color: sub,
+      letterSpacing: '0.04em',
+      marginBottom: 4
+    }
+  }, "Suggestions"), SUGGEST.map((s, i) => /*#__PURE__*/React.createElement("button", {
+    key: i,
+    onClick: () => {
+      setEmoji(s.e);
+      setText(s.t);
+    },
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 13,
+      width: '100%',
+      textAlign: 'left',
+      padding: '12px 4px',
+      background: 'none',
+      border: 'none',
+      borderTop: i ? `1px solid ${dark ? '#152545' : '#F0EBE3'}` : 'none',
+      cursor: 'pointer',
+      fontFamily: J,
+      fontSize: 15,
+      color: ink
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 20,
+      width: 24,
+      textAlign: 'center'
+    }
+  }, s.e), s.t)))));
+}
+
+// ─── Deals Tab ───────────────────────────────────────────────────
+function DealsTab() {
+  const J = "'Jost', sans-serif";
+  const [openStages, setOpenStages] = useState({});
+  const toggleStage = id => setOpenStages(s => ({
+    ...s,
+    [id]: !s[id]
+  }));
+  const STAGES = [{
+    id: 'new',
+    label: 'New Referrals',
+    dot: '#16A34A',
+    bg: '#DCFCE7',
+    text: '#166534',
+    border: '#86EFAC'
+  }, {
+    id: 'standby',
+    label: 'Standby (90-120d)',
+    dot: '#2563EB',
+    bg: '#DBEAFE',
+    text: '#1D4ED8',
+    border: '#93C5FD'
+  }, {
+    id: 'prehot',
+    label: 'Pre-Hot Zone (30-90d)',
+    dot: '#D97706',
+    bg: '#FEF3C7',
+    text: '#B45309',
+    border: '#FCD34D'
+  }, {
+    id: 'hot',
+    label: 'Hot Zone (<30d)',
+    dot: '#DC2626',
+    bg: '#FEE2E2',
+    text: '#B91C1C',
+    border: '#FCA5A5'
+  }, {
+    id: 'contract',
+    label: 'Under Contract',
+    dot: '#9333EA',
+    bg: '#F3E8FF',
+    text: '#7E22CE',
+    border: '#D8B4FE'
+  }, {
+    id: 'closed',
+    label: 'Closed Contract',
+    dot: '#0D9488',
+    bg: '#CCFBF1',
+    text: '#0F766E',
+    border: '#99F6E4'
+  }];
+  const TYPE_COLORS = {
+    'Commercial Buyer': {
+      bg: '#DBEAFE',
+      text: '#1D4ED8'
+    },
+    'Residential Buyer': {
+      bg: '#DCFCE7',
+      text: '#166534'
+    },
+    'Residential Seller': {
+      bg: '#FEF3C7',
+      text: '#B45309'
+    },
+    'Commercial Seller': {
+      bg: '#F3E8FF',
+      text: '#7E22CE'
+    }
+  };
+  const fmtPrice = n => '$' + n.toLocaleString();
+  const DEALS = {
+    new: [{
+      name: 'Daniel Brown',
+      type: 'Commercial Buyer',
+      price: 1750000,
+      agents: ['Brett Silverman']
+    }, {
+      name: 'Mason Miller',
+      type: 'Commercial Buyer',
+      price: 1200000,
+      agents: ['Brett Silverman']
+    }],
+    standby: [{
+      name: 'Kristen Cutshall',
+      type: 'Commercial Buyer',
+      price: 1200000,
+      agents: ['Brett Silverman']
+    }, {
+      name: 'Matt Sladek',
+      type: 'Commercial Buyer',
+      price: 725000,
+      agents: ['Brett Silverman']
+    }, {
+      name: 'Neal Gilbreath',
+      type: 'Residential Buyer',
+      price: 500000,
+      agents: ['Kyle Baird', 'Alexandra Machado']
+    }],
+    prehot: [{
+      name: 'Shivam Gautam & Supriya Singh',
+      type: 'Commercial Buyer',
+      price: 2000000,
+      agents: ['Brett Silverman']
+    }, {
+      name: 'Frank Barbella',
+      type: null,
+      price: 2000000,
+      agents: ['Tarek Morshed']
+    }, {
+      name: 'Fatima & Kamaal Ahmed',
+      type: 'Residential Seller',
+      price: 600000,
+      agents: ['Kyle Baird', 'Alexandra Machado']
+    }, {
+      name: 'Stuart Frazier',
+      type: 'Residential Buyer',
+      price: 850000,
+      agents: ['Kyle Baird', 'Alexandra Machado']
+    }],
+    hot: [{
+      name: 'Randy Mire',
+      type: 'Commercial Buyer',
+      price: 10000000,
+      agents: ['Brett Silverman']
+    }, {
+      name: 'Omar Ghani & Lina Pervez',
+      type: 'Residential Seller',
+      price: 620000,
+      agents: ['Brad Baker', 'Alexandra Machado']
+    }, {
+      name: 'Maricruz Acuna — 13400 Immanuel Rd',
+      type: 'Commercial Seller',
+      price: 3150000,
+      agents: ['Brett Silverman', 'Alexandra Machado']
+    }],
+    contract: [{
+      name: 'Shahid & Sharon Ullah',
+      type: 'Residential Seller',
+      price: 575000,
+      agents: ['Brad Baker', 'Alexandra Machado'],
+      date: '2026-03-31',
+      dateStatus: 'overdue'
+    }, {
+      name: 'Ernie Rogers — 21511 W State Hwy 7',
+      type: 'Commercial Buyer',
+      price: 1050000,
+      agents: ['Brett Silverman']
+    }, {
+      name: 'Darrell Suriff & Maricruz Acuna',
+      type: 'Commercial Seller',
+      price: 2433300,
+      agents: ['Brett Silverman']
+    }],
+    closed: [{
+      name: 'James Roberts — 360 Nueces #2807',
+      type: 'Residential Seller',
+      price: 470000,
+      agents: ['Cassandra Clemons', 'Alexandra Machado'],
+      date: 'Jun 17, 2026',
+      dateStatus: 'closed'
+    }, {
+      name: 'Paola & Anthony Knight — 271 Egret Ln',
+      type: 'Residential Buyer',
+      price: 1100000,
+      agents: ['Cassandra Clemons', 'Alexandra Machado'],
+      date: 'Jun 9, 2026',
+      dateStatus: 'closed'
+    }, {
+      name: 'Steven & Jennifer Smith — 5305 Fairmount',
+      type: 'Residential Seller',
+      price: 690000,
+      agents: ['Kyle Baird', 'Alexandra Machado'],
+      date: 'Jun 8, 2026',
+      dateStatus: 'closed'
+    }]
+  };
+  const TOTALS = {
+    new: 2950000,
+    standby: 2425000,
+    prehot: 5450000,
+    hot: 13770000,
+    contract: 4058300,
+    closed: 2260000
+  };
+  const Badge = ({
+    type
+  }) => {
+    if (!type) return null;
+    const tc = TYPE_COLORS[type] || {};
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        borderRadius: 20,
+        padding: '3px 9px',
+        background: tc.bg,
+        color: tc.text,
+        fontFamily: J,
+        fontSize: 9,
+        fontWeight: 600
+      }
+    }, type);
+  };
+  const BadgeSm = ({
+    type
+  }) => {
+    if (!type) return null;
+    const tc = TYPE_COLORS[type] || {};
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        borderRadius: 14,
+        padding: '2px 7px',
+        background: tc.bg,
+        color: tc.text,
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 600
+      }
+    }, type);
+  };
+  const DateLine = ({
+    date,
+    dateStatus,
+    mobile
+  }) => {
+    if (!date) return null;
+    const fs = mobile ? 10 : 9;
+    if (dateStatus === 'overdue') return /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: fs,
+        fontWeight: 500,
+        color: '#DC2626',
+        marginTop: 4
+      }
+    }, "\u23F0 ", date);
+    if (dateStatus === 'closed') return /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: fs,
+        fontWeight: 500,
+        color: '#0F766E',
+        marginTop: 4
+      }
+    }, "\u2713 ", date);
+    return null;
+  };
+
+  /* ── Mobile card ── */
+  const MobileCard = ({
+    deal
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#fff',
+      border: '1px solid #EDE7DC',
+      borderRadius: 10,
+      padding: '12px 14px',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      marginBottom: 5
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      fontWeight: 600,
+      color: '#001A4A',
+      flex: 1,
+      marginRight: 8,
+      lineHeight: 1.3
+    }
+  }, deal.name), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      color: '#001A4A',
+      flexShrink: 0,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtPrice(deal.price))), deal.type && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement(Badge, {
+    type: deal.type
+  })), deal.agents.map((a, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      fontFamily: J,
+      fontSize: 10,
+      color: '#6B6B6B',
+      lineHeight: 1.5
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-user",
+    style: {
+      fontSize: 11,
+      color: '#AD832F',
+      flexShrink: 0
+    }
+  }), a)), /*#__PURE__*/React.createElement(DateLine, {
+    date: deal.date,
+    dateStatus: deal.dateStatus,
+    mobile: true
+  }));
+
+  /* ── Kanban card ── */
+  const KanbanCard = ({
+    deal
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#fff',
+      border: '1px solid #EDE7DC',
+      borderRadius: 9,
+      padding: '10px 12px',
+      cursor: 'pointer',
+      transition: 'all 0.15s'
+    },
+    onMouseEnter: e => {
+      e.currentTarget.style.boxShadow = '0 2px 10px rgba(0,26,74,0.1)';
+      e.currentTarget.style.transform = 'translateY(-1px)';
+    },
+    onMouseLeave: e => {
+      e.currentTarget.style.boxShadow = '';
+      e.currentTarget.style.transform = '';
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 600,
+      color: '#001A4A',
+      lineHeight: 1.3,
+      marginBottom: 5
+    }
+  }, deal.name), deal.type && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement(BadgeSm, {
+    type: deal.type
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      color: '#001A4A',
+      marginBottom: 5
+    }
+  }, fmtPrice(deal.price)), deal.agents.map((a, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      fontFamily: J,
+      fontSize: 9,
+      color: '#6B6B6B',
+      lineHeight: 1.4
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-user",
+    style: {
+      fontSize: 10,
+      color: '#AD832F',
+      flexShrink: 0
+    }
+  }), a)), /*#__PURE__*/React.createElement(DateLine, {
+    date: deal.date,
+    dateStatus: deal.dateStatus,
+    mobile: false
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      overflowY: 'auto',
+      background: '#FCFBF8',
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#9B1C1C',
+      padding: '9px 16px',
+      textAlign: 'center',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      letterSpacing: '0.14em',
+      textTransform: 'uppercase',
+      color: '#fff'
+    }
+  }, "Coming Soon \xB7 Q3 2026")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '14px 16px 12px',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 18,
+      fontWeight: 600,
+      color: '#001A4A'
+    }
+  }, "Deals"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: '#B4B2A9',
+      marginTop: 2
+    }
+  }, "18 active \xB7 $30,913,300 pipeline")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      border: '1px solid #E4DFD4',
+      background: '#fff',
+      borderRadius: 8,
+      padding: '7px 12px',
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 500,
+      color: '#6B6B6B',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-adjustments-horizontal",
+    style: {
+      fontSize: 13,
+      color: '#AD832F'
+    }
+  }), "Filter"), /*#__PURE__*/React.createElement("button", {
+    className: "deals-desktop-only",
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      border: '1px solid #E4DFD4',
+      background: '#fff',
+      borderRadius: 8,
+      padding: '7px 12px',
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 500,
+      color: '#6B6B6B',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-search",
+    style: {
+      fontSize: 13,
+      color: '#AD832F'
+    }
+  }), "Search"), /*#__PURE__*/React.createElement("button", {
+    className: "deals-desktop-only",
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      border: '1px solid #001A4A',
+      background: '#001A4A',
+      borderRadius: 8,
+      padding: '7px 12px',
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 500,
+      color: '#fff',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 13,
+      color: '#C9A45A'
+    }
+  }), "New Deal"), /*#__PURE__*/React.createElement("button", {
+    className: "deals-mobile-only",
+    style: {
+      width: 30,
+      height: 30,
+      borderRadius: 8,
+      background: '#F3EBDA',
+      border: 'none',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 15,
+      color: '#AD832F'
+    }
+  })))), /*#__PURE__*/React.createElement("div", {
+    className: "deals-mobile-view",
+    style: {
+      padding: '0 14px 20px',
+      flexDirection: 'column',
+      gap: 8
+    }
+  }, STAGES.map(st => {
+    const deals = DEALS[st.id] || [];
+    const isOpen = !!openStages[st.id];
+    return /*#__PURE__*/React.createElement("div", {
+      key: st.id
+    }, /*#__PURE__*/React.createElement("div", {
+      onClick: () => toggleStage(st.id),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '10px 13px',
+        borderRadius: 11,
+        border: `1px solid ${st.border}`,
+        background: st.bg,
+        cursor: 'pointer'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 9,
+        height: 9,
+        borderRadius: '50%',
+        background: st.dot,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 12,
+        fontWeight: 600,
+        color: st.text,
+        flex: 1
+      }
+    }, st.label), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 600,
+        padding: '2px 8px',
+        borderRadius: 8,
+        background: 'rgba(255,255,255,0.6)',
+        color: st.text
+      }
+    }, deals.length), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 11,
+        fontWeight: 600,
+        color: st.text
+      }
+    }, fmtPrice(TOTALS[st.id])), /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-chevron-down",
+      style: {
+        fontSize: 15,
+        color: 'rgba(0,0,0,0.3)',
+        transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+        transition: 'transform 0.2s'
+      }
+    })), isOpen && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        marginTop: 6
+      }
+    }, deals.map((d, i) => /*#__PURE__*/React.createElement(MobileCard, {
+      key: i,
+      deal: d
+    }))));
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "deals-kanban-view",
+    style: {
+      gap: 12,
+      overflowX: 'auto',
+      padding: '14px 16px 20px',
+      minHeight: 560,
+      alignItems: 'flex-start'
+    }
+  }, STAGES.map(st => {
+    const deals = DEALS[st.id] || [];
+    return /*#__PURE__*/React.createElement("div", {
+      key: st.id,
+      style: {
+        flex: '0 0 200px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        borderRadius: 10,
+        padding: '9px 12px',
+        border: `1px solid ${st.border}`,
+        background: st.bg
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        marginBottom: 3
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 8,
+        height: 8,
+        borderRadius: '50%',
+        background: st.dot,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: 600,
+        color: st.text,
+        flex: 1,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, st.label), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 9,
+        fontWeight: 600,
+        padding: '1px 7px',
+        borderRadius: 7,
+        background: 'rgba(255,255,255,0.6)',
+        color: st.text,
+        flexShrink: 0
+      }
+    }, deals.length)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 11,
+        fontWeight: 600,
+        color: '#001A4A'
+      }
+    }, fmtPrice(TOTALS[st.id]))), deals.map((d, i) => /*#__PURE__*/React.createElement(KanbanCard, {
+      key: i,
+      deal: d
+    })));
+  })));
+}
+
+// ─── Calendar Popover ────────────────────────────────────────────
+// ─── Chat History Drawer ─────────────────────────────────────────
+// Short timestamp like "11:42p", "Yest", "Mon", "Jun 3".
+function shortTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso),
+    now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    let h = d.getHours();
+    const m = d.getMinutes();
+    const ap = h >= 12 ? 'p' : 'a';
+    h = h % 12 || 12;
+    return h + ':' + String(m).padStart(2, '0') + ap;
+  }
+  const yest = new Date(now);
+  yest.setDate(now.getDate() - 1);
+  if (d.toDateString() === yest.toDateString()) return 'Yest';
+  if (Math.floor((now - d) / 86400000) < 7) return d.toLocaleDateString('en-US', {
+    weekday: 'short'
+  });
+  return d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric'
+  });
+}
+
+// In-flow chat history sidebar — filter/sort, projects, pinned + date groups.
+function HistoryPanel({
+  dark,
+  conversations,
+  projects,
+  currentConvId,
+  wide,
+  onSelect,
+  onNewChat,
+  onPin,
+  onArchive,
+  onRename,
+  onDelete,
+  onShare,
+  onOpenMemory,
+  onNewProject,
+  onOpenProject,
+  onMoveToProject
+}) {
+  const [menuId, setMenuId] = useState(null);
+  const [movingId, setMovingId] = useState(null);
+  const [projMenuId, setProjMenuId] = useState(null);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [sortBy, setSortBy] = useState('recent');
+  const [projectFilter, setProjectFilter] = useState(null);
+  // Clear the filter if its project no longer exists (e.g. it was deleted) — otherwise
+  // the list filters to a phantom project with no way back to the regular chats.
+  useEffect(() => {
+    if (projectFilter && !(projects || []).some(p => p.id === projectFilter)) setProjectFilter(null);
+  }, [projects, projectFilter]);
+  const J = "'Jost', sans-serif";
+  const titleCol = '#001A4A',
+    previewCol = '#B4B2A9',
+    pinCol = '#AD832F',
+    panelBg = '#fff',
+    menuBord = '#EAE3D6';
+  const iconBtn = wide ? 26 : 28;
+  const filterActive = sortBy !== 'recent';
+  const all = (conversations || []).filter(c => !c.archived);
+  let pool = all;
+  if (projectFilter) pool = pool.filter(c => c.projectId === projectFilter);
+  const sortFn = sortBy === 'alpha' ? (a, b) => (a.title || '').localeCompare(b.title || '') : (a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+  const pinnedList = pool.filter(c => c.pinned).sort(sortFn);
+  const rest = pool.filter(c => !c.pinned).sort(sortFn);
+  const groupOf = c => {
+    const d = new Date(c.updatedAt || 0),
+      n = new Date();
+    if (d.toDateString() === n.toDateString()) return 'Today';
+    if ((n - d) / 86400000 < 7) return 'This week';
+    return 'Earlier';
+  };
+  const groups = sortBy === 'alpha' ? [['All chats', rest]] : ['Today', 'This week', 'Earlier'].map(g => [g, rest.filter(c => groupOf(c) === g)]).filter(x => x[1].length);
+  const checkbox = on => /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 16,
+      height: 16,
+      borderRadius: 4,
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      border: `1.5px solid ${on ? '#001A4A' : '#C4B9A8'}`,
+      background: on ? '#001A4A' : 'transparent'
+    }
+  }, on && /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-check",
+    style: {
+      fontSize: 10,
+      color: '#fff'
+    }
+  }));
+  const sectionLabel = (txt, right) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      padding: '12px 14px 4px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 500,
+      color: '#9A958A',
+      flex: 1
+    }
+  }, txt), right);
+  const chatRow = c => {
+    const active = c.id === currentConvId;
+    const open = menuId === c.id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.id,
+      className: "hp-row",
+      onClick: () => onSelect(c.id),
+      onContextMenu: e => {
+        e.preventDefault();
+        setMenuId(open ? null : c.id);
+      },
+      style: {
+        position: 'relative',
+        padding: '9px 14px',
+        borderRadius: 8,
+        margin: '1px 6px',
+        cursor: 'pointer',
+        background: active ? '#E8E3DB' : undefined,
+        transition: 'background 0.1s'
+      }
+    }, c.pinned && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 3,
+        marginBottom: 1
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-pin-filled",
+      style: {
+        fontSize: 9,
+        color: '#AD832F'
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 600,
+        color: '#AD832F'
+      }
+    }, "Pinned")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: J,
+        fontSize: 13,
+        fontWeight: 400,
+        color: '#001A4A',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        lineHeight: 1.3,
+        paddingRight: 16
+      }
+    }, c.title), /*#__PURE__*/React.createElement("button", {
+      className: "hp-dots",
+      onClick: e => {
+        e.stopPropagation();
+        setMenuId(open ? null : c.id);
+      },
+      style: {
+        position: 'absolute',
+        right: 10,
+        top: '50%',
+        transform: 'translateY(-50%)',
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        padding: 0,
+        color: '#D4D0CC',
+        fontSize: 12,
+        display: 'flex',
+        opacity: active ? 0.5 : undefined
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-dots"
+    })), open && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      onClick: e => {
+        e.stopPropagation();
+        setMenuId(null);
+      },
+      style: {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 120
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        top: '72%',
+        right: 12,
+        zIndex: 121,
+        minWidth: 150,
+        background: panelBg,
+        border: `1px solid ${menuBord}`,
+        borderRadius: 10,
+        boxShadow: '0 8px 28px rgba(0,0,0,0.18)',
+        padding: 5
+      }
+    }, [c.pinned ? {
+      t: 'Unpin',
+      i: 'ti-pinned-off',
+      fn: () => onPin(c.id, false)
+    } : {
+      t: 'Pin',
+      i: 'ti-pin',
+      fn: () => onPin(c.id, true)
+    }, {
+      t: 'Rename',
+      i: 'ti-pencil',
+      fn: () => onRename(c.id)
+    }, {
+      t: 'Move to project',
+      i: 'ti-folder',
+      fn: () => setMovingId(c.id)
+    }, {
+      t: 'Share',
+      i: 'ti-share',
+      fn: () => onShare && onShare(c.id)
+    }, {
+      t: 'Archive',
+      i: 'ti-archive',
+      fn: () => onArchive(c.id, true)
+    }, {
+      t: 'Delete',
+      i: 'ti-trash',
+      fn: () => onDelete(c.id),
+      danger: true
+    }].map(a => /*#__PURE__*/React.createElement("button", {
+      key: a.t,
+      onClick: e => {
+        e.stopPropagation();
+        setMenuId(null);
+        a.fn();
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 9,
+        width: '100%',
+        textAlign: 'left',
+        padding: '9px 10px',
+        borderRadius: 7,
+        border: 'none',
+        cursor: 'pointer',
+        background: 'none',
+        color: a.danger ? C.red : titleCol,
+        fontFamily: J,
+        fontSize: 11
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${a.i}`,
+      style: {
+        fontSize: 14
+      }
+    }), a.t)))));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: '#F5F0E8'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      padding: '11px 14px 9px',
+      borderBottom: '0.5px solid #EDE7DC',
+      background: '#F5F0E8',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 16,
+      fontWeight: 600,
+      color: '#001A4A',
+      flex: 1
+    }
+  }, "AI Chat"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onOpenMemory,
+    title: "Assistant memory",
+    style: {
+      width: iconBtn,
+      height: iconBtn,
+      borderRadius: 7,
+      border: '0.5px solid #E4DFD4',
+      background: '#FCFBF8',
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: '#6B6B6B'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-settings",
+    style: {
+      fontSize: 13
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFilterOpen(o => !o),
+    title: "Sort & filter",
+    style: {
+      width: iconBtn,
+      height: iconBtn,
+      borderRadius: 7,
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      border: `0.5px solid ${filterActive ? '#E8D9BC' : '#E4DFD4'}`,
+      background: filterActive ? '#F3EBDA' : '#FCFBF8',
+      color: filterActive ? '#AD832F' : '#6B6B6B'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-adjustments-horizontal",
+    style: {
+      fontSize: 13
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: onNewChat,
+    title: "New chat",
+    style: {
+      width: iconBtn,
+      height: iconBtn,
+      borderRadius: 7,
+      border: '0.5px solid #E8D9BC',
+      background: '#F3EBDA',
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: '#AD832F'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-edit",
+    style: {
+      fontSize: 13
+    }
+  })))), filterOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setFilterOpen(false),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 18
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative',
+      zIndex: 19,
+      background: '#fff',
+      border: '0.5px solid #EDE7DC',
+      borderRadius: 10,
+      margin: '6px 10px 0',
+      boxShadow: '0 4px 14px rgba(0,26,74,.10)',
+      overflow: 'hidden',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '8px 12px 5px',
+      fontFamily: J,
+      fontSize: 8,
+      fontWeight: 700,
+      letterSpacing: '0.14em',
+      textTransform: 'uppercase',
+      color: '#AD832F',
+      borderBottom: '0.5px solid #F0EBE3'
+    }
+  }, "Sort by"), [{
+    v: 'recent',
+    t: 'Most recent first'
+  }, {
+    v: 'alpha',
+    t: 'Alphabetical'
+  }].map((o, i, arr) => /*#__PURE__*/React.createElement("div", {
+    key: o.v,
+    className: "hp-opt",
+    onClick: () => setSortBy(o.v),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '9px 12px',
+      borderBottom: i === arr.length - 1 ? 'none' : '0.5px solid #F5F2EE',
+      cursor: 'pointer'
+    }
+  }, checkbox(sortBy === o.v), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 500,
+      color: '#001A4A',
+      flex: 1
+    }
+  }, o.t))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      paddingBottom: 8,
+      background: '#F5F0E8'
+    }
+  }, sectionLabel('Projects', /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      onNewProject();
+    },
+    className: "hp-plus",
+    title: "New project",
+    style: {
+      width: 20,
+      height: 20,
+      borderRadius: 5,
+      border: 'none',
+      background: 'transparent',
+      cursor: 'pointer',
+      color: '#C4BFBA',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 13
+    }
+  }))), (projects || []).map(p => {
+    const cnt = all.filter(c => c.projectId === p.id).length;
+    const sel = projectFilter === p.id;
+    const pm = projMenuId === p.id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: p.id,
+      className: "hp-row",
+      onClick: () => setProjectFilter(sel ? null : p.id),
+      onContextMenu: e => {
+        e.preventDefault();
+        setProjMenuId(pm ? null : p.id);
+      },
+      style: {
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 14px',
+        borderRadius: 8,
+        margin: '1px 6px',
+        cursor: 'pointer',
+        background: sel ? '#E8E3DB' : undefined,
+        transition: 'background 0.1s'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        fontFamily: J,
+        fontSize: 13,
+        fontWeight: 400,
+        color: '#001A4A',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, p.name), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        color: '#C4BFBA',
+        flexShrink: 0,
+        marginRight: 2
+      }
+    }, cnt), /*#__PURE__*/React.createElement("button", {
+      className: "hp-dots",
+      onClick: e => {
+        e.stopPropagation();
+        setProjMenuId(pm ? null : p.id);
+      },
+      style: {
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        padding: 0,
+        color: '#D4D0CC',
+        fontSize: 12,
+        display: 'flex'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-dots"
+    })), pm && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      onClick: e => {
+        e.stopPropagation();
+        setProjMenuId(null);
+      },
+      style: {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 120
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        top: '80%',
+        right: 12,
+        zIndex: 121,
+        minWidth: 140,
+        background: panelBg,
+        border: `1px solid ${menuBord}`,
+        borderRadius: 10,
+        boxShadow: '0 8px 28px rgba(0,0,0,0.18)',
+        padding: 5
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: e => {
+        e.stopPropagation();
+        setProjMenuId(null);
+        onOpenProject(p.id);
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 9,
+        width: '100%',
+        textAlign: 'left',
+        padding: '9px 10px',
+        borderRadius: 7,
+        border: 'none',
+        cursor: 'pointer',
+        background: 'none',
+        color: titleCol,
+        fontFamily: J,
+        fontSize: 11
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-folder-open",
+      style: {
+        fontSize: 14
+      }
+    }), "Open / edit"))));
+  }), (projects || []).length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '2px 14px 6px',
+      fontFamily: J,
+      fontSize: 10,
+      color: previewCol,
+      lineHeight: 1.5
+    }
+  }, "No projects yet. Tap \uFF0B to group chats with their own instructions & files."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 0.5,
+      background: '#E4DFD4',
+      margin: '6px 14px'
+    }
+  }), pinnedList.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, sectionLabel('Pinned'), pinnedList.map(chatRow)), groups.map(([label, arr]) => /*#__PURE__*/React.createElement(React.Fragment, {
+    key: label
+  }, sectionLabel(label), arr.map(chatRow))), pool.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: '#B4B2A9',
+      fontSize: 11,
+      padding: '24px 16px',
+      fontFamily: J
+    }
+  }, projectFilter ? /*#__PURE__*/React.createElement(React.Fragment, null, "No chats in this project yet.", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
+    onClick: () => setProjectFilter(null),
+    style: {
+      color: '#AD832F',
+      fontWeight: 500,
+      cursor: 'pointer'
+    }
+  }, "Show all chats")) : 'No conversations yet.')), movingId && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setMovingId(null),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 130,
+      background: 'rgba(0,13,38,0.3)'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      top: '50%',
+      left: '50%',
+      transform: 'translate(-50%,-50%)',
+      zIndex: 131,
+      width: 'min(280px, 86vw)',
+      maxHeight: '70vh',
+      overflowY: 'auto',
+      background: panelBg,
+      border: `1px solid ${menuBord}`,
+      borderRadius: 12,
+      boxShadow: '0 10px 40px rgba(0,0,0,0.3)',
+      padding: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      letterSpacing: '0.12em',
+      fontWeight: 700,
+      color: previewCol,
+      padding: '6px 8px 8px'
+    }
+  }, "MOVE TO PROJECT"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onMoveToProject(movingId, null);
+      setMovingId(null);
+    },
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      width: '100%',
+      textAlign: 'left',
+      padding: '9px 10px',
+      borderRadius: 8,
+      border: 'none',
+      cursor: 'pointer',
+      background: 'none',
+      color: titleCol,
+      fontFamily: J,
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-circle-off",
+    style: {
+      fontSize: 14
+    }
+  }), "No project"), (projects || []).map(p => /*#__PURE__*/React.createElement("button", {
+    key: p.id,
+    onClick: () => {
+      onMoveToProject(movingId, p.id);
+      setMovingId(null);
+    },
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      width: '100%',
+      textAlign: 'left',
+      padding: '9px 10px',
+      borderRadius: 8,
+      border: 'none',
+      cursor: 'pointer',
+      background: 'none',
+      color: titleCol,
+      fontFamily: J,
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-folder",
+    style: {
+      fontSize: 14,
+      color: pinCol
+    }
+  }), p.name)), (projects || []).length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: previewCol,
+      padding: '4px 8px 8px'
+    }
+  }, "No projects yet \u2014 create one with \uFF0B."))));
+}
+function HistoryDrawer({
+  dark,
+  side,
+  conversations,
+  currentConvId,
+  onClose,
+  onSelect,
+  onNewChat,
+  onPin,
+  onArchive,
+  onRename,
+  onDelete
+}) {
+  const [menuId, setMenuId] = useState(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const panelBg = dark ? '#0A1730' : '#FFFFFF';
+  const textCol = dark ? '#FFFFFF' : C.textPrimary;
+  const subCol = dark ? 'rgba(255,255,255,0.5)' : C.textSecondary;
+  const borderCol = dark ? '#152545' : C.border;
+  const hoverBg = dark ? 'rgba(255,255,255,0.06)' : '#F3EBDA';
+  const active = conversations.filter(c => !c.archived);
+  const pinned = active.filter(c => c.pinned);
+  const recent = active.filter(c => !c.pinned);
+  const archived = conversations.filter(c => c.archived);
+  const reqShort = k => (WORK_REQUESTS.find(w => w.key === k) || {}).short;
+  const sectionLabel = txt => /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.62rem',
+      fontWeight: 600,
+      color: subCol,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      padding: '12px 14px 6px',
+      fontFamily: C.fontSans
+    }
+  }, txt);
+  const row = c => {
+    const isCur = c.id === currentConvId;
+    const open = menuId === c.id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.id,
+      style: {
+        position: 'relative',
+        padding: '0 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      onClick: () => onSelect(c.id),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '10px 10px',
+        borderRadius: 10,
+        cursor: 'pointer',
+        background: isCur ? hoverBg : 'transparent'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${c.type === 'work' ? 'ti-briefcase' : 'ti-sparkles'}`,
+      style: {
+        fontSize: 16,
+        flexShrink: 0,
+        color: c.type === 'work' ? C.gold : dark ? C.goldSoft : C.navy
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.86rem',
+        color: textCol,
+        fontFamily: C.fontSans,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, c.title), c.type === 'work' && reqShort(c.workRequest) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.62rem',
+        color: C.gold,
+        letterSpacing: '0.06em',
+        textTransform: 'uppercase',
+        marginTop: 1
+      }
+    }, reqShort(c.workRequest))), c.pinned && /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-pin-filled",
+      style: {
+        fontSize: 13,
+        color: subCol,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("button", {
+      onClick: e => {
+        e.stopPropagation();
+        setMenuId(open ? null : c.id);
+      },
+      style: {
+        flexShrink: 0,
+        background: 'none',
+        border: 'none',
+        cursor: 'pointer',
+        color: subCol,
+        fontSize: 16,
+        padding: 2
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-dots"
+    }))), open && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      onClick: () => setMenuId(null),
+      style: {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 320
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        top: '80%',
+        right: 12,
+        zIndex: 321,
+        minWidth: 150,
+        background: panelBg,
+        border: `1px solid ${borderCol}`,
+        borderRadius: 10,
+        boxShadow: '0 8px 28px rgba(0,0,0,0.28)',
+        padding: 5
+      }
+    }, [c.archived ? {
+      t: 'Restore',
+      i: 'ti-refresh',
+      fn: () => onArchive(c.id, false)
+    } : c.pinned ? {
+      t: 'Unpin',
+      i: 'ti-pinned-off',
+      fn: () => onPin(c.id, false)
+    } : {
+      t: 'Pin',
+      i: 'ti-pin',
+      fn: () => onPin(c.id, true)
+    }, !c.archived && {
+      t: 'Rename',
+      i: 'ti-pencil',
+      fn: () => onRename(c.id)
+    }, !c.archived && {
+      t: 'Archive',
+      i: 'ti-archive',
+      fn: () => onArchive(c.id, true)
+    }, {
+      t: 'Delete',
+      i: 'ti-trash',
+      fn: () => onDelete(c.id),
+      danger: true
+    }].filter(Boolean).map(a => /*#__PURE__*/React.createElement("button", {
+      key: a.t,
+      onClick: () => {
+        setMenuId(null);
+        a.fn();
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 9,
+        width: '100%',
+        textAlign: 'left',
+        padding: '9px 10px',
+        borderRadius: 7,
+        border: 'none',
+        cursor: 'pointer',
+        background: 'none',
+        color: a.danger ? C.red : textCol,
+        fontSize: '0.82rem',
+        fontFamily: C.fontSans
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: `ti ${a.i}`,
+      style: {
+        fontSize: 15
+      }
+    }), a.t)))));
+  };
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 300,
+      background: 'rgba(0,13,38,0.45)'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      top: 0,
+      bottom: 0,
+      [side]: 0,
+      zIndex: 301,
+      width: 'min(86vw, 320px)',
+      background: panelBg,
+      borderRight: side === 'left' ? `1px solid ${borderCol}` : 'none',
+      borderLeft: side === 'right' ? `1px solid ${borderCol}` : 'none',
+      display: 'flex',
+      flexDirection: 'column',
+      boxShadow: '0 0 40px rgba(0,0,0,0.3)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: 'calc(14px + env(safe-area-inset-top)) 14px 12px',
+      borderBottom: `1px solid ${borderCol}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '1rem',
+      fontWeight: 600,
+      color: textCol,
+      fontFamily: C.fontSans
+    }
+  }, "Chats"), /*#__PURE__*/React.createElement("button", {
+    onClick: onNewChat,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '7px 12px',
+      borderRadius: 9,
+      cursor: 'pointer',
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      border: 'none',
+      fontFamily: C.fontSans,
+      fontSize: '0.8rem',
+      fontWeight: 500
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 15
+    }
+  }), "New")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      padding: '4px 0 20px'
+    }
+  }, active.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      color: subCol,
+      fontSize: '0.8rem',
+      padding: '32px 16px'
+    }
+  }, "No conversations yet."), pinned.length > 0 && sectionLabel('Pinned'), pinned.map(row), recent.length > 0 && sectionLabel('Recent'), recent.map(row), archived.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowArchived(s => !s),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      width: '100%',
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: subCol,
+      fontSize: '0.62rem',
+      fontWeight: 600,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      padding: '16px 14px 6px',
+      fontFamily: C.fontSans
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ti-chevron-${showArchived ? 'down' : 'right'}`,
+    style: {
+      fontSize: 13
+    }
+  }), "Archived (", archived.length, ")"), showArchived && archived.map(row)))));
+}
+
+// ─── Root App ────────────────────────────────────────────────────
+// ── Hash routing: each tab / More-page gets a URL (#roadmap, #calls, …) so
+// the Back button, refresh, and shareable links work. GitHub-Pages-safe
+// (hash only, no server config). Overlays (calendar/tasks/profile) close on
+// Back but aren't deep-linked yet. parseRoute maps a hash → {tab, view}.
+const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
+// Every screen that lives under "More". This is what a #hash is checked
+// against on load, so a view missing from this list survives being opened
+// but silently falls back to AI Chat on refresh — ADD A NEW MORE SCREEN
+// HERE as well as to allMoreDefs, or reloading it dumps you on chat.
+const ROUTE_MORE = ['guide', 'drives', 'directory', 'timeoff', 'expsurvey', 'healthgoals', 'sffu', 'admin', 'app-masterplan'];
+function parseRoute(hash) {
+  const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
+  if (ROUTE_MORE.indexOf(h) !== -1) return {
+    tab: 'more',
+    view: h
+  };
+  if (ROUTE_TABS.indexOf(h) !== -1) return {
+    tab: h,
+    view: null
+  };
+  return {
+    tab: 'chat',
+    view: null
+  };
+}
+// Guide uses a real clean path (/guide or /guide/<slug>) instead of a #hash, so
+// links are shareable/bookmarkable. Returns a parseRoute-shaped result, or null
+// when the current path isn't a guide path (then hash routing applies as before).
+function parsePath() {
+  try {
+    const m = (location.pathname || '').match(/^\/guide(?:\/([a-z0-9-]+))?\/?$/i);
+    if (m) return {
+      tab: 'more',
+      view: 'guide',
+      slug: m[1] || null
+    };
+  } catch (e) {}
+  return null;
+}
+
+// The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
+// /tasks app. The top-bar icons open it in an iframe popout inside the content
+// area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
+const TASKS_POPOUT_VERSION = '20260813a'; // bump when tasks.html changes to bust the iframe/standalone-link cache
+function TaskFramePopover({
+  which,
+  zoneH,
+  onClose
+}) {
+  const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
+  useEffect(() => {
+    const f = () => setWide(window.innerWidth >= 769);
+    window.addEventListener('resize', f);
+    return () => window.removeEventListener('resize', f);
+  }, []);
+  const hash = which === 'decisions' ? '#decisions' : which === 'calendar' ? '#calendar' : '#tasks';
+  // Cache-buster: bump TASKS_POPOUT_VERSION whenever tasks.html changes so the iframe
+  // always loads the matching deploy instead of a stale cached copy.
+  const src = 'tasks.html?embed=1&v=' + TASKS_POPOUT_VERSION + hash;
+  const top = 'calc(60px + env(safe-area-inset-top))';
+  const panel = wide ? {
+    right: 0,
+    width: 'min(94vw, 760px)',
+    borderLeft: '1px solid #EDE7DC',
+    boxShadow: '-8px 0 32px rgba(0,26,74,0.14)'
+  } : {
+    left: 8,
+    right: 8,
+    borderRadius: '0 0 14px 14px'
+  };
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      top,
+      bottom: zoneH || 0,
+      left: 0,
+      right: 0,
+      background: 'rgba(0,26,74,0.20)',
+      zIndex: 9
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      top,
+      bottom: (zoneH || 0) + 10,
+      zIndex: 10,
+      background: '#fff',
+      overflow: 'hidden',
+      ...panel
+    }
+  }, /*#__PURE__*/React.createElement("iframe", {
+    src: src,
+    title: "Tasks",
+    style: {
+      width: '100%',
+      height: '100%',
+      border: 'none',
+      display: 'block'
+    }
+  })));
+}
+
+// Global assistant memory editor (applies to every AI chat).
+function GlobalMemoryModal({
+  dark,
+  initial,
+  onSave,
+  onClose
+}) {
+  const [text, setText] = useState(initial || '');
+  const [busy, setBusy] = useState(false);
+  const bg = dark ? '#0A1730' : '#fff',
+    bord = dark ? '#152545' : C.border;
+  const txt = dark ? '#fff' : C.navy,
+    sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const save = async () => {
+    setBusy(true);
+    try {
+      await onSave(text);
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 140,
+      background: 'rgba(0,26,74,0.42)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: 'min(560px, 95vw)',
+      maxHeight: '88vh',
+      overflowY: 'auto',
+      background: bg,
+      borderRadius: 16,
+      padding: '22px 20px',
+      boxShadow: '0 12px 40px rgba(0,26,74,0.22)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-brain",
+    style: {
+      fontSize: 18,
+      color: C.gold
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontDisplay,
+      fontStyle: 'italic',
+      fontSize: '1.4rem',
+      color: txt
+    }
+  }, "Assistant Memory")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 11,
+      color: sub,
+      marginBottom: 14,
+      lineHeight: 1.5
+    }
+  }, "Applied to ", /*#__PURE__*/React.createElement("b", null, "every"), " AI chat. Tell the assistant what to always keep in mind \u2014 your role, your team, preferences, recurring context."), /*#__PURE__*/React.createElement("textarea", {
+    autoFocus: true,
+    value: text,
+    onChange: e => setText(e.target.value),
+    placeholder: "e.g. I'm Symon, Operations Manager at The Morshed Group (real estate). Keep replies concise. Our agents are …",
+    style: {
+      width: '100%',
+      minHeight: 200,
+      resize: 'vertical',
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      padding: '12px 14px',
+      fontFamily: C.fontSans,
+      fontSize: 13,
+      lineHeight: 1.6,
+      color: txt,
+      background: dark ? '#06101F' : '#FCFBF8',
+      outline: 'none',
+      boxSizing: 'border-box'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'flex-end',
+      gap: 8,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 12,
+      fontWeight: 500,
+      color: sub,
+      background: 'none',
+      border: `1px solid ${bord}`,
+      borderRadius: 9,
+      padding: '9px 18px',
+      cursor: 'pointer'
+    }
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    onClick: save,
+    disabled: busy,
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 12,
+      fontWeight: 600,
+      color: '#fff',
+      background: dark ? C.gold : C.navy,
+      border: 'none',
+      borderRadius: 9,
+      padding: '9px 18px',
+      cursor: 'pointer'
+    }
+  }, busy ? 'Saving…' : 'Save memory'))));
+}
+
+// Project detail — name, instructions, memory, files (knowledge), and its chats.
+function ProjectModal({
+  dark,
+  project,
+  conversations,
+  onSaveFields,
+  onDelete,
+  onClose,
+  onOpenChat,
+  onNewChat,
+  onMutated
+}) {
+  const [name, setName] = useState(project.name);
+  const [instructions, setInstructions] = useState(project.instructions || '');
+  const [memory, setMemory] = useState(project.memory || '');
+  const [files, setFiles] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+  useEffect(() => {
+    ProjectDB.listFiles(project.id).then(setFiles);
+  }, [project.id]);
+  const bg = dark ? '#000D26' : C.bg,
+    card = dark ? '#0A1730' : '#fff',
+    bord = dark ? '#152545' : C.border;
+  const txt = dark ? '#fff' : C.navy,
+    sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const lbl = {
+    fontFamily: C.fontSans,
+    fontSize: '0.62rem',
+    color: sub,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
+    fontWeight: 600,
+    marginBottom: 6
+  };
+  const ta = {
+    width: '100%',
+    resize: 'vertical',
+    border: `1px solid ${bord}`,
+    borderRadius: 10,
+    padding: '10px 12px',
+    fontFamily: C.fontSans,
+    fontSize: 12.5,
+    lineHeight: 1.6,
+    color: txt,
+    background: card,
+    outline: 'none',
+    boxSizing: 'border-box'
+  };
+  const fmtSize = n => !n ? '' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+  const saveAll = async () => {
+    setBusy(true);
+    try {
+      await onSaveFields(project.id, {
+        name: name.trim() || 'Untitled project',
+        instructions,
+        memory
+      });
+      onMutated(project.id);
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+  const onFiles = async fl => {
+    const arr = Array.from(fl || []);
+    for (const f of arr) {
+      const type = f.type || '';
+      const isText = type.startsWith('text/') || /\.(txt|csv|md|json|log|tsv)$/i.test(f.name);
+      if (!isText) {
+        alert('"' + f.name + '" — only text files (txt, csv, md, json) can be added as project knowledge right now.');
+        continue;
+      }
+      if (f.size > 2 * 1024 * 1024) {
+        alert('"' + f.name + '" is over 2 MB and was skipped.');
+        continue;
+      }
+      try {
+        const content = await f.text();
+        await ProjectDB.addFile(project.id, {
+          name: f.name,
+          mimeType: type,
+          size: f.size,
+          textContent: content
+        });
+      } catch (e) {
+        alert('Could not add ' + f.name);
+      }
+    }
+    const fresh = await ProjectDB.listFiles(project.id);
+    setFiles(fresh);
+    onMutated(project.id);
+  };
+  const delFile = async id => {
+    try {
+      await ProjectDB.removeFile(id, project.id);
+      setFiles(f => (f || []).filter(x => x.id !== id));
+      onMutated(project.id);
+    } catch (e) {
+      alert('Could not remove file.');
+    }
+  };
+  const projChats = (conversations || []).filter(c => c.projectId === project.id && !c.archived);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 140,
+      background: bg,
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: 'calc(12px + env(safe-area-inset-top)) 16px 12px',
+      borderBottom: `1px solid ${bord}`,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: txt,
+      fontSize: 22,
+      display: 'flex',
+      alignItems: 'center',
+      padding: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-folder",
+    style: {
+      fontSize: 18,
+      color: C.gold,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontDisplay,
+      fontStyle: 'italic',
+      fontSize: '1.25rem',
+      color: txt,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, name || 'Project')), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (window.confirm('Delete project "' + (name || '') + '" and unlink its chats? This cannot be undone.')) onDelete(project.id);
+    },
+    title: "Delete project",
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: C.red,
+      fontSize: 18,
+      display: 'flex',
+      padding: 3
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-trash"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto',
+      padding: '16px',
+      maxWidth: 720,
+      width: '100%',
+      margin: '0 auto',
+      boxSizing: 'border-box'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Project name"), /*#__PURE__*/React.createElement("input", {
+    value: name,
+    onChange: e => setName(e.target.value),
+    placeholder: "Project name",
+    style: {
+      ...ta,
+      fontWeight: 600,
+      fontSize: 15,
+      marginBottom: 16
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Instructions"), /*#__PURE__*/React.createElement("textarea", {
+    value: instructions,
+    onChange: e => setInstructions(e.target.value),
+    placeholder: "How should the assistant behave in this project? e.g. You are helping with the 123 Main St listing. Always reference the seller's priorities.",
+    style: {
+      ...ta,
+      minHeight: 90,
+      marginBottom: 16
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Project memory"), /*#__PURE__*/React.createElement("textarea", {
+    value: memory,
+    onChange: e => setMemory(e.target.value),
+    placeholder: "Facts to remember within this project \u2014 key people, addresses, numbers, decisions.",
+    style: {
+      ...ta,
+      minHeight: 90,
+      marginBottom: 16
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Files (knowledge)"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => fileRef.current && fileRef.current.click(),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '5px 11px',
+      borderRadius: 18,
+      border: `1px solid ${bord}`,
+      cursor: 'pointer',
+      background: 'none',
+      color: dark ? C.goldSoft : C.gold,
+      fontFamily: C.fontSans,
+      fontSize: 11,
+      fontWeight: 600
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 13
+    }
+  }), "Add file"), /*#__PURE__*/React.createElement("input", {
+    ref: fileRef,
+    type: "file",
+    multiple: true,
+    accept: ".txt,.csv,.md,.json,.log,.tsv,text/*",
+    style: {
+      display: 'none'
+    },
+    onChange: e => {
+      onFiles(e.target.files);
+      e.target.value = '';
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 10,
+      color: sub,
+      marginBottom: 8
+    }
+  }, "Text files (txt, csv, md, json). Their contents become reference knowledge for this project's chats."), files === null ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 11,
+      color: sub,
+      padding: '4px 0 16px'
+    }
+  }, "Loading\u2026") : files.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 11.5,
+      color: sub,
+      padding: '4px 0 16px'
+    }
+  }, "No files yet.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 16
+    }
+  }, files.map(f => /*#__PURE__*/React.createElement("div", {
+    key: f.id,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      padding: '9px 11px',
+      border: `1px solid ${bord}`,
+      borderRadius: 9,
+      marginBottom: 7,
+      background: card
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-file-text",
+    style: {
+      fontSize: 16,
+      color: C.gold,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 12.5,
+      color: txt,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, f.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 10,
+      color: sub
+    }
+  }, fmtSize(f.size), f.size ? ' · ' : '', (f.textContent || '').length.toLocaleString(), " chars")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => delFile(f.id),
+    title: "Remove",
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontSize: 16,
+      display: 'flex',
+      padding: 2
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 8,
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Chats in this project"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onNewChat(project.id),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '5px 11px',
+      borderRadius: 18,
+      border: 'none',
+      cursor: 'pointer',
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      fontFamily: C.fontSans,
+      fontSize: 11,
+      fontWeight: 600
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 13
+    }
+  }), "New chat")), projChats.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 11.5,
+      color: sub,
+      padding: '2px 0 16px'
+    }
+  }, "No chats yet \u2014 start one and it'll use this project's instructions, memory, and files.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 16
+    }
+  }, projChats.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.id,
+    onClick: () => onOpenChat(c.id),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      padding: '9px 11px',
+      border: `1px solid ${bord}`,
+      borderRadius: 9,
+      marginBottom: 7,
+      background: card,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-sparkles",
+    style: {
+      fontSize: 15,
+      color: dark ? C.goldSoft : C.navy,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontFamily: C.fontSans,
+      fontSize: 12.5,
+      color: txt,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, c.title), /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-right",
+    style: {
+      fontSize: 14,
+      color: sub,
+      flexShrink: 0
+    }
+  }))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flexShrink: 0,
+      display: 'flex',
+      gap: 8,
+      padding: '12px 16px calc(12px + env(safe-area-inset-bottom))',
+      borderTop: `1px solid ${bord}`,
+      maxWidth: 720,
+      width: '100%',
+      margin: '0 auto',
+      boxSizing: 'border-box'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: saveAll,
+    disabled: busy,
+    style: {
+      flex: 1,
+      padding: 12,
+      background: dark ? C.gold : C.navy,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 12,
+      fontFamily: C.fontSans,
+      fontSize: '0.9rem',
+      fontWeight: 600,
+      cursor: 'pointer'
+    }
+  }, busy ? 'Saving…' : 'Save project')));
+}
+
+// Chat panel header (desktop split view) — open chat's title, meta, and actions.
+function ChatPanelHeader({
+  conv,
+  projectName,
+  onPin,
+  onShare,
+  onRename,
+  onArchive,
+  onDelete
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const w = conv.type === 'work';
+  const fmtDate = iso => {
+    try {
+      return new Date(iso).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric'
+      });
+    } catch (e) {
+      return '';
+    }
+  };
+  const btn = extra => ({
+    width: 28,
+    height: 28,
+    borderRadius: 7,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    border: '0.5px solid #E4DFD4',
+    background: '#FCFBF8',
+    ...(extra || {})
+  });
+  const mItem = a => /*#__PURE__*/React.createElement("button", {
+    key: a.t,
+    onClick: () => {
+      setMenuOpen(false);
+      a.fn();
+    },
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 9,
+      width: '100%',
+      textAlign: 'left',
+      padding: '9px 10px',
+      borderRadius: 7,
+      border: 'none',
+      cursor: 'pointer',
+      background: 'none',
+      color: a.danger ? C.red : '#001A4A',
+      fontFamily: C.fontSans,
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${a.i}`,
+    style: {
+      fontSize: 14
+    }
+  }), a.t);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 10,
+      padding: '12px 18px',
+      borderBottom: '0.5px solid #EDE7DC',
+      background: '#fff',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 14,
+      fontWeight: 600,
+      color: '#001A4A',
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, conv.title), conv.pinned && /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 3,
+      background: '#F3EBDA',
+      color: '#AD832F',
+      borderRadius: 5,
+      padding: '2px 7px',
+      fontFamily: C.fontSans,
+      fontSize: 8,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-pin-filled",
+    style: {
+      fontSize: 9
+    }
+  }), "Pinned")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      marginTop: 3,
+      fontFamily: C.fontSans,
+      fontSize: 10,
+      color: '#B4B2A9',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 3
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${w ? 'ti-briefcase' : 'ti-sparkles'}`,
+    style: {
+      fontSize: 11,
+      color: w ? '#C9A45A' : '#8A9CC0'
+    }
+  }), w ? 'Work Mode' : 'AI Mode'), projectName && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", null, "\xB7"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 3
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-folder",
+    style: {
+      fontSize: 11
+    }
+  }), projectName)), conv.updatedAt && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", null, "\xB7"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 3
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-calendar",
+    style: {
+      fontSize: 11
+    }
+  }), fmtDate(conv.updatedAt))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      flexShrink: 0,
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => onPin(conv.id, !conv.pinned),
+    title: conv.pinned ? 'Unpin' : 'Pin',
+    style: btn(conv.pinned ? {
+      border: '0.5px solid #E8D9BC',
+      background: '#F3EBDA'
+    } : null)
+  }, /*#__PURE__*/React.createElement("i", {
+    className: `ti ${conv.pinned ? 'ti-pin-filled' : 'ti-pin'}`,
+    style: {
+      fontSize: 14,
+      color: conv.pinned ? '#AD832F' : '#6B6B6B'
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onShare && onShare(conv.id),
+    title: "Share",
+    style: btn()
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-share",
+    style: {
+      fontSize: 14,
+      color: '#6B6B6B'
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setMenuOpen(o => !o),
+    title: "More",
+    style: btn()
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-dots",
+    style: {
+      fontSize: 14,
+      color: '#6B6B6B'
+    }
+  })), menuOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setMenuOpen(false),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 120
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: 34,
+      right: 0,
+      zIndex: 121,
+      minWidth: 140,
+      background: '#fff',
+      border: '1px solid #EAE3D6',
+      borderRadius: 10,
+      boxShadow: '0 8px 28px rgba(0,0,0,0.18)',
+      padding: 5
+    }
+  }, [{
+    t: 'Rename',
+    i: 'ti-pencil',
+    fn: () => onRename(conv.id)
+  }, {
+    t: 'Archive',
+    i: 'ti-archive',
+    fn: () => onArchive(conv.id, true)
+  }, {
+    t: 'Delete',
+    i: 'ti-trash',
+    fn: () => onDelete(conv.id),
+    danger: true
+  }].map(mItem)))));
+}
+
+// Lightweight "new project" popout — name (+ optional instructions). Memory/files
+// are added later by opening the project from the sidebar.
+function NewProjectModal({
+  onCreate,
+  onClose
+}) {
+  const [name, setName] = useState('');
+  const [instructions, setInstructions] = useState('');
+  const [busy, setBusy] = useState(false);
+  const wide = typeof window !== 'undefined' && window.innerWidth >= 769;
+  const bord = '#E4DFD4',
+    txt = '#001A4A',
+    sub = '#6B6B6B';
+  const lbl = {
+    fontFamily: C.fontSans,
+    fontSize: '0.62rem',
+    color: sub,
+    letterSpacing: '0.07em',
+    textTransform: 'uppercase',
+    fontWeight: 600,
+    marginBottom: 5
+  };
+  const create = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    try {
+      await onCreate(name.trim(), instructions.trim());
+      onClose();
+    } catch (e) {
+      alert('Could not create project: ' + (e.message || e));
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 142,
+      background: 'rgba(0,26,74,0.42)',
+      display: 'flex',
+      alignItems: wide ? 'center' : 'flex-end',
+      justifyContent: 'center',
+      padding: wide ? 16 : 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: wide ? 'min(440px, 95vw)' : '100%',
+      background: '#fff',
+      borderRadius: wide ? 16 : '16px 16px 0 0',
+      padding: '20px 18px',
+      boxShadow: '0 12px 40px rgba(0,26,74,0.22)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-folder-plus",
+    style: {
+      fontSize: 18,
+      color: '#AD832F'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontDisplay,
+      fontStyle: 'italic',
+      fontSize: '1.35rem',
+      color: txt
+    }
+  }, "New project")), /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Name"), /*#__PURE__*/React.createElement("input", {
+    autoFocus: true,
+    value: name,
+    onChange: e => setName(e.target.value),
+    onKeyDown: e => {
+      if (e.key === 'Enter') create();
+    },
+    placeholder: "e.g. 123 Main St Listing",
+    style: {
+      width: '100%',
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      padding: '10px 12px',
+      fontFamily: C.fontSans,
+      fontSize: 14,
+      fontWeight: 600,
+      color: txt,
+      background: '#FCFBF8',
+      outline: 'none',
+      boxSizing: 'border-box',
+      marginBottom: 14
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: lbl
+  }, "Instructions ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      textTransform: 'none',
+      fontWeight: 400
+    }
+  }, "(optional)")), /*#__PURE__*/React.createElement("textarea", {
+    value: instructions,
+    onChange: e => setInstructions(e.target.value),
+    placeholder: "How should the assistant behave in this project?",
+    style: {
+      width: '100%',
+      minHeight: 70,
+      resize: 'vertical',
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      padding: '10px 12px',
+      fontFamily: C.fontSans,
+      fontSize: 12.5,
+      lineHeight: 1.6,
+      color: txt,
+      background: '#FCFBF8',
+      outline: 'none',
+      boxSizing: 'border-box'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 10,
+      color: sub,
+      marginTop: 8
+    }
+  }, "Add memory and files after creating \u2014 open the project from the sidebar."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'flex-end',
+      gap: 8,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 12,
+      fontWeight: 500,
+      color: sub,
+      background: '#FCFBF8',
+      border: `1px solid ${bord}`,
+      borderRadius: 9,
+      padding: '9px 18px',
+      cursor: 'pointer'
+    }
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    onClick: create,
+    disabled: !name.trim() || busy,
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 12,
+      fontWeight: 600,
+      color: '#fff',
+      background: '#001A4A',
+      border: 'none',
+      borderRadius: 9,
+      padding: '9px 18px',
+      cursor: 'pointer',
+      opacity: !name.trim() || busy ? 0.5 : 1
+    }
+  }, busy ? 'Creating…' : 'Create project'))));
+}
+function App({
+  user,
+  profile
+}) {
+  const _boot = typeof location !== 'undefined' ? parsePath() || parseRoute(location.hash) : {
+    tab: 'chat',
+    view: null
+  };
+  const [activeTab, setActiveTab] = useState(() => _boot.tab);
+  const [dark, setDark] = useState(() => localStorage.getItem('tmg-theme') === 'dark');
+  const [fontScale, setFontScale] = useState(() => parseFloat(localStorage.getItem('tmg-fontscale')) || 1);
+  const [accessCfg, setAccessCfg] = useState(DEFAULT_ACCESS);
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [showTasks, setShowTasks] = useState(false);
+  const [showDecisions, setShowDecisions] = useState(false);
+  const [tasksFocus, setTasksFocus] = useState(null); // a task to open directly (e.g. from the Projects tab)
+  const [showProfile, setShowProfile] = useState(() => {
+    // Reopen the Profile panel after a Connect Google Calendar redirect lands back
+    // (the OAuth round-trip reloads the page, which would otherwise always drop the
+    // user on the default Chat tab with the panel closed — reads as a random bounce).
+    try {
+      if (sessionStorage.getItem('tmg_calendar_connect_return') === '1') {
+        sessionStorage.removeItem('tmg_calendar_connect_return');
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  });
+  const [showStatus, setShowStatus] = useState(false);
+  const [away, setAway] = useState(!!(profile && profile.away));
+  const [statusText, setStatusText] = useState(profile && profile.status_text || '');
+  const [statusEmoji, setStatusEmoji] = useState(profile && profile.status_emoji || '');
+
+  // Admin-configurable access: filter the nav + More apps to what this user may see.
+  const appSet = profile ? allowedAppSet(profile.access, accessCfg) : null; // null = everything
+  const [navConfig, setNavConfig] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('tmg-nav-config')) || null;
+    } catch {
+      return null;
+    }
+  });
+  const saveNavConfig = cfg => {
+    setNavConfig(cfg);
+    localStorage.setItem('tmg-nav-config', JSON.stringify(cfg));
+  };
+  const isAdmin = hasAdmin(profile && profile.access);
+  // Tasks lives in the main nav, not More (moved 2026-08-10) — kept as its own
+  // item rather than a TABS entry since it needs TASKS_POPOUT_VERSION, which
+  // isn't defined yet at TABS' top-level position in the file.
+  const tasksNavItem = {
+    id: 'tasks',
+    label: 'Tasks',
+    icon: 'ti-checklist',
+    href: 'tasks.html?v=' + TASKS_POPOUT_VERSION
+  };
+  // All possible items the user could see (access-filtered). Tasks was never
+  // gated by appSet before, so it's spliced in after filtering to preserve that.
+  const defaultNavIds = (() => {
+    const base = (appSet ? TABS.filter(t => t.id === 'more' || appSet.has(t.id)) : TABS).map(t => t.id);
+    return base.filter(id => id !== 'more').concat(['tasks', 'more']);
+  })();
+  const allMoreDefs = [].concat([{
+    id: 'guide',
+    label: 'Guide',
+    icon: 'ti-book'
+  }]).concat(!appSet || appSet.has('drives') ? [{
+    id: 'drives',
+    label: 'Shared Drives',
+    icon: 'ti-folders'
+  }] : []).concat(!appSet || appSet.has('directory') ? [{
+    id: 'directory',
+    label: 'Company Directory',
+    icon: 'ti-users'
+  }] : []).concat([{
+    id: 'timeoff',
+    label: 'Time Off',
+    icon: 'ti-calendar-off'
+  }]).concat([{
+    id: 'expsurvey',
+    label: 'Exp Survey',
+    icon: 'ti-qrcode'
+  }]).concat([{
+    id: 'healthgoals',
+    label: 'Health Goals',
+    icon: 'ti-heartbeat'
+  }]).concat([{
+    id: 'commercial-listings',
+    label: 'Commercial Listings',
+    icon: 'ti-building-skyscraper',
+    href: 'commercial-listings/'
+  }]).concat(!appSet || appSet.has('sffu') ? [{
+    id: 'sffu',
+    label: 'SFFU',
+    img: 'sffu-icon.png'
+  }] : []).concat(isAdmin ? [{
+    id: 'admin',
+    label: 'Admin',
+    icon: 'ti-shield-lock'
+  }] : []).concat(isAdmin ? [{
+    id: 'app-masterplan',
+    label: 'App Masterplan',
+    icon: 'ti-sitemap'
+  }] : []);
+  // Catches the drift above before a user does: a More screen with no route
+  // opens fine and then reloads onto AI Chat.
+  allMoreDefs.forEach(m => {
+    if (!m.href && ROUTE_MORE.indexOf(m.id) === -1) console.warn('[nav] "' + m.id + '" is missing from ROUTE_MORE — refreshing it will fall back to AI Chat.');
+  });
+  const allItemMap = Object.fromEntries(TABS.concat(allMoreDefs).concat([tasksNavItem]).map(it => [it.id, it]));
+  // Build nav + more from config, falling back to defaults.
+  const buildLists = () => {
+    if (!navConfig) return {
+      nav: defaultNavIds,
+      more: allMoreDefs.map(m => m.id)
+    };
+    const allowed = new Set(defaultNavIds.concat(allMoreDefs.map(m => m.id)));
+    const cfgNav = (navConfig.nav || []).filter(id => allowed.has(id));
+    const cfgMore = (navConfig.more || []).filter(id => allowed.has(id));
+    // One-time forced migration (2026-08-10): Tasks moves from every team member's
+    // already-saved More placement into the main nav. Gated on tasksMigratedV1 so
+    // it only overrides the OLD saved layout once — after that it's a normal
+    // draggable item again and a deliberate later move back to More sticks.
+    if (!navConfig.tasksMigratedV1) {
+      const i = cfgMore.indexOf('tasks');
+      if (i !== -1) cfgMore.splice(i, 1);
+      if (!cfgNav.includes('tasks')) cfgNav.push('tasks');
+    }
+    const placed = new Set(cfgNav.concat(cfgMore));
+    // Any new items not in config go to their default list.
+    defaultNavIds.forEach(id => {
+      if (!placed.has(id)) cfgNav.push(id);
+      placed.add(id);
+    });
+    allMoreDefs.forEach(m => {
+      if (!placed.has(m.id)) cfgMore.push(m.id);
+      placed.add(m.id);
+    });
+    // 'more' must always be in nav and last.
+    const navNoMore = cfgNav.filter(id => id !== 'more');
+    return {
+      nav: navNoMore.concat(['more']),
+      more: cfgMore.filter(id => id !== 'more')
+    };
+  };
+  const lists = buildLists();
+  const visibleTabs = lists.nav.map(id => allItemMap[id]).filter(Boolean);
+  const moreItems = lists.more.map(id => allItemMap[id]).filter(Boolean);
+  // Persist the migration once so it doesn't keep overriding a later, deliberate
+  // move back to More — see buildLists' tasksMigratedV1 check above.
+  useEffect(() => {
+    if (navConfig && !navConfig.tasksMigratedV1) {
+      saveNavConfig({
+        nav: lists.nav,
+        more: lists.more,
+        tasksMigratedV1: true
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Mark 'more' as locked (can't be moved/dragged).
+  const navForSettings = visibleTabs.map(t => t.id === 'more' ? {
+    ...t,
+    locked: true
+  } : t);
+  const handleReorderNav = arr => saveNavConfig({
+    nav: arr.map(t => t.id),
+    more: lists.more
+  });
+  const handleReorderMore = arr => saveNavConfig({
+    nav: lists.nav,
+    more: arr.map(t => t.id)
+  });
+  const handleMoveToMore = item => saveNavConfig({
+    nav: lists.nav.filter(id => id !== item.id),
+    more: lists.more.concat([item.id])
+  });
+  const handleMoveToNav = item => {
+    const navNoMore = lists.nav.filter(id => id !== 'more');
+    saveNavConfig({
+      nav: navNoMore.concat([item.id, 'more']),
+      more: lists.more.filter(id => id !== item.id)
+    });
+  };
+  // Profile / presence — the avatar chip + slide-out panel; Settings now lives there.
+  const myAvatar = profile && profile.avatar_url || user && user.user_metadata && user.user_metadata.avatar_url || '';
+  const myName = ((profile && profile.first_name || '') + ' ' + (profile && profile.last_name || '')).trim() || user && user.user_metadata && user.user_metadata.full_name || user && user.email || 'Me';
+  const dotColor = away ? '#E0A93B' : '#2FBF6B';
+  const toggleAway = () => {
+    const v = !away;
+    setAway(v);
+    ProfileDB.setPresence({
+      away: v
+    });
+  };
+  const saveStatus = (text, emoji) => {
+    setStatusText(text);
+    setStatusEmoji(emoji);
+    ProfileDB.setPresence({
+      status_text: text || null,
+      status_emoji: emoji || null
+    });
+    setShowStatus(false);
+  };
+  useEffect(() => {
+    if (!visibleTabs.some(t => t.id === activeTab)) setActiveTab((visibleTabs[0] || {
+      id: 'more'
+    }).id);
+  }, [profile]);
+
+  // Chat state (lifted so the input lives in the shared bottom zone)
+  const [messages, setMessages] = useState([]); // { role:'user'|'assistant', content, error? }
+  const [input, setInput] = useState(() => localStorage.getItem('tmg-draft-new') || '');
+  const [loading, setLoading] = useState(false);
+  const [pendingAttachments, setPendingAttachments] = useState([]); // { id, file, kind, name, mediaType, size, previewUrl, textContent }
+
+  // Conversation persistence + history
+  const [conversations, setConversations] = useState([]);
+  // AI assistant memory (global) + Projects (Claude-style). Personal per user.
+  const [aiMemory, setAiMemory] = useState('');
+  const [projects, setProjects] = useState([]);
+  const [activeProjectId, setActiveProjectId] = useState(null);
+  const [activeProjectFiles, setActiveProjectFiles] = useState([]);
+  const [showMemory, setShowMemory] = useState(false);
+  const [openProjectId, setOpenProjectId] = useState(null); // project detail overlay
+  const [showNewProject, setShowNewProject] = useState(false); // new-project popout
+  const [currentConvId, setCurrentConvId] = useState(null);
+  const [workRequest, setWorkRequest] = useState(null); // 'kpis' | 'listing_presentation' | null
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [isWide, setIsWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
+  useEffect(() => {
+    const f = () => setIsWide(window.innerWidth >= 769);
+    window.addEventListener('resize', f);
+    return () => window.removeEventListener('resize', f);
+  }, []);
+  function shareConversation(id) {
+    const c = conversations.find(x => x.id === id);
+    try {
+      navigator.clipboard.writeText(c && c.title || 'TMG AI chat');
+    } catch (e) {}
+  }
+  const [historySide, setHistorySide] = useState(() => localStorage.getItem('tmg-history-side') || 'left');
+
+  // AI Chat pills (admin-configurable)
+  const [pills, setPills] = useState(null);
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [activePill, setActivePill] = useState(null); // { pill, kind: 'form'|'steps' }
+  const [taskInstruction, setTaskInstruction] = useState(null); // armed by the Add To-Do pill → next send creates a task
+  const [kpiInstruction, setKpiInstruction] = useState(null); // armed by Enter KPI "paste your notes" → next send parses a KPI note
+  const [kpiFlow, setKpiFlow] = useState(null); // inline Enter KPI card: { step:'choice'|'form'|'summary', payload? }
+  const [calBrief, setCalBrief] = useState(null); // inline Calendar Brief card: { kind:'daily'|'weekly' }
+
+  // "More" menu: which screen (settings | admin) + dropdown open state.
+  const [moreView, setMoreView] = useState(() => _boot.view || 'directory');
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+
+  // ── URL hash <-> nav state ──
+  const firstSync = useRef(true);
+  useEffect(() => {
+    const apply = () => {
+      const r = parsePath() || parseRoute(location.hash);
+      setActiveTab(r.tab);
+      if (r.tab === 'more' && r.view) setMoreView(r.view);
+      setMoreMenuOpen(false);
+      setDrawerOpen(false);
+      setShowCalendar(false);
+      setShowTasks(false);
+      setShowProfile(false);
+      setShowStatus(false);
+    };
+    window.addEventListener('popstate', apply);
+    window.addEventListener('hashchange', apply);
+    return () => {
+      window.removeEventListener('popstate', apply);
+      window.removeEventListener('hashchange', apply);
+    };
+  }, []);
+  useEffect(() => {
+    if (location.hash.indexOf('=') !== -1) return; // never clobber the OAuth #access_token=... hash
+    const token = activeTab === 'more' ? moreView || 'directory' : activeTab;
+    const onGuidePath = /^\/guide(\/|$)/i.test(location.pathname);
+    if (token === 'guide') {
+      // Guide owns a real /guide[/slug] path; GuideTab manages the slug segment.
+      if (!onGuidePath) {
+        try {
+          firstSync.current ? history.replaceState(null, '', '/guide') : history.pushState(null, '', '/guide');
+        } catch (e) {}
+      }
+      firstSync.current = false;
+      return;
+    }
+    if (onGuidePath) {
+      // Leaving a guide deep-link for another tab → reset to root with the tab hash.
+      try {
+        history.pushState(null, '', '/#' + token);
+      } catch (e) {
+        try {
+          location.hash = token;
+        } catch (e2) {}
+      }
+    } else if (location.hash.replace(/^#\/?/, '') !== token) {
+      try {
+        firstSync.current ? history.replaceState(null, '', '#' + token) : history.pushState(null, '', '#' + token);
+      } catch (e) {
+        location.hash = token;
+      }
+    }
+    firstSync.current = false;
+  }, [activeTab, moreView]);
+  const zoneRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [zoneH, setZoneH] = useState(96);
+  const onChat = activeTab === 'chat';
+  function openFilePicker() {
+    if (fileInputRef.current) fileInputRef.current.click();
+  }
+  async function onSelectFiles(fileList) {
+    const files = Array.from(fileList || []);
+    const additions = [];
+    for (const file of files) {
+      if (file.size > 20 * 1024 * 1024) {
+        alert('"' + file.name + '" is over 20 MB and was skipped.');
+        continue;
+      }
+      const type = file.type || '';
+      const name = file.name || '';
+      let kind = null,
+        textContent = null,
+        previewUrl = null;
+      try {
+        if (type.startsWith('image/')) {
+          kind = 'image';
+          previewUrl = URL.createObjectURL(file);
+        } else if (type === 'application/pdf' || /\.pdf$/i.test(name)) {
+          kind = 'pdf';
+        } else if (/\.(xlsx|xls)$/i.test(name)) {
+          kind = 'text';
+          textContent = await readXlsxAsText(file);
+        } else if (/\.docx$/i.test(name)) {
+          kind = 'text';
+          textContent = await readDocxAsText(file);
+        } else if (/\.pptx$/i.test(name)) {
+          kind = 'text';
+          textContent = await readPptxAsText(file);
+        } else if (/\.(doc|ppt)$/i.test(name)) {
+          alert('"' + name + '" is an older Office format the app can\'t read. Please re-save it as .docx or .pptx and try again.');
+          continue;
+        } else if (type.startsWith('text/') || /\.(txt|csv|md|json|log)$/i.test(name)) {
+          kind = 'text';
+          textContent = await file.text();
+        } else {
+          alert('The AI can\'t read "' + name + '" yet (unsupported type).');
+          continue;
+        }
+      } catch (e) {
+        alert('Could not read "' + name + '": ' + (e.message || e));
+        continue;
+      }
+      additions.push({
+        id: crypto.randomUUID(),
+        file,
+        kind,
+        name,
+        mediaType: type,
+        size: file.size,
+        previewUrl,
+        textContent
+      });
+    }
+    if (additions.length) setPendingAttachments(prev => [...prev, ...additions]);
+  }
+  function removeAttachment(id) {
+    setPendingAttachments(prev => prev.filter(a => {
+      if (a.id === id && a.previewUrl) {
+        try {
+          URL.revokeObjectURL(a.previewUrl);
+        } catch (e) {}
+      }
+      return a.id !== id;
+    }));
+  }
+  const refreshConversations = () => ConvDB.loadConversations().then(setConversations);
+  useEffect(() => {
+    refreshConversations();
+  }, []);
+
+  // AI memory + projects load
+  const refreshProjects = () => ProjectDB.list().then(setProjects);
+  useEffect(() => {
+    AIMemoryDB.get().then(setAiMemory);
+    refreshProjects();
+  }, []);
+  // Consume a stashed /guide/<slug> deep-link (set in <head> before login) — opens the
+  // Guide tab + note even if the OAuth round-trip dropped the path back to the site root.
+  useEffect(() => {
+    try {
+      const dl = sessionStorage.getItem('tmg-guide-deeplink');
+      if (dl) {
+        sessionStorage.removeItem('tmg-guide-deeplink');
+        try {
+          history.replaceState(null, '', '/guide/' + dl);
+        } catch (e) {}
+        setActiveTab('more');
+        setMoreView('guide');
+      }
+    } catch (e) {}
+  }, []);
+  useEffect(() => {
+    let on = true;
+    if (activeProjectId) ProjectDB.listFiles(activeProjectId).then(f => {
+      if (on) setActiveProjectFiles(f);
+    });else setActiveProjectFiles([]);
+    return () => {
+      on = false;
+    };
+  }, [activeProjectId]);
+  const activeProject = activeProjectId ? projects.find(p => p.id === activeProjectId) : null;
+  async function saveMemory(text) {
+    setAiMemory(text);
+    try {
+      await AIMemoryDB.set(text);
+    } catch (e) {
+      alert('Could not save memory: ' + (e.message || e));
+    }
+  }
+  async function createProject(name) {
+    const p = await ProjectDB.create(name);
+    await refreshProjects();
+    return p;
+  }
+  async function saveProject(id, fields) {
+    setProjects(ps => ps.map(p => p.id === id ? {
+      ...p,
+      ...fields
+    } : p));
+    try {
+      await ProjectDB.update(id, fields);
+    } catch (e) {
+      alert('Could not save project: ' + (e.message || e));
+    }
+  }
+  async function deleteProject(id) {
+    try {
+      await ProjectDB.remove(id);
+    } catch (e) {
+      alert('Could not delete: ' + (e.message || e));
+      return;
+    }
+    if (activeProjectId === id) setActiveProjectId(null);
+    setOpenProjectId(null);
+    await refreshProjects();
+    refreshConversations();
+  }
+  async function moveConversationToProject(convId, projectId) {
+    await ConvDB.setProject(convId, projectId);
+    if (convId === currentConvId) setActiveProjectId(projectId || null);
+    refreshConversations();
+  }
+  const refreshPills = () => PillDB.list().then(setPills);
+  useEffect(() => {
+    refreshPills();
+  }, []);
+  // First-run: materialize the default pills into the DB so they're editable in Admin
+  // (incl. the Add To-Do task pill). Guarded so deleting all pills won't respawn them.
+  const pillsSeededRef = useRef(false);
+  useEffect(() => {
+    if (!isAdmin || pills === null || pills.length > 0 || pillsSeededRef.current) return;
+    if (localStorage.getItem('tmg-pills-seeded')) return;
+    pillsSeededRef.current = true;
+    (async () => {
+      try {
+        for (let i = 0; i < FALLBACK_PILLS.length; i++) await PillDB.create({
+          ...FALLBACK_PILLS[i],
+          sortOrder: i
+        });
+        localStorage.setItem('tmg-pills-seeded', '1');
+        refreshPills();
+      } catch (e) {
+        console.warn('[pills] seed:', e);
+      }
+    })();
+  }, [pills, isAdmin]);
+  // Effective pills: DB pills when present, else the built-in fallback; only enabled ones show.
+  // A pill with no roles set is shown to everyone; admins always see every pill regardless of roles.
+  const myRoles = toRoles(profile && profile.access);
+  const pillVisible = p => !p.roles || !p.roles.length || isAdmin || p.roles.some(r => myRoles.includes(r));
+  const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false && pillVisible(p));
+  // New Chat first, then every visible pill — there's only one unified mode now.
+  const shownPills = [NEW_CHAT_PILL].concat(effectivePills).concat(CALENDAR_PILLS).concat([DEAL_PILL]).concat(SOON_PILLS);
+  useEffect(() => {
+    localStorage.setItem('tmg-history-side', historySide);
+  }, [historySide]);
+
+  // Per-conversation draft autosave (device-local). Key 'new' before a conversation exists.
+  const draftKey = id => 'tmg-draft-' + (id || 'new');
+  function updateInput(val) {
+    setInput(val);
+    try {
+      localStorage.setItem(draftKey(currentConvId), val);
+    } catch (e) {}
+  }
+  useEffect(() => {
+    document.body.classList.toggle('dark', dark);
+    localStorage.setItem('tmg-theme', dark ? 'dark' : 'light');
+  }, [dark]);
+
+  // App-wide text/UI scale (iPhone-style). Applied as page zoom; persisted.
+  useEffect(() => {
+    localStorage.setItem('tmg-fontscale', String(fontScale));
+    document.documentElement.style.zoom = fontScale === 1 ? '' : String(fontScale);
+  }, [fontScale]);
+
+  // Load the per-tool role-access config (gates this user's tabs + More apps).
+  useEffect(() => {
+    AccessDB.load().then(c => {
+      if (c) setAccessCfg(normalizeAccess(c));
+    });
+  }, []);
+
+  // Presence heartbeat: mark "online" now + every minute while the app is open/foreground.
+  useEffect(() => {
+    ProfileDB.touchPresence();
+    const iv = setInterval(() => {
+      if (!document.hidden) ProfileDB.touchPresence();
+    }, 60000);
+    const onVis = () => {
+      if (!document.hidden) ProfileDB.touchPresence();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onVis);
+    return () => {
+      clearInterval(iv);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onVis);
+    };
+  }, []);
+
+  // Keep content padding in sync with the fixed bottom zone height.
+  useEffect(() => {
+    if (zoneRef.current) setZoneH(zoneRef.current.offsetHeight);
+  }, [activeTab, dark, onChat, input, loading, pendingAttachments]);
+
+  // Core send: persists the user message, gets a reply, persists it, auto-titles a new conversation.
+  // Assemble the system prompt: base (or the task/KPI instruction when armed)
+  // + the user's global memory + the active project's instructions/memory/files.
+  function buildSystemPrompt(armed) {
+    const parts = [armed || SYSTEM_PROMPT];
+    if (aiMemory && aiMemory.trim()) parts.push('## What to always remember about this user\n' + aiMemory.trim());
+    if (!armed && activeProject) {
+      const p = activeProject;
+      if (p.instructions && p.instructions.trim()) parts.push('## Project instructions — "' + p.name + '"\n' + p.instructions.trim());
+      if (p.memory && p.memory.trim()) parts.push('## Project memory — "' + p.name + '"\n' + p.memory.trim());
+      const knowledge = (activeProjectFiles || []).filter(f => f.textContent && f.textContent.trim()).map(f => '### ' + f.name + '\n' + f.textContent.trim().slice(0, 20000)).join('\n\n');
+      if (knowledge) parts.push('## Project files (reference knowledge)\n' + knowledge);
+    }
+    parts.push('Today is ' + new Date().toISOString().slice(0, 10) + '.');
+    return parts.join('\n\n');
+  }
+  async function runSend(text, opts = {}) {
+    const pend = opts.attachments !== undefined ? opts.attachments : pendingAttachments;
+    if ((!text || !text.trim()) && (!pend || !pend.length)) return;
+    if (loading) return;
+    const startType = opts.type || 'ai';
+    const startReq = opts.workRequest !== undefined ? opts.workRequest : workRequest;
+    const isFirst = !currentConvId;
+
+    // Optimistic user message with local previews; clear the picker immediately.
+    const localAtts = (pend || []).map(a => ({
+      kind: a.kind,
+      name: a.name,
+      mediaType: a.mediaType,
+      size: a.size,
+      url: a.previewUrl,
+      textContent: a.textContent
+    }));
+    const userMsg = {
+      role: 'user',
+      content: text || '',
+      attachments: localAtts
+    };
+    const next = [...messages, userMsg];
+    setMessages(next);
+    setPendingAttachments([]);
+    setLoading(true);
+    let convId = currentConvId;
+    try {
+      if (!convId) {
+        const conv = await ConvDB.createConversation({
+          type: startType,
+          workRequest: startReq,
+          projectId: activeProjectId
+        });
+        convId = conv.id;
+        setCurrentConvId(convId);
+        refreshConversations();
+      }
+      // Upload pending files, then resolve signed URLs (needed for Claude + display).
+      const uploaded = [];
+      for (const a of pend || []) {
+        let path = null;
+        if (a.file) {
+          try {
+            path = await ConvDB.uploadAttachment(a.file, convId);
+          } catch (e) {}
+        }
+        const url = path ? await ConvDB.signedUrl(path) : a.previewUrl;
+        uploaded.push({
+          kind: a.kind,
+          name: a.name,
+          mediaType: a.mediaType,
+          size: a.size,
+          path,
+          url,
+          textContent: a.textContent
+        });
+      }
+      const history = next.map((m, idx) => idx === next.length - 1 ? {
+        ...m,
+        attachments: uploaded
+      } : m);
+      setMessages(history);
+      await ConvDB.insertMessage(convId, 'user', text || '', uploaded);
+      const apiMsgs = history.map(m => ({
+        role: m.role,
+        content: toApiContent(m)
+      }));
+      const armed = taskInstruction || kpiInstruction;
+      const sys = buildSystemPrompt(armed);
+      const reply = await callAI(apiMsgs, sys, kpiInstruction ? 'kpi' : taskInstruction ? 'add_todo' : 'ai_chat');
+      // Add To-Do mode: the AI ends with an ACTION block — read it, create the task, hide the JSON.
+      let display = reply;
+      if (taskInstruction) {
+        const mm = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
+        if (mm) {
+          display = reply.slice(0, mm.index).trim();
+          try {
+            const parsed = JSON.parse(mm[1]);
+            if (parsed && String(parsed.type).toUpperCase() === 'ADD' && parsed.payload) {
+              const created = await createTaskFromAI(parsed.payload, user);
+              if (!display) display = created ? 'Done — added “' + (parsed.payload.title || 'task') + '” to your Tasks.' : 'I couldn’t create that — please try again.';
+              if (created) setTaskInstruction(null); // task created → leave to-do mode
+            }
+          } catch (e) {/* keep the stripped conversational text */}
+        }
+      } else if (kpiInstruction) {
+        // Enter KPI "paste your notes": the AI ends with an ACTION block. KPI → open the summary card for
+        // confirmation (don't submit yet); NONE → it's asking a follow-up (e.g. a hotzone count). Hide the JSON.
+        const mm = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
+        if (mm) {
+          display = reply.slice(0, mm.index).trim();
+          try {
+            const parsed = JSON.parse(mm[1]);
+            if (parsed && String(parsed.type).toUpperCase() === 'KPI' && parsed.payload) {
+              const payload = {
+                ...parsed.payload,
+                owner: myName
+              }; // owner is app-side, never from the model
+              setKpiInstruction(null); // got a full payload → leave note mode; confirm via the card
+              setKpiFlow({
+                step: 'summary',
+                payload
+              });
+              if (!display) display = 'Here’s what I got — review and confirm below.';
+            }
+          } catch (e) {/* keep the stripped conversational text */}
+        }
+      }
+      if (!display) display = reply;
+      // The model decides for itself when to hand back a real file (see SYSTEM_PROMPT) — it's
+      // not always reliable at recognizing intent. Only armed (Add To-Do/KPI) replies never try;
+      // for a normal chat message that clearly asked for one, say so instead of going quiet.
+      if (!armed && looksLikeFileRequest(text) && !hasFileBlock(reply)) {
+        display += '\n\n_Didn’t catch that as a file request — try being explicit, e.g. “put this in a spreadsheet” or “make this a Word doc,” and I’ll hand back a real download._';
+      }
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: display
+      }]);
+      await ConvDB.insertMessage(convId, 'assistant', display);
+      if (isFirst) {
+        const seed = text || uploaded[0] && uploaded[0].name || 'Shared a file';
+        const title = await generateTitle(seed);
+        await ConvDB.updateConversation(convId, {
+          title
+        });
+      } else {
+        await ConvDB.touchConversation(convId);
+      }
+    } catch (e) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: String(e.message || e),
+        error: true
+      }]);
+    } finally {
+      setLoading(false);
+      refreshConversations();
+    }
+  }
+  function send() {
+    const text = input.trim();
+    if (!text && !pendingAttachments.length || loading) return;
+    try {
+      localStorage.removeItem(draftKey(currentConvId));
+    } catch (e) {}
+    setInput('');
+    runSend(text);
+  }
+  function newChat(projectId) {
+    setMessages([]);
+    setCurrentConvId(null);
+    setWorkRequest(null);
+    setTaskInstruction(null);
+    setKpiInstruction(null);
+    setKpiFlow(null);
+    setCalBrief(null);
+    setActiveProjectId(projectId !== undefined ? projectId || null : null);
+    setInput(localStorage.getItem('tmg-draft-new') || '');
+  }
+  async function selectConversation(id) {
+    const conv = conversations.find(c => c.id === id);
+    setDrawerOpen(false);
+    setCurrentConvId(id);
+    setTaskInstruction(null);
+    setKpiInstruction(null);
+    setKpiFlow(null);
+    setCalBrief(null);
+    setInput(localStorage.getItem(draftKey(id)) || '');
+    setWorkRequest(conv?.workRequest || null);
+    setActiveProjectId(conv?.projectId || null);
+    setActiveTab('chat');
+    const msgs = await ConvDB.loadMessages(id);
+    setMessages(msgs);
+  }
+
+  // Enter KPI — arm the paste-a-note parser (mirrors the task-pill arm), seeding the input.
+  async function startKpiNote() {
+    setKpiFlow(null);
+    setCalBrief(null);
+    setTaskInstruction(null);
+    // Splice Zoho's live Other-KPI picklist into the instruction. Without the
+    // exact strings the model invents near-misses ("Networking" for
+    // "Networking Event"), which the writer then refuses.
+    let opts = [];
+    try {
+      opts = await fetchOtherKpiOptions();
+    } catch (e) {/* fall through — writer still validates */}
+    setKpiInstruction(KPI_NOTE_INSTRUCTION.replace('{{OTHER_KPI_OPTIONS}}', opts.length ? opts.map(o => '- ' + o).join('\n') : '(could not load the list from Zoho — do NOT output any "others"; mention them in your reply instead)'));
+    setInput('KPI: ');
+    setTimeout(() => {
+      const el = document.querySelector('.tmg-ai-input');
+      if (el) {
+        el.focus();
+        try {
+          const n = el.value.length;
+          el.setSelectionRange(n, n);
+        } catch (e) {}
+      }
+    }, 30);
+  }
+
+  // Confirm step → finalize. Phase A (KPI_LIVE=false): preview only, no network. Persists the preview message.
+  async function submitKpi(rawPayload) {
+    // Owner is always the logged-in submitter, set here (the single funnel for both the
+    // form and paste-notes flows) so it can't be missed or spoofed by either path.
+    const payload = {
+      ...rawPayload,
+      owner: myName,
+      owner_email: profile && profile.email || null
+    };
+    setKpiFlow(null);
+    setCalBrief(null);
+    const preview = formatKpiPreview(payload);
+    let content;
+    if (KPI_LIVE) {
+      try {
+        const res = await createAgentKpi(payload);
+        content = 'Submitted to Zoho — Agent KPI created' + (res && res.id ? ' (id ' + res.id + ')' : '') + '.\n\n' + preview;
+        // Zoho silently reassigns the record when the submitter can't be matched to a Zoho
+        // user — say so here rather than letting it be found later in the CRM.
+        if (res && res.owner_warning) content += '\n\n⚠️ Owner not set to you: ' + res.owner_warning;
+      } catch (e) {
+        content = 'Could not submit to Zoho: ' + (e.message || e) + '\n\nHere is what would have been sent:\n\n' + preview;
+      }
+    } else {
+      content = 'Here is your KPI summary (preview — not yet sent to Zoho):\n\n' + preview;
+    }
+    setMessages(prev => [...prev, {
+      role: 'assistant',
+      content
+    }]);
+    // The quick "Add KPIs" form never starts a normal chat, so currentConvId is usually null
+    // here — without this, the submitted values (date/CTC/persons/others) existed nowhere but
+    // this screen and vanished on navigation, with no way to check them against Zoho later.
+    // Create a real conversation on the fly so every submission is durably saved.
+    let cid = currentConvId;
+    if (!cid) {
+      try {
+        const conv = await ConvDB.createConversation({
+          type: 'kpi',
+          workRequest: 'Enter KPI',
+          title: 'KPI — ' + (payload.kpi_date || kpiTodayStr())
+        });
+        cid = conv.id;
+        setCurrentConvId(cid);
+        refreshConversations();
+      } catch (e) {/* best-effort — the confirmation above still shows on screen either way */}
+    }
+    if (cid) {
+      try {
+        await ConvDB.insertMessage(cid, 'assistant', content);
+        await ConvDB.touchConversation(cid);
+      } catch (e) {}
+    }
+  }
+
+  // Tap a pill → run its configured behavior.
+  function dispatchPill(pill) {
+    if (!pill) return;
+    if (pill.type === 'soon') {
+      alert('“' + pill.label + '” is coming soon.');
+      return;
+    }
+    if (pill.id === 'new-chat' || pill.type === 'newchat') {
+      newChat();
+      return;
+    }
+    if (pill.id === 'fb-kpis' || pill.config && pill.config.kpi) {
+      setTaskInstruction(null);
+      setKpiInstruction(null);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'Let’s get started 👋 — would you like to fill out a form, or paste your notes?'
+      }]);
+      setKpiFlow({
+        step: 'choice'
+      });
+      return;
+    }
+    if (pill.type === 'calendar' || pill.config && pill.config.calendarBrief) {
+      setKpiFlow(null);
+      setTaskInstruction(null);
+      setKpiInstruction(null);
+      setCalBrief({
+        kind: (pill.config && (pill.config.kind || pill.config.calendarBrief)) === 'weekly' ? 'weekly' : 'daily'
+      });
+      return;
+    }
+    if (pill.type === 'form') {
+      setActivePill({
+        pill,
+        kind: 'form'
+      });
+      return;
+    }
+    if (pill.type === 'steps') {
+      setActivePill({
+        pill,
+        kind: 'steps'
+      });
+      return;
+    }
+    setKpiFlow(null);
+    setCalBrief(null);
+    setKpiInstruction(null);
+    if (pill.type === 'task') {
+      setTaskInstruction(pill.config && pill.config.instruction || TASK_PILL_INSTRUCTION);
+      let seed = pill.config && pill.config.seed;
+      if (!seed || seed === 'Add To Do: ') seed = 'To Do: '; // default + upgrade the old prefill
+      setInput(seed);
+      setTimeout(() => {
+        const el = document.querySelector('.tmg-ai-input');
+        if (el) {
+          el.focus();
+          try {
+            const n = el.value.length;
+            el.setSelectionRange(n, n);
+          } catch (e) {}
+        }
+      }, 30);
+      return;
+    }
+    const text = pill.config && pill.config.prompt || pill.label; // prompt (default)
+    runSend(text);
+  }
+  function startWorkRequest(key) {
+    const req = WORK_REQUESTS.find(w => w.key === key);
+    if (!req) return;
+    setWorkRequest(key);
+    setCurrentConvId(null);
+    setMessages([]);
+    runSend(req.label, {
+      type: 'work',
+      workRequest: key
+    });
+  }
+  async function pinConversation(id, pinned) {
+    await ConvDB.updateConversation(id, {
+      pinned
+    });
+    refreshConversations();
+  }
+  async function archiveConversation(id, archived) {
+    await ConvDB.updateConversation(id, {
+      archived
+    });
+    if (id === currentConvId) newChat();
+    refreshConversations();
+  }
+  async function renameConversation(id) {
+    const conv = conversations.find(c => c.id === id);
+    const title = window.prompt('Rename conversation', conv?.title || '');
+    if (title && title.trim()) {
+      await ConvDB.updateConversation(id, {
+        title: title.trim()
+      });
+      refreshConversations();
+    }
+  }
+  async function removeConversation(id) {
+    if (!window.confirm('Delete this conversation permanently?')) return;
+    await ConvDB.deleteConversation(id);
+    try {
+      localStorage.removeItem(draftKey(id));
+    } catch (e) {}
+    if (id === currentConvId) newChat();
+    refreshConversations();
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      background: dark ? '#000D26' : C.bg,
+      display: 'flex',
+      flexDirection: 'column',
+      color: C.textPrimary,
+      transition: 'background 0.2s ease'
+    }
+  }, /*#__PURE__*/React.createElement(TopBar, {
+    dark: dark,
+    onToggleDark: () => setDark(d => !d),
+    onCalendar: () => {
+      setShowCalendar(s => !s);
+      setShowTasks(false);
+      setShowDecisions(false);
+    },
+    calendarOpen: showCalendar,
+    onTasks: () => {
+      setShowTasks(s => !s);
+      setShowCalendar(false);
+      setShowDecisions(false);
+      setTasksFocus(null);
+    },
+    tasksOpen: showTasks,
+    onDecisions: () => {
+      setShowDecisions(s => !s);
+      setShowCalendar(false);
+      setShowTasks(false);
+    },
+    decisionsOpen: showDecisions,
+    avatar: myAvatar,
+    name: myName,
+    dotColor: dotColor,
+    onProfile: () => setShowProfile(true)
+  }), showCalendar && /*#__PURE__*/React.createElement(TaskFramePopover, {
+    which: "calendar",
+    zoneH: zoneH,
+    onClose: () => setShowCalendar(false)
+  }), showTasks && /*#__PURE__*/React.createElement(TaskFramePopover, {
+    which: "tasks",
+    zoneH: zoneH,
+    onClose: () => {
+      setShowTasks(false);
+      setTasksFocus(null);
+    }
+  }), showDecisions && /*#__PURE__*/React.createElement(TaskFramePopover, {
+    which: "decisions",
+    zoneH: zoneH,
+    onClose: () => setShowDecisions(false)
+  }), showProfile && /*#__PURE__*/React.createElement(ProfilePanel, {
+    dark: dark,
+    user: user,
+    profile: profile,
+    name: myName,
+    avatar: myAvatar,
+    dotColor: dotColor,
+    away: away,
+    statusText: statusText,
+    statusEmoji: statusEmoji,
+    onToggleAway: toggleAway,
+    onOpenStatus: () => setShowStatus(true),
+    onClose: () => setShowProfile(false),
+    historySide: historySide,
+    setHistorySide: setHistorySide,
+    setDark: setDark,
+    fontScale: fontScale,
+    setFontScale: setFontScale,
+    navItems: navForSettings,
+    moreMenuItems: moreItems,
+    onReorderNav: handleReorderNav,
+    onReorderMore: handleReorderMore,
+    onMoveToMore: handleMoveToMore,
+    onMoveToNav: handleMoveToNav
+  }), showStatus && /*#__PURE__*/React.createElement(StatusModal, {
+    dark: dark,
+    initialText: statusText,
+    initialEmoji: statusEmoji,
+    onSave: saveStatus,
+    onClose: () => setShowStatus(false)
+  }), showMemory && /*#__PURE__*/React.createElement(GlobalMemoryModal, {
+    dark: dark,
+    initial: aiMemory,
+    onSave: saveMemory,
+    onClose: () => setShowMemory(false)
+  }), openProjectId && (() => {
+    const p = projects.find(x => x.id === openProjectId);
+    return p ? /*#__PURE__*/React.createElement(ProjectModal, {
+      dark: dark,
+      project: p,
+      conversations: conversations,
+      onSaveFields: saveProject,
+      onDelete: deleteProject,
+      onClose: () => setOpenProjectId(null),
+      onOpenChat: cid => {
+        setOpenProjectId(null);
+        selectConversation(cid);
+      },
+      onNewChat: pid => {
+        setOpenProjectId(null);
+        setDrawerOpen(false);
+        newChat(pid);
+        setActiveTab('chat');
+      },
+      onMutated: pid => {
+        refreshProjects();
+        if (pid === activeProjectId) ProjectDB.listFiles(pid).then(setActiveProjectFiles);
+      }
+    }) : null;
+  })(), showNewProject && /*#__PURE__*/React.createElement(NewProjectModal, {
+    onCreate: async (name, instructions) => {
+      const p = await ProjectDB.create(name);
+      if (instructions) await ProjectDB.update(p.id, {
+        instructions
+      });
+      await refreshProjects();
+    },
+    onClose: () => setShowNewProject(false)
+  }), activeTab === 'chat' && !isWide && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '9px 12px 4px',
+      background: dark ? '#000D26' : C.bg,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setDrawerOpen(o => !o),
+    title: "Chat history",
+    style: {
+      width: 32,
+      height: 32,
+      borderRadius: 9,
+      cursor: 'pointer',
+      background: AI_UI.tint,
+      border: `0.5px solid ${AI_UI.border}`,
+      boxShadow: drawerOpen ? `0 0 0 2px ${AI_UI.primary}` : 'none',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: AI_UI.primary,
+      fontSize: 15,
+      transition: 'box-shadow 0.15s'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-menu-2"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      paddingBottom: zoneH
+    }
+  }, activeTab === 'chat' && (() => {
+    const openConv = conversations.find(c => c.id === currentConvId) || null;
+    const aiChat = /*#__PURE__*/React.createElement(AIChatTab, {
+      user: user,
+      messages: messages,
+      loading: loading,
+      dark: dark,
+      pills: shownPills,
+      onPill: dispatchPill,
+      projectName: activeProject ? activeProject.name : null,
+      flowKey: kpiFlow ? kpiFlow.step : calBrief ? 'cal-' + calBrief.kind : '',
+      flowCard: kpiFlow ? /*#__PURE__*/React.createElement(KpiFlowCard, {
+        dark: dark,
+        flow: kpiFlow,
+        pill: effectivePills.find(p => p.id === 'fb-kpis' || p.config && p.config.kpi) || {
+          icon: 'ti-chart-bar'
+        },
+        ownerName: myName,
+        onChoose: c => {
+          if (c === 'form') setKpiFlow({
+            step: 'form',
+            payload: kpiFlow.payload
+          });else startKpiNote();
+        },
+        onReview: payload => setKpiFlow({
+          step: 'summary',
+          payload
+        }),
+        onBack: () => setKpiFlow({
+          step: 'form',
+          payload: kpiFlow.payload
+        }),
+        onConfirm: resolvedPersons => submitKpi({
+          ...kpiFlow.payload,
+          persons: resolvedPersons || kpiFlow.payload.persons
+        }),
+        onCancel: () => setKpiFlow(null)
+      }) : calBrief ? /*#__PURE__*/React.createElement(CalendarBriefCard, {
+        dark: dark,
+        kind: calBrief.kind,
+        userName: myName,
+        onCancel: () => setCalBrief(null)
+      }) : null
+    });
+    const sidebar = /*#__PURE__*/React.createElement(HistoryPanel, {
+      dark: dark,
+      conversations: conversations,
+      projects: projects,
+      currentConvId: currentConvId,
+      wide: isWide,
+      onSelect: selectConversation,
+      onNewChat: () => {
+        newChat();
+        setDrawerOpen(false);
+      },
+      onPin: pinConversation,
+      onArchive: archiveConversation,
+      onRename: renameConversation,
+      onDelete: removeConversation,
+      onShare: shareConversation,
+      onOpenMemory: () => setShowMemory(true),
+      onNewProject: () => setShowNewProject(true),
+      onOpenProject: id => setOpenProjectId(id),
+      onMoveToProject: (convId, pid) => moveConversationToProject(convId, pid)
+    });
+    return isWide ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        height: '100%'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 240,
+        flexShrink: 0,
+        height: '100%',
+        borderRight: '0.5px solid #EDE7DC'
+      }
+    }, sidebar), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column'
+      }
+    }, openConv && /*#__PURE__*/React.createElement(ChatPanelHeader, {
+      conv: openConv,
+      projectName: activeProject ? activeProject.name : null,
+      onPin: pinConversation,
+      onShare: shareConversation,
+      onRename: renameConversation,
+      onArchive: archiveConversation,
+      onDelete: removeConversation
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minHeight: 0
+      }
+    }, aiChat))) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'relative',
+        height: '100%'
+      }
+    }, aiChat, drawerOpen && /*#__PURE__*/React.createElement("div", {
+      onClick: () => setDrawerOpen(false),
+      style: {
+        position: 'absolute',
+        inset: 0,
+        zIndex: 29,
+        background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)'
+      }
+    }), drawerOpen && /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        [historySide]: 0,
+        width: '82%',
+        maxWidth: 320,
+        zIndex: 30,
+        boxShadow: '0 0 28px rgba(0,0,0,0.18)'
+      }
+    }, sidebar));
+  })(), activeTab === 'teamchat' && /*#__PURE__*/React.createElement(ChatTab, {
+    dark: dark
+  }), activeTab === 'calls' && /*#__PURE__*/React.createElement(CallsTab, {
+    dark: dark,
+    ownerName: myName,
+    isAdmin: isAdmin
+  }), activeTab === 'kpis' && /*#__PURE__*/React.createElement(KpisTab, {
+    dark: dark
+  }), activeTab === 'deals' && /*#__PURE__*/React.createElement(DealsTab, null), activeTab === 'more' && (moreView === 'admin' && isAdmin ? /*#__PURE__*/React.createElement(AdminTab, {
+    onOpenBuilder: () => setBuilderOpen(true)
+  }) : moreView === 'guide' ? /*#__PURE__*/React.createElement(GuideTab, {
+    dark: dark,
+    profile: profile,
+    isAdmin: isAdmin
+  }) : moreView === 'app-masterplan' && isAdmin ? /*#__PURE__*/React.createElement(AppRoadmap, {
+    dark: dark,
+    onBack: () => setMoreMenuOpen(true)
+  }) : moreView === 'drives' ? /*#__PURE__*/React.createElement(SharedDrivesTab, {
+    dark: dark,
+    onBack: () => setMoreMenuOpen(true)
+  }) : moreView === 'directory' ? /*#__PURE__*/React.createElement(CompanyDirectory, {
+    dark: dark,
+    onBack: () => setMoreMenuOpen(true)
+  }) : moreView === 'expsurvey' ? /*#__PURE__*/React.createElement(ExpSurvey, {
+    dark: dark,
+    onBack: () => setMoreMenuOpen(true)
+  }) : moreView === 'healthgoals' ? /*#__PURE__*/React.createElement(HealthGoalsTab, {
+    dark: dark,
+    ownerName: myName,
+    ownerEmail: user && user.email || '',
+    isAdmin: isAdmin
+  }) : moreView === 'sffu' ? /*#__PURE__*/React.createElement(SffuFrame, {
+    dark: dark,
+    onBack: () => setMoreMenuOpen(true)
+  }) : moreView === 'timeoff' ? /*#__PURE__*/React.createElement(TimeOffFrame, {
+    dark: dark,
+    onBack: () => setMoreMenuOpen(true)
+  }) : /*#__PURE__*/React.createElement(CompanyDirectory, {
+    dark: dark,
+    onBack: () => setMoreMenuOpen(true)
+  })), !['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'].includes(activeTab) && /*#__PURE__*/React.createElement(Placeholder, {
+    title: (TABS.find(t => t.id === activeTab) || {}).label || ''
+  })), /*#__PURE__*/React.createElement("input", {
+    ref: fileInputRef,
+    type: "file",
+    multiple: true,
+    accept: "image/*,application/pdf,.txt,.csv,.md,.json,.log,.xlsx,.xls,.docx,.pptx,text/*",
+    style: {
+      display: 'none'
+    },
+    onChange: e => {
+      onSelectFiles(e.target.files);
+      e.target.value = '';
+    }
+  }), /*#__PURE__*/React.createElement(BottomZone, {
+    active: activeTab,
+    activeMoreView: moreView,
+    tabs: visibleTabs,
+    onChange: t => {
+      setDrawerOpen(false);
+      if (t === 'more') {
+        if (moreItems.length <= 1) {
+          setMoreView((moreItems[0] || {}).id || 'directory');
+          setActiveTab('more');
+        } else setMoreMenuOpen(o => !o);
+        return;
+      }
+      setMoreMenuOpen(false);
+      const item = allItemMap[t];
+      if (item && item.href) {
+        window.location.href = item.href;
+        return;
+      }
+      const coreNavIds = ['chat', 'teamchat', 'calls', 'kpis', 'deals'];
+      if (coreNavIds.includes(t)) {
+        setActiveTab(t);
+      } else {
+        setMoreView(t);
+        setActiveTab('more');
+      }
+    },
+    dark: dark,
+    isWide: isWide,
+    onOpenAttach: openFilePicker,
+    pendingAttachments: pendingAttachments,
+    onRemoveAttach: removeAttachment,
+    input: input,
+    setInput: updateInput,
+    onSend: send,
+    loading: loading,
+    zoneRef: zoneRef
+  }), moreMenuOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setMoreMenuOpen(false),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 51
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      right: 12,
+      bottom: 'calc(68px + env(safe-area-inset-bottom))',
+      zIndex: 52,
+      background: dark ? '#0A1730' : '#FFFFFF',
+      border: `1px solid ${dark ? '#152545' : C.border}`,
+      borderRadius: 12,
+      boxShadow: '0 8px 28px rgba(0,0,0,0.22)',
+      padding: 6,
+      minWidth: 168
+    }
+  }, moreItems.map(it => {
+    const on = activeTab === 'more' && moreView === it.id;
+    return /*#__PURE__*/React.createElement("button", {
+      key: it.id,
+      onClick: () => {
+        if (it.href) {
+          window.location.href = it.href;
+          return;
+        }
+        setMoreView(it.id);
+        setActiveTab('more');
+        setMoreMenuOpen(false);
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 11,
+        width: '100%',
+        textAlign: 'left',
+        padding: '10px 12px',
+        borderRadius: 8,
+        border: 'none',
+        background: on ? dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA' : 'none',
+        cursor: 'pointer',
+        color: dark ? '#fff' : C.navy,
+        fontFamily: C.fontSans,
+        fontSize: '0.9rem',
+        fontWeight: 500
+      }
+    }, it.img ? /*#__PURE__*/React.createElement("img", {
+      src: it.img,
+      style: {
+        width: 18,
+        height: 18,
+        objectFit: 'contain'
+      }
+    }) : /*#__PURE__*/React.createElement("i", {
+      className: `ti ${it.icon}`,
+      style: {
+        fontSize: 18,
+        color: dark ? C.goldSoft : C.gold
+      }
+    }), it.label);
+  }))), builderOpen && /*#__PURE__*/React.createElement(WorkModeBuilder, {
+    dark: dark,
+    onClose: () => setBuilderOpen(false),
+    onSaved: refreshPills
+  }), activePill && activePill.kind === 'form' && /*#__PURE__*/React.createElement(FormSheet, {
+    dark: dark,
+    pill: activePill.pill,
+    onClose: () => setActivePill(null),
+    onSubmit: vals => {
+      const text = composeFromTemplate(activePill.pill.config.template, vals, activePill.pill.config.fields);
+      setActivePill(null);
+      runSend(text, {
+        type: 'work'
+      });
+    }
+  }), activePill && activePill.kind === 'steps' && /*#__PURE__*/React.createElement(StepSheet, {
+    dark: dark,
+    pill: activePill.pill,
+    onClose: () => setActivePill(null),
+    onComplete: ans => {
+      const text = composeFromTemplate(activePill.pill.config.template, ans, activePill.pill.config.steps);
+      setActivePill(null);
+      runSend(text, {
+        type: 'work'
+      });
+    }
+  }));
+}
+
+// ─── Mount ───────────────────────────────────────────────────────
+(function mount() {
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  const AUTHORIZED_DOMAIN = 'themorshedgroup.com';
+  function _showScreen(id) {
+    ['login-screen', 'denied-screen', 'pending-screen'].forEach(function (s) {
+      var el = document.getElementById(s);
+      if (el) el.hidden = s !== id;
+    });
+    document.getElementById('auth-overlay').style.display = 'block';
+  }
+  function showSignin() {
+    _showScreen('login-screen');
+  }
+  function showRejected() {
+    _showScreen('denied-screen');
+  }
+  function showPending() {
+    _showScreen('pending-screen');
+  }
+  function hideOverlay() {
+    document.getElementById('auth-overlay').style.display = 'none';
+  }
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+    root.render( /*#__PURE__*/React.createElement(App, {
+      user: window.SupabaseAuth._state.session?.user,
+      profile: {
+        id: 'dev-user-id',
+        email: 'symon@morshedgroup.com',
+        first_name: 'Symon',
+        last_name: 'Yongco',
+        title: 'Operations Manager',
+        employee_id: 'TMG-001',
+        access: 'admin',
+        status: 'active',
+        avatar_url: ''
+      }
+    }));
+    hideOverlay();
+    return;
+  }
+  window.SupabaseAuth.onAuthStateChange(async function ({
+    session
+  }) {
+    if (!session) {
+      showSignin();
+      return;
+    }
+    // Domain gate: only TMG Workspace accounts may enter; others see Access Denied.
+    const email = (session.user.email || '').toLowerCase();
+    if (!email.endsWith('@' + AUTHORIZED_DOMAIN)) {
+      showRejected();
+      return;
+    }
+    const profile = await ProfileDB.ensureProfile(session.user);
+    // Gate: a profile that exists but isn't active is blocked. No profile (error/not-yet-set-up) → fail open.
+    if (profile && profile.status === 'pending') {
+      showPending();
+      return;
+    }
+    if (profile && profile.status && profile.status !== 'active') {
+      showRejected();
+      return;
+    }
+    // One-time: persist the Google refresh token captured at sign-in so the calendar can sync.
+    const grt = window.SupabaseAuth._googleRefresh;
+    if (grt) {
+      window.SupabaseAuth._googleRefresh = null;
+      connectGoogleCalendar(grt);
+    }
+    root.render( /*#__PURE__*/React.createElement(App, {
+      user: session.user,
+      profile: profile
+    }));
+    hideOverlay();
+  });
+})();

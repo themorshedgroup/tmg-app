@@ -1,0 +1,1478 @@
+const {
+  useState,
+  useEffect
+} = React;
+
+// ─── Design tokens (TMG Brand) ───────────────────────────────────
+const C = {
+  bg: '#FCFBF8',
+  surface: '#FFFFFF',
+  surfaceHover: '#F3EBDA',
+  border: '#E4DFD4',
+  navy: '#001A4A',
+  navyHover: '#0A2552',
+  gold: '#AD832F',
+  goldSoft: '#C9A45A',
+  textPrimary: '#001A4A',
+  textSecondary: '#6B6B6B',
+  textMuted: '#9B9380',
+  red: '#C0392B',
+  green: '#1E6B40',
+  amber: '#B07A00',
+  fontSans: "-apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif",
+  fontDisplay: "'Cormorant Garamond', Georgia, serif"
+};
+
+// ─── Roles (mirror index.html) ───────────────────────────────────
+const ACCESS_LABEL = {
+  admin: 'Admin',
+  operations: 'Operations',
+  agent: 'Sales Agent',
+  tc: 'Transaction Coordinator',
+  pending: 'Pending'
+};
+const toRoles = a => (Array.isArray(a) ? a : a ? [a] : []).filter(r => r && r !== 'pending');
+const hasAdmin = a => toRoles(a).some(r => r === 'admin' || r === 'operations');
+
+// ─── Profiles ────────────────────────────────────────────────────
+const ProfileDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  uid() {
+    return window.SupabaseAuth?._state?.session?.user?.id || null;
+  },
+  async ensureProfile(user) {
+    if (!this.client()) return null;
+    try {
+      const {
+        data,
+        error
+      } = await this.client().from('profiles').select('*').eq('id', user.id).maybeSingle();
+      if (error) {
+        console.error('[ProfileDB] load:', error.message);
+        return null;
+      }
+      if (data) return data;
+      const full = (user.user_metadata?.full_name || '').trim();
+      const parts = full.split(' ');
+      const {
+        data: ins,
+        error: e2
+      } = await this.client().from('profiles').insert({
+        id: user.id,
+        email: user.email,
+        first_name: parts.shift() || null,
+        last_name: parts.join(' ') || null,
+        avatar_url: user.user_metadata?.avatar_url || null
+      }).select().single();
+      if (e2) {
+        console.error('[ProfileDB] create:', e2.message);
+        return null;
+      }
+      return ins;
+    } catch (e) {
+      console.error('[ProfileDB] ensure:', e);
+      return null;
+    }
+  },
+  async loadAll() {
+    if (!this.client()) return [];
+    const {
+      data,
+      error
+    } = await this.client().from('profiles').select('*').order('created_at', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[ProfileDB] loadAll:', error.message);
+      return [];
+    }
+    return data || [];
+  }
+};
+
+// ─── Time Off: policy config (admins write, everyone reads) ───────
+// Global setting only (hours per workday); allotment is now per-person on profiles.
+const TIMEOFF_DEFAULT = {
+  hours_per_workday: 8,
+  year_basis: 'calendar'
+};
+function normalizeTimeoffPolicy(cfg) {
+  const base = cfg && typeof cfg === 'object' ? cfg : {};
+  const hpw = Number(base.hours_per_workday);
+  return {
+    hours_per_workday: hpw > 0 ? hpw : 8,
+    year_basis: base.year_basis === 'anniversary' ? 'anniversary' : 'calendar'
+  };
+}
+const PolicyDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  async load() {
+    if (!this.client()) return null;
+    const {
+      data,
+      error
+    } = await this.client().from('time_off_policies').select('config').eq('id', 1).maybeSingle();
+    if (error) {
+      console.error('[PolicyDB] load:', error.message);
+      return null;
+    }
+    return data && data.config || null;
+  },
+  async save(config) {
+    if (!this.client()) return;
+    const {
+      error
+    } = await this.client().from('time_off_policies').upsert({
+      id: 1,
+      config,
+      updated_at: new Date().toISOString()
+    });
+    if (error) {
+      console.error('[PolicyDB] save:', error.message);
+      throw error;
+    }
+  }
+};
+
+// ─── Google Calendar (write-only here) — mirrors tasks.html's callCalendar exactly,
+// so an approved time-off request can drop an OOO event on the shared team calendar. ───
+const SUPABASE_ANON = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
+const CAL_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-calendar';
+const CAL_IS_DEV = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:');
+// The shared "TMG" team calendar (confirmed by Symon). Writes go through the
+// edge function's SERVICE ACCOUNT (action: team-event-*), which owns this calendar —
+// so an approver never needs their own Google Calendar connected. The edge function
+// holds the authoritative id; this constant is only recorded alongside the event.
+const TEAM_CALENDAR_ID = 'c_u17la9j1annqi72em9qs3e8v44@group.calendar.google.com';
+function authToken() {
+  return window.SupabaseAuth?._state?.session?.access_token || SUPABASE_ANON;
+}
+async function callCalendar(payload) {
+  if (CAL_IS_DEV) return {
+    ok: true,
+    status: 200,
+    data: payload.action === 'create' || payload.action === 'team-event-create' ? {
+      ok: true,
+      id: 'dev-' + Math.random().toString(36).slice(2)
+    } : {
+      ok: true
+    }
+  };
+  const res = await fetch(CAL_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken(),
+      'apikey': SUPABASE_ANON
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json().catch(() => ({}));
+  return {
+    ok: res.ok,
+    status: res.status,
+    data
+  };
+}
+// Google's all-day event `end.date` is EXCLUSIVE — one day past the last included day.
+function isoPlusOneDay(isoDate) {
+  const d = new Date(isoDate + 'T00:00:00');
+  d.setDate(d.getDate() + 1);
+  const p2 = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+}
+async function createOOOEvent(name, startISO, endISO) {
+  const event = {
+    summary: 'OOO - ' + name,
+    start: {
+      date: startISO
+    },
+    end: {
+      date: isoPlusOneDay(endISO)
+    }
+  };
+  const {
+    ok,
+    data
+  } = await callCalendar({
+    action: 'team-event-create',
+    event
+  });
+  if (!ok) {
+    const err = new Error(data.error || 'calendar_error');
+    err.code = data.error;
+    throw err;
+  }
+  return data.id || null;
+}
+async function deleteOOOEvent(eventId, calendarId) {
+  if (!eventId) return;
+  try {
+    await callCalendar({
+      action: 'team-event-delete',
+      eventId
+    });
+  } catch (e) {}
+}
+
+// ─── Time Off: request data + balance math ───────────────────────
+const TimeOffDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  uid() {
+    return window.SupabaseAuth?._state?.session?.user?.id || null;
+  },
+  async listMine() {
+    if (!this.client()) return [];
+    const {
+      data,
+      error
+    } = await this.client().from('time_off_requests').select('*').eq('user_id', this.uid()).order('start_at', {
+      ascending: false
+    });
+    if (error) {
+      console.error('[TimeOffDB] listMine:', error.message);
+      return [];
+    }
+    return data || [];
+  },
+  async listPending() {
+    if (!this.client()) return [];
+    const {
+      data,
+      error
+    } = await this.client().from('time_off_requests').select('*').eq('status', 'pending').order('start_at', {
+      ascending: true
+    });
+    if (error) {
+      console.error('[TimeOffDB] listPending:', error.message);
+      return [];
+    }
+    return data || [];
+  },
+  // Org-wide, for the Team roster. RLS scopes this to what the caller may see —
+  // for a true time-off admin that's everyone; for anyone else, just their own + reports'.
+  async listAllForYear(year) {
+    if (!this.client()) return [];
+    const start = year + '-01-01T00:00:00';
+    const end = year + 1 + '-01-01T00:00:00';
+    const {
+      data,
+      error
+    } = await this.client().from('time_off_requests').select('*').gte('start_at', start).lt('start_at', end);
+    if (error) {
+      console.error('[TimeOffDB] listAllForYear:', error.message);
+      return [];
+    }
+    return data || [];
+  },
+  // forUserId lets a timeoff admin file on behalf of a teammate — the DB guard trigger
+  // enforces that only an admin may pass a user_id other than their own.
+  async create(req) {
+    if (!this.client()) return null;
+    const {
+      data,
+      error
+    } = await this.client().from('time_off_requests').insert({
+      user_id: req.forUserId || this.uid(),
+      start_at: req.start_at,
+      end_at: req.end_at,
+      full_day: !!req.full_day,
+      reason: req.reason || null
+    }).select().single();
+    if (error) {
+      console.error('[TimeOffDB] create:', error.message);
+      throw error;
+    }
+    return data;
+  },
+  // Edits are allowed on any non-cancelled request, including already-decided ones —
+  // changing the dates/reason withdraws the prior decision and puts it back up for approval.
+  async update(id, req) {
+    if (!this.client()) return null;
+    const {
+      data,
+      error
+    } = await this.client().from('time_off_requests').update({
+      start_at: req.start_at,
+      end_at: req.end_at,
+      full_day: !!req.full_day,
+      reason: req.reason || null,
+      status: 'pending',
+      decision_note: null,
+      decided_by: null,
+      decided_at: null,
+      calendar_id: null,
+      calendar_event_id: null
+    }).eq('id', id).select().single();
+    if (error) {
+      console.error('[TimeOffDB] update:', error.message);
+      throw error;
+    }
+    return data;
+  },
+  async decide(id, status, note) {
+    if (!this.client()) return;
+    const {
+      error
+    } = await this.client().from('time_off_requests').update({
+      status,
+      decision_note: note || null
+    }).eq('id', id);
+    if (error) {
+      console.error('[TimeOffDB] decide:', error.message);
+      throw error;
+    }
+  },
+  // Records the OOO calendar event created for an approved request, so a later edit
+  // (which withdraws the approval) knows which event to delete.
+  async setCalendarEvent(id, calendarId, eventId) {
+    if (!this.client()) return;
+    const {
+      error
+    } = await this.client().from('time_off_requests').update({
+      calendar_id: calendarId,
+      calendar_event_id: eventId
+    }).eq('id', id);
+    if (error) console.error('[TimeOffDB] setCalendarEvent:', error.message);
+  },
+  async cancel(id) {
+    if (!this.client()) return;
+    const {
+      error
+    } = await this.client().from('time_off_requests').update({
+      status: 'cancelled'
+    }).eq('id', id);
+    if (error) {
+      console.error('[TimeOffDB] cancel:', error.message);
+      throw error;
+    }
+  }
+};
+const timeoffDate = v => new Date(String(v || '').replace(' ', 'T'));
+const timeoffFmtHours = h => String(Math.round((Number(h) || 0) * 100) / 100);
+function timeoffClientHours(startISO, endISO, fullDay, hpw) {
+  const s = timeoffDate(startISO),
+    e = timeoffDate(endISO);
+  if (isNaN(s) || isNaN(e) || e < s) return 0;
+  if (fullDay) {
+    let d = new Date(s.getFullYear(), s.getMonth(), s.getDate());
+    const end = new Date(e.getFullYear(), e.getMonth(), e.getDate());
+    let n = 0;
+    while (d <= end) {
+      const wd = d.getDay();
+      if (wd >= 1 && wd <= 5) n++;
+      d.setDate(d.getDate() + 1);
+    }
+    return n * (Number(hpw) || 8);
+  }
+  return Math.max(0, Math.round((e - s) / 3600000 * 100) / 100);
+}
+// A person hired mid-year gets a prorated allotment for that first calendar year —
+// the fraction of the year remaining from their hire date onward. Hired in an earlier
+// year (or no hire_date on file) → full allotment, unchanged. Hired in a future year
+// (bad data) → 0 for this year.
+function timeoffProration(hireDateStr, year) {
+  if (!hireDateStr) return 1;
+  const hire = timeoffDate(hireDateStr);
+  if (isNaN(hire)) return 1;
+  const hireYear = hire.getFullYear();
+  if (hireYear < year) return 1;
+  if (hireYear > year) return 0;
+  const yearStart = new Date(year, 0, 1);
+  const yearEnd = new Date(year, 11, 31);
+  const hireDay = new Date(hire.getFullYear(), hire.getMonth(), hire.getDate());
+  const daysInYear = Math.round((yearEnd - yearStart) / 86400000) + 1;
+  const daysRemaining = Math.round((yearEnd - hireDay) / 86400000) + 1;
+  return Math.max(0, Math.min(1, daysRemaining / daysInYear));
+}
+// Per-person: allotment hours = the person's profile.time_off_days × hours-per-workday,
+// prorated for the calendar year they were hired in.
+function timeoffBalance(cfg, profile, rows) {
+  const days = Math.max(0, Number(profile && profile.time_off_days) || 0);
+  const hpw = cfg && Number(cfg.hours_per_workday) || 8;
+  const tracked = days > 0;
+  const year = new Date().getFullYear();
+  const proration = timeoffProration(profile && profile.hire_date, year);
+  const allot = days * hpw * proration;
+  let used = 0,
+    pending = 0;
+  (rows || []).forEach(r => {
+    if (!r.tracked || timeoffDate(r.start_at).getFullYear() !== year) return;
+    const h = Number(r.total_hours) || 0;
+    if (r.status === 'approved') used += h;else if (r.status === 'pending') pending += h;
+  });
+  return {
+    tracked,
+    allot,
+    used,
+    pending,
+    remaining: allot - used,
+    proration
+  };
+}
+function timeoffWhen(r) {
+  const s = timeoffDate(r.start_at),
+    e = timeoffDate(r.end_at);
+  const dOpt = {
+    month: 'short',
+    day: 'numeric'
+  };
+  if (r.full_day) {
+    return s.toDateString() === e.toDateString() ? s.toLocaleDateString(undefined, dOpt) : s.toLocaleDateString(undefined, dOpt) + ' – ' + e.toLocaleDateString(undefined, dOpt);
+  }
+  const tOpt = {
+    hour: 'numeric',
+    minute: '2-digit'
+  };
+  return s.toLocaleDateString(undefined, dOpt) + ', ' + s.toLocaleTimeString([], tOpt) + ' – ' + e.toLocaleTimeString([], tOpt);
+}
+function TimeOffTab({
+  dark,
+  profile,
+  isAdmin,
+  onBack,
+  hideHeader
+}) {
+  const uid = profile && profile.id;
+  const [policy, setPolicy] = useState(null);
+  const [mine, setMine] = useState([]);
+  const [pending, setPending] = useState([]);
+  const [people, setPeople] = useState({});
+  const [profiles, setProfiles] = useState([]);
+  const [yearRequests, setYearRequests] = useState([]);
+  const [scope, setScope] = useState('mine'); // 'mine' | 'team' — admins only
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState('list');
+  const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState('fullday');
+  const today = new Date().toISOString().slice(0, 10);
+  const [startDate, setStartDate] = useState(today);
+  const [endDate, setEndDate] = useState(today);
+  const [startTime, setStartTime] = useState('09:00');
+  const [endTime, setEndTime] = useState('13:00');
+  const [reason, setReason] = useState('');
+  const [editingId, setEditingId] = useState(null);
+  const [editingStatus, setEditingStatus] = useState(null);
+  const [editingCalEvent, setEditingCalEvent] = useState(null); // { calendarId, eventId } | null
+  const [forUserId, setForUserId] = useState(null); // admin-only: filing on behalf of a teammate; null = self
+
+  const reload = async () => {
+    const [m, p, yr] = await Promise.all([TimeOffDB.listMine(), TimeOffDB.listPending(), isAdmin ? TimeOffDB.listAllForYear(new Date().getFullYear()) : Promise.resolve(null)]);
+    setMine(m);
+    setPending(p);
+    if (yr) setYearRequests(yr);
+  };
+  useEffect(() => {
+    let on = true;
+    (async () => {
+      const cfg = normalizeTimeoffPolicy((await PolicyDB.load()) || TIMEOFF_DEFAULT);
+      const ppl = await ProfileDB.loadAll();
+      const map = {};
+      ppl.forEach(u => {
+        map[u.id] = ((u.first_name || '') + ' ' + (u.last_name || '')).trim() || u.email || 'Someone';
+      });
+      const [m, p, yr] = await Promise.all([TimeOffDB.listMine(), TimeOffDB.listPending(), isAdmin ? TimeOffDB.listAllForYear(new Date().getFullYear()) : Promise.resolve([])]);
+      if (!on) return;
+      setPolicy(cfg);
+      setPeople(map);
+      setProfiles(ppl);
+      setMine(m);
+      setPending(p);
+      setYearRequests(yr);
+      setLoading(false);
+    })();
+    return () => {
+      on = false;
+    };
+  }, []);
+  const t = dark ? {
+    bg: '#0B1830',
+    surface: '#12203B',
+    text: '#EDE6D6',
+    sub: '#A9B2C4',
+    muted: '#7E8AA0',
+    border: '#24314F'
+  } : {
+    bg: C.bg,
+    surface: C.surface,
+    text: C.navy,
+    sub: C.textSecondary,
+    muted: C.textMuted,
+    border: C.border
+  };
+  const PILL = {
+    pending: {
+      bg: dark ? 'rgba(176,122,0,0.18)' : '#FBF1D9',
+      fg: dark ? '#E0B65C' : C.amber,
+      label: 'Pending'
+    },
+    approved: {
+      bg: dark ? 'rgba(30,107,64,0.20)' : '#E6F2EC',
+      fg: dark ? '#7FCBA4' : C.green,
+      label: 'Approved'
+    },
+    denied: {
+      bg: dark ? 'rgba(192,57,43,0.18)' : '#FDECEA',
+      fg: dark ? '#E89B92' : C.red,
+      label: 'Denied'
+    },
+    cancelled: {
+      bg: dark ? 'rgba(255,255,255,0.08)' : '#F0EEE8',
+      fg: dark ? '#98A0AE' : C.textMuted,
+      label: 'Cancelled'
+    },
+    noted: {
+      bg: dark ? 'rgba(173,131,47,0.16)' : '#F3EBDA',
+      fg: dark ? '#C9A45A' : C.gold,
+      label: 'Logged'
+    }
+  };
+  const pill = s => {
+    const p = PILL[s] || PILL.pending;
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        padding: '3px 9px',
+        borderRadius: 20,
+        background: p.bg,
+        color: p.fg,
+        fontSize: '0.68rem',
+        fontWeight: 700,
+        fontFamily: C.fontSans,
+        letterSpacing: '0.02em'
+      }
+    }, p.label);
+  };
+  const bal = policy ? timeoffBalance(policy, profile, mine) : null;
+  // When an admin is filing on behalf of someone else, show THEIR balance/warnings instead
+  // of the admin's own — sourced from yearRequests, which is only loaded for admins.
+  const forProfile = isAdmin && forUserId ? profiles.find(p => p.id === forUserId) : null;
+  const forBal = forProfile ? timeoffBalance(policy, forProfile, yearRequests.filter(r => r.user_id === forUserId)) : bal;
+  const hpw = policy ? policy.hours_per_workday : 8;
+  const daysEq = h => Math.round(h / (hpw || 8) * 10) / 10;
+  // Approver sees: their reports' requests, or (admin/ops) everyone's. A TRUE admin
+  // (access has 'admin') may also approve their OWN — matches the DB self-approval carve-out.
+  const isSuper = toRoles(profile && profile.access).indexOf('admin') !== -1;
+  const toReview = pending.filter(r => (isAdmin || r.manager_id === uid) && (isSuper || r.user_id !== uid));
+  const draftStart = mode === 'fullday' ? startDate + 'T00:00:00' : startDate + 'T' + startTime + ':00';
+  const draftEnd = mode === 'fullday' ? endDate + 'T00:00:00' : startDate + 'T' + endTime + ':00';
+  const draftFull = mode === 'fullday';
+  const draftHours = timeoffClientHours(draftStart, draftEnd, draftFull, hpw);
+  const draftValid = mode === 'fullday' ? !!(startDate && endDate && endDate >= startDate) : !!(startDate && endTime > startTime);
+  const startCreate = () => {
+    setEditingId(null);
+    setEditingStatus(null);
+    setEditingCalEvent(null);
+    setForUserId(null);
+    setMode('fullday');
+    setStartDate(today);
+    setEndDate(today);
+    setStartTime('09:00');
+    setEndTime('13:00');
+    setReason('');
+    setView('new');
+  };
+  const startEdit = r => {
+    const pad = n => String(n).padStart(2, '0');
+    const dateStr = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    const timeStr = d => pad(d.getHours()) + ':' + pad(d.getMinutes());
+    const s = timeoffDate(r.start_at),
+      e = timeoffDate(r.end_at);
+    setEditingId(r.id);
+    setEditingStatus(r.status);
+    setForUserId(null);
+    setEditingCalEvent(r.calendar_event_id ? {
+      calendarId: r.calendar_id,
+      eventId: r.calendar_event_id
+    } : null);
+    setMode(r.full_day ? 'fullday' : 'hours');
+    setStartDate(dateStr(s));
+    setEndDate(dateStr(e));
+    setStartTime(r.full_day ? '09:00' : timeStr(s));
+    setEndTime(r.full_day ? '13:00' : timeStr(e));
+    setReason(r.reason || '');
+    setView('new');
+  };
+  // Shared by the approval flow AND by "logged" (noted) entries — both mean the time off
+  // is a settled fact, not a pending ask, so both should land an OOO event on the Team
+  // Calendar. Best-effort: a calendar hiccup shouldn't block the request/log itself.
+  const syncOOOToCalendar = async row => {
+    try {
+      const name = people[row.user_id] || 'Team member';
+      const startISO = (row.start_at || '').slice(0, 10);
+      const endISO = (row.end_at || '').slice(0, 10) || startISO;
+      const eventId = await createOOOEvent(name, startISO, endISO);
+      if (eventId) await TimeOffDB.setCalendarEvent(row.id, TEAM_CALENDAR_ID, eventId);
+      return true;
+    } catch (ce) {
+      const msg = ce.code === 'team_calendar_not_configured' ? 'Team Calendar sync isn’t set up yet — no OOO event was added.' : 'Couldn’t add it to the Team Calendar (' + (ce.message || ce) + '). You can add it there manually.';
+      alert(msg);
+      return false;
+    }
+  };
+  const submit = async () => {
+    if (!draftValid || busy) return;
+    setBusy(true);
+    try {
+      if (editingId) {
+        // Editing withdraws any prior approval — drop its OOO event before saving the new dates.
+        if (editingCalEvent) await deleteOOOEvent(editingCalEvent.eventId, editingCalEvent.calendarId);
+        await TimeOffDB.update(editingId, {
+          start_at: draftStart,
+          end_at: draftEnd,
+          full_day: draftFull,
+          reason
+        });
+      } else {
+        const row = await TimeOffDB.create({
+          start_at: draftStart,
+          end_at: draftEnd,
+          full_day: draftFull,
+          reason,
+          forUserId
+        });
+        // 'noted' = logged, not a pending ask (e.g. an admin filing on someone else's behalf)
+        // — it never goes through doDecide()/Approve, so sync it to the Team Calendar now.
+        if (row && row.status === 'noted') await syncOOOToCalendar(row);
+      }
+      setReason('');
+      setMode('fullday');
+      setEditingId(null);
+      setEditingStatus(null);
+      setEditingCalEvent(null);
+      setForUserId(null);
+      setView('list');
+      await reload();
+    } catch (e) {
+      alert('Could not file: ' + (e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const doCancel = async r => {
+    if (!window.confirm('Cancel this time-off request?')) return;
+    setBusy(true);
+    try {
+      await TimeOffDB.cancel(r.id);
+      await reload();
+    } catch (e) {
+      alert('Could not cancel: ' + (e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const doDecide = async (r, status) => {
+    const note = status === 'denied' ? window.prompt('Reason for denial (optional):') || null : null;
+    setBusy(true);
+    try {
+      await TimeOffDB.decide(r.id, status, note);
+      if (status === 'approved') await syncOOOToCalendar(r);
+      await reload();
+    } catch (e) {
+      alert('Could not update: ' + (e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const card = {
+    background: t.surface,
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 14,
+    border: `1px solid ${t.border}`,
+    boxShadow: dark ? 'none' : '0 2px 8px rgba(0,26,74,0.06)'
+  };
+  const fld = {
+    width: '100%',
+    padding: '10px 12px',
+    borderRadius: 10,
+    border: `1.5px solid ${t.border}`,
+    background: t.surface,
+    color: t.text,
+    fontSize: '0.9rem',
+    fontFamily: C.fontSans,
+    boxSizing: 'border-box'
+  };
+  const lbl = {
+    fontSize: '0.72rem',
+    fontWeight: 600,
+    color: t.sub,
+    fontFamily: C.fontSans,
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
+    marginBottom: 6,
+    display: 'block'
+  };
+  const primaryBtn = {
+    width: '100%',
+    padding: 13,
+    background: C.navy,
+    color: '#fff',
+    border: 'none',
+    borderRadius: 12,
+    fontSize: '0.92rem',
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: C.fontSans
+  };
+  const myRow = r => {
+    const canCancel = r.status === 'pending' || r.status === 'noted';
+    const canEdit = r.status !== 'cancelled';
+    const who = r.decided_by && people[r.decided_by];
+    return /*#__PURE__*/React.createElement("div", {
+      key: r.id,
+      style: {
+        ...card,
+        marginBottom: 10,
+        padding: 13
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        fontSize: '0.9rem',
+        fontWeight: 600,
+        color: t.text,
+        fontFamily: C.fontSans
+      }
+    }, timeoffWhen(r)), pill(r.status)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.76rem',
+        color: t.sub,
+        fontFamily: C.fontSans,
+        marginTop: 3
+      }
+    }, timeoffFmtHours(r.total_hours), "h", r.tracked ? ' · ' + daysEq(r.total_hours) + ' day' + (daysEq(r.total_hours) === 1 ? '' : 's') : ' · visibility', r.reason ? ' · ' + r.reason : ''), r.decision_note ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.74rem',
+        color: t.muted,
+        fontFamily: C.fontSans,
+        marginTop: 3,
+        fontStyle: 'italic'
+      }
+    }, "\u201C", r.decision_note, "\u201D", who ? ' — ' + who : '') : null, canEdit || canCancel ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8,
+        marginTop: 9
+      }
+    }, canEdit ? /*#__PURE__*/React.createElement("button", {
+      onClick: () => startEdit(r),
+      disabled: busy,
+      style: {
+        padding: '7px 12px',
+        background: 'none',
+        border: `1.5px solid ${t.border}`,
+        borderRadius: 9,
+        color: t.text,
+        fontSize: '0.76rem',
+        fontWeight: 600,
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, "Edit") : null, canCancel ? /*#__PURE__*/React.createElement("button", {
+      onClick: () => doCancel(r),
+      disabled: busy,
+      style: {
+        padding: '7px 12px',
+        background: 'none',
+        border: `1.5px solid ${t.border}`,
+        borderRadius: 9,
+        color: t.sub,
+        fontSize: '0.76rem',
+        fontWeight: 600,
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, "Cancel") : null) : null);
+  };
+  const reviewRow = r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: {
+      ...card,
+      marginBottom: 10,
+      padding: 13
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontSize: '0.9rem',
+      fontWeight: 700,
+      color: t.text,
+      fontFamily: C.fontSans
+    }
+  }, people[r.user_id] || 'Someone'), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.76rem',
+      color: t.sub,
+      fontFamily: C.fontSans
+    }
+  }, timeoffFmtHours(r.total_hours), "h")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.8rem',
+      color: t.sub,
+      fontFamily: C.fontSans,
+      marginTop: 3
+    }
+  }, timeoffWhen(r), r.reason ? ' · ' + r.reason : ''), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => doDecide(r, 'approved'),
+    disabled: busy,
+    style: {
+      flex: 1,
+      padding: '9px 0',
+      background: C.green,
+      color: '#fff',
+      border: 'none',
+      borderRadius: 9,
+      fontSize: '0.8rem',
+      fontWeight: 700,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Approve"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => doDecide(r, 'denied'),
+    disabled: busy,
+    style: {
+      flex: 1,
+      padding: '9px 0',
+      background: 'none',
+      color: C.red,
+      border: `1.5px solid ${dark ? 'rgba(192,57,43,0.5)' : '#F3C9C4'}`,
+      borderRadius: 9,
+      fontSize: '0.8rem',
+      fontWeight: 700,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Deny")));
+  // Admin-only Team roster: every active profile's balance for the year, side by side.
+  const activeProfiles = profiles.filter(p => !p.status || p.status === 'active');
+  const rosterRow = p => {
+    const b = timeoffBalance(policy, p, yearRequests.filter(r => r.user_id === p.id));
+    const name = ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || 'Someone';
+    return /*#__PURE__*/React.createElement("div", {
+      key: p.id,
+      style: {
+        ...card,
+        marginBottom: 10,
+        padding: 13
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        fontSize: '0.88rem',
+        fontWeight: 700,
+        color: t.text,
+        fontFamily: C.fontSans
+      }
+    }, name), !b.tracked ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.68rem',
+        color: t.muted,
+        fontFamily: C.fontSans
+      }
+    }, "Not tracked") : null), b.tracked ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.78rem',
+        color: t.sub,
+        fontFamily: C.fontSans,
+        marginTop: 4
+      }
+    }, /*#__PURE__*/React.createElement("b", {
+      style: {
+        color: t.text
+      }
+    }, timeoffFmtHours(b.remaining), "h"), " left \xB7 ", timeoffFmtHours(b.used), "h used \xB7 ", timeoffFmtHours(b.pending), "h pending \xB7 of ", timeoffFmtHours(b.allot), "h", b.proration < 1 ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.gold
+      }
+    }, " \xB7 prorated (", p.hire_date ? timeoffDate(p.hire_date).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric'
+    }) : 'started', " start)") : null) : null);
+  };
+  if (loading) return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '20px 16px',
+      background: t.bg
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.85rem',
+      color: t.muted,
+      fontFamily: C.fontSans
+    }
+  }, "Loading\u2026"));
+  if (view === 'new') {
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        padding: '20px 16px 100px',
+        background: t.bg,
+        minHeight: '100%'
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        setEditingId(null);
+        setEditingStatus(null);
+        setEditingCalEvent(null);
+        setForUserId(null);
+        setView('list');
+      },
+      style: {
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        display: 'flex',
+        alignItems: 'center',
+        cursor: 'pointer',
+        color: t.sub,
+        fontSize: '0.86rem',
+        fontWeight: 600,
+        fontFamily: C.fontSans,
+        marginBottom: 16
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-chevron-left",
+      style: {
+        fontSize: 20
+      }
+    }), "Back"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '1.5rem',
+        fontWeight: 400,
+        fontStyle: 'italic',
+        color: t.text,
+        marginBottom: 18,
+        fontFamily: C.fontDisplay
+      }
+    }, editingId ? 'Edit request' : forUserId ? 'Log time off for ' + (people[forUserId] || 'them') : forBal && forBal.tracked ? 'Request time off' : 'Log time off'), /*#__PURE__*/React.createElement("div", {
+      style: card
+    }, isAdmin && !editingId ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 16
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: lbl
+    }, "For"), /*#__PURE__*/React.createElement("select", {
+      value: forUserId || uid,
+      onChange: e => setForUserId(e.target.value === uid ? null : e.target.value),
+      style: fld
+    }, /*#__PURE__*/React.createElement("option", {
+      value: uid
+    }, "Myself"), activeProfiles.filter(p => p.id !== uid).map(p => /*#__PURE__*/React.createElement("option", {
+      key: p.id,
+      value: p.id
+    }, ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || 'Someone')))) : null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8,
+        marginBottom: 16
+      }
+    }, [{
+      k: 'fullday',
+      l: 'Full day(s)'
+    }, {
+      k: 'hours',
+      l: 'Specific hours'
+    }].map(o => /*#__PURE__*/React.createElement("button", {
+      key: o.k,
+      onClick: () => setMode(o.k),
+      style: {
+        flex: 1,
+        padding: '9px 0',
+        borderRadius: 9,
+        border: `1.5px solid ${mode === o.k ? C.navy : t.border}`,
+        background: mode === o.k ? C.navy : t.surface,
+        color: mode === o.k ? '#fff' : t.sub,
+        fontSize: '0.8rem',
+        fontWeight: 600,
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, o.l))), mode === 'fullday' ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 10,
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: lbl
+    }, "From"), /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      value: startDate,
+      onChange: e => {
+        setStartDate(e.target.value);
+        if (e.target.value > endDate) setEndDate(e.target.value);
+      },
+      style: fld
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: lbl
+    }, "To"), /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      min: startDate,
+      value: endDate,
+      onChange: e => setEndDate(e.target.value),
+      style: fld
+    }))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: lbl
+    }, "Date"), /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      value: startDate,
+      onChange: e => setStartDate(e.target.value),
+      style: fld
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 10,
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: lbl
+    }, "From"), /*#__PURE__*/React.createElement("input", {
+      type: "time",
+      value: startTime,
+      onChange: e => setStartTime(e.target.value),
+      style: fld
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: lbl
+    }, "To"), /*#__PURE__*/React.createElement("input", {
+      type: "time",
+      value: endTime,
+      onChange: e => setEndTime(e.target.value),
+      style: fld
+    })))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: lbl
+    }, "Reason (optional)"), /*#__PURE__*/React.createElement("input", {
+      type: "text",
+      value: reason,
+      onChange: e => setReason(e.target.value),
+      placeholder: "e.g. family trip",
+      style: fld
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.82rem',
+        color: t.sub,
+        fontFamily: C.fontSans,
+        marginBottom: 6
+      }
+    }, draftValid ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: t.text
+      }
+    }, "= ", timeoffFmtHours(draftHours), " hours"), forBal && forBal.tracked ? ' (' + daysEq(draftHours) + ' day' + (daysEq(draftHours) === 1 ? '' : 's') + ')' : '') : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: t.muted
+      }
+    }, "Pick a valid date/time range.")), forBal && forBal.tracked && draftValid && draftHours > forBal.remaining ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.76rem',
+        color: C.amber,
+        fontFamily: C.fontSans,
+        marginBottom: 10
+      }
+    }, "\u26A0 This is more than ", timeoffFmtHours(forBal.remaining), "h remaining", forUserId ? ' for ' + (people[forUserId] || 'this person') : '', ".") : null, editingId && (editingStatus === 'approved' || editingStatus === 'denied') ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.76rem',
+        color: C.amber,
+        fontFamily: C.fontSans,
+        marginBottom: 10
+      }
+    }, "\u26A0 Saving will withdraw this ", PILL[editingStatus].label.toLowerCase(), " request and send it back for approval.") : null, /*#__PURE__*/React.createElement("button", {
+      onClick: submit,
+      disabled: !draftValid || busy,
+      style: {
+        ...primaryBtn,
+        marginTop: 6,
+        opacity: !draftValid || busy ? 0.5 : 1
+      }
+    }, busy ? 'Saving…' : editingId ? 'Save changes' : forBal && forBal.tracked ? 'Submit request' : 'Log it')));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: hideHeader ? '16px 16px 100px' : '20px 16px 100px',
+      background: t.bg,
+      minHeight: '100%'
+    }
+  }, !hideHeader ? /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    style: {
+      background: 'none',
+      border: 'none',
+      padding: 0,
+      display: 'flex',
+      alignItems: 'center',
+      cursor: 'pointer',
+      color: t.sub,
+      fontSize: '0.86rem',
+      fontWeight: 600,
+      fontFamily: C.fontSans,
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 20
+    }
+  }), "Back") : null, !hideHeader ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '1.5rem',
+      fontWeight: 400,
+      fontStyle: 'italic',
+      color: t.text,
+      marginBottom: 18,
+      fontFamily: C.fontDisplay
+    }
+  }, "Time Off") : null, isAdmin ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginBottom: 16
+    }
+  }, [{
+    k: 'mine',
+    l: 'Mine'
+  }, {
+    k: 'team',
+    l: 'Team'
+  }].map(o => {
+    const on = scope === o.k;
+    return /*#__PURE__*/React.createElement("button", {
+      key: o.k,
+      onClick: () => setScope(o.k),
+      style: {
+        flex: 1,
+        padding: '9px 0',
+        borderRadius: 9,
+        border: `1.5px solid ${on ? C.navy : t.border}`,
+        background: on ? C.navy : t.surface,
+        color: on ? '#fff' : t.sub,
+        fontSize: '0.8rem',
+        fontWeight: 600,
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, o.l);
+  })) : null, scope === 'team' ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 700,
+      color: t.sub,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      marginBottom: 10
+    }
+  }, "Team time off \u2014 ", new Date().getFullYear(), " (", activeProfiles.length, ")"), activeProfiles.length ? activeProfiles.map(rosterRow) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.82rem',
+      color: t.muted,
+      fontFamily: C.fontSans,
+      padding: '4px 2px'
+    }
+  }, "No one on the roster yet.")) : /*#__PURE__*/React.createElement(React.Fragment, null, bal && bal.tracked ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      background: dark ? '#12203B' : C.navy
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.7)',
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans
+    }
+  }, "Time off \u2014 ", new Date().getFullYear()), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '2.2rem',
+      fontWeight: 400,
+      color: '#fff',
+      fontFamily: C.fontDisplay,
+      fontStyle: 'italic'
+    }
+  }, timeoffFmtHours(bal.remaining), "h"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.9rem',
+      color: dark ? '#C9A45A' : C.goldSoft,
+      fontFamily: C.fontSans
+    }
+  }, "\u2248 ", daysEq(bal.remaining), " days left")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.66)',
+      fontFamily: C.fontSans,
+      marginTop: 4
+    }
+  }, timeoffFmtHours(bal.used), "h used \xB7 ", timeoffFmtHours(bal.pending), "h awaiting \xB7 of ", timeoffFmtHours(bal.allot), "h (", daysEq(bal.allot), " days)", bal.proration < 1 ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: dark ? '#C9A45A' : C.goldSoft
+    }
+  }, " \xB7 prorated for your ", new Date().getFullYear(), " start") : null)) : /*#__PURE__*/React.createElement("div", {
+    style: card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.88rem',
+      fontWeight: 600,
+      color: t.text,
+      fontFamily: C.fontSans
+    }
+  }, "Time off isn\u2019t tracked for your role"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.8rem',
+      color: t.sub,
+      fontFamily: C.fontSans,
+      marginTop: 4,
+      lineHeight: 1.5
+    }
+  }, "You can still log it here so your manager and team can see it \u2014 there\u2019s just no balance to track.")), /*#__PURE__*/React.createElement("button", {
+    onClick: startCreate,
+    style: {
+      ...primaryBtn,
+      marginBottom: 22
+    }
+  }, bal && bal.tracked ? 'Request time off' : 'Log time off'), toReview.length ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 700,
+      color: C.gold,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      marginBottom: 10
+    }
+  }, "Requests to review (", toReview.length, ")"), toReview.map(reviewRow), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 14
+    }
+  })) : null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 700,
+      color: t.sub,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      marginBottom: 10
+    }
+  }, "My requests"), mine.length ? mine.map(myRow) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.82rem',
+      color: t.muted,
+      fontFamily: C.fontSans,
+      padding: '4px 2px'
+    }
+  }, "Nothing yet \u2014 file your first request above.")));
+}
+function Root() {
+  const params = new URLSearchParams(location.search);
+  const EMBED = params.get('embed') === '1' || window.self !== window.top;
+  const dark = params.get('theme') === 'dark';
+  const [phase, setPhase] = useState('loading'); // loading | ready | blocked
+  const [profile, setProfile] = useState(null);
+  useEffect(() => {
+    let on = true,
+      settled = false;
+    const hideSplash = () => {
+      const sp = document.getElementById('splash');
+      if (sp) sp.style.display = 'none';
+    };
+    // Standalone redirects to the app's sign-in; embedded shows a note (parent app is already authed).
+    const bail = () => {
+      if (!EMBED) window.location.replace('index.html');else {
+        setPhase('blocked');
+        hideSplash();
+      }
+    };
+    const resolve = async session => {
+      if (!on || settled) return;
+      if (!session) {
+        bail();
+        return;
+      } // not settled — a later (truthy) session can still resolve
+      const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.protocol === 'file:';
+      let p;
+      try {
+        p = local ? {
+          id: 'dev-user-id',
+          email: 'symon@morshedgroup.com',
+          first_name: 'Symon',
+          last_name: 'Yongco',
+          title: 'Operations Manager',
+          access: 'admin',
+          status: 'active',
+          time_off_days: 14
+        } : await ProfileDB.ensureProfile(session.user);
+      } catch (e) {
+        p = null;
+      }
+      if (!on || settled) return;
+      if (!p || p.status && p.status !== 'active') {
+        bail();
+        return;
+      }
+      settled = true;
+      setProfile(p);
+      setPhase('ready');
+      hideSplash();
+    };
+    const start = () => {
+      const sa = window.SupabaseAuth;
+      if (!sa || !sa.getSession) {
+        setTimeout(start, 100);
+        return;
+      }
+      // Primary: resolve the session DIRECTLY so the gate never hangs on notify/init timing.
+      sa.getSession().then(resolve).catch(() => bail());
+      // Secondary: catch a sign-in that lands after mount (truthy-only, to avoid a 'blocked' flash).
+      if (sa.onAuthStateChange) sa.onAuthStateChange(({
+        session
+      }) => {
+        if (session) resolve(session);
+      });
+    };
+    start();
+    return () => {
+      on = false;
+    };
+  }, []);
+  if (phase === 'blocked') return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 40,
+      textAlign: 'center',
+      fontFamily: C.fontSans,
+      color: dark ? '#A9B2C4' : C.textSecondary,
+      fontSize: '0.9rem',
+      lineHeight: 1.6
+    }
+  }, "Please sign in to the TMG app to use Time Off.");
+  if (phase !== 'ready' || !profile) return null;
+  const bg = dark ? '#0B1830' : C.bg;
+  const backToApp = () => {
+    window.location.href = 'index.html';
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: bg
+    }
+  }, !EMBED ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      flexShrink: 0,
+      background: C.navy,
+      color: '#fff',
+      padding: 'max(10px, env(safe-area-inset-top)) 14px 12px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: backToApp,
+    style: {
+      background: 'none',
+      border: 'none',
+      color: '#fff',
+      display: 'flex',
+      alignItems: 'center',
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      fontSize: '0.82rem',
+      fontWeight: 500,
+      padding: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 20,
+      color: C.goldSoft
+    }
+  }), "App"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      textAlign: 'center',
+      fontFamily: C.fontDisplay,
+      fontStyle: 'italic',
+      fontSize: '1.15rem',
+      fontWeight: 500
+    }
+  }, "Time Off"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 20
+    }
+  })) : null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement(TimeOffTab, {
+    dark: dark,
+    profile: profile,
+    isAdmin: hasAdmin(profile.access),
+    onBack: backToApp,
+    hideHeader: true
+  })));
+}
+ReactDOM.createRoot(document.getElementById('root')).render( /*#__PURE__*/React.createElement(Root, null));

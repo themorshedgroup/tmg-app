@@ -6510,9 +6510,11 @@ Rules:
       // Symon's app login and his Zoho user are different addresses.
       { key: 'symon',    name: 'Symon',    emails: ['symon@themorshedgroup.com', 'manager@themorshedgroup.com'] },
       { key: 'luciana',  name: 'Luciana',  emails: ['ea@themorshedgroup.com'], until: '2026-09' },
-      // No address on file for Angelica yet — she matches on first name until
-      // she has a profile, then add it here.
-      { key: 'angelica', name: 'Angelica', emails: [], from: '2026-09' },
+      // ea@ is the EA role account, not a person: Luciana held it through
+      // August, Angelica from September. Same address on both entries — the
+      // month decides whose row an ea@-owned record lands in, so August stays
+      // Luciana's and September onward reads as Angelica's.
+      { key: 'angelica', name: 'Angelica', emails: ['ea@themorshedgroup.com'], from: '2026-09' },
       { key: 'alexa',    name: 'Alexa',    emails: ['alexandra@themorshedgroup.com'], alsoNames: ['alexandra'] },
       { key: 'gustavo',  name: 'Gustavo',  emails: ['gustavo@themorshedgroup.com'] },
       { key: 'camila',   name: 'Camila',   emails: ['camila@themorshedgroup.com'], from: '2026-09' },

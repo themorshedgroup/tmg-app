@@ -17527,12 +17527,14 @@ const HG_ROSTER = [{
   emails: ['ea@themorshedgroup.com'],
   until: '2026-09'
 },
-// No address on file for Angelica yet — she matches on first name until
-// she has a profile, then add it here.
+// ea@ is the EA role account, not a person: Luciana held it through
+// August, Angelica from September. Same address on both entries — the
+// month decides whose row an ea@-owned record lands in, so August stays
+// Luciana's and September onward reads as Angelica's.
 {
   key: 'angelica',
   name: 'Angelica',
-  emails: [],
+  emails: ['ea@themorshedgroup.com'],
   from: '2026-09'
 }, {
   key: 'alexa',

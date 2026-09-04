@@ -240,6 +240,19 @@ async function listZohoUsers(sb: any, conn: any, accessToken: string, apiDomain:
 //   users the search endpoint won't return (e.g. unconfirmed or oddly-indexed).
 // Strategy 3 (only if fullName given): exact case-insensitive full-name match,
 //   accepted only when unambiguous (exactly one hit).
+// The stored Zoho user id for a signed-in app user — the ONLY deterministic
+// answer available. Everything below it is guesswork that depends on the
+// person happening to own a record the app can read, which is how goals and
+// KPIs ended up filed under the API connection owner instead of their author.
+async function zohoIdFromProfile(sb: any, userId: string | null): Promise<string | null> {
+  if (!sb || !userId || userId === "service") return null;
+  try {
+    const { data } = await sb.from("profiles").select("zoho_user_id").eq("id", userId).maybeSingle();
+    const id = (data?.zoho_user_id || "").trim();
+    return id || null;
+  } catch (_) { return null; }
+}
+
 async function resolveZohoOwner(
   sb: any, conn: any, accessToken: string, apiDomain: string,
   email: string, fullName: string | null
@@ -301,7 +314,10 @@ async function harvestOwnerFromRecords(
   const wantName = (fullName || "").trim().toLowerCase();
   const byEmail: Record<string, string> = {};
   const byName: Record<string, Set<string>> = {};
-  for (const moduleName of ["Tasks", "Agent_KPIs", "Contacts"]) {
+  // Health_Goals included: Gustavo and Luciana own records in no other module,
+  // so leaving it out meant they could never be resolved and their goals were
+  // filed under the connection owner instead.
+  for (const moduleName of ["Tasks", "Agent_KPIs", "Contacts", "Health_Goals"]) {
     for (let page = 1; page <= 3; page++) {
       const url = new URL(`https://${apiDomain}/crm/v6/${moduleName}`);
       url.searchParams.set("fields", "Owner");
@@ -426,7 +442,10 @@ Deno.serve(async (req) => {
           .from("profiles").select("first_name, last_name").eq("id", auth.userId).maybeSingle();
         if (callerProf) callerName = [callerProf.first_name, callerProf.last_name].filter(Boolean).join(" ") || null;
       }
-      if (ownerEmail || callerName) {
+      const storedZohoId = await zohoIdFromProfile(sb, auth.userId);
+      if (storedZohoId) {
+        record.Owner = { id: storedZohoId };
+      } else if (ownerEmail || callerName) {
         const resolved = await resolveZohoOwner(sb, conn, accessToken, apiDomain, ownerEmail, callerName);
         if (resolved.id) record.Owner = { id: resolved.id };
         else ownerWarning = `Could not match you to a Zoho CRM user (tried email "${ownerEmail || "—"}"${callerName ? ` and name "${callerName}"` : ""}), so Zoho assigned this record to the API connection owner instead. Detail: ${resolved.trace.join(" → ")}`;
@@ -489,12 +508,24 @@ Deno.serve(async (req) => {
           .from("profiles").select("first_name, last_name").eq("id", auth.userId).maybeSingle();
         if (callerProf) callerName = [callerProf.first_name, callerProf.last_name].filter(Boolean).join(" ") || null;
       }
-      if (ownerEmail || callerName) {
-        const resolved = await resolveZohoOwner(sb, conn, accessToken, apiDomain, ownerEmail, callerName);
-        if (resolved.id) record.Owner = { id: resolved.id };
-        else ownerWarning = `Could not match you to a Zoho CRM user (tried email "${ownerEmail || "—"}"${callerName ? ` and name "${callerName}"` : ""}), so Zoho assigned this goal to the API connection owner instead. Detail: ${resolved.trace.join(" → ")}`;
+      const storedZohoId = await zohoIdFromProfile(sb, auth.userId);
+      if (storedZohoId) {
+        record.Owner = { id: storedZohoId };
       } else {
-        ownerWarning = "No account email was available, so Zoho assigned this goal to the API connection owner instead.";
+        const resolved = (ownerEmail || callerName)
+          ? await resolveZohoOwner(sb, conn, accessToken, apiDomain, ownerEmail, callerName)
+          : { id: null, via: "none", trace: ["no email or name for the submitter"] };
+        if (resolved.id) record.Owner = { id: resolved.id };
+        else {
+          // Refuse rather than save it under the wrong person. Zoho's fallback
+          // is "assign to the API connection owner", which quietly files one
+          // person's health goal under Symon's name — the whole reason this
+          // path exists. Better to stop and say so than to misattribute.
+          return json({
+            error: "We couldn't match your account to your Zoho CRM user, so this goal wasn't saved — saving it would have filed it under someone else's name. Ask Symon to add your Zoho user ID to your profile.",
+            detail: resolved.trace.join(" → "),
+          }, 409);
+        }
       }
 
       const r = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Health_Goals`, {

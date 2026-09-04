@@ -1,0 +1,21 @@
+#!/bin/sh
+# Rebuilds build/*.js from src/*.jsx before every commit, so the deployed pages
+# can never be stale relative to their source. Only the build outputs this run
+# actually rewrote get staged -- nothing else is touched, which matters because
+# several Claude sessions share this working tree.
+set -e
+
+if [ ! -d tools/build/node_modules ]; then
+  echo "pre-commit: build deps missing. Run:  npm install --prefix tools/build" >&2
+  exit 1
+fi
+
+before=$(git diff --name-only -- build/ 2>/dev/null || true)
+node tools/build/build-jsx.mjs >/dev/null
+changed=$(git diff --name-only -- build/ 2>/dev/null || true)
+
+if [ -n "$changed" ]; then
+  echo "$changed" | while read -r f; do [ -n "$f" ] && git add -- "$f"; done
+  echo "pre-commit: rebuilt and staged:"; echo "$changed" | sed 's/^/  /'
+fi
+exit 0

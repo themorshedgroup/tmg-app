@@ -1,3 +1,6 @@
 .DS_Store
 .claude/
 *.log
+
+# build tooling deps (regenerate with: npm install --prefix tools/build)
+tools/build/node_modules/

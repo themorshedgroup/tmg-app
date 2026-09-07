@@ -560,8 +560,17 @@ function calendarTitle(raw: string, topic?: string | null): string {
   const cleaned = cleanTitle(raw);
   const split = splitTopic(cleaned);
   const t = (topic || split.topic || "").trim();
-  const head = "Christie's - " + split.base;
-  return (t ? head + ": " + t : head).slice(0, 220);
+  if (!t) return ("Christie's - " + split.base).slice(0, 220);
+  // When the "topic" is just the event's own name again — the prose model tends
+  // to answer both fields with the same phrase, differing only by a year — one
+  // of them is redundant. Keep the fuller wording, drop the repetition, rather
+  // than shipping "Masters Circle & Agents Summit: 2026 Masters Circle &
+  // Agents Summit".
+  const nt = normKey(t), nb = normKey(split.base);
+  if (nt.includes(nb) || nb.includes(nt)) {
+    return ("Christie's - " + (t.length >= split.base.length ? t : split.base)).slice(0, 220);
+  }
+  return ("Christie's - " + split.base + ": " + t).slice(0, 220);
 }
 // The series name with any week-specific topic removed — what an announcement
 // email's event has to match to be recognised as "that same Toolbox Thursday".
@@ -893,8 +902,17 @@ async function pushEvent(sb: any, ctx: {
       .not("team_event_id", "is", null)
       .gte("starts_at", dayStart.toISOString())
       .lt("starts_at", dayEnd.toISOString());
-    const twin = (twins || []).find((t: any) =>
-      normKey(t.base_title || "") === normKey(seriesBase) && t.dedup_key !== dedupKey);
+    // Containment, not equality: two emails describe the same day's event with
+    // different fullness ("2026 Masters Circle & Agents Summit" vs "Agents
+    // Summit"), and exact matching would put both on the calendar. Same day plus
+    // one name inside the other is a duplicate, not a coincidence.
+    const nb = normKey(seriesBase);
+    const twin = (twins || []).find((t: any) => {
+      if (t.dedup_key === dedupKey) return false;
+      const tb = normKey(t.base_title || "");
+      if (!tb || !nb) return false;
+      return tb === nb || tb.includes(nb) || nb.includes(tb);
+    });
     if (twin) {
       await save({ status: "skipped_duplicate", team_event_id: null });
       return { action: "skipped_duplicate", title: calTitle };
@@ -1006,7 +1024,10 @@ async function syncSource(sb: any, src: any, opts: { lookbackDays: number; anthr
 
   const results: any[] = [];
   let claudeCalls = 0;
-  const MAX_CLAUDE_CALLS = 12; // a cost ceiling per run; roundups are rare
+  // A per-run cost ceiling. 30 lets a first run drain a whole backlog in one
+  // pass — after that christies_ai_reads means each email is read once ever, so
+  // steady-state runs use a fraction of this.
+  const MAX_CLAUDE_CALLS = 30;
 
   for (const m of msgs) {
     if (!m) continue;

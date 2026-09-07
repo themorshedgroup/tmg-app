@@ -282,7 +282,7 @@ async function zohoIdFromProfile(sb: any, userId: string | null): Promise<string
 async function ownerForCaller(
   sb: any, conn: any, accessToken: string, apiDomain: string,
   auth: any, ownerEmail: string,
-): Promise<{ owner: any | null; warning: string | null }> {
+): Promise<{ owner: any | null; warning: string | null; callerName: string | null }> {
   let callerName: string | null = null;
   if (sb && auth?.userId && auth.userId !== "service") {
     try {
@@ -292,14 +292,14 @@ async function ownerForCaller(
     } catch (_) { /* fall through to the other strategies */ }
   }
   const storedZohoId = await zohoIdFromProfile(sb, auth?.userId || null);
-  if (storedZohoId) return { owner: { id: storedZohoId }, warning: null };
-  if (ownerEmail) return { owner: { email: ownerEmail }, warning: null };
+  if (storedZohoId) return { owner: { id: storedZohoId }, warning: null, callerName };
+  if (ownerEmail) return { owner: { email: ownerEmail }, warning: null, callerName };
   if (callerName) {
     const resolved = await resolveZohoOwner(sb, conn, accessToken, apiDomain, "", callerName);
-    if (resolved.id) return { owner: { id: resolved.id }, warning: null };
-    return { owner: null, warning: `Could not match you to a Zoho CRM user (tried name "${callerName}"), so Zoho assigned this record to the API connection owner instead. Detail: ${resolved.trace.join(" → ")}` };
+    if (resolved.id) return { owner: { id: resolved.id }, warning: null, callerName };
+    return { owner: null, callerName, warning: `Could not match you to a Zoho CRM user (tried name "${callerName}"), so Zoho assigned this record to the API connection owner instead. Detail: ${resolved.trace.join(" → ")}` };
   }
-  return { owner: null, warning: "No account email was available for the submitter, so Zoho assigned this record to the API connection owner instead." };
+  return { owner: null, callerName, warning: "No account email was available for the submitter, so Zoho assigned this record to the API connection owner instead." };
 }
 
 async function resolveZohoOwner(
@@ -449,6 +449,103 @@ function nameScore(typed: string, candidate: string): number {
   return total / tt.length;
 }
 
+// A call NEVER belongs on an Agent_KPI record — it is written as a Task instead.
+//
+// An Agent_KPI person row carrying "Touch Call" is what makes Zoho raise a
+// "Validate <tier> Touch Call" task for a human to check by hand. The app now
+// shows the agent when the contact was last called, so that check has no
+// purpose. Zoho Reports counts Tasks by Task Type anyway, so a call written
+// straight to Tasks is counted exactly once with no chore attached.
+//
+// This lives on the SERVER, not in a page, because there are three separate
+// screens that submit KPIs and fixing them one at a time is precisely how they
+// drifted apart before. Anything that reaches this action is covered, including
+// screens nobody has written yet.
+const CALL_KPI_LABELS = ["Touch Call", "Follow Up Call"];
+const MAX_KPI_PERSONS = 10;
+
+async function splitCallsOutOfKpi(
+  sb: any, conn: any, accessToken: string, apiDomain: string,
+  record: any, kpiDate: string, owner: any,
+): Promise<{ made: number; failed: string[] }> {
+  // Pull the person rows apart into calls vs everything else.
+  const rows: any[] = [];
+  for (let i = 1; i <= MAX_KPI_PERSONS; i++) {
+    const kpis = record[`Person_${i}_Applicable_KPIs`];
+    if (!Array.isArray(kpis) || !kpis.length) continue;
+    rows.push({
+      name: record[`Person_${i}_Name`] || null,
+      hotzone: record[`Number_of_Hotzone_Actions_${i}`] ?? null,
+      calls: kpis.filter((k: string) => CALL_KPI_LABELS.includes(k)),
+      rest: kpis.filter((k: string) => !CALL_KPI_LABELS.includes(k)),
+    });
+  }
+  if (!rows.some((r) => r.calls.length)) return { made: 0, failed: [] };
+
+  let made = 0;
+  const failed: string[] = [];
+  for (const r of rows) {
+    if (!r.calls.length) continue;
+    const cid = r.name?.id || null;
+    // The tier is a property of the CONTACT, read from the field that actually
+    // holds it rather than guessed from an old task's subject line.
+    let full = "", tier = "";
+    if (cid) {
+      try {
+        const cr = await zohoFetch(sb, conn, accessToken,
+          `https://${apiDomain}/crm/v6/Contacts/${cid}?fields=Full_Name,Client_Classification`, {});
+        if (cr.ok && cr.status !== 204) {
+          const cd = await cr.json().catch(() => ({}));
+          const c = cd?.data?.[0];
+          full = c?.Full_Name || "";
+          const cls = String(c?.Client_Classification || "").trim().toUpperCase();
+          if (/^[ABC]$/.test(cls)) tier = cls;
+        }
+      } catch (_) { /* subject just goes out without the letter */ }
+    }
+    const who = full || r.name?.name || "";
+    for (const k of r.calls) {
+      // Matches the subjects Zoho's own workflow writes: a space before the
+      // colon on follow-ups, the tier letter in front of a touch.
+      const subject = k === "Touch Call"
+        ? `${tier ? tier + " " : ""}Touch Call: ${who}`
+        : `Follow Up Call : ${who}`;
+      const task: any = { Subject: subject, Status: "Completed", Task_Type: "Call", Due_Date: kpiDate };
+      if (cid) task.Who_Id = { id: cid };
+      if (owner) task.Owner = owner;
+      try {
+        const tr = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Tasks`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: [task] }),
+        });
+        const td = await tr.json().catch(() => ({}));
+        if (tr.ok && td?.data?.[0]?.status === "success") made++;
+        else failed.push(`${who || "unknown"} — ${td?.data?.[0]?.message || "Zoho refused the task"}`);
+      } catch (e) { failed.push(`${who || "unknown"} — ${String(e)}`); }
+    }
+  }
+
+  // Rewrite the person rows with the calls removed. Survivors are compacted into
+  // Person_1..N so the record never carries a gap, and a person whose ONLY entry
+  // was a call drops off entirely.
+  for (let i = 1; i <= MAX_KPI_PERSONS; i++) {
+    delete record[`Person_${i}_Name`];
+    delete record[`Person_${i}_Applicable_KPIs`];
+    delete record[`Number_of_Hotzone_Actions_${i}`];
+  }
+  let slot = 0;
+  for (const r of rows) {
+    if (!r.rest.length) continue;
+    slot++;
+    if (r.name) record[`Person_${slot}_Name`] = r.name;
+    record[`Person_${slot}_Applicable_KPIs`] = r.rest;
+    if (r.hotzone != null && r.rest.some((k: string) => /hotzone/i.test(k))) {
+      record[`Number_of_Hotzone_Actions_${slot}`] = r.hotzone;
+    }
+  }
+  return { made, failed };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
 
@@ -483,15 +580,33 @@ Deno.serve(async (req) => {
       // at submit time instead of being discovered in Zoho weeks later.
       let ownerWarning: string | null = null;
       const ownerEmail = typeof body.owner_email === "string" ? body.owner_email.trim() : "";
-      // The submitter's profile name enables the unambiguous-name fallback when their
-      // TMG login email doesn't match their Zoho user email exactly.
       // Shared with create_record and create_contact, so the three create paths
       // cannot drift apart again — a forgotten Owner on any one of them is the
       // "assigned to Symon again" report.
-      {
-        const r = await ownerForCaller(sb, conn, accessToken, apiDomain, auth, ownerEmail);
-        if (r.owner) record.Owner = r.owner;
-        ownerWarning = r.warning;
+      const ownerRes = await ownerForCaller(sb, conn, accessToken, apiDomain, auth, ownerEmail);
+      if (ownerRes.owner) record.Owner = ownerRes.owner;
+      ownerWarning = ownerRes.warning;
+      const callerName = ownerRes.callerName;
+
+      // Calls come off the record and become Tasks, so no validation chore is
+      // raised. Whatever is left (notes, hotzone, pop-by, lunch, CTC hours,
+      // other KPIs) still rides the Agent_KPI record, which generates its own
+      // tasks for those.
+      const callSplit = await splitCallsOutOfKpi(
+        sb, conn, accessToken, apiDomain, record,
+        String(record.KPI_Date || "").slice(0, 10), record.Owner || null,
+      );
+      // A submission that was ONLY calls has nothing left to file: the calls are
+      // already saved as Tasks, so posting an empty record would create a blank
+      // Agent_KPI row rather than represent anything.
+      const nothingLeft = !record.Person_1_Applicable_KPIs
+        && record.CTC_Hours_2 == null && !record.Other_KPI_1;
+      if (nothingLeft) {
+        return json({
+          ok: true, id: null, calls_logged: callSplit.made,
+          call_failures: callSplit.failed.length ? callSplit.failed : undefined,
+          owner_warning: ownerWarning,
+        }, 200);
       }
 
       const crmRes = await zohoFetch(
@@ -520,6 +635,11 @@ Deno.serve(async (req) => {
           id: created?.details?.id || null,
           status: created?.status || "success",
           owner_warning: ownerWarning,
+          // Reported so a caller can say what actually happened, and so a call
+          // that Zoho refused is visible at submit time rather than simply
+          // missing from the KPI count later.
+          calls_logged: callSplit.made,
+          call_failures: callSplit.failed.length ? callSplit.failed : undefined,
         },
         200
       );

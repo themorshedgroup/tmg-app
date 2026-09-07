@@ -1222,6 +1222,61 @@ Deno.serve(async (req) => {
       return json({ tasks_by_contact: out, owner_by_contact: owners }, 200);
     }
 
+    // ── Probe whether this connection may read a Contact's Emails [read-only] ──
+    //  The Emails tab on a Zoho contact is a related list with its OWN OAuth
+    //  scope (ZohoCRM.modules.emails.READ) — separate from the module scopes
+    //  this app already uses. Nobody recorded which scopes the stored refresh
+    //  token was granted, and Zoho has no endpoint that reports them back, so
+    //  the only way to find out is to ask and read the refusal.
+    //
+    //  Safe by construction: GET only, and by default it targets record id "1",
+    //  which can never be a real Zoho id (those are 18-19 digits). Zoho enforces
+    //  scope at the gateway BEFORE record handling:
+    //    • scope missing → 401 OAUTH_SCOPE_MISMATCH  (nothing read)
+    //    • scope present → a benign invalid-id error  (nothing read)
+    //
+    //  Pass contact_id to also probe a REAL contact — that answers the second
+    //  question, whether emails actually come back and whether the payload
+    //  carries message CONTENT or only headers. It reports counts and FIELD
+    //  NAMES only; no subjects, addresses or bodies are ever returned.
+    if (action === "probe_emails") {
+      if (!(auth as any).isService) {
+        const { data: prof } = await sb.from("profiles").select("access").eq("id", auth.userId).maybeSingle();
+        const roles = Array.isArray(prof?.access) ? prof.access : [];
+        if (!roles.includes("admin")) return json({ error: "Admin access required." }, 403);
+      }
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+      const realId = /^[0-9]{6,32}$/.test(String(body.contact_id || "")) ? String(body.contact_id) : null;
+
+      const attempt = async (label: string, url: string) => {
+        try {
+          const r = await zohoFetch(sb, conn, accessToken, url, {});
+          if (r.status === 204) return { label, http: 204, note: "no emails on this record" };
+          const d = await r.json().catch(() => ({}));
+          const rows = Array.isArray(d?.Emails) ? d.Emails : (Array.isArray(d?.data) ? d.data : null);
+          return {
+            label, http: r.status,
+            code: d?.code || d?.status || null,
+            message: typeof d?.message === "string" ? d.message.slice(0, 200) : null,
+            count: rows ? rows.length : null,
+            // field names only — never values
+            fields: rows && rows[0] ? Object.keys(rows[0]).slice(0, 40) : null,
+            envelope: rows ? null : Object.keys(d || {}).slice(0, 12),
+          };
+        } catch (e) { return { label, error: String((e as any)?.message || e).slice(0, 200) }; }
+      };
+
+      const checks = [
+        await attempt("scope probe (fake id)", `https://${apiDomain}/crm/v6/Contacts/1/Emails`),
+      ];
+      if (realId) {
+        checks.push(await attempt("real contact", `https://${apiDomain}/crm/v6/Contacts/${realId}/Emails`));
+      }
+      return json({ ok: true, checks }, 200);
+    }
+
     // ── Probe the token's OAuth scope for update/delete [CRM] ───────
     //  This answers "does the CONNECTION (not just the Zoho profile) actually
     //  allow editing/deleting?" — the gate the list_modules flags can't see.

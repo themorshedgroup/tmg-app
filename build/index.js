@@ -14547,10 +14547,6 @@ function CallsTab({
   const [agent, setAgent] = useState(''); // '' = all agents; otherwise an owner name
   const [collapsed, setCollapsed] = useState({}); // owner -> true, in the grouped "all agents" list
   const [day, setDay] = useState('today');
-  const [briefOpen, setBriefOpen] = useState(() => localStorage.getItem('tmg-coach-open') !== 'false');
-  useEffect(() => {
-    localStorage.setItem('tmg-coach-open', briefOpen ? 'true' : 'false');
-  }, [briefOpen]);
   const [buckets, setBuckets] = useState(null); // { yesterday:[], today:[], tomorrow:[] } | null while loading
   const [overdue, setOverdue] = useState(null); // { list, count, capped } | null
   const [clipped, setClipped] = useState({}); // per-bucket "Zoho page was full" flag
@@ -15164,38 +15160,6 @@ function CallsTab({
     EO: 3,
     Other: 4
   };
-  const brief = useMemo(() => {
-    if (!buckets) return [];
-    const list = mine(buckets.today || []);
-    const who = agent ? agent.split(' ')[0] + ' has' : team ? 'The team has' : '';
-    const lines = [];
-    const mix = {};
-    list.forEach(t => {
-      const g = callTier(t.Subject);
-      mix[g] = (mix[g] || 0) + 1;
-    });
-    const mixTxt = ['A', 'B', 'C', 'EO'].filter(g => mix[g]).map(g => mix[g] + ' ' + g).join(' · ');
-    const openList = list.filter(t => !/completed/i.test(t.Status || ''));
-    if (!list.length) lines.push(who ? who + ' no calls on the board for today.' : 'No calls on the board for today.');else lines.push((who ? who + ' ' : '') + list.length + ' call' + (list.length === 1 ? '' : 's') + ' today' + (mixTxt ? ' — ' + mixTxt : '') + '. ' + (list.length - openList.length) + ' already logged.');
-    const top = openList.slice().sort((a, b) => (RANK[callTier(a.Subject)] ?? 9) - (RANK[callTier(b.Subject)] ?? 9))[0];
-    if (top) lines.push('Start with ' + (top.Who_Id && top.Who_Id.name || top.Subject) + ' — ' + callTier(top.Subject) + ' touch' + (team && !agent ? ' (' + ownerOf(top) + ')' : '') + '.');
-    if (overdueShown) lines.push(overdueShown + (overdue && overdue.capped ? '+' : '') + ' call' + (overdueShown === 1 ? '' : 's') + ' still overdue. Clear the oldest tier-A ones first.');
-    return lines;
-  }, [buckets, overdue, agent, team]);
-  const botMsg = (t, key) => /*#__PURE__*/React.createElement("div", {
-    key: key,
-    style: {
-      alignSelf: 'flex-start',
-      marginRight: '8%',
-      background: dark ? '#0A1E44' : '#F3EBDA',
-      color: dark ? '#fff' : '#001A4A',
-      borderRadius: '8px 8px 8px 2px',
-      padding: '6px 8px',
-      fontFamily: J,
-      fontSize: 8,
-      lineHeight: 1.45
-    }
-  }, t);
   const todayCount = buckets ? mine(buckets.today || []).length : null;
 
   // One call row, shared by the flat list and the per-agent groups.
@@ -15532,6 +15496,33 @@ function CallsTab({
     }, problem));
   };
 
+  // Spouses are worked as a pair — same conversation, same household — so a
+  // partner's call is pulled up to sit directly under the other's instead of
+  // landing wherever the sort happened to put it. Order is otherwise left
+  // alone. Depends on the spouse lookup having answered, so the pairing
+  // settles a moment after the rows first paint (and instantly thereafter,
+  // since the answer is cached).
+  const pairSpouses = list => {
+    const used = new Set();
+    const out = [];
+    (list || []).forEach(t => {
+      if (used.has(t.id)) return;
+      out.push(t);
+      used.add(t.id);
+      const cid = t.Who_Id && t.Who_Id.id;
+      const sp = cid && contacts[cid] && contacts[cid].spouse;
+      if (!sp || !sp.id) return;
+      (list || []).forEach(o => {
+        if (used.has(o.id)) return;
+        if (o.Who_Id && o.Who_Id.id === sp.id) {
+          out.push(o);
+          used.add(o.id);
+        }
+      });
+    });
+    return out;
+  };
+
   // With "All agents" picked, the day's calls are grouped under a tappable
   // per-agent header — that's the drop-down-per-agent view, without having
   // to switch the picker back and forth to see who is carrying what.
@@ -15600,7 +15591,10 @@ function CallsTab({
           borderRadius: 20,
           padding: '2px 8px'
         }
-      }, list.length)), !shut && list.map((t, i) => callRow(t, i === list.length - 1)));
+      }, list.length)), !shut && (() => {
+        const rows = pairSpouses(list);
+        return rows.map((t, i) => callRow(t, i === rows.length - 1));
+      })());
     });
   };
 
@@ -15825,68 +15819,10 @@ function CallsTab({
       fontSize: 8,
       color: dark ? '#F87171' : '#9B1C1C'
     }
-  }, "Zoho returned a full page for this day \u2014 the list may be incomplete. Check /crm-tasks for the full view."), !err && buckets !== null && (team && !agent ? groupedRows() : shown.map((t, i) => callRow(t, i === shown.length - 1)))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flexShrink: 0,
-      background: coachBg,
-      borderTop: `1px solid ${coachBord}`
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      padding: '7px 12px'
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-sparkles",
-    style: {
-      fontSize: 11,
-      color: coachLabel
-    }
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontFamily: J,
-      fontSize: 8,
-      letterSpacing: '0.16em',
-      fontWeight: 500,
-      color: coachLabel,
-      textTransform: 'uppercase'
-    }
-  }, "Call Brief")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setBriefOpen(o => !o),
-    style: {
-      width: 22,
-      height: 22,
-      borderRadius: '50%',
-      border: 'none',
-      cursor: 'pointer',
-      background: addBg,
-      color: addCol,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      flexShrink: 0
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: `ti ti-chevron-${briefOpen ? 'down' : 'up'}`,
-    style: {
-      fontSize: 13
-    }
-  }))), briefOpen && /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: '7px 12px 9px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 6
-    }
-  }, brief.length ? brief.map((l, i) => botMsg(l, 'b' + i)) : botMsg('Loading the board…', 'b0')))), addKpi && /*#__PURE__*/React.createElement(AddKpiSheet, {
+  }, "Zoho returned a full page for this day \u2014 the list may be incomplete. Check /crm-tasks for the full view."), !err && buckets !== null && (team && !agent ? groupedRows() : (() => {
+    const rows = pairSpouses(shown);
+    return rows.map((t, i) => callRow(t, i === rows.length - 1));
+  })()))), addKpi && /*#__PURE__*/React.createElement(AddKpiSheet, {
     dark: dark,
     ownerId: logOwnerId,
     ownerName: logOwnerName,
@@ -24398,15 +24334,6 @@ function App({
   });
   const allItemMap = Object.fromEntries(TABS.concat(allMoreDefs).concat([tasksNavItem]).map(it => [it.id, it]));
 
-  // Browser tab title follows the open tab — "Calls - TMG App" — so a
-  // pinned or backgrounded tab says which screen it is, and history entries
-  // are distinguishable. Falls back to the bare app name for anything
-  // unlabelled.
-  useEffect(() => {
-    const id = activeTab === 'more' ? moreView || 'directory' : activeTab;
-    const label = (allItemMap[id] || {}).label || '';
-    document.title = label ? label + ' - TMG App' : 'TMG App';
-  }, [activeTab, moreView]);
   // Build nav + more from config, falling back to defaults.
   const buildLists = () => {
     if (!navConfig) return {
@@ -24552,6 +24479,20 @@ function App({
   // "More" menu: which screen (settings | admin) + dropdown open state.
   const [moreView, setMoreView] = useState(() => _boot.view || 'directory');
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+
+  // Browser tab title follows the open tab — "Calls - TMG App" — so a
+  // pinned or backgrounded tab says which screen it is, and history entries
+  // are distinguishable. Falls back to the bare app name for anything
+  // unlabelled.
+  //
+  // MUST sit below the moreView declaration: it reads moreView, and a
+  // `const` cannot be read before its own line. Placed above it, this threw
+  // on every single render and the whole app rendered as a blank page.
+  useEffect(() => {
+    const id = activeTab === 'more' ? moreView || 'directory' : activeTab;
+    const label = (allItemMap[id] || {}).label || '';
+    document.title = label ? label + ' - TMG App' : 'TMG App';
+  }, [activeTab, moreView, allItemMap]);
 
   // ── URL hash <-> nav state ──
   const firstSync = useRef(true);

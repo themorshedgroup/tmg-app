@@ -1047,7 +1047,10 @@ Deno.serve(async (req) => {
       const conn = await loadConnection(sb);
       const accessToken = await getZohoToken(sb, conn);
       const apiDomain = conn.api_domain || "www.zohoapis.com";
-      const fields = "First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Mailing_City,Mailing_State,Lead_Source,Created_Time";
+      // Other_Phone matters: the Cadence Health "unreachable" sweep counts it as
+      // a number, so leaving it out here made the two disagree — a contact with
+      // only an Other_Phone looked numberless to the call row.
+      const fields = "First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Other_Phone,Mailing_City,Mailing_State,Lead_Source,Created_Time";
 
       let id = (body.id || "").toString().trim();
       if (!id && body.name) {
@@ -1057,18 +1060,18 @@ Deno.serve(async (req) => {
         const sr = await zohoFetch(sb, conn, accessToken, u.toString(), {});
         if (sr.status !== 204) { const sd = await sr.json().catch(() => ({})); id = sd?.data?.[0]?.id || ""; }
       }
-      if (!id) return json({ contact: null }, 200);
+      if (!id) return json({ contact: null, found: false }, 200);
 
       const r = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Contacts/${id}?fields=${encodeURIComponent(fields)}`, {});
-      if (r.status === 204) return json({ contact: null }, 200);
+      if (r.status === 204) return json({ contact: null, found: false }, 200);
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return json({ error: d?.message || "Zoho contact error" }, r.status);
       const c = d?.data?.[0];
-      if (!c) return json({ contact: null }, 200);
-      return json({ contact: {
+      if (!c) return json({ contact: null, found: false }, 200);
+      return json({ found: true, contact: {
         id: c.id,
         full_name: c.Full_Name || `${c.First_Name || ""} ${c.Last_Name || ""}`.trim(),
-        email: c.Email || null, phone: c.Phone || c.Mobile || null,
+        email: c.Email || null, phone: c.Phone || c.Mobile || c.Other_Phone || null,
         city: c.Mailing_City || null, state: c.Mailing_State || null,
         lead_source: c.Lead_Source || null, created: c.Created_Time || null,
       } }, 200);
@@ -1086,16 +1089,24 @@ Deno.serve(async (req) => {
       const apiDomain = conn.api_domain || "www.zohoapis.com";
 
       // Find the Spouse lookup field's api name on Contacts (or take it from the caller).
+      //
+      // "We could not read the field list" and "this org has no Spouse field"
+      // used to collapse into the SAME 200 + empty-links answer, and callers
+      // cache a null spouse permanently. One transient Zoho hiccup on this
+      // single metadata read therefore branded up to 60 contacts as having no
+      // spouse forever — which, since a contact with no phone of their own is
+      // reached through their spouse, left them permanently uncallable. The two
+      // cases are now told apart: a failed read is a 502 the caller retries, an
+      // org genuinely without the field keeps the 200.
       let spouseApi = (body.spouse_field || "").toString().replace(/[^A-Za-z0-9_]/g, "");
       if (!spouseApi) {
         const fr = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/settings/fields?module=Contacts`, {});
-        if (fr.ok) {
-          const fd = await fr.json().catch(() => ({}));
-          const f = (fd.fields || []).find((x: any) => /spouse|partner/i.test(x.field_label || "") && x.data_type === "lookup");
-          spouseApi = f?.api_name || "";
-        }
+        if (!fr.ok) return json({ error: "Could not read the Contacts field list from Zoho.", retryable: true }, 502);
+        const fd = await fr.json().catch(() => ({}));
+        const f = (fd.fields || []).find((x: any) => /spouse|partner/i.test(x.field_label || "") && x.data_type === "lookup");
+        spouseApi = f?.api_name || "";
       }
-      if (!spouseApi) return json({ error: "No Spouse lookup field found on Contacts.", links: {} }, 200);
+      if (!spouseApi) return json({ no_spouse_field: true, links: {} }, 200);
 
       const links: Record<string, any> = {};
       const B = 10;
@@ -1104,15 +1115,20 @@ Deno.serve(async (req) => {
         const res = await Promise.all(batch.map(async (id: string) => {
           try {
             const r = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Contacts/${id}?fields=${spouseApi}`, {});
-            if (!r.ok) return [id, null];
+            // undefined = could not read this one. null = read fine, no spouse.
+            // Returning null for both is what let a failed read be cached as a
+            // definitive "they have no spouse".
+            if (!r.ok) return [id, undefined];
             const d = await r.json().catch(() => ({}));
             const sp = d?.data?.[0]?.[spouseApi];
             return [id, sp && sp.id ? { id: sp.id, name: sp.name || null } : null];
-          } catch { return [id, null]; }
+          } catch { return [id, undefined]; }
         }));
-        for (const [id, sp] of res) links[id as string] = sp;
+        // Ids we could not read are OMITTED from links entirely, so the caller
+        // can tell "asked and there is none" from "never got an answer".
+        for (const [id, sp] of res) { if (sp !== undefined) links[id as string] = sp; }
       }
-      return json({ field: spouseApi, links }, 200);
+      return json({ field: spouseApi, links, asked: ids }, 200);
     }
 
     // ── Tasks for a set of contacts [read-only] ────────────────────

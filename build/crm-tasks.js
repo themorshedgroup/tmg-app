@@ -979,13 +979,20 @@ async function fetchSpouseLinksFor(keys) {
       action: 'spouse_links',
       contact_ids: batch
     });
-    if (ok && data && data.links) {
-      batch.forEach(k => {
-        const v = data.links.hasOwnProperty(k) ? data.links[k] : null;
-        out[k] = v;
-        SPOUSE_LINKS_CACHE.set(k, v);
-      });
-    }
+    // A refused batch returns NULL, the same way fetchContactPhones does.
+    // This map decides whether a contact is unreachable, and unreachable
+    // contacts get queued for DELETION — so a partial answer must never be
+    // mistaken for a complete one.
+    if (!ok || !data || data.error || !data.links) return null;
+    // Only ids the action actually answered for are recorded. It omits any
+    // contact it could not read, and writing null for those would brand a
+    // contact spouse-less — and therefore deletable — on a failed lookup.
+    batch.forEach(k => {
+      if (!Object.prototype.hasOwnProperty.call(data.links, k)) return;
+      const v = data.links[k];
+      out[k] = v;
+      SPOUSE_LINKS_CACHE.set(k, v);
+    });
   }
   return out;
 }
@@ -1063,41 +1070,53 @@ async function fetchLastCompletedFor(keys) {
   uniq.forEach(k => {
     if (LAST_COMPLETED_CACHE.has(k)) out[k] = LAST_COMPLETED_CACHE.get(k);else missing.push(k);
   });
-  for (let i = 0; i < missing.length; i += 60) {
-    const batch = missing.slice(i, i + 60);
-    const {
-      ok,
-      data
-    } = await callZoho({
-      action: 'tasks_for_contacts',
-      contact_ids: batch
-    });
-    if (ok && data && data.tasks_by_contact) {
-      batch.forEach(cid => {
-        const list = data.tasks_by_contact[cid] || [];
+  // Per contact, not batched — because the batched route was WRONG. It used
+  // `tasks_for_contacts`, whose Contacts→Tasks related list returns ONLY
+  // OPEN tasks, so this function could never see a completed call and
+  // always reported "no history". That is the exact input the backlog uses
+  // to decide a contact has no prior cadence, which is why contacts with
+  // real call history kept being swept in as never-called.
+  //
+  // Zoho's search API does return closed rows when given a criteria on the
+  // Who_Id lookup, and search_tasks already emits precisely that from its
+  // type/type_field pair. Verified live against a contact whose completed
+  // call the old route could not see.
+  const B = 6;
+  for (let i = 0; i < missing.length; i += B) {
+    const batch = missing.slice(i, i + B);
+    const res = await Promise.all(batch.map(async cid => {
+      try {
+        const {
+          ok,
+          data
+        } = await callZoho({
+          action: 'search_tasks',
+          type_field: 'Who_Id',
+          type: cid,
+          status: 'Completed',
+          per_page: 200,
+          extra_fields: ['Task_Type']
+        });
+        if (!ok) return [cid, undefined]; // undefined = unknown, so it is retried rather than cached as "never"
         let best = null;
-        list.forEach(t => {
-          if (!/complete/i.test(t.Status || '')) return;
-          // ONLY a completed CALL sets the cadence baseline. Without this
-          // guard a completed Note or Pop-by counted as "the last call",
-          // so a contact nobody had actually phoned looked freshly touched
-          // and their next touch got pushed out a whole interval (30-120
-          // days) — silently dropping them off the board. The local
-          // lastCompletedByContact has always checked this; this path (the
-          // live top-up) did not. tasks_for_contacts is fetched without the
-          // Task Type field, so isCallTask falls through to its subject
-          // test, which is exactly what separates "A Touch Call: Jane Doe"
-          // from "Pop-by: Jane Doe".
+        (data.tasks || []).forEach(t => {
           if (!isCallTask(t, {
             type: 'Task_Type'
           })) return;
           const key = String(t.Closed_Time || t.Due_Date || '');
+          if (!key) return;
           if (!best || key.localeCompare(String(best.Closed_Time || best.Due_Date || '')) > 0) best = t;
         });
-        out[cid] = best;
-        LAST_COMPLETED_CACHE.set(cid, best);
-      });
-    }
+        return [cid, best];
+      } catch (e) {
+        return [cid, undefined];
+      }
+    }));
+    res.forEach(([cid, best]) => {
+      if (best === undefined) return;
+      out[cid] = best;
+      LAST_COMPLETED_CACHE.set(cid, best);
+    });
   }
   return out;
 }
@@ -3147,11 +3166,17 @@ function findNoPhoneCalls({
   phones,
   spouseLinks
 }) {
-  if (!phones) return [];
+  // Either lookup coming back null means we could not establish
+  // reachability at all — so nothing is proposed for deletion.
+  if (!phones || !spouseLinks) return [];
   const reachable = cid => {
     if (!cid || !(cid in phones)) return true;
     if (phones[cid]) return true;
-    const sp = spouseLinks && spouseLinks[cid];
+    // No spouse ANSWER for this contact — as opposed to an answer of
+    // "they have none" — means we do not know whether the Calls tab could
+    // still dial them. Unknown resolves to "leave it alone", never delete.
+    if (!(cid in spouseLinks)) return true;
+    const sp = spouseLinks[cid];
     return !!(sp && sp.id && phones[sp.id]);
   };
   return (tasks || []).filter(t => (t.Status || '') === 'Not Started' && isCallTask(t, colMap) && !reachable(t.Who_Id?.id)).map(t => ({
@@ -3451,9 +3476,11 @@ function CadenceHealth({
       cancelled = true;
     };
   }, [noPhoneCandidates.join('|')]);
+  // null (a refused lookup) flows through to noPhoneReady above and keeps
+  // the delete list empty.
   // Held back until BOTH lookups have answered — a half-resolved spouse map
   // would list a reachable contact for deletion.
-  const noPhoneReady = !phonesLoading && !noPhoneLinksLoading && !!phones;
+  const noPhoneReady = !phonesLoading && !noPhoneLinksLoading && !!phones && !!noPhoneLinks;
   const noPhone = useMemo(() => noPhoneReady ? findNoPhoneCalls({
     tasks,
     colMap,

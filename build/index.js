@@ -13623,9 +13623,16 @@ function bustCrmTaskCaches() {
 }
 function patchOrgCache(fn) {
   try {
-    const c = loadOrgCache();
-    if (!c) return;
-    const next = fn(c.calls || []);
+    // Read the RAW record, not through loadOrgCache — that now enforces a
+    // scope match, and this is called from the write path which has no
+    // scope to hand. Going through the gate silently made the whole
+    // write-through dead for every agent, so a completed call stayed on
+    // their capacity month until they hit Refresh. Removing a task id (or
+    // putting it back) is correct for any scope, so no gate is needed.
+    const raw = localStorage.getItem(CALL_ORG_KEY);
+    const c = raw ? JSON.parse(raw) : null;
+    if (!c || !Array.isArray(c.calls)) return;
+    const next = fn(c.calls);
     // cachedAt is carried through unchanged, so "loaded 20m ago" stays true.
     if (next) localStorage.setItem(CALL_ORG_KEY, JSON.stringify({
       ...c,
@@ -13752,9 +13759,16 @@ async function createActivityTasks({
   dateIso,
   ownerId
 }) {
+  // A job carries its own subject when the caller needs one that isn't
+  // "<Task Type>: <Name>" — touch and follow-up calls are both Task Type
+  // "Call" and are told apart ONLY by the subject line, which is how every
+  // cadence task in this org is already written.
   const jobs = [];
   (items || []).forEach(it => {
-    for (let i = 0; i < it.count; i++) jobs.push(it.type);
+    for (let i = 0; i < it.count; i++) jobs.push({
+      type: it.type,
+      subject: it.subject || null
+    });
   });
   if (!jobs.length) return {
     made: 0,
@@ -13772,13 +13786,13 @@ async function createActivityTasks({
     };
   }
   let whoShape = 'object';
-  const build = type => {
+  const build = job => {
     const rec = {
-      Subject: activitySubject(type, contact.name),
+      Subject: job.subject || activitySubject(job.type, contact.name),
       Status: 'Completed',
       Due_Date: dateIso
     };
-    if (typeField) rec[typeField] = type;
+    if (typeField) rec[typeField] = job.type;
     if (contact.id) rec.Who_Id = whoShape === 'object' ? {
       id: contact.id
     } : contact.id;
@@ -13809,12 +13823,12 @@ async function createActivityTasks({
     };
     throw err;
   };
-  const post = type => safeZoho({
+  const post = job => safeZoho({
     action: 'create_record',
     module: 'Tasks',
-    record: build(type)
+    record: build(job)
   }).then(r => ({
-    type,
+    type: job.type,
     r
   }));
   let first = await post(jobs[0]);
@@ -13823,7 +13837,7 @@ async function createActivityTasks({
     first = await post(jobs[0]);
   }
   if (!first.r.ok) stop(first.r.data && first.r.data.error || 'Zoho would not create that task.');
-  landed[jobs[0]] = 1;
+  landed[jobs[0].type] = 1;
   const rest = jobs.slice(1);
   for (let i = 0; i < rest.length; i += 4) {
     const res = await Promise.all(rest.slice(i, i + 4).map(post));
@@ -13841,6 +13855,57 @@ async function createActivityTasks({
     made: jobs.length,
     byType: byType()
   };
+}
+
+// A contact's own completed call history.
+//
+// The obvious route — the Contacts→Tasks related list — returns ONLY OPEN
+// tasks, so every "when did we last call them?" built on it has silently
+// read empty. Zoho's search API takes a criteria on the Who_Id lookup
+// instead, which does return closed rows, and search_tasks already emits
+// exactly that criteria from its type/type_field pair.
+const LAST_CALL_CACHE = new Map(); // contact id -> { iso, tier } | null
+async function lastCallFor(contactId) {
+  if (!contactId) return null;
+  if (LAST_CALL_CACHE.has(contactId)) return LAST_CALL_CACHE.get(contactId);
+  if (callsIsDev()) {
+    const v = /[02468]$/.test(String(contactId)) ? {
+      iso: cIso(new Date(Date.now() - 17 * 86400000)),
+      tier: 'B'
+    } : null;
+    LAST_CALL_CACHE.set(contactId, v);
+    return v;
+  }
+  let out = null;
+  try {
+    const r = await callZoho({
+      action: 'search_tasks',
+      type_field: 'Who_Id',
+      type: contactId,
+      status: 'Completed',
+      per_page: 200,
+      extra_fields: ['Task_Type']
+    });
+    if (r.ok) {
+      const calls = (r.data.tasks || []).filter(t => t.Task_Type === 'Call' || /touch call|follow up call/i.test(t.Subject || '')).map(t => ({
+        iso: cDateOnly(t.Closed_Time || t.Due_Date),
+        subject: t.Subject || ''
+      })).filter(t => t.iso).sort((a, b) => b.iso.localeCompare(a.iso));
+      // The tier is a property of the CONTACT, so it is read from whichever
+      // past call actually carries one — not just the newest, which may
+      // well have been a follow-up with no tier in its subject.
+      const tiered = calls.find(c => callTier(c.subject) !== 'Other');
+      const newest = calls.find(c => /touch call/i.test(c.subject)) || calls[0];
+      if (newest) out = {
+        iso: newest.iso,
+        tier: tiered ? callTier(tiered.subject) : null
+      };
+    }
+  } catch (e) {
+    return null;
+  } // unknown ≠ "never called" — don't cache a guess
+  LAST_CALL_CACHE.set(contactId, out);
+  return out;
 }
 
 // ─── Call capacity: cadence math + projection ────────────────────
@@ -14147,6 +14212,8 @@ function CallsTab({
   const [rowBusy, setRowBusy] = useState({}); // taskId -> true while a write is in flight
   const [rowErr, setRowErr] = useState({}); // taskId -> message, shown on the row itself
   const [sheet, setSheet] = useState(null); // { task, contact } | null — the + popup
+  const [addKpi, setAddKpi] = useState(false); // the standalone Add KPI sheet
+  const [kpiToast, setKpiToast] = useState(''); // what the last standalone log wrote
   const [dataAt, setDataAt] = useState(0); // when the shown day data was FETCHED, not last touched
 
   // A phone PWA sits on this tab for days at a time, so "today" cannot be
@@ -14392,8 +14459,21 @@ function CallsTab({
     // stored null is indistinguishable from a real answer and this cache is
     // never re-checked otherwise — one flaky moment would blank a contact's
     // phone, email or spouse on that device permanently.
-    const needDetail = ids.filter(id => !cache[id] || !cache[id].detail);
-    const needSpouse = ids.filter(id => !cache[id] || !('spouse' in cache[id]));
+    // A POSITIVE answer is kept indefinitely — numbers and spouses barely
+    // change. A NEGATIVE one ("no phone", "no spouse") is re-checked after a
+    // day, because that is the answer a failure looks like, and without an
+    // expiry a single bad moment is permanent with no way for the agent to
+    // clear it.
+    const NEG_TTL = 86400000;
+    const stale = (c, key, at) => !c[key] && (!c[at] || Date.now() - c[at] > NEG_TTL);
+    const needDetail = ids.filter(id => {
+      const c = cache[id];
+      return !c || !c.detail || stale(c, 'phone', 'at');
+    });
+    const needSpouse = ids.filter(id => {
+      const c = cache[id];
+      return !c || !('spouse' in c) || !c.spouse && (!c.at || Date.now() - c.at > NEG_TTL);
+    });
     // Third gap: a contact with no number of their own is still reachable
     // through their spouse, but that means reading the SPOUSE's record —
     // a second lookup that can only be worked out once the first two
@@ -14402,7 +14482,7 @@ function CallsTab({
     // than re-asked on every paint.
     const needSpousePhone = m => ids.filter(id => {
       const c = m[id];
-      return c && c.detail && !c.phone && c.spouse && c.spouse.id && !('spousePhone' in c);
+      return c && c.detail && !c.phone && c.spouse && c.spouse.id && (!('spousePhone' in c) || stale(c, 'spousePhone', 'spouseAt'));
     });
     if (!needDetail.length && !needSpouse.length && !needSpousePhone(cache).length) return;
     let dead = false;
@@ -14458,15 +14538,22 @@ function CallsTab({
             contact_ids: chunk
           });
           if (dead) return;
-          // Only write the spouse key for a chunk Zoho actually answered.
-          if (r.ok && r.data && r.data.links) {
+          // Stamp the spouse key ONLY for ids present in `links`. The action
+          // omits anyone it could not read, so an id that is missing was
+          // never actually answered for — and a stored null here is
+          // permanent, which is what previously left a whole chunk of
+          // contacts branded spouse-less (and therefore uncallable) after
+          // one transient failure. `r.data.error` is checked too, because
+          // that envelope used to arrive with HTTP 200.
+          const links = r.ok && r.data && !r.data.error && r.data.links || null;
+          if (links) {
             const out = {};
             chunk.forEach(id => {
-              out[id] = {
-                spouse: r.data.links[id] || null
+              if (id in links) out[id] = {
+                spouse: links[id] || null
               };
             });
-            merge(out);
+            if (Object.keys(out).length) merge(out);
           }
         } catch (e) {/* leave this chunk unasked so a later visit retries it */}
         if (dead) return;
@@ -14480,10 +14567,14 @@ function CallsTab({
               action: 'get_contact',
               id
             });
-            if (!r.ok) return [id, null];
-            const c = r.data && r.data.contact || null;
+            // `found === false` means Zoho was reached but the record was
+            // not — caching that as "they have no number" is a lie that
+            // never expires, so it is left unstamped and retried later.
+            if (!r.ok || !r.data || r.data.found === false) return [id, null];
+            const c = r.data.contact || null;
             return [id, {
               detail: true,
+              at: Date.now(),
               phone: c && c.phone || null,
               email: c && c.email || null
             }];
@@ -14510,10 +14601,11 @@ function CallsTab({
               action: 'get_contact',
               id: local[id].spouse.id
             });
-            if (!r.ok) return [id, null];
-            const c = r.data && r.data.contact || null;
+            if (!r.ok || !r.data || r.data.found === false) return [id, null];
+            const c = r.data.contact || null;
             return [id, {
-              spousePhone: c && c.phone || null
+              spousePhone: c && c.phone || null,
+              spouseAt: Date.now()
             }];
           } catch (e) {
             return [id, null];
@@ -14752,7 +14844,11 @@ function CallsTab({
     // `undefined` = not looked up yet, `null` = looked up and the contact
     // genuinely has nothing on file — they read differently.
     const info = cid && contacts[cid] || null;
-    const looked = !cid || !!(info && info.detail);
+    // "No number" is a definitive statement, so only make it once every
+    // lookup that could produce one has actually answered — including the
+    // spouse's-line pass, which runs after the other two.
+    const spouseLookupPending = !!(info && info.detail && !info.phone && info.spouse && info.spouse.id && !('spousePhone' in info));
+    const looked = !cid || !!(info && info.detail) && !spouseLookupPending;
     const phone = info && info.phone;
     const email = info && info.email;
     const spouse = info && info.spouse;
@@ -15220,7 +15316,37 @@ function CallsTab({
       fontWeight: 600,
       color: headTitle
     }
-  }, "Call List"), /*#__PURE__*/React.createElement("button", {
+  }, "Call List"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAddKpi(true),
+    title: "Log a KPI for any contact, on or off this list",
+    style: {
+      height: 24,
+      borderRadius: 20,
+      border: 'none',
+      cursor: 'pointer',
+      background: addBg,
+      color: addCol,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      padding: '0 10px',
+      fontFamily: J,
+      fontSize: 9,
+      fontWeight: 600
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 12
+    }
+  }), " Add KPI"), /*#__PURE__*/React.createElement("button", {
     onClick: () => !busy && load(true),
     disabled: busy,
     title: "Refresh from Zoho",
@@ -15243,7 +15369,18 @@ function CallsTab({
     style: {
       fontSize: 12
     }
-  }))), /*#__PURE__*/React.createElement("div", {
+  })))), kpiToast && /*#__PURE__*/React.createElement("div", {
+    style: {
+      margin: '0 14px 8px',
+      padding: '7px 9px',
+      borderRadius: 8,
+      background: addBg,
+      color: addCol,
+      fontFamily: J,
+      fontSize: 8,
+      lineHeight: 1.5
+    }
+  }, kpiToast), /*#__PURE__*/React.createElement("div", {
     style: {
       margin: '0 14px 10px',
       borderRadius: 10,
@@ -15378,7 +15515,15 @@ function CallsTab({
       flexDirection: 'column',
       gap: 6
     }
-  }, brief.length ? brief.map((l, i) => botMsg(l, 'b' + i)) : botMsg('Loading the board…', 'b0')))), sheet && /*#__PURE__*/React.createElement(LogActivitySheet, {
+  }, brief.length ? brief.map((l, i) => botMsg(l, 'b' + i)) : botMsg('Loading the board…', 'b0')))), addKpi && /*#__PURE__*/React.createElement(AddKpiSheet, {
+    dark: dark,
+    ownerId: myOwnerId,
+    onDone: (name, items) => {
+      setKpiToast('Logged for ' + name + ': ' + items.map(i => i.count + ' × ' + (i.subject || i.type)).join(', '));
+      load(true); // the new rows are real tasks, so the list and counts have to catch up
+    },
+    onClose: () => setAddKpi(false)
+  }), sheet && /*#__PURE__*/React.createElement(LogActivitySheet, {
     dark: dark,
     task: sheet.task,
     contact: sheet.contact,
@@ -15402,6 +15547,469 @@ function CallsTab({
 //  The list of activities is NOT hardcoded. It is this org's live Task Type
 //  picklist with the call types removed (the row itself is the call), so a
 //  type added in Zoho Setup shows up here on its own.
+// ─── Add KPI (standalone) ────────────────────────────────────────
+//  The row-level "+" can only log against somebody already on today's
+//  call list, and it deliberately hides every call type — "the row IS the
+//  call". That leaves no way to record work done off the list, and no way
+//  to say a call was a FOLLOW-UP rather than a touch. That gap is what
+//  creates the "Validate … Touch Call" queue: the agent has no view of when
+//  the contact was last called, so a touch call is the only thing they can
+//  claim, and somebody has to check every one by hand afterwards.
+//
+//  So this sheet does the two things that one can't: pick any contact, and
+//  show the cadence facts BEFORE the choice is made.
+function AddKpiSheet({
+  dark,
+  ownerId,
+  onDone,
+  onClose
+}) {
+  const J = "'Jost', sans-serif";
+  const [meta, setMeta] = useState(null);
+  const [q, setQ] = useState('');
+  const [hits, setHits] = useState(null); // null = not searched yet
+  const [searching, setSearching] = useState(false);
+  const [contact, setContact] = useState(null); // { id, name }
+  const [hist, setHist] = useState('loading'); // 'loading' | { iso, tier } | null
+  const [sel, setSel] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    resolveTaskTypes().then(setMeta).catch(e => setErr(e && e.message || String(e)));
+  }, []);
+  async function runSearch() {
+    const term = q.trim();
+    if (term.length < 2 || searching) return;
+    setSearching(true);
+    setErr('');
+    try {
+      const r = await callZoho({
+        action: 'match_contacts',
+        name: term
+      });
+      setHits(r.ok ? r.data.matches || [] : []);
+      if (!r.ok) setErr(r.data && r.data.error || 'Contact search failed.');
+    } catch (e) {
+      setErr(e && e.message || String(e));
+      setHits([]);
+    } finally {
+      setSearching(false);
+    }
+  }
+  function pick(c) {
+    const picked = {
+      id: c.id,
+      name: c.full_name || c.name || 'Unknown'
+    };
+    setContact(picked);
+    setHits(null);
+    setSel({});
+    setHist('loading');
+    lastCallFor(picked.id).then(h => setHist(h));
+  }
+
+  // The cadence read, in plain terms, plus which option it points at. This
+  // is the whole reason the sheet exists — an agent who can see "12 days
+  // ago, cadence is 60" does not need anyone to validate the answer.
+  const tier = hist && hist !== 'loading' && hist.tier || null;
+  const interval = tier ? CALL_INTERVALS.other[tier] || null : null;
+  const gapDays = hist && hist !== 'loading' && hist.iso ? Math.round((new Date(cIso(new Date())) - new Date(hist.iso)) / 86400000) : null;
+  const dueForTouch = interval == null || gapDays == null ? null : gapDays >= interval * 0.8;
+  const picklist = meta && meta.options || [];
+  const callType = picklist.find(o => /^call$/i.test(o)) || picklist.find(o => /call/i.test(o));
+  // Call options are subject-driven: both are Task Type "Call", and only
+  // the subject separates a touch from a follow-up.
+  const callOpts = callType ? [{
+    key: 'touch',
+    label: 'Touch Call',
+    type: callType,
+    subject: n => (tier ? tier + ' ' : '') + 'Touch Call: ' + n
+  }, {
+    key: 'follow',
+    label: 'Follow Up Call',
+    type: callType,
+    subject: n => 'Follow Up Call : ' + n
+  }] : [];
+  const otherOpts = LOG_ACTIVITIES.map(a => ({
+    ...a,
+    type: picklist.find(o => a.match.test(o))
+  })).filter(a => a.type).map(a => ({
+    key: a.key,
+    label: a.label,
+    type: a.type,
+    requireCount: a.requireCount,
+    subject: null
+  }));
+  const options = callOpts.concat(otherOpts);
+  const chosen = options.filter(o => sel[o.key] !== undefined);
+  const unfilled = chosen.filter(o => !(Number(sel[o.key]) > 0));
+  const items = chosen.filter(o => Number(sel[o.key]) > 0).map(o => ({
+    type: o.type,
+    count: Number(sel[o.key]),
+    subject: o.subject ? o.subject(contact ? contact.name : '') : null
+  }));
+  const total = items.reduce((n, it) => n + it.count, 0);
+  const canAdd = !!contact && !!items.length && !unfilled.length && total <= LOG_MAX_TASKS && !busy;
+  // Claiming a touch call the cadence does not support is exactly what the
+  // validation queue exists to catch — so it is called out here, before it
+  // is written, rather than by somebody else a week later.
+  const claimingEarlyTouch = sel.touch !== undefined && dueForTouch === false;
+  function toggle(o) {
+    setSel(s => {
+      const n = {
+        ...s
+      };
+      if (n[o.key] !== undefined) delete n[o.key];else n[o.key] = o.requireCount ? '' : 1;
+      return n;
+    });
+  }
+  function setCount(o, v) {
+    const d = String(v == null ? '' : v).replace(/[^\d]/g, '');
+    if (!d) {
+      setSel(s => ({
+        ...s,
+        [o.key]: o.requireCount ? '' : 1
+      }));
+      return;
+    }
+    setSel(s => ({
+      ...s,
+      [o.key]: Math.max(1, Math.min(LOG_MAX_TASKS, parseInt(d, 10)))
+    }));
+  }
+  async function submit() {
+    if (!canAdd) return;
+    setBusy(true);
+    setErr('');
+    try {
+      await createActivityTasks({
+        items,
+        typeField: meta && meta.api,
+        contact,
+        dateIso: cIso(new Date()),
+        ownerId
+      });
+      onDone(contact.name, items);
+      onClose();
+    } catch (e) {
+      const p = e && e.partial;
+      if (p && p.made) onDone(contact.name, p.byType);
+      setErr(e && e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const headTitle = dark ? '#FFFFFF' : '#001A4A';
+  const mutedCol = dark ? 'rgba(255,255,255,0.4)' : '#888888';
+  const bord = dark ? '#0D1E3A' : '#EDE7DC';
+  const panelBg = dark ? '#0A1730' : '#FFFFFF';
+  const fieldBg = dark ? '#040C1C' : '#FCFBF8';
+  const addBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
+  const addCol = dark ? '#C9A45A' : '#AD832F';
+  const redCol = dark ? '#F87171' : '#9B1C1C';
+  const goBg = dark ? '#AD832F' : '#001A4A';
+  const btn = {
+    flex: 1,
+    padding: '10px 0',
+    borderRadius: 10,
+    border: 'none',
+    fontFamily: J,
+    fontSize: 10,
+    fontWeight: 600,
+    cursor: 'pointer'
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: () => {
+      if (!busy) onClose();
+    },
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 70,
+      background: 'rgba(0,13,38,0.35)',
+      display: 'flex',
+      alignItems: 'flex-end',
+      justifyContent: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: '100%',
+      maxWidth: 480,
+      background: panelBg,
+      borderTopLeftRadius: 18,
+      borderTopRightRadius: 18,
+      padding: '16px 16px calc(18px + env(safe-area-inset-bottom))',
+      maxHeight: '88vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      fontWeight: 600,
+      color: headTitle
+    }
+  }, "Add KPI"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    disabled: busy,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: busy ? 'default' : 'pointer',
+      opacity: busy ? 0.4 : 1,
+      color: mutedCol
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x",
+    style: {
+      fontSize: 15
+    }
+  }))), !contact && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: q,
+    onChange: e => setQ(e.target.value),
+    onKeyDown: e => {
+      if (e.key === 'Enter') runSearch();
+    },
+    placeholder: "Search a contact\u2026",
+    autoFocus: true,
+    style: {
+      flex: 1,
+      background: fieldBg,
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      padding: '9px 11px',
+      fontFamily: J,
+      fontSize: 10,
+      color: headTitle,
+      outline: 'none'
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: runSearch,
+    disabled: q.trim().length < 2 || searching,
+    style: {
+      ...btn,
+      flex: 'none',
+      width: 64,
+      background: goBg,
+      color: '#fff',
+      opacity: q.trim().length < 2 || searching ? 0.5 : 1
+    }
+  }, searching ? '…' : 'Find')), hits && hits.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: mutedCol,
+      padding: '8px 2px'
+    }
+  }, "No contact matched \u201C", q.trim(), "\u201D."), hits && hits.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.id,
+    onClick: () => pick(c),
+    style: {
+      display: 'block',
+      width: '100%',
+      textAlign: 'left',
+      background: 'none',
+      border: 'none',
+      borderBottom: `1px solid ${bord}`,
+      padding: '9px 2px',
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 600,
+      color: headTitle
+    }
+  }, c.full_name || c.name), c.email && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: mutedCol
+    }
+  }, c.email)))), contact && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 600,
+      color: headTitle,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, contact.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: mutedCol,
+      marginTop: 2
+    }
+  }, hist === 'loading' ? 'Checking call history…' : !hist ? 'No completed call on record — first touch.' : gapDays + ' day' + (gapDays === 1 ? '' : 's') + ' since the last call' + (interval ? ' · ' + tier + ' cadence is ' + interval + ' days' : ' · no tier on file'))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setContact(null);
+      setHits(null);
+      setSel({});
+    },
+    disabled: busy,
+    style: {
+      ...btn,
+      flex: 'none',
+      width: 68,
+      background: fieldBg,
+      color: mutedCol,
+      border: `1px solid ${bord}`
+    }
+  }, "Change")), dueForTouch === false && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      lineHeight: 1.5,
+      color: addCol,
+      background: addBg,
+      borderRadius: 8,
+      padding: '7px 9px',
+      marginBottom: 8
+    }
+  }, "Too soon for a touch call \u2014 the next one is due in about ", Math.max(0, interval - gapDays), " days. Log this as a Follow Up Call unless it really was the cadence touch."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gap: 4,
+      marginBottom: 10
+    }
+  }, options.map(o => {
+    const on = sel[o.key] !== undefined;
+    return /*#__PURE__*/React.createElement("div", {
+      key: o.key,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 9px',
+        borderRadius: 9,
+        border: `1px solid ${on ? addCol : bord}`,
+        background: on ? addBg : 'transparent'
+      }
+    }, /*#__PURE__*/React.createElement("label", {
+      style: {
+        flex: 1,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        cursor: 'pointer',
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: on,
+      onChange: () => toggle(o),
+      style: {
+        accentColor: goBg,
+        cursor: 'pointer'
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 10,
+        fontWeight: on ? 600 : 500,
+        color: headTitle
+      }
+    }, o.label)), on && o.requireCount && /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      inputMode: "numeric",
+      min: "1",
+      max: LOG_MAX_TASKS,
+      value: sel[o.key],
+      onChange: e => setCount(o, e.target.value),
+      placeholder: "how many",
+      style: {
+        width: 82,
+        background: fieldBg,
+        border: `1px solid ${bord}`,
+        borderRadius: 8,
+        padding: '5px 8px',
+        fontFamily: J,
+        fontSize: 10,
+        color: headTitle,
+        outline: 'none'
+      }
+    }));
+  })), claimingEarlyTouch && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: redCol,
+      marginBottom: 8,
+      lineHeight: 1.5
+    }
+  }, "You\u2019re logging a touch call ", gapDays, " days after the last one, against a ", interval, "-day cadence. This is the case that gets sent for validation."), items.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 8,
+      color: mutedCol,
+      marginBottom: 8,
+      lineHeight: 1.6
+    }
+  }, items.map((it, i) => /*#__PURE__*/React.createElement("div", {
+    key: i
+  }, it.count, " \xD7 ", it.subject || activitySubject(it.type, contact.name)))), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      color: redCol,
+      marginBottom: 8,
+      lineHeight: 1.5
+    }
+  }, err), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    disabled: busy,
+    style: {
+      ...btn,
+      background: fieldBg,
+      color: mutedCol,
+      border: `1px solid ${bord}`
+    }
+  }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    disabled: !canAdd,
+    style: {
+      ...btn,
+      background: goBg,
+      color: '#fff',
+      opacity: canAdd ? 1 : 0.5
+    }
+  }, busy ? 'Saving…' : 'Log ' + (total || '') + ' KPI' + (total === 1 ? '' : 's'))))));
+}
 function LogActivitySheet({
   dark,
   task,
@@ -15874,7 +16482,14 @@ function CapacityView({
 
   // An agent pulls only their own calls; an admin needs everyone.
   const scope = !team && meId ? meId : '';
+
+  // `scope` can change mid-flight (meId arrives with the call list), so two
+  // loads can be in the air at once — and the org-wide one is the slower.
+  // Without this the slow, wrong-scope response lands last and wins.
+  const gen = useRef(0);
   async function load(force) {
+    const g = ++gen.current;
+    const current = () => g === gen.current;
     setErr('');
     if (!force) {
       const c = loadOrgCache(scope);
@@ -15902,6 +16517,7 @@ function CapacityView({
         calls: got,
         capped: cap
       } = await fetchOrgOpenCalls(typeField, setProgress, scope || null);
+      if (!current()) return;
       setCalls(got);
       setCapped(cap);
       setCachedAt(Date.now());
@@ -15913,10 +16529,11 @@ function CapacityView({
         scope
       });
     } catch (e) {
+      if (!current()) return;
       setErr(e && e.message || String(e));
       setCalls([]);
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   }
   // meId arrives with the call list, which may land after this mounts — so
@@ -15943,19 +16560,26 @@ function CapacityView({
   // Loaded, has a name, and still nothing under it — say so instead of
   // showing a blank month that looks like "no calls this month".
   const nameUnmatched = !team && calls !== null && !!me && !mine;
+
+  // Everything downstream reads THIS, not `calls`. Narrowing once at the
+  // source is what guarantees an agent can never see another agent's
+  // numbers — the projection's `unprojected` count was summed org-wide and
+  // reported to agents as if it were theirs, precisely because it was the
+  // one consumer that filtered nothing.
+  const visible = useMemo(() => team ? calls || [] : (calls || []).filter(c => c.owner === who), [calls, team, who]);
   const booked = useMemo(() => {
     const out = {}; // owner -> iso -> [call]
-    (calls || []).forEach(c => {
+    (visible || []).forEach(c => {
       if (!c.Due_Date) return;
       const byOwner = out[c.owner] = out[c.owner] || {};
       (byOwner[c.Due_Date] = byOwner[c.Due_Date] || []).push(c);
     });
     return out;
-  }, [calls]);
-  const projection = useMemo(() => showProjected ? projectCallCadence(calls, endIso, todayIso) : {
+  }, [visible]);
+  const projection = useMemo(() => showProjected ? projectCallCadence(visible, endIso, todayIso) : {
     byOwner: {},
     unprojected: 0
-  }, [calls, endIso, todayIso, showProjected]);
+  }, [visible, endIso, todayIso, showProjected]);
   const monthTotals = useMemo(() => {
     const inMonth = iso => iso && iso.slice(0, 7) === monthKey;
     return owners.map(o => {

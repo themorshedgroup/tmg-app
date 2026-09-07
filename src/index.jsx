@@ -5350,21 +5350,42 @@ Rules:
         // phone, email or spouse on that device permanently.
         const needDetail = ids.filter(id => !cache[id] || !cache[id].detail);
         const needSpouse = ids.filter(id => !cache[id] || !('spouse' in cache[id]));
-        if (!needDetail.length && !needSpouse.length) return;
-        let dead = false;
-        const merge = (out) => setContacts(p => {
-          const m = { ...p };
-          Object.keys(out).forEach(id => { if (out[id]) m[id] = Object.assign({}, m[id], out[id]); });
-          saveContactCache(m);
-          return m;
+        // Third gap: a contact with no number of their own is still reachable
+        // through their spouse, but that means reading the SPOUSE's record —
+        // a second lookup that can only be worked out once the first two
+        // passes have answered. Keyed on the `spousePhone` KEY being absent,
+        // so "looked up, they have no number either" is remembered rather
+        // than re-asked on every paint.
+        const needSpousePhone = (m) => ids.filter(id => {
+          const c = m[id];
+          return c && c.detail && !c.phone && c.spouse && c.spouse.id && !('spousePhone' in c);
         });
+        if (!needDetail.length && !needSpouse.length && !needSpousePhone(cache).length) return;
+        let dead = false;
+        // `local` mirrors what has been merged so far in THIS run. The ref is
+        // only refreshed on a later render, so the spouse pass below would
+        // otherwise be deciding off a snapshot taken before the two passes
+        // that feed it.
+        const local = Object.assign({}, cache);
+        const merge = (out) => {
+          Object.keys(out).forEach(id => { if (out[id]) local[id] = Object.assign({}, local[id], out[id]); });
+          setContacts(p => {
+            const m = { ...p };
+            Object.keys(out).forEach(id => { if (out[id]) m[id] = Object.assign({}, m[id], out[id]); });
+            saveContactCache(m);
+            return m;
+          });
+        };
         if (callsIsDev()) {
           const out = {};
           ids.forEach((id, i) => { out[id] = {
             detail: true,
-            phone: i % 5 === 4 ? null : String(5122000000 + i * 3737),
+            // Two no-number shapes on purpose: one the spouse fallback rescues
+            // (i%5), one it can't (i%7), so both render paths are visible.
+            phone: (i % 5 === 4 || i % 7 === 6) ? null : String(5122000000 + i * 3737),
             email: i % 4 === 3 ? null : 'contact' + i + '@example.com',
-            spouse: i % 3 === 0 ? { id: '55000000000009' + String(100 + i), name: 'Pat Example' } : null,
+            spouse: (i % 3 === 0 || i % 5 === 4) ? { id: '55000000000009' + String(100 + i), name: 'Pat Example' } : null,
+            spousePhone: i % 5 === 4 ? String(5129000000 + i * 11) : null,
           }; });
           merge(out);
           return;
@@ -5403,6 +5424,22 @@ Rules:
             // Persisted per batch, not once at the end: switching day tabs
             // mid-fetch used to throw away everything already looked up.
             const out = {}; got.forEach(([id, v]) => { out[id] = v; });
+            merge(out);
+          }
+          // Anyone still without a number gets one more look — at their
+          // spouse's record. Runs last because it depends on both passes above.
+          const need2 = needSpousePhone(local);
+          for (let i = 0; i < need2.length; i += 6) {
+            const got = await Promise.all(need2.slice(i, i + 6).map(async id => {
+              try {
+                const r = await callZoho({ action: 'get_contact', id: local[id].spouse.id });
+                if (!r.ok) return [id, null];
+                const c = (r.data && r.data.contact) || null;
+                return [id, { spousePhone: (c && c.phone) || null }];
+              } catch (e) { return [id, null]; }
+            }));
+            if (dead) return;
+            const out = {}; got.forEach(([id, v]) => { if (v) out[id] = v; });
             merge(out);
           }
         })();
@@ -5539,6 +5576,12 @@ Rules:
         const phone = info && info.phone;
         const email = info && info.email;
         const spouse = info && info.spouse;
+        // No number of their own falls back to the spouse's line. Always
+        // labelled — whoever picks up is not the person on the task, and the
+        // agent needs to know that before the call connects.
+        const spousePhone = info && info.spousePhone;
+        const dial = phone || spousePhone || null;
+        const viaSpouse = !phone && !!spousePhone;
         const href = zohoContactUrl(cid);
         const spouseHref = spouse && zohoContactUrl(spouse.id);
         const done = /completed/i.test(t.Status || '');
@@ -5569,7 +5612,13 @@ Rules:
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 3, minWidth: 0 }}>
                   <i className={`ti ${st.icon}`} style={{ fontSize: 11, color: st.col, flexShrink: 0 }} />
-                  <span style={{ fontFamily: J, fontSize: 8, color: st.num, flexShrink: 0 }}>{phone ? formatPhone(phone) : (looked ? 'No number' : '…')}</span>
+                  <span style={{ fontFamily: J, fontSize: 8, color: st.num, flexShrink: 0 }}>{dial ? formatPhone(dial) : (looked ? 'No number' : '…')}</span>
+                  {viaSpouse && (
+                    <span title={'This is ' + ((spouse && spouse.name) || 'their spouse') + "'s number — " + cname + ' has none on file'}
+                      style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: addCol, background: addBg, borderRadius: 20, padding: '1px 6px', flexShrink: 0 }}>
+                      spouse&rsquo;s line
+                    </span>
+                  )}
                   {email && <a href={'mailto:' + email} style={{ fontFamily: J, fontSize: 8, color: mutedCol, textDecoration: 'none', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {email}</a>}
                   {team && !agent && <span style={{ fontFamily: J, fontSize: 8, color: mutedCol, flexShrink: 0 }}>· {ownerOf(t)}</span>}
                 </div>
@@ -5584,8 +5633,8 @@ Rules:
                 style={{ ...ctrl, background: addBg, color: addCol, opacity: cid ? 1 : 0.4, cursor: cid ? 'pointer' : 'default' }}>
                 <i className="ti ti-plus" style={{ fontSize: 14 }} />
               </button>
-              {phone
-                ? <a href={'tel:' + String(phone).replace(/[^\d+]/g, '')} title="Call" style={{ ...ctrl, background: callBtnBg, color: '#fff', textDecoration: 'none' }}>
+              {dial
+                ? <a href={'tel:' + String(dial).replace(/[^\d+]/g, '')} title={viaSpouse ? 'Call ' + ((spouse && spouse.name) || 'their spouse') + " — " + cname + ' has no number on file' : 'Call'} style={{ ...ctrl, background: callBtnBg, color: '#fff', textDecoration: 'none' }}>
                     <i className="ti ti-phone" style={{ fontSize: 12 }} />
                   </a>
                 : <div style={{ ...ctrl, background: navInBg, color: navInCol, cursor: 'default' }}>

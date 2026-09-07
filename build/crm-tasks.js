@@ -933,6 +933,20 @@ function devSpouseLinks(keys) {
   });
   return out;
 }
+// Dev stand-in for the Contacts phone sweep: every contact the fixtures
+// reference, with roughly one in seven given no number, so the no-phone
+// list is non-empty locally and the spouse leg is actually exercised.
+function devContactPhones() {
+  const map = {};
+  DEV_TASKS.forEach(t => {
+    const id = t.Who_Id && t.Who_Id.id;
+    if (id && !(id in map)) map[id] = true;
+  });
+  Object.keys(map).forEach((id, i) => {
+    if (i % 7 === 3) map[id] = false;
+  });
+  return map;
+}
 // The real pairing source: each contact's own Spouse lookup field (found
 // by label, same as the app's other spouse tools — spouse_links resolves
 // it live). Batched at 60 (the edge action's own cap); dev uses the mock
@@ -975,6 +989,57 @@ async function fetchSpouseLinksFor(keys) {
   }
   return out;
 }
+// Which contacts have a phone number of their own. There is no
+// bulk contacts-by-id action, and fanning out one get_contact per contact
+// over a 1,300-call backlog is minutes of requests — but the whole
+// Contacts module is only ~11 pages, so a single paged sweep is both
+// cheaper and complete. Cached module-wide; numbers rarely change.
+//
+// Returns null on ANY failure rather than a partial map. A half-read sweep
+// would read as "these contacts have no number", and the only thing this
+// feeds is a DELETE list — so a failed read must produce nothing to delete,
+// never a shorter list of survivors.
+let CONTACT_PHONES = null; // contact id -> true when they have their own number
+function clearContactPhonesCache() {
+  CONTACT_PHONES = null;
+}
+async function fetchContactPhones() {
+  if (CONTACT_PHONES) return CONTACT_PHONES;
+  if (isDev()) {
+    CONTACT_PHONES = devContactPhones();
+    return CONTACT_PHONES;
+  }
+  const has = v => !!(v && String(v).trim());
+  const map = {};
+  let page = 1,
+    token = null,
+    more = true,
+    guard = 0;
+  while (more && guard++ < 60) {
+    const args = {
+      action: 'list_tasks',
+      module: 'Contacts',
+      fields: ['Phone', 'Mobile', 'Other_Phone'],
+      per_page: 200
+    };
+    if (token) args.page_token = token;else args.page = page;
+    const {
+      ok,
+      data
+    } = await callZoho(args);
+    if (!ok) return null;
+    (data.tasks || []).forEach(c => {
+      map[c.id] = has(c.Phone) || has(c.Mobile) || has(c.Other_Phone);
+    });
+    more = !!(data.info && data.info.more_records);
+    token = data.info && data.info.next_page_token || null;
+    if (more && !token && page >= 10) break;
+    page++;
+  }
+  CONTACT_PHONES = map;
+  return map;
+}
+
 // Cadence math (duplicate resolution, no-baseline detection, spouse
 // alignment) reads a contact's LAST COMPLETED call from `lastCompletedByContact`
 // — but that only sees whatever's in the currently loaded `tasks` state,
@@ -3067,6 +3132,38 @@ function findUnclassifiedCalls({
   })).sort((a, b) => a.contact.localeCompare(b.contact));
 }
 
+// Open calls for contacts nobody can actually ring: no number of their
+// own, and no spouse with one either. The spouse leg matters because the
+// Calls tab dials the spouse's line as a fallback, so a contact reachable
+// that way is NOT unreachable and must not be swept in here.
+//
+// `phones` null (the sweep failed) yields an EMPTY list, never a full one.
+// Anything this returns is queued for deletion, so every uncertainty —
+// no contact attached, a contact the sweep never saw, a name-shaped key
+// instead of a real Zoho id — resolves to "leave it alone".
+function findNoPhoneCalls({
+  tasks,
+  colMap,
+  phones,
+  spouseLinks
+}) {
+  if (!phones) return [];
+  const reachable = cid => {
+    if (!cid || !(cid in phones)) return true;
+    if (phones[cid]) return true;
+    const sp = spouseLinks && spouseLinks[cid];
+    return !!(sp && sp.id && phones[sp.id]);
+  };
+  return (tasks || []).filter(t => (t.Status || '') === 'Not Started' && isCallTask(t, colMap) && !reachable(t.Who_Id?.id)).map(t => ({
+    id: t.id,
+    cid: t.Who_Id?.id,
+    contact: t.Who_Id?.name || '—',
+    owner: t.Owner?.name || '—',
+    due: t.Due_Date,
+    subject: t.Subject
+  })).sort((a, b) => a.contact.localeCompare(b.contact) || String(a.due).localeCompare(String(b.due)));
+}
+
 // Couples whose single surviving Not-Started call has drifted apart —
 // uses the higher-touch-wins target rule (resolveCoupleTarget) to decide
 // the shared date. Only pairs contacts with exactly one open call each —
@@ -3303,7 +3400,67 @@ function CadenceHealth({
     tasks,
     colMap
   }), [tasks, colMap]);
-  const removeAll = fixable.flatMap(g => g.removeIds).concat(unclassified.map(u => u.id));
+
+  // Calls nobody can ring. Two fetches, in order: the phone sweep says who
+  // has no number of their own, and only THOSE contacts then get a spouse
+  // lookup — a contact whose spouse has a line is reachable (the Calls tab
+  // dials it) and is deliberately left alone.
+  const [phones, setPhones] = useState(null);
+  const [phonesLoading, setPhonesLoading] = useState(true);
+  const [phonesFailed, setPhonesFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setPhonesLoading(true);
+    fetchContactPhones().then(m => {
+      if (cancelled) return;
+      setPhones(m);
+      setPhonesFailed(!m);
+      setPhonesLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const noPhoneCandidates = useMemo(() => {
+    if (!phones) return [];
+    const out = new Set();
+    (tasks || []).forEach(t => {
+      if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
+      const cid = t.Who_Id?.id;
+      if (cid && cid in phones && !phones[cid]) out.add(cid);
+    });
+    return Array.from(out);
+  }, [tasks, colMap, phones]);
+  const [noPhoneLinks, setNoPhoneLinks] = useState({});
+  const [noPhoneLinksLoading, setNoPhoneLinksLoading] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (!noPhoneCandidates.length) {
+      setNoPhoneLinks({});
+      setNoPhoneLinksLoading(false);
+      return;
+    }
+    setNoPhoneLinksLoading(true);
+    fetchSpouseLinksFor(noPhoneCandidates).then(links => {
+      if (!cancelled) {
+        setNoPhoneLinks(links);
+        setNoPhoneLinksLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [noPhoneCandidates.join('|')]);
+  // Held back until BOTH lookups have answered — a half-resolved spouse map
+  // would list a reachable contact for deletion.
+  const noPhoneReady = !phonesLoading && !noPhoneLinksLoading && !!phones;
+  const noPhone = useMemo(() => noPhoneReady ? findNoPhoneCalls({
+    tasks,
+    colMap,
+    phones,
+    spouseLinks: noPhoneLinks
+  }) : [], [noPhoneReady, tasks, colMap, phones, noPhoneLinks]);
+  const removeAll = fixable.flatMap(g => g.removeIds).concat(unclassified.map(u => u.id)).concat(noPhone.map(n => n.id));
   const dupesClear = fixable.length === 0; // needs-review cases don't block — can't be fixed from here
   const dupesBusyLoading = dupeLinksLoading || completedLoading;
   async function applyDupes() {
@@ -3671,7 +3828,7 @@ function CadenceHealth({
       borderRadius: 9,
       overflow: 'hidden'
     }
-  }, tabBtn('dupes', tab === 'dupes', false, `1 · Duplicate calls (${dupes.length + unclassified.length})`), tabBtn('backlog', tab === 'backlog', !dupesClear, `2 · Backlog${dupesClear ? ' (' + plan.total + ')' : ''}`), tabBtn('align', tab === 'align', !!alignGate, `3 · Spouse alignment${alignGate ? '' : ' (' + aligns.length + ')'}`)), tab === 'align' && !alignGate && /*#__PURE__*/React.createElement("button", {
+  }, tabBtn('dupes', tab === 'dupes', false, `1 · Duplicate calls (${dupes.length + unclassified.length + noPhone.length})`), tabBtn('backlog', tab === 'backlog', !dupesClear, `2 · Backlog${dupesClear ? ' (' + plan.total + ')' : ''}`), tabBtn('align', tab === 'align', !!alignGate, `3 · Spouse alignment${alignGate ? '' : ' (' + aligns.length + ')'}`)), tab === 'align' && !alignGate && /*#__PURE__*/React.createElement("button", {
     onClick: recheckSpousePairings,
     disabled: alignBusyLoading,
     title: "Spouse pairings + call history are cached after the first check \u2014 use this to re-check against Zoho now",
@@ -3725,14 +3882,97 @@ function CadenceHealth({
       overflowY: 'auto',
       padding: '14px 22px'
     }
-  }, tab === 'dupes' && /*#__PURE__*/React.createElement(React.Fragment, null, dupes.length === 0 && unclassified.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, tab === 'dupes' && /*#__PURE__*/React.createElement(React.Fragment, null, dupes.length === 0 && unclassified.length === 0 && noPhone.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 40,
       textAlign: 'center',
       color: C.textMuted,
       fontSize: '0.86rem'
     }
-  }, "No contacts with more than one Not-Started call, and no unclassified calls."), unclassified.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "No contacts with more than one Not-Started call, no unclassified calls, and nobody unreachable."), phonesFailed && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      borderColor: C.amber,
+      color: C.amber,
+      fontSize: '0.78rem'
+    }
+  }, "Couldn\u2019t read contact phone numbers from Zoho, so the \u201Cno phone number\u201D check is skipped this session. Nothing is listed for deletion on that basis \u2014 reopen to retry."), !phonesFailed && !noPhoneReady && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      marginBottom: 10
+    }
+  }, "Checking which contacts have a phone number\u2026"), noPhone.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      fontWeight: 700,
+      letterSpacing: '.08em',
+      textTransform: 'uppercase',
+      color: C.textMuted,
+      marginBottom: 2
+    }
+  }, "No phone number \u2014 will be deleted (", noPhone.length, ")"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      marginBottom: 6,
+      lineHeight: 1.5
+    }
+  }, "Neither the contact nor their spouse has a number on file, so the call can\u2019t be made. Add a number in Zoho instead if you want to keep one."), noPhone.map(u => /*#__PURE__*/React.createElement("div", {
+    key: u.id,
+    style: {
+      ...card,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.62rem',
+      fontWeight: 700,
+      borderRadius: 20,
+      padding: '1px 7px',
+      color: '#fff',
+      background: C.red,
+      flexShrink: 0
+    }
+  }, "REMOVE"), /*#__PURE__*/React.createElement(ZohoLink, {
+    module: "Contacts",
+    id: u.cid,
+    style: {
+      fontSize: '0.82rem',
+      fontWeight: 600,
+      color: C.textPrimary,
+      flexShrink: 0
+    }
+  }, u.contact), /*#__PURE__*/React.createElement(ZohoLink, {
+    module: "Tasks",
+    id: u.id,
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      flex: 1
+    }
+  }, u.subject), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.68rem',
+      color: C.textMuted,
+      flexShrink: 0
+    }
+  }, u.owner), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.68rem',
+      color: C.textMuted,
+      flexShrink: 0
+    }
+  }, fmtDate(u.due))))), unclassified.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 14
     }
@@ -4353,7 +4593,7 @@ function CadenceHealth({
       fontSize: '0.76rem',
       color: done ? done.ok ? C.green : C.red : C.textMuted
     }
-  }, done ? done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error : tab === 'dupes' ? `${removeAll.length} call${removeAll.length === 1 ? '' : 's'} to remove${unclassified.length ? ' (' + unclassified.length + ' unclassified)' : ''}${review.length ? ' · ' + review.length + ' need review' : ''}` : tab === 'backlog' ? !dupesClear ? 'Blocked until duplicate calls are resolved.' : backlogBusyLoading ? backlogCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…' : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available` : alignGate === 'dupes' ? 'Blocked until duplicate calls are resolved.' : alignGate === 'backlog' ? 'Blocked until the overdue/no-cadence backlog is cleared.' : alignBusyLoading ? alignCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…' : `${aligns.length} couple${aligns.length === 1 ? '' : 's'} to align across ${alignDays} business day${alignDays === 1 ? '' : 's'} · ≤5 calls/day per agent`), /*#__PURE__*/React.createElement("div", {
+  }, done ? done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error : tab === 'dupes' ? `${removeAll.length} call${removeAll.length === 1 ? '' : 's'} to remove${[unclassified.length ? unclassified.length + ' unclassified' : '', noPhone.length ? noPhone.length + ' no phone' : ''].filter(Boolean).length ? ' (' + [unclassified.length ? unclassified.length + ' unclassified' : '', noPhone.length ? noPhone.length + ' no phone' : ''].filter(Boolean).join(', ') + ')' : ''}${review.length ? ' · ' + review.length + ' need review' : ''}` : tab === 'backlog' ? !dupesClear ? 'Blocked until duplicate calls are resolved.' : backlogBusyLoading ? backlogCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…' : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available` : alignGate === 'dupes' ? 'Blocked until duplicate calls are resolved.' : alignGate === 'backlog' ? 'Blocked until the overdue/no-cadence backlog is cleared.' : alignBusyLoading ? alignCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…' : `${aligns.length} couple${aligns.length === 1 ? '' : 's'} to align across ${alignDays} business day${alignDays === 1 ? '' : 's'} · ≤5 calls/day per agent`), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 10

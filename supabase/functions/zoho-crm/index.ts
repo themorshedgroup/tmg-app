@@ -240,6 +240,23 @@ async function listZohoUsers(sb: any, conn: any, accessToken: string, apiDomain:
 //   users the search endpoint won't return (e.g. unconfirmed or oddly-indexed).
 // Strategy 3 (only if fullName given): exact case-insensitive full-name match,
 //   accepted only when unambiguous (exactly one hit).
+// Record who submitted a record the app just created in Zoho. Zoho itself only
+// ever names the API connection as the creator, so without this the author
+// survives nowhere except the edge-function logs, which keep about two days.
+// Stamped here rather than by the browser so it reflects the real session, and
+// never allowed to fail the request — the record is already saved in Zoho.
+async function stampSubmission(
+  sb: any, module: string, zohoId: string | null, userId: string | null, name: string | null,
+) {
+  if (!sb || !zohoId || !userId || userId === "service") return;
+  try {
+    const { error } = await sb.from("zoho_submissions").insert({
+      module, zoho_id: zohoId, submitted_by: userId, submitted_by_name: name,
+    });
+    if (error) console.error(`[zoho-crm] ${module} submission stamp failed:`, error.message);
+  } catch (e) { console.error(`[zoho-crm] ${module} submission stamp threw:`, String(e)); }
+}
+
 // The stored Zoho user id for a signed-in app user — the ONLY deterministic
 // answer available. Everything below it is guesswork that depends on the
 // person happening to own a record the app can read, which is how goals and
@@ -477,6 +494,7 @@ Deno.serve(async (req) => {
       }
 
       const created = crmData?.data?.[0];
+      await stampSubmission(sb, moduleName, created?.details?.id || null, auth.userId, callerName);
       return json(
         {
           ok: true,
@@ -550,7 +568,13 @@ Deno.serve(async (req) => {
         }, 409);
         return json({ error: row?.message || d?.message || "Could not create health goal", detail: d }, r.ok ? 400 : r.status);
       }
-      return json({ ok: true, id: row?.details?.id || null, owner_warning: ownerWarning }, 200);
+      // Record who submitted it, permanently. Zoho only ever names the API
+      // connection as creator, so without this the author survives nowhere
+      // except the edge-function logs, which keep ~2 days. Written here rather
+      // than by the browser so it reflects the actual session.
+      const newId = row?.details?.id || null;
+      await stampSubmission(sb, "Health_Goals", newId, auth.userId, callerName);
+      return json({ ok: true, id: newId, owner_warning: ownerWarning }, 200);
     }
 
     // ── Owner diagnosis (ops/admin only) ────────────────────────────

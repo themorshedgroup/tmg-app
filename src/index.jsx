@@ -6564,9 +6564,9 @@ Rules:
     function hgCache() {
       try {
         const c = JSON.parse(localStorage.getItem(HG_CACHE_KEY) || 'null');
-        if (c && Array.isArray(c.rows)) return { rows: c.rows, ticks: c.ticks || {} };
+        if (c && Array.isArray(c.rows)) return { rows: c.rows, ticks: c.ticks || {}, submitters: c.submitters || {} };
       } catch (e) {}
-      return { rows: null, ticks: {} };
+      return { rows: null, ticks: {}, submitters: {} };
     }
 
     function HealthGoalsTab({ dark, ownerName, ownerEmail, isAdmin }) {
@@ -6581,6 +6581,8 @@ Rules:
       // few-seconds-stale first paint to mislead anyone).
       const [rows, setRows] = useState(() => hgCache().rows); // null = never loaded
       const [ticks, setTicks] = useState(() => hgCache().ticks);
+      // zohoId -> the name of whoever actually saved it through the app.
+      const [submitters, setSubmitters] = useState(() => hgCache().submitters);
       const [busy, setBusy] = useState(false);
       const [note, setNote] = useState('');
       const [adding, setAdding] = useState(false);
@@ -6605,7 +6607,7 @@ Rules:
         setBusy(true); setNote('');
         // Both fetches at once — the marks don't depend on the goals list, so
         // waiting for Zoho first just added its ~2s to the ~0.7s query.
-        const [zoho, marks] = await Promise.all([
+        const [zoho, marks, subs] = await Promise.all([
           callZoho({
             action: 'list_tasks', module: 'Health_Goals', per_page: 200,
             fields: ['Owner', 'Health_Goal_s', 'Month_of', 'Goal_Status', 'Created_Time'],
@@ -6616,12 +6618,22 @@ Rules:
             if (!c) return null;
             return await c.from('health_goal_weeks').select('zoho_id, week, done');
           })(),
+          (async () => {
+            const c = window.SupabaseAuth && window.SupabaseAuth._client;
+            if (!c) return null;
+            return await c.from('zoho_submissions').select('zoho_id, submitted_by_name').eq('module', 'Health_Goals');
+          })(),
         ]);
         setBusy(false);
         if (marks && !marks.error) {
           const m = {};
           (marks.data || []).forEach(w => { m[w.zoho_id + ':' + w.week] = !!w.done; });
           setTicks(m);
+        }
+        if (subs && !subs.error) {
+          const s = {};
+          (subs.data || []).forEach(r => { if (r.submitted_by_name) s[r.zoho_id] = r.submitted_by_name; });
+          setSubmitters(s);
         }
         const { ok, data } = zoho;
         if (!ok) { setNote(data.error || 'Could not load health goals from Zoho.'); setRows(r => r || []); return; }
@@ -6645,8 +6657,8 @@ Rules:
       // still ticked on the next open's first paint.
       useEffect(() => {
         if (rows === null) return;
-        try { localStorage.setItem(HG_CACHE_KEY, JSON.stringify({ rows, ticks })); } catch (e) {}
-      }, [rows, ticks]);
+        try { localStorage.setItem(HG_CACHE_KEY, JSON.stringify({ rows, ticks, submitters })); } catch (e) {}
+      }, [rows, ticks, submitters]);
 
       // Editing someone else's health goal isn't yours to do — own rows only
       // (admins can fix anyone's). Matched against the roster person as well as
@@ -6775,6 +6787,14 @@ Rules:
                             : isMine(person, rec) ? (
                               <span onClick={() => setAdding(true)} style={{ color: gold, cursor: 'pointer', fontWeight: 600 }}>+ Add your goal</span>
                             ) : dash}
+                          {/* Only worth saying when it disagrees with the row —
+                              a goal sitting under the wrong name is exactly the
+                              failure this record exists to catch. */}
+                          {rec && submitters[rec.id] && submitters[rec.id] !== label && (
+                            <div style={{ fontFamily: J, fontSize: 9, color: muted, marginTop: 4, fontStyle: 'italic' }}>
+                              logged by {submitters[rec.id]}
+                            </div>
+                          )}
                         </td>
                         {weeks.map((w, i) => {
                           // No goal logged = nothing to tick: dashes, like the

@@ -8360,6 +8360,199 @@ function LabelManager({
 //
 // Reads come straight from ctc_emails (SELECT-only RLS for active users).
 // Every write goes through callCtcEmails — see the note on that helper.
+// Admin-only: which mailboxes the poller may read. This switch is the
+// AUTHORITY — having the Sales Agent or TC role only puts someone in the
+// suggested list, it never starts collection on its own. Reading a
+// colleague's mail stays a deliberate, reversible act.
+// A mailbox produces nothing until BOTH this is on AND its owner has
+// connected their own Google account, which they can revoke themselves.
+function MailboxAdminPanel({
+  dark,
+  onClose
+}) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState('');
+  const bord = dark ? '#152545' : '#E4DFD4',
+    ink = dark ? '#fff' : '#001A4A',
+    sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
+  const gold = dark ? '#C9A45A' : '#AD832F',
+    teal = '#0F6E56';
+  async function load() {
+    const {
+      ok,
+      data
+    } = await callCtcEmails({
+      action: 'list_mailboxes'
+    });
+    setLoading(false);
+    if (!ok) {
+      setErr(data.error || 'Could not load the mailbox list.');
+      return;
+    }
+    setRows(data.mailboxes || []);
+  }
+  useEffect(() => {
+    load();
+  }, []);
+  async function toggle(m) {
+    setBusy(m.user_id);
+    setErr('');
+    const {
+      ok,
+      data
+    } = await callCtcEmails({
+      action: 'set_mailbox',
+      user_id: m.user_id,
+      enabled: !m.enabled
+    });
+    setBusy(null);
+    if (!ok) {
+      setErr(data.error || 'That did not go through.');
+      return;
+    }
+    if (data.warning) setErr(data.warning);
+    load();
+  }
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 80,
+      background: 'rgba(0,0,0,0.5)'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      left: 0,
+      right: 0,
+      bottom: 0,
+      zIndex: 81,
+      maxHeight: '82%',
+      background: dark ? '#0A1730' : '#FFFFFF',
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '14px 16px',
+      borderBottom: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: 15,
+      fontWeight: 600,
+      color: ink
+    }
+  }, "Mailboxes we read"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      color: sub,
+      fontSize: 18,
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 16,
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: sub,
+      fontFamily: C.fontSans,
+      lineHeight: 1.6,
+      marginBottom: 12
+    }
+  }, "Switching someone on starts pulling their received mail into the Emails tab every 15 minutes. Only sender, subject, date and a short preview are stored \u2014 never the message itself. Nothing is collected until that person has also connected their own Google account, and they can disconnect it at any time."), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: '#9B1C1C',
+      marginBottom: 10,
+      fontFamily: C.fontSans
+    }
+  }, err), loading ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: sub,
+      fontFamily: C.fontSans
+    }
+  }, "Loading\u2026") : !rows.length ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: sub,
+      fontFamily: C.fontSans
+    }
+  }, "Nobody has the Sales Agent or Transaction Coordinator role yet.") : rows.map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.user_id,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      padding: '11px 2px',
+      borderBottom: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      color: ink,
+      fontFamily: C.fontSans
+    }
+  }, m.name || m.email), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: sub,
+      fontFamily: C.fontSans,
+      marginTop: 2
+    }
+  }, m.email, m.enabled && !m.connected && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#9B6B1C'
+    }
+  }, " \xB7 hasn't connected Google yet"), m.enabled && m.connected && m.last_polled_at && /*#__PURE__*/React.createElement("span", null, " \xB7 last checked ", new Date(m.last_polled_at).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  })), m.enabled && m.last_error && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#9B1C1C'
+    }
+  }, " \xB7 ", m.last_error))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => toggle(m),
+    disabled: busy === m.user_id,
+    style: {
+      flexShrink: 0,
+      padding: '6px 12px',
+      borderRadius: 16,
+      fontSize: 12,
+      fontFamily: C.fontSans,
+      cursor: busy === m.user_id ? 'default' : 'pointer',
+      border: `1px solid ${m.enabled ? teal : bord}`,
+      background: m.enabled ? dark ? 'rgba(15,110,86,.16)' : '#E6F2EC' : 'transparent',
+      color: m.enabled ? teal : sub
+    }
+  }, busy === m.user_id ? '…' : m.enabled ? 'On' : 'Off'))))));
+}
 function CtcEmailsTab({
   dark,
   user,
@@ -8372,12 +8565,27 @@ function CtcEmailsTab({
   const [busyId, setBusyId] = useState(null);
   const [err, setErr] = useState('');
   const [triaging, setTriaging] = useState(false);
+  const [mbOpen, setMbOpen] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const bord = dark ? '#152545' : '#E4DFD4',
     ink = dark ? '#fff' : '#001A4A',
     sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
   const gold = dark ? '#C9A45A' : '#AD832F',
     teal = '#0F6E56';
   const nameOfFile = id => (files.find(f => f.id === id) || {}).name || '';
+
+  // Only admins/operations can switch a mailbox on, and the function
+  // enforces that too (403) — this just hides a button that would fail.
+  useEffect(() => {
+    const c = window.SupabaseAuth?._client;
+    if (!c || !user) return;
+    c.from('profiles').select('access').eq('id', user.id).maybeSingle().then(({
+      data
+    }) => {
+      const a = Array.isArray(data?.access) ? data.access : [];
+      setIsAdmin(a.includes('admin') || a.includes('operations'));
+    });
+  }, [user && user.id]);
   async function load() {
     const c = window.SupabaseAuth?._client;
     if (!c) {
@@ -8467,11 +8675,36 @@ function CtcEmailsTab({
       flexWrap: 'wrap',
       marginBottom: 12
     }
-  }, chip('open', 'Needs filing', rows.filter(r => r.status === 'new' || r.status === 'suggested').length), chip('filed', 'Filed', rows.filter(r => r.status === 'approved').length), chip('all', 'All', rows.length), /*#__PURE__*/React.createElement("button", {
+  }, chip('open', 'Needs filing', rows.filter(r => r.status === 'new' || r.status === 'suggested').length), chip('filed', 'Filed', rows.filter(r => r.status === 'approved').length), chip('all', 'All', rows.length), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginLeft: 'auto',
+      display: 'flex',
+      gap: 8
+    }
+  }, isAdmin && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setMbOpen(true),
+    style: {
+      padding: '7px 12px',
+      borderRadius: 6,
+      border: `1px solid ${bord}`,
+      background: dark ? '#0A1730' : '#fff',
+      color: sub,
+      fontSize: 12,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-mailbox",
+    style: {
+      fontSize: 13
+    }
+  }), "Mailboxes"), /*#__PURE__*/React.createElement("button", {
     onClick: runTriage,
     disabled: triaging,
     style: {
-      marginLeft: 'auto',
       padding: '7px 12px',
       borderRadius: 6,
       border: `1px solid ${bord}`,
@@ -8490,7 +8723,13 @@ function CtcEmailsTab({
       fontSize: 13,
       animation: triaging ? 'spin 1s linear infinite' : 'none'
     }
-  }), triaging ? 'Reading…' : 'Suggest matches')), err && /*#__PURE__*/React.createElement("div", {
+  }), triaging ? 'Reading…' : 'Suggest matches'))), mbOpen && /*#__PURE__*/React.createElement(MailboxAdminPanel, {
+    dark: dark,
+    onClose: () => {
+      setMbOpen(false);
+      load();
+    }
+  }), err && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12.5,
       color: '#9B1C1C',

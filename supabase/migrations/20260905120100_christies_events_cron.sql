@@ -1,0 +1,41 @@
+-- Documents (does not itself re-provision) the pg_cron job that runs the
+-- christies-events crawl. Same shape as 20260826150000_zoho_projects_poll_cron:
+-- extensions are safe to re-apply, but the vault secret + cron.schedule() call
+-- are run once via a one-off `supabase db query --linked -f <scratch file>`
+-- (NOT committed — it holds the raw secret), so the secret value never lands in
+-- git history.
+--
+-- Hourly is deliberate. A Christie's invite that arrives at 9:05 is on the Team
+-- Calendar by 10:00, which is soon enough for an event days or weeks out, and
+-- the crawl re-scans a rolling 30-day mail window every run — so a missed tick
+-- costs nothing and there is no cursor to corrupt. Dedup (ICS UID, else title +
+-- date) makes the overlap free.
+--
+-- To provision from scratch (new environment, or secret rotation):
+--   1. Generate a random value; `supabase secrets set CHRISTIES_CRON_SECRET=<value>`
+--      and deploy the function:
+--        supabase functions deploy christies-events --no-verify-jwt
+--      (--no-verify-jwt is required: the cron caller has no user session. Every
+--       other action in the function verifies a real session itself.)
+--   2. Via `supabase db query --linked -f <scratch file>` (not a migration), run:
+--        delete from vault.secrets where name = 'christies_cron_secret';
+--        select vault.create_secret('<same value>', 'christies_cron_secret', 'christies-events cron');
+--        select cron.unschedule(jobid) from cron.job where jobname = 'christies-events';
+--        select cron.schedule('christies-events', '7 * * * *', $c$
+--          select net.http_post(
+--            url := 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/christies-events',
+--            headers := jsonb_build_object('Content-Type','application/json',
+--              'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'christies_cron_secret')),
+--            body := '{"action":"sync"}'::jsonb
+--          );
+--        $c$);
+--   (minute 7, not 0, so this does not start in the same second as every other
+--    hourly job on the instance.)
+--
+-- Other secrets this function needs, all already set for other functions:
+--   GOOGLE_CLIENT_SECRET, GCAL_SA_CLIENT_EMAIL, GCAL_SA_PRIVATE_KEY,
+--   GCAL_SA_SUBJECT (optional), ANTHROPIC_API_KEY.
+
+create extension if not exists pg_cron with schema extensions;
+create extension if not exists pg_net with schema extensions;
+create extension if not exists supabase_vault with schema vault;

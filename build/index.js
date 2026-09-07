@@ -13738,7 +13738,7 @@ function ChatTab({
 //  function the KPI flow already uses. Tier (A/B/C/EO) is parsed off the
 //  subject with the exact same rule /crm-tasks uses, so a contact's grade
 //  here always matches the grade on the CRM page.
-const CALL_HOLIDAYS = ['2026-09-07', '2026-10-12', '2026-11-11', '2026-11-26', '2026-12-25', '2027-01-01', '2027-01-18', '2027-02-15', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06', '2027-10-11', '2027-11-11', '2027-11-25', '2027-12-24'];
+const CALL_HOLIDAYS = ['2026-09-07', '2026-10-12', '2026-11-11', '2026-11-26', '2026-12-24', '2026-12-25', '2026-12-31', '2027-01-01', '2027-01-18', '2027-02-15', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06', '2027-10-11', '2027-11-11', '2027-11-25', '2027-12-24'];
 const cIso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 function cIsWorkday(d) {
   const dow = d.getDay();

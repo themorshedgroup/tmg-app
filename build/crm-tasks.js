@@ -2579,7 +2579,7 @@ function CapacityGrid({
 // fully deterministic, and writes once instead of asking per task.
 //
 // US federal holidays, observed. Labor Day is treated as a holiday per TMG.
-const FED_HOLIDAYS = ['2026-09-07', '2026-10-12', '2026-11-11', '2026-11-26', '2026-12-25', '2027-01-01', '2027-01-18', '2027-02-15', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06', '2027-10-11', '2027-11-11', '2027-11-25', '2027-12-24'];
+const FED_HOLIDAYS = ['2026-09-07', '2026-10-12', '2026-11-11', '2026-11-26', '2026-12-24', '2026-12-25', '2026-12-31', '2027-01-01', '2027-01-18', '2027-02-15', '2027-05-31', '2027-06-18', '2027-07-05', '2027-09-06', '2027-10-11', '2027-11-11', '2027-11-25', '2027-12-24'];
 const isoOf = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 const parseISO = s => {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || '');

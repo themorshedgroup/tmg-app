@@ -64,6 +64,14 @@ function parseTaskRoute(hash) {
     type: 'list',
     surface: ROUTE_LIST[s[0]]
   } : null;
+  // #ctc/emails — the consolidated Emails tab that sits beside the file
+  // list. Checked before the id test below, since 'emails' is a named
+  // sub-view of the list, not a record.
+  if (s[0] === 'ctc' && s[1] === 'emails') return {
+    type: 'list',
+    surface: 'ctc',
+    ctcTab: 'emails'
+  };
   if (!ROUTE_ID_RE.test(s[1])) return null;
   if (s[0] === 'task') return {
     type: 'task',
@@ -8567,6 +8575,8 @@ function CtcEmailsTab({
   const [triaging, setTriaging] = useState(false);
   const [mbOpen, setMbOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [pulling, setPulling] = useState(false);
+  const [pulledMsg, setPulledMsg] = useState('');
   const bord = dark ? '#152545' : '#E4DFD4',
     ink = dark ? '#fff' : '#001A4A',
     sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
@@ -8621,6 +8631,28 @@ function CtcEmailsTab({
     await load();
     if (onFiled) onFiled();
     return true;
+  }
+  // Pull new mail on demand. This talks to Gmail only — no AI, no tokens,
+  // no cost. (The AI spend is "Suggest matches" below, which is why the
+  // two are separate buttons.)
+  async function pullNow() {
+    setPulling(true);
+    setErr('');
+    setPulledMsg('');
+    const {
+      ok,
+      data
+    } = await callCtcEmails({
+      action: 'poll'
+    });
+    setPulling(false);
+    if (!ok) {
+      setErr(data.error || 'Could not check for new mail.');
+      return;
+    }
+    const t = data.totals || {};
+    setPulledMsg(t.inserted ? 'Found ' + t.inserted + ' new email' + (t.inserted === 1 ? '' : 's') + '.' : t.mailboxes ? 'No new mail.' : 'No mailboxes are switched on yet.');
+    load();
   }
   async function runTriage() {
     setTriaging(true);
@@ -8682,6 +8714,29 @@ function CtcEmailsTab({
       gap: 8
     }
   }, isAdmin && /*#__PURE__*/React.createElement("button", {
+    onClick: pullNow,
+    disabled: pulling,
+    title: "Check the switched-on mailboxes for new mail right now (no AI, no cost)",
+    style: {
+      padding: '7px 12px',
+      borderRadius: 6,
+      border: `1px solid ${bord}`,
+      background: dark ? '#0A1730' : '#fff',
+      color: sub,
+      fontSize: 12,
+      cursor: pulling ? 'default' : 'pointer',
+      fontFamily: C.fontSans,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: pulling ? 'ti ti-loader-2' : 'ti ti-refresh',
+    style: {
+      fontSize: 13,
+      animation: pulling ? 'spin 1s linear infinite' : 'none'
+    }
+  }), pulling ? 'Checking…' : 'Refresh'), isAdmin && /*#__PURE__*/React.createElement("button", {
     onClick: () => setMbOpen(true),
     style: {
       padding: '7px 12px',
@@ -8736,7 +8791,14 @@ function CtcEmailsTab({
       marginBottom: 10,
       fontFamily: C.fontSans
     }
-  }, err), loading ? /*#__PURE__*/React.createElement("div", {
+  }, err), pulledMsg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: sub,
+      marginBottom: 10,
+      fontFamily: C.fontSans
+    }
+  }, pulledMsg), loading ? /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: sub,
@@ -9155,7 +9217,9 @@ function ProjectsSurface({
   titleNode,
   hideSidebar,
   openId,
-  onOpenIdConsumed
+  onOpenIdConsumed,
+  openCtcTab,
+  onCtcTabConsumed
 }) {
   const isCtc = kind === 'ctc_file';
   const zohoSyncable = ZOHO_SYNCABLE_KINDS.includes(kind); // ctc_file + project (e.g. "Accountability") — not rock
@@ -9186,7 +9250,14 @@ function ProjectsSurface({
   const [openTask, setOpenTask] = useState(null);
   const [taskEditing, setTaskEditing] = useState(false);
   const [zohoLinkOpen, setZohoLinkOpen] = useState(false); // ctc_file only — see ZohoLinkModal
-  const [ctcTab, setCtcTab] = useState('files'); // ctc_file only: 'files' | 'emails'
+  // 'files' | 'emails'. Seeded from the route (#ctc/emails) so a pasted
+  // link to the Emails tab lands there, not on the file list.
+  const [ctcTab, setCtcTab] = useState(() => isCtc && openCtcTab === 'emails' ? 'emails' : 'files');
+  useEffect(() => {
+    if (!isCtc || !openCtcTab) return;
+    setCtcTab(openCtcTab);
+    if (onCtcTabConsumed) onCtcTabConsumed();
+  }, [isCtc, openCtcTab]);
   // Approved email-derived updates for the open record (see CtcEmailsTab).
   const [updates, setUpdates] = useState([]);
   useEffect(() => {
@@ -9208,6 +9279,35 @@ function ProjectsSurface({
       on = false;
     };
   }, [current && current.id]);
+  // The Zoho CRM deal behind this CTC file. A CTC file's name IS the
+  // property address, and so is the deal name, so the name is the match.
+  // Display-only: nothing here is ever written back, and a file with no
+  // matching deal simply doesn't render the block.
+  const [deal, setDeal] = useState(null);
+  const [dealBusy, setDealBusy] = useState(false);
+  useEffect(() => {
+    let on = true;
+    setDeal(null);
+    if (!current || !current.id || !isCtc || !current.name) return;
+    setDealBusy(true);
+    callZoho({
+      action: 'search_deals',
+      query: current.name
+    }).then(({
+      ok,
+      data
+    }) => {
+      if (on) {
+        setDeal(ok ? data.deal || null : null);
+        setDealBusy(false);
+      }
+    }).catch(() => {
+      if (on) setDealBusy(false);
+    });
+    return () => {
+      on = false;
+    };
+  }, [current && current.id, isCtc]);
   // Reset on record change — but honour a routed sub-tab (#ctc/<id>/board).
   // PENDING_ROUTE is consumed here rather than read in the router, because
   // this effect runs a render AFTER setCurrent and would otherwise clobber
@@ -9232,14 +9332,15 @@ function ProjectsSurface({
     const seg = ROUTE_SEG_BY_KIND[kind];
     if (!seg) return;
     // This surface owns its whole hash — list and record alike.
-    const hash = pview === 'detail' && current ? seg + '/' + current.id + (dtab && dtab !== 'overview' ? '/' + dtab : '') : ROUTE_LIST_SEG[ROUTE_SURFACE_BY_SEG[seg]];
+    const listSeg = ROUTE_LIST_SEG[ROUTE_SURFACE_BY_SEG[seg]];
+    const hash = pview === 'detail' && current ? seg + '/' + current.id + (dtab && dtab !== 'overview' ? '/' + dtab : '') : isCtc && ctcTab === 'emails' ? listSeg + '/emails' : listSeg;
     const t = setTimeout(() => {
       try {
         if (location.hash.replace(/^#\/?/, '') !== hash) history.replaceState(null, '', '#' + hash);
       } catch (e) {}
     }, 120);
     return () => clearTimeout(t);
-  }, [current && current.id, dtab, pview]);
+  }, [current && current.id, dtab, pview, ctcTab]);
   const wide = useWide(700);
   useEffect(() => {
     localStorage.setItem(gKey, group);
@@ -10895,7 +10996,53 @@ function ProjectsSurface({
     // file it was a 100-row wall). addInputs STAYS — it carries the "Add a
     // milestone" and "Add a task" inputs, which are the only way to add
     // either from this screen.
-    const tasksBlock = /*#__PURE__*/React.createElement(React.Fragment, null, updates.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    const dealRow = (k, v) => /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: 10,
+        padding: '9px 0',
+        borderBottom: `1px solid ${bord}`,
+        fontSize: 13.5,
+        fontFamily: C.fontSans
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: sub,
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        fontSize: 11,
+        flexShrink: 0
+      }
+    }, k), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: ink,
+        fontWeight: 500,
+        textAlign: 'right'
+      }
+    }, v));
+    const money = n => n == null ? '—' : '$' + Number(n).toLocaleString('en-US', {
+      maximumFractionDigits: 0
+    });
+    const dealBlock = isCtc && deal ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: sub,
+        fontWeight: 600,
+        margin: '22px 0 8px'
+      }
+    }, "Deal details"), dealRow('Deal', deal.name || '—'), dealRow('Stage', deal.stage || '—'), dealRow('Amount', money(deal.amount)), dealRow('Closing', deal.closing_date ? fmtD(deal.closing_date) : '—'), deal.contact && dealRow('Contact', deal.contact), deal.owner && dealRow('Owner', deal.owner), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: sub,
+        fontFamily: C.fontSans,
+        marginTop: 6
+      }
+    }, "From Zoho CRM \xB7 matched on the property address")) : null;
+    const tasksBlock = /*#__PURE__*/React.createElement(React.Fragment, null, dealBlock, updates.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         letterSpacing: '0.14em',
@@ -12519,7 +12666,8 @@ function TasksScreen({
   const [surface, setSurface] = useState(() => localStorage.getItem('tmg-tasks-surface') || 'my');
   const [surfaceMenuOpen, setSurfaceMenuOpen] = useState(false);
   const [navItems, setNavItems] = useState([]); // sidebar: every project/CTC file, for the per-item rows
-  const [openItemId, setOpenItemId] = useState(null); // sidebar-initiated: jump straight to this project/file ('new' = open the create form)
+  const [openItemId, setOpenItemId] = useState(null);
+  const [openCtcTab, setOpenCtcTab] = useState(null); // route → CTC sub-tab ('emails')   // sidebar-initiated: jump straight to this project/file ('new' = open the create form)
   // A surface set by a URL is a visit, not a preference — opening someone
   // else's #rock/<id> link must not permanently change your default view.
   const routeFromUrl = useRef(false);
@@ -12616,6 +12764,7 @@ function TasksScreen({
       if (!r) return;
       routeFromUrl.current = true; // don't persist a route-driven surface switch
       if (r.type === 'list') {
+        setOpenCtcTab(r.ctcTab || null);
         setSurface(r.surface);
         setView('list');
         setCurrent(null);
@@ -14628,7 +14777,9 @@ function TasksScreen({
     titleNode: plainSurfaceTitle,
     hideSidebar: true,
     openId: openItemId,
-    onOpenIdConsumed: () => setOpenItemId(null)
+    onOpenIdConsumed: () => setOpenItemId(null),
+    openCtcTab: openCtcTab,
+    onCtcTabConsumed: () => setOpenCtcTab(null)
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '26px 34px 0',
@@ -14844,7 +14995,9 @@ function TasksScreen({
     team: team,
     titleNode: surfaceTitle,
     openId: openItemId,
-    onOpenIdConsumed: () => setOpenItemId(null)
+    onOpenIdConsumed: () => setOpenItemId(null),
+    openCtcTab: openCtcTab,
+    onCtcTabConsumed: () => setOpenCtcTab(null)
   }) : view !== 'list' ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',

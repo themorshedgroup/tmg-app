@@ -641,6 +641,74 @@ Deno.serve(async (req) => {
       return json({ contacts }, 200);
     }
 
+    // ── Find the Deal behind a CTC file, for the Overview's Deal details
+    // block. A CTC file's name IS the property address, and so is the deal
+    // name, so a word search on the address is the match. Display-only and
+    // deliberately narrow: this block must never become a second source of
+    // truth for anything TMG already tracks itself. [CRM] ──
+    if (action === "search_deals") {
+      const query = (body.query || "").trim();
+      if (!query || query.length < 2)
+        return json({ error: "Query too short (min 2 chars)." }, 400);
+
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      const url = new URL(`https://${apiDomain}/crm/v6/Deals/search`);
+      url.searchParams.set("word", query);
+      url.searchParams.set("per_page", "10");
+
+      const crmRes = await zohoFetch(sb, conn, accessToken, url.toString(), {});
+
+      // 204 = no results. A CTC file with no matching deal is normal, not an
+      // error — the block just doesn't render.
+      if (crmRes.status === 204) return json({ deal: null, count: 0 }, 200);
+
+      const crmData = await crmRes.json();
+      if (!crmRes.ok) {
+        const msg = crmData?.message || "Zoho deal search error";
+        return json({ error: msg }, crmRes.status);
+      }
+
+      const lookupName = (v: any) => (v && typeof v === "object" ? (v.name || null) : (v || null));
+      const deals = (crmData.data || []).map((d: any) => ({
+        id: d.id,
+        name: d.Deal_Name || null,
+        stage: d.Stage || null,
+        amount: d.Amount ?? null,
+        closing_date: d.Closing_Date || null,
+        account: lookupName(d.Account_Name),
+        contact: lookupName(d.Contact_Name),
+        owner: lookupName(d.Owner),
+      }));
+
+      // Zoho's word search is broad ("888" matches plenty), so rank rather
+      // than trusting result order.
+      //
+      // Real deal names here are "<client names> <address>" —
+      // e.g. "Albert Vila Tarres & Sara Vanderlinden 1903 Frazier Ave #A" —
+      // NOT the bare address a CTC file is named after. So the test is
+      // CONTAINMENT, not prefix: does the file's address appear inside the
+      // deal name? A prefix match would miss essentially every real deal,
+      // because they all start with the clients' names.
+      const norm = (s: string) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const q = norm(query);
+      const score = (d: any) => {
+        const n = norm(d.name);
+        if (!n || !q) return 0;
+        if (n === q) return 1000;
+        if (n.includes(q)) return 500 + q.length;   // the address sits inside the deal name
+        if (q.includes(n)) return 400 + n.length;   // deal name is the shorter side
+        let i = 0; while (i < n.length && i < q.length && n[i] === q[i]) i++;
+        return i;
+      };
+      const ranked = deals.slice().sort((a: any, b: any) => score(b) - score(a));
+      const best = ranked[0] && score(ranked[0]) > 0 ? ranked[0] : null;
+
+      return json({ deal: best, count: deals.length }, 200);
+    }
+
     // ── List CRM modules (metadata only — no records touched) [CRM] ──
     if (action === "list_modules") {
       const conn = await loadConnection(sb);

@@ -27,6 +27,10 @@
       if (!h || h.indexOf('=') !== -1) return null;
       const s = h.split('/').filter(Boolean);
       if (s.length === 1) return ROUTE_LIST[s[0]] ? { type: 'list', surface: ROUTE_LIST[s[0]] } : null;
+      // #ctc/emails — the consolidated Emails tab that sits beside the file
+      // list. Checked before the id test below, since 'emails' is a named
+      // sub-view of the list, not a record.
+      if (s[0] === 'ctc' && s[1] === 'emails') return { type: 'list', surface: 'ctc', ctcTab: 'emails' };
       if (!ROUTE_ID_RE.test(s[1])) return null;
       if (s[0] === 'task') return { type: 'task', id: s[1] };
       const kind = ROUTE_KIND_BY_SEG[s[0]];
@@ -3185,6 +3189,8 @@ Rules:
       const [triaging, setTriaging] = useState(false);
       const [mbOpen, setMbOpen] = useState(false);
       const [isAdmin, setIsAdmin] = useState(false);
+      const [pulling, setPulling] = useState(false);
+      const [pulledMsg, setPulledMsg] = useState('');
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
       const gold = dark ? '#C9A45A' : '#AD832F', teal = '#0F6E56';
       const nameOfFile = (id) => (files.find(f => f.id === id) || {}).name || '';
@@ -3217,6 +3223,20 @@ Rules:
         await load(); if (onFiled) onFiled();
         return true;
       }
+      // Pull new mail on demand. This talks to Gmail only — no AI, no tokens,
+      // no cost. (The AI spend is "Suggest matches" below, which is why the
+      // two are separate buttons.)
+      async function pullNow() {
+        setPulling(true); setErr(''); setPulledMsg('');
+        const { ok, data } = await callCtcEmails({ action: 'poll' });
+        setPulling(false);
+        if (!ok) { setErr(data.error || 'Could not check for new mail.'); return; }
+        const t = data.totals || {};
+        setPulledMsg(t.inserted ? ('Found ' + t.inserted + ' new email' + (t.inserted === 1 ? '' : 's') + '.')
+          : t.mailboxes ? 'No new mail.'
+          : 'No mailboxes are switched on yet.');
+        load();
+      }
       async function runTriage() {
         setTriaging(true); setErr('');
         const { ok, data } = await callCtcEmails({ action: 'triage', limit: 20 });
@@ -3242,6 +3262,11 @@ Rules:
             {chip('all', 'All', rows.length)}
             <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
               {isAdmin && (
+                <button onClick={pullNow} disabled={pulling} title="Check the switched-on mailboxes for new mail right now (no AI, no cost)" style={{ padding: '7px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? '#0A1730' : '#fff', color: sub, fontSize: 12, cursor: pulling ? 'default' : 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <i className={pulling ? 'ti ti-loader-2' : 'ti ti-refresh'} style={{ fontSize: 13, animation: pulling ? 'spin 1s linear infinite' : 'none' }} />{pulling ? 'Checking…' : 'Refresh'}
+                </button>
+              )}
+              {isAdmin && (
                 <button onClick={() => setMbOpen(true)} style={{ padding: '7px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? '#0A1730' : '#fff', color: sub, fontSize: 12, cursor: 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <i className="ti ti-mailbox" style={{ fontSize: 13 }} />Mailboxes
                 </button>
@@ -3253,6 +3278,7 @@ Rules:
           </div>
           {mbOpen && <MailboxAdminPanel dark={dark} onClose={() => { setMbOpen(false); load(); }} />}
           {err && <div style={{ fontSize: 12.5, color: '#9B1C1C', marginBottom: 10, fontFamily: C.fontSans }}>{err}</div>}
+          {pulledMsg && <div style={{ fontSize: 12.5, color: sub, marginBottom: 10, fontFamily: C.fontSans }}>{pulledMsg}</div>}
           {loading ? <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans }}>Loading emails…</div>
             : !rows.length ? (
               <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans, lineHeight: 1.6, maxWidth: 620 }}>
@@ -3397,7 +3423,7 @@ Rules:
     // Self-contained: list + detail + create/edit form, mobile + desktop.
     // `titleNode(fontSize)` renders the shared My Tasks/CTC Files/Projects switcher.
     // ══════════════════════════════════════════════════════════════════════
-    function ProjectsSurface({ kind, dark, user, team, titleNode, hideSidebar, openId, onOpenIdConsumed }) {
+    function ProjectsSurface({ kind, dark, user, team, titleNode, hideSidebar, openId, onOpenIdConsumed, openCtcTab, onCtcTabConsumed }) {
       const isCtc = kind === 'ctc_file';
       const zohoSyncable = ZOHO_SYNCABLE_KINDS.includes(kind);   // ctc_file + project (e.g. "Accountability") — not rock
       const KL = kindLabel(kind);
@@ -3423,7 +3449,14 @@ Rules:
       const [openTask, setOpenTask] = useState(null);
       const [taskEditing, setTaskEditing] = useState(false);
       const [zohoLinkOpen, setZohoLinkOpen] = useState(false);   // ctc_file only — see ZohoLinkModal
-      const [ctcTab, setCtcTab] = useState('files');   // ctc_file only: 'files' | 'emails'
+      // 'files' | 'emails'. Seeded from the route (#ctc/emails) so a pasted
+      // link to the Emails tab lands there, not on the file list.
+      const [ctcTab, setCtcTab] = useState(() => (isCtc && openCtcTab === 'emails') ? 'emails' : 'files');
+      useEffect(() => {
+        if (!isCtc || !openCtcTab) return;
+        setCtcTab(openCtcTab);
+        if (onCtcTabConsumed) onCtcTabConsumed();
+      }, [isCtc, openCtcTab]);
       // Approved email-derived updates for the open record (see CtcEmailsTab).
       const [updates, setUpdates] = useState([]);
       useEffect(() => {
@@ -3435,6 +3468,22 @@ Rules:
           .then(({ data }) => { if (on) setUpdates(data || []); });
         return () => { on = false; };
       }, [current && current.id]);
+      // The Zoho CRM deal behind this CTC file. A CTC file's name IS the
+      // property address, and so is the deal name, so the name is the match.
+      // Display-only: nothing here is ever written back, and a file with no
+      // matching deal simply doesn't render the block.
+      const [deal, setDeal] = useState(null);
+      const [dealBusy, setDealBusy] = useState(false);
+      useEffect(() => {
+        let on = true;
+        setDeal(null);
+        if (!current || !current.id || !isCtc || !current.name) return;
+        setDealBusy(true);
+        callZoho({ action: 'search_deals', query: current.name })
+          .then(({ ok, data }) => { if (on) { setDeal(ok ? (data.deal || null) : null); setDealBusy(false); } })
+          .catch(() => { if (on) setDealBusy(false); });
+        return () => { on = false; };
+      }, [current && current.id, isCtc]);
       // Reset on record change — but honour a routed sub-tab (#ctc/<id>/board).
       // PENDING_ROUTE is consumed here rather than read in the router, because
       // this effect runs a render AFTER setCurrent and would otherwise clobber
@@ -3454,14 +3503,16 @@ Rules:
         const seg = ROUTE_SEG_BY_KIND[kind];
         if (!seg) return;
         // This surface owns its whole hash — list and record alike.
+        const listSeg = ROUTE_LIST_SEG[ROUTE_SURFACE_BY_SEG[seg]];
         const hash = (pview === 'detail' && current)
           ? seg + '/' + current.id + (dtab && dtab !== 'overview' ? '/' + dtab : '')
-          : ROUTE_LIST_SEG[ROUTE_SURFACE_BY_SEG[seg]];
+          : (isCtc && ctcTab === 'emails') ? listSeg + '/emails'
+          : listSeg;
         const t = setTimeout(() => {
           try { if (location.hash.replace(/^#\/?/, '') !== hash) history.replaceState(null, '', '#' + hash); } catch (e) {}
         }, 120);
         return () => clearTimeout(t);
-      }, [current && current.id, dtab, pview]);
+      }, [current && current.id, dtab, pview, ctcTab]);
       const wide = useWide(700);
 
       useEffect(() => { localStorage.setItem(gKey, group); }, [group]);
@@ -3931,8 +3982,29 @@ Rules:
         // file it was a 100-row wall). addInputs STAYS — it carries the "Add a
         // milestone" and "Add a task" inputs, which are the only way to add
         // either from this screen.
+        const dealRow = (k, v) => (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: `1px solid ${bord}`, fontSize: 13.5, fontFamily: C.fontSans }}>
+            <span style={{ color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontSize: 11, flexShrink: 0 }}>{k}</span>
+            <span style={{ color: ink, fontWeight: 500, textAlign: 'right' }}>{v}</span>
+          </div>
+        );
+        const money = (n) => n == null ? '—' : '$' + Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+        const dealBlock = isCtc && deal ? (
+          <React.Fragment>
+            <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600, margin: '22px 0 8px' }}>Deal details</div>
+            {dealRow('Deal', deal.name || '—')}
+            {dealRow('Stage', deal.stage || '—')}
+            {dealRow('Amount', money(deal.amount))}
+            {dealRow('Closing', deal.closing_date ? fmtD(deal.closing_date) : '—')}
+            {deal.contact && dealRow('Contact', deal.contact)}
+            {deal.owner && dealRow('Owner', deal.owner)}
+            <div style={{ fontSize: 11, color: sub, fontFamily: C.fontSans, marginTop: 6 }}>From Zoho CRM · matched on the property address</div>
+          </React.Fragment>
+        ) : null;
+
         const tasksBlock = (
           <React.Fragment>
+            {dealBlock}
             {/* Updates filed from the Emails tab — approved by a human, never
                 auto-applied. Sits below Milestones, where Open tasks used to. */}
             {updates.length > 0 && (
@@ -4458,7 +4530,8 @@ Rules:
       const [surface, setSurface] = useState(() => localStorage.getItem('tmg-tasks-surface') || 'my');
       const [surfaceMenuOpen, setSurfaceMenuOpen] = useState(false);
       const [navItems, setNavItems] = useState([]);   // sidebar: every project/CTC file, for the per-item rows
-      const [openItemId, setOpenItemId] = useState(null);   // sidebar-initiated: jump straight to this project/file ('new' = open the create form)
+      const [openItemId, setOpenItemId] = useState(null);
+      const [openCtcTab, setOpenCtcTab] = useState(null);   // route → CTC sub-tab ('emails')   // sidebar-initiated: jump straight to this project/file ('new' = open the create form)
       // A surface set by a URL is a visit, not a preference — opening someone
       // else's #rock/<id> link must not permanently change your default view.
       const routeFromUrl = useRef(false);
@@ -4514,7 +4587,7 @@ Rules:
           const r = parseTaskRoute(hash);
           if (!r) return;
           routeFromUrl.current = true;   // don't persist a route-driven surface switch
-          if (r.type === 'list') { setSurface(r.surface); setView('list'); setCurrent(null); return; }
+          if (r.type === 'list') { setOpenCtcTab(r.ctcTab || null); setSurface(r.surface); setView('list'); setCurrent(null); return; }
           if (r.type === 'record') {
             // ProjectsSurface picks the tab up via this module-level handoff —
             // its own reset effect would otherwise clobber a tab set here.
@@ -5153,7 +5226,7 @@ Rules:
                   {navSidebar}
                   <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                     {surface !== 'my' ? (
-                      <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} hideSidebar openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
+                      <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} hideSidebar openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} openCtcTab={openCtcTab} onCtcTabConsumed={() => setOpenCtcTab(null)} />
                     ) : (
                       <React.Fragment>
                         {/* List/Kanban/Timeline always stays mounted and visible — opening a
@@ -5221,7 +5294,7 @@ Rules:
               ) : (
                 /* ── Mobile: single column, no sidebar — title dropdown switches surfaces ── */
                 surface !== 'my' ? (
-                  <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={surfaceTitle} openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} />
+                  <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={surfaceTitle} openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} openCtcTab={openCtcTab} onCtcTabConsumed={() => setOpenCtcTab(null)} />
                 ) : view !== 'list' ? (
                   <React.Fragment>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderBottom: `1px solid ${bord}`, flexShrink: 0 }}>

@@ -864,11 +864,40 @@ Rules:
       if (!ok) throw new Error(data.error || 'Contact match failed');
       return data.matches || [];
     }
-    // Create a new Zoho Contact → { id, full_name }.
-    async function createZohoContact(firstName, lastName) {
-      const { ok, data } = await callZoho({ action: 'create_contact', first_name: firstName, last_name: lastName });
+    // Client_Classification is a real picklist on this org's Contacts module —
+    // verified live, and already carried by ~1,870 of 2,112 contacts (A 280,
+    // B 736, C 853). Mobile is a plain writable phone field. Both are REQUIRED
+    // to create a contact, because a contact without them is precisely what
+    // produces an untiered call task and an undialable row on the call list.
+    const CONTACT_CLASS_FIELD = 'Client_Classification';
+    const CONTACT_CLASS_OPTIONS = ['A', 'B', 'C'];
+
+    // Create a new Zoho Contact → { id, full_name, classification, mobile }.
+    //
+    // Every create in this app goes through here, so the requirement lives here
+    // rather than in either form — a future call site cannot skip it by
+    // forgetting to re-implement the check.
+    //
+    // Uses the generic create_record rather than the dedicated create_contact
+    // action: that action only ever sends first/last name, and widening it
+    // would need an edge-function redeploy. create_record takes any module and
+    // posts the record verbatim, which this app already relies on for Tasks.
+    async function createZohoContact({ first, last, mobile, classification }) {
+      const f = String(first || '').trim(), l = String(last || '').trim();
+      const digits = String(mobile || '').replace(/\D/g, '');
+      if (!l) throw new Error('A last name is required.');
+      // 10 digits, or 11 starting with a US country code. Anything shorter is
+      // worse than blank: the unreachable-contact sweep would count it as a
+      // real number and stop flagging the contact.
+      const ok10 = digits.length === 10 || (digits.length === 11 && digits[0] === '1');
+      if (!ok10) throw new Error('A 10-digit mobile number is required.');
+      if (!CONTACT_CLASS_OPTIONS.includes(classification)) throw new Error('Pick a client classification — A, B or C.');
+      const record = { Last_Name: l, Mobile: digits, [CONTACT_CLASS_FIELD]: classification };
+      if (f) record.First_Name = f;
+      const { ok, data } = await callZoho({ action: 'create_record', module: 'Contacts', record });
       if (!ok) throw new Error(data.error || 'Could not create contact');
-      return data;
+      if (!data.id) throw new Error('Zoho created the contact but returned no id.');
+      return { id: data.id, full_name: (f ? f + ' ' + l : l), classification, mobile: digits };
     }
     // Valid options for the "Other KPI" fields come from ZOHO, live — never a
     // hardcoded copy. A hardcoded list was here before and had silently gone
@@ -3077,15 +3106,29 @@ Rules:
 
       const pick = (i, m) => setOne(i, { chosenId: m.id, chosenLabel: m.full_name, mode: 'match', error: '' });
       const clearPick = (i) => setOne(i, { chosenId: null, chosenLabel: '', mode: null });
-      async function createFor(i) {
+      // Opens the create form rather than creating on the spot — a contact
+      // needs a mobile number and a client classification, and neither can be
+      // guessed from the name the agent typed.
+      function startCreate(i) {
         const nm = (persons[i].name || '').trim();
         const parts = nm.split(/\s+/).filter(Boolean);
-        const first = parts.length > 1 ? parts[0] : '';
-        const last = parts.length > 1 ? parts.slice(1).join(' ') : (parts[0] || nm);
+        setOne(i, {
+          error: '',
+          newC: {
+            first: parts.length > 1 ? parts[0] : '',
+            last: parts.length > 1 ? parts.slice(1).join(' ') : (parts[0] || nm),
+            mobile: '', classification: '',
+          },
+        });
+      }
+      function setNewC(i, patch) { setOne(i, { newC: { ...(res[i] && res[i].newC), ...patch } }); }
+      async function createFor(i) {
+        const st = res[i] || {};
+        if (!st.newC) return;
         setOne(i, { creating: true, error: '' });
         try {
-          const c = await createZohoContact(first, last);
-          setOne(i, { creating: false, chosenId: c.id, chosenLabel: c.full_name || nm, mode: 'created' });
+          const c = await createZohoContact(st.newC);
+          setOne(i, { creating: false, chosenId: c.id, chosenLabel: c.full_name, mode: 'created', newC: null });
         } catch (e) { setOne(i, { creating: false, error: (e.message || 'Could not create contact') }); }
       }
 
@@ -3136,9 +3179,41 @@ Rules:
                       </button>
                     ))}
                     <div style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, margin: '8px 0 0' }}>{st.matches && st.matches.length ? 'None of these?' : 'No matching contact found.'}</div>
-                    <button onClick={() => createFor(i)} disabled={st.creating} style={{ marginTop: 5, display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: `1px dashed ${dark ? C.goldSoft : C.gold}`, borderRadius: 8, padding: '7px 11px', color: dark ? C.goldSoft : C.gold, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>
-                      {st.creating ? <i className="ti ti-loader-2" style={spin} /> : <i className="ti ti-user-plus" />}Create contact “{p.name}”
-                    </button>
+                    {!st.newC && (
+                      <button onClick={() => startCreate(i)} style={{ marginTop: 5, display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: `1px dashed ${dark ? C.goldSoft : C.gold}`, borderRadius: 8, padding: '7px 11px', color: dark ? C.goldSoft : C.gold, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>
+                        <i className="ti ti-user-plus" />Create contact “{p.name}”
+                      </button>
+                    )}
+                    {st.newC && (
+                      <div style={{ display: 'grid', gap: 6, marginTop: 7 }}>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <input value={st.newC.first} onChange={e => setNewC(i, { first: e.target.value })} placeholder="First name"
+                            style={{ flex: 1, minWidth: 0, background: dark ? C.navy : '#fff', border: `1px solid ${dark ? C.navyHover : C.border}`, borderRadius: 8, padding: '7px 9px', fontSize: '0.78rem', color: dark ? '#fff' : C.textPrimary, fontFamily: C.fontSans, outline: 'none' }} />
+                          <input value={st.newC.last} onChange={e => setNewC(i, { last: e.target.value })} placeholder="Last name"
+                            style={{ flex: 1, minWidth: 0, background: dark ? C.navy : '#fff', border: `1px solid ${dark ? C.navyHover : C.border}`, borderRadius: 8, padding: '7px 9px', fontSize: '0.78rem', color: dark ? '#fff' : C.textPrimary, fontFamily: C.fontSans, outline: 'none' }} />
+                        </div>
+                        <input value={st.newC.mobile} onChange={e => setNewC(i, { mobile: e.target.value })} placeholder="Mobile number (required)" inputMode="tel"
+                          style={{ background: dark ? C.navy : '#fff', border: `1px solid ${dark ? C.navyHover : C.border}`, borderRadius: 8, padding: '7px 9px', fontSize: '0.78rem', color: dark ? '#fff' : C.textPrimary, fontFamily: C.fontSans, outline: 'none' }} />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontSize: '0.72rem', color: sub, fontFamily: C.fontSans, flexShrink: 0 }}>Classification</span>
+                          {CONTACT_CLASS_OPTIONS.map(o => (
+                            <button key={o} onClick={() => setNewC(i, { classification: o })}
+                              style={{ flex: 1, padding: '6px 0', borderRadius: 8, cursor: 'pointer', fontSize: '0.78rem', fontWeight: 700, fontFamily: C.fontSans,
+                                border: `1px solid ${st.newC.classification === o ? (dark ? C.goldSoft : C.gold) : (dark ? C.navyHover : C.border)}`,
+                                background: st.newC.classification === o ? (dark ? 'rgba(173,131,47,0.15)' : C.surfaceHover) : 'transparent',
+                                color: st.newC.classification === o ? (dark ? C.goldSoft : C.gold) : (dark ? '#fff' : C.textPrimary) }}>{o}</button>
+                          ))}
+                        </div>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button onClick={() => setOne(i, { newC: null, error: '' })} disabled={st.creating}
+                            style={{ flex: 1, padding: '7px 0', borderRadius: 8, border: `1px solid ${dark ? C.navyHover : C.border}`, background: 'none', color: sub, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+                          <button onClick={() => createFor(i)} disabled={st.creating}
+                            style={{ flex: 1, padding: '7px 0', borderRadius: 8, border: 'none', background: dark ? C.gold : C.navy, color: '#fff', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: st.creating ? 0.55 : 1 }}>
+                            {st.creating ? 'Saving…' : 'Create contact'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     {st.error && <div style={{ fontSize: '0.74rem', color: C.red, marginTop: 5, fontFamily: C.fontSans }}>{st.error}</div>}
                   </div>
                 )}
@@ -5370,6 +5445,23 @@ Rules:
         return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
       }, [team, myOwner, buckets, overdue]);
 
+      // Who a KPI logged from this tab gets credited to. An agent is always
+      // themselves; an admin is whoever they have selected in the picker, read
+      // off that agent's own tasks. Null means "nobody identifiable", and the
+      // Add KPI button is disabled rather than writing an unowned task that
+      // Zoho would quietly credit to the API connection.
+      const logOwnerId = useMemo(() => {
+        if (!team) return myOwnerId;
+        if (!agent) return null;
+        const counts = {};
+        [].concat(
+          (buckets && buckets.yesterday) || [], (buckets && buckets.today) || [],
+          (buckets && buckets.tomorrow) || [], (overdue && overdue.list) || []
+        ).forEach(t => { if (ownerOf(t) === agent && t.Owner && t.Owner.id) counts[t.Owner.id] = (counts[t.Owner.id] || 0) + 1; });
+        return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
+      }, [team, agent, myOwnerId, buckets, overdue]);
+      const logOwnerName = team ? agent : myOwner;
+
       // The agent picker is built from the people who actually own calls in
       // Zoho — not from the TMG staff list — so the names always match what
       // the owner filter is comparing against, and nobody with calls is
@@ -5806,8 +5898,9 @@ Rules:
               ? agentPicker
               : <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Call List</div>}
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
-              <button onClick={() => setAddKpi(true)} title="Log a KPI for any contact, on or off this list"
-                style={{ height: 24, borderRadius: 20, border: 'none', cursor: 'pointer', background: addBg, color: addCol, display: 'flex', alignItems: 'center', gap: 4, padding: '0 10px', fontFamily: J, fontSize: 9, fontWeight: 600 }}>
+              <button onClick={() => logOwnerId && setAddKpi(true)} disabled={!logOwnerId}
+                title={logOwnerId ? 'Log a KPI for any contact, on or off this list' : 'Pick a single agent first — a KPI has to be credited to somebody'}
+                style={{ height: 24, borderRadius: 20, border: 'none', cursor: logOwnerId ? 'pointer' : 'default', opacity: logOwnerId ? 1 : 0.45, background: addBg, color: addCol, display: 'flex', alignItems: 'center', gap: 4, padding: '0 10px', fontFamily: J, fontSize: 9, fontWeight: 600 }}>
                 <i className="ti ti-plus" style={{ fontSize: 12 }} /> Add KPI
               </button>
               <button onClick={() => !busy && load(true)} disabled={busy} title="Refresh from Zoho" style={{ width: 24, height: 24, borderRadius: '50%', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1, background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -5863,7 +5956,9 @@ Rules:
           {addKpi && (
             <AddKpiSheet
               dark={dark}
-              ownerId={myOwnerId}
+              ownerId={logOwnerId}
+              ownerName={logOwnerName}
+              dateIso={dates[day] || cIso(new Date())}
               onDone={(name, items) => {
                 setKpiToast('Logged for ' + name + ': ' + items.map(i => i.count + ' × ' + (i.subject || i.type)).join(', '));
                 load(true);   // the new rows are real tasks, so the list and counts have to catch up
@@ -5877,6 +5972,7 @@ Rules:
               task={sheet.task}
               contact={sheet.contact}
               ownerId={(sheet.task.Owner && sheet.task.Owner.id) || null}
+              dateIso={(sheet.task.Due_Date || '').slice(0, 10) || cIso(new Date())}
               onLogged={(items) => onLogged(sheet.task, items)}
               onError={(msg) => setRowErr(e => ({ ...e, [sheet.task.id]: msg }))}
               onClose={() => setSheet(null)}
@@ -5907,13 +6003,15 @@ Rules:
     //
     //  So this sheet does the two things that one can't: pick any contact, and
     //  show the cadence facts BEFORE the choice is made.
-    function AddKpiSheet({ dark, ownerId, onDone, onClose }) {
+    function AddKpiSheet({ dark, ownerId, ownerName, dateIso, onDone, onClose }) {
       const J = "'Jost', sans-serif";
       const [meta, setMeta] = useState(null);
       const [q, setQ] = useState('');
       const [hits, setHits] = useState(null);       // null = not searched yet
       const [searching, setSearching] = useState(false);
       const [contact, setContact] = useState(null); // { id, name }
+      const [creating, setCreating] = useState(null); // { first, last, mobile, classification } | null
+      const [saving, setSaving] = useState(false);
       const [hist, setHist] = useState('loading');  // 'loading' | { iso, tier } | null
       const [sel, setSel] = useState({});
       const [busy, setBusy] = useState(false);
@@ -5942,15 +6040,40 @@ Rules:
 
       function pick(c) {
         const picked = { id: c.id, name: c.full_name || c.name || 'Unknown' };
-        setContact(picked); setHits(null); setSel({}); setHist('loading');
+        setContact(picked); setHits(null); setSel({}); setCreating(null); setHist('loading');
         lastCallFor(picked.id).then(h => setHist(h));
+      }
+
+      function startCreate() {
+        const parts = q.trim().split(/\s+/).filter(Boolean);
+        setCreating({ first: parts.length > 1 ? parts[0] : '', last: parts.length > 1 ? parts.slice(1).join(' ') : (parts[0] || ''), mobile: '', classification: '' });
+        setErr('');
+      }
+      async function saveNewContact() {
+        if (saving) return;
+        setSaving(true); setErr('');
+        try {
+          const c = await createZohoContact(creating);
+          setContact({ id: c.id, name: c.full_name });
+          setHits(null); setSel({}); setCreating(null);
+          // A contact made seconds ago has no past tasks, so lastCallFor would
+          // return null and the touch-call subject would go out with no letter.
+          // Seeding the tier from what was just entered is what makes the very
+          // first task read "B Touch Call: Jane Doe".
+          setHist({ iso: null, tier: c.classification });
+        } catch (e) { setErr((e && e.message) || String(e)); }
+        finally { setSaving(false); }
       }
 
       // The cadence read, in plain terms, plus which option it points at. This
       // is the whole reason the sheet exists — an agent who can see "12 days
       // ago, cadence is 60" does not need anyone to validate the answer.
       const tier = (hist && hist !== 'loading' && hist.tier) || null;
-      const interval = tier ? (CALL_INTERVALS.other[tier] || null) : null;
+      // Tarek's cadence is longer than everyone else's, and this number drives
+      // a warning whose entire job is being right — so it reads the same
+      // owner-bucketed table the CRM packer uses, not the default column.
+      const cadenceBucket = /tarek/i.test(ownerName || '') ? 'tarek' : 'other';
+      const interval = tier ? ((CALL_INTERVALS[cadenceBucket] || CALL_INTERVALS.other)[tier] || null) : null;
       const gapDays = (hist && hist !== 'loading' && hist.iso)
         ? Math.round((new Date(cIso(new Date())) - new Date(hist.iso)) / 86400000) : null;
       const dueForTouch = (interval == null || gapDays == null) ? null : gapDays >= interval * 0.8;
@@ -5995,7 +6118,7 @@ Rules:
         if (!canAdd) return;
         setBusy(true); setErr('');
         try {
-          await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: cIso(new Date()), ownerId });
+          await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: dateIso || cIso(new Date()), ownerId });
           onDone(contact.name, items);
           onClose();
         } catch (e) {
@@ -6035,7 +6158,41 @@ Rules:
                     {searching ? '…' : 'Find'}
                   </button>
                 </div>
-                {hits && hits.length === 0 && <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, padding: '8px 2px' }}>No contact matched “{q.trim()}”.</div>}
+                {hits && hits.length === 0 && !creating && (
+                  <div style={{ padding: '8px 2px' }}>
+                    <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 6 }}>No contact matched “{q.trim()}”.</div>
+                    <button onClick={startCreate} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: 'none', border: `1px dashed ${addCol}`, borderRadius: 9, padding: '7px 11px', color: addCol, fontFamily: J, fontSize: 9, fontWeight: 600, cursor: 'pointer' }}>
+                      <i className="ti ti-user-plus" style={{ fontSize: 12 }} /> Create “{q.trim()}”
+                    </button>
+                  </div>
+                )}
+                {creating && (
+                  <div style={{ display: 'grid', gap: 6, marginTop: 4 }}>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <input value={creating.first} onChange={e => setCreating(c => ({ ...c, first: e.target.value }))} placeholder="First name"
+                        style={{ flex: 1, minWidth: 0, background: fieldBg, border: `1px solid ${bord}`, borderRadius: 9, padding: '8px 10px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
+                      <input value={creating.last} onChange={e => setCreating(c => ({ ...c, last: e.target.value }))} placeholder="Last name"
+                        style={{ flex: 1, minWidth: 0, background: fieldBg, border: `1px solid ${bord}`, borderRadius: 9, padding: '8px 10px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
+                    </div>
+                    <input value={creating.mobile} onChange={e => setCreating(c => ({ ...c, mobile: e.target.value }))} placeholder="Mobile number (required)" inputMode="tel"
+                      style={{ background: fieldBg, border: `1px solid ${bord}`, borderRadius: 9, padding: '8px 10px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontFamily: J, fontSize: 9, color: mutedCol, flexShrink: 0 }}>Classification</span>
+                      {CONTACT_CLASS_OPTIONS.map(o => (
+                        <button key={o} onClick={() => setCreating(c => ({ ...c, classification: o }))}
+                          style={{ flex: 1, padding: '7px 0', borderRadius: 9, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: 700,
+                            border: `1px solid ${creating.classification === o ? addCol : bord}`,
+                            background: creating.classification === o ? addBg : 'transparent',
+                            color: creating.classification === o ? addCol : headTitle }}>{o}</button>
+                      ))}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
+                      <button onClick={() => setCreating(null)} disabled={saving} style={{ ...btn, background: fieldBg, color: mutedCol, border: `1px solid ${bord}` }}>Cancel</button>
+                      <button onClick={saveNewContact} disabled={saving} style={{ ...btn, background: goBg, color: '#fff', opacity: saving ? 0.5 : 1 }}>{saving ? 'Saving…' : 'Create contact'}</button>
+                    </div>
+                    {err && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>{err}</div>}
+                  </div>
+                )}
                 {hits && hits.map(c => (
                   <button key={c.id} onClick={() => pick(c)}
                     style={{ display: 'block', width: '100%', textAlign: 'left', background: 'none', border: 'none', borderBottom: `1px solid ${bord}`, padding: '9px 2px', cursor: 'pointer' }}>
@@ -6110,7 +6267,7 @@ Rules:
       );
     }
 
-    function LogActivitySheet({ dark, task, contact, ownerId, onLogged, onError, onClose }) {
+    function LogActivitySheet({ dark, task, contact, ownerId, dateIso, onLogged, onError, onClose }) {
       const J = "'Jost', sans-serif";
       const [meta, setMeta] = useState(null);       // { api, options } | null while loading
       const [loadErr, setLoadErr] = useState('');
@@ -6175,7 +6332,7 @@ Rules:
         if (busy || !canAdd) return;   // double-submit guard, and no writing a half-filled row
         setBusy(true); setErr('');
         try {
-          const res = await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: cIso(new Date()), ownerId });
+          const res = await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: dateIso || cIso(new Date()), ownerId });
           onLogged((res.byType && res.byType.length) ? res.byType : items);
           onClose();
         } catch (e) {

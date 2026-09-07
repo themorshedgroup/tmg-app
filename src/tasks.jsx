@@ -933,12 +933,10 @@ Rules:
       if (!ok) throw new Error(data.error || 'Contact match failed');
       return data.matches || [];
     }
-    // Create a new Zoho Contact → { id, full_name }.
-    async function createZohoContact(firstName, lastName) {
-      const { ok, data } = await callZoho({ action: 'create_contact', first_name: firstName, last_name: lastName });
-      if (!ok) throw new Error(data.error || 'Could not create contact');
-      return data;
-    }
+    // Contact creation deliberately does NOT live here. A contact now requires a
+    // mobile number and a client classification (see createZohoContact in
+    // src/index.jsx), and this file used to carry a name-only copy with zero
+    // call sites — one line away from re-opening exactly that gap.
     // Valid picklist options for the "Other KPI" fields — Zoho rejects any other value.
     const ALLOWED_OTHER_KPIS = [
       'Agent Recruiting for Tarek', 'Agent Training for Tarek', 'EO Work for Brad',

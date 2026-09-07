@@ -678,6 +678,7 @@ Deno.serve(async (req) => {
         stage: d.Stage || null,
         amount: d.Amount ?? null,
         closing_date: d.Closing_Date || null,
+        type: d.Type || null,
         account: lookupName(d.Account_Name),
         contact: lookupName(d.Contact_Name),
         owner: lookupName(d.Owner),

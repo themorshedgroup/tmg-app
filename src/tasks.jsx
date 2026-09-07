@@ -1246,7 +1246,7 @@ Rules:
     // same "computed, not a new table" principle as everything else here.
     const KIND_LABEL = {
       project:  { plural: 'Projects',  singular: 'Project',  article: 'project', groupLabel: 'Group',   groupPlaceholder: 'e.g. Q3 Rocks',                namePlaceholder: 'e.g. AI Feature Rollout' },
-      ctc_file: { plural: 'CTC Files', singular: 'CTC File', article: 'file',    groupLabel: 'Side',    groupPlaceholder: 'e.g. Buyer, Seller, Landlord', namePlaceholder: 'e.g. 5999 Ranch Rd 165' },
+      ctc_file: { plural: 'CTC Files', singular: 'CTC File', article: 'file',    groupLabel: 'Deal Type', groupPlaceholder: 'e.g. Residential Seller', namePlaceholder: 'e.g. 5999 Ranch Rd 165' },
       rock:     { plural: 'Rocks',     singular: 'Rock',     article: 'rock',    groupLabel: 'Quarter', groupPlaceholder: 'e.g. Q3 2026',                 namePlaceholder: 'e.g. Close $12M in new brokerage volume' },
     };
     const kindLabel = (kind) => KIND_LABEL[kind] || KIND_LABEL.project;
@@ -1256,6 +1256,10 @@ Rules:
     // goal isn't shaped like a Zoho project the way a CTC file or a standing
     // "Accountability"/role project is.
     const ZOHO_SYNCABLE_KINDS = ['ctc_file', 'project'];
+    // Deal Type on a CTC file = Zoho CRM's Deals "Type" picklist, plus the two
+    // rep types and the combined value that exist on live deals but not in
+    // the picklist definition (confirmed against the CRM on 2026-09-08).
+    const DEAL_TYPES = ['Residential Buyer', 'Residential Seller', 'Commercial Buyer', 'Commercial Seller', 'Commercial Tenant Rep', 'Commercial Landlord Rep', 'Both Residential Buyer & Seller'];
 
     const TaskDB = {
       client() { return window.SupabaseAuth?._client || null; },
@@ -1716,7 +1720,7 @@ Rules:
 
       async create(fields, user) {
         const c = this.client(); if (!c) return null;
-        const base = { name: fields.name, record_type: fields.record_type || 'project', status: fields.status || 'on_track', outcome: fields.outcome || null, group_tag: fields.group_tag || null, owner_id: fields.owner_id || null, started_at: fields.started_at || null, target_date: fields.target_date || null, created_by: user?.id || null };
+        const base = { name: fields.name, record_type: fields.record_type || 'project', status: fields.status || 'on_track', outcome: fields.outcome || null, group_tag: fields.group_tag || null, owner_id: fields.owner_id || null, started_at: fields.started_at || null, target_date: fields.target_date || null, agent_id: fields.agent_id || null, zoho_deal_id: fields.zoho_deal_id || null, zoho_deal_name: fields.zoho_deal_name || null, created_by: user?.id || null };
         let res = await c.from('projects').insert(base).select().single();
         if (res.error && /column|schema cache|PGRST204|42703/i.test((res.error.message || '') + (res.error.code || ''))) {
           res = await c.from('projects').insert({ name: base.name, created_by: base.created_by }).select().single();
@@ -1729,7 +1733,7 @@ Rules:
         const c = this.client(); if (!c) return;
         let { error } = await c.from('projects').update(patch).eq('id', id);
         if (error && /column|schema cache|PGRST204|42703/i.test((error.message || '') + (error.code || ''))) {
-          const p2 = { ...patch }; ['record_type', 'status', 'outcome', 'group_tag', 'owner_id', 'started_at', 'target_date'].forEach(k => delete p2[k]);
+          const p2 = { ...patch }; ['record_type', 'status', 'outcome', 'group_tag', 'owner_id', 'started_at', 'target_date', 'agent_id', 'zoho_deal_id', 'zoho_deal_name'].forEach(k => delete p2[k]);
           if (Object.keys(p2).length) ({ error } = await c.from('projects').update(p2).eq('id', id));
         }
         if (error) console.error('[ProjectDB] update:', error.message);
@@ -3522,9 +3526,11 @@ Rules:
       useEffect(() => {
         let on = true;
         setDeal(null);
-        if (!current || !current.id || !isCtc || !current.name) return;
+        if (!current || !current.id || !isCtc || !(current.zoho_deal_name || current.name)) return;
         setDealBusy(true);
-        callZoho({ action: 'search_deals', query: current.name })
+        // A file explicitly linked to a deal looks that deal up by its own name;
+        // otherwise fall back to matching on the file's address.
+        callZoho({ action: 'search_deals', query: current.zoho_deal_name || current.name })
           .then(({ ok, data }) => { if (on) { setDeal(ok ? (data.deal || null) : null); setDealBusy(false); } })
           .catch(() => { if (on) setDealBusy(false); });
         return () => { on = false; };
@@ -3916,6 +3922,7 @@ Rules:
         return (
           <React.Fragment>
             {fld('Owner', p.owner_id ? <React.Fragment>{avatar(p.owner_id, 16)}{nameOf(p.owner_id)}</React.Fragment> : '—')}
+            {isCtc && fld('Agent', p.agent_id ? <React.Fragment>{avatar(p.agent_id, 16)}{nameOf(p.agent_id)}</React.Fragment> : '—')}
             {fld('Type', KL.singular)}
             {fld(KL.groupLabel, p.group_tag || '—')}
             {fld('Status', <React.Fragment><span style={{ width: 7, height: 7, borderRadius: '50%', background: projStatusMeta(p.status).color }} />{projStatusMeta(p.status).label}</React.Fragment>)}
@@ -4237,6 +4244,32 @@ Rules:
       const [targetDate, setTargetDate] = useState(p.target_date || '');
       const [saving, setSaving] = useState(false);
       const KL = kindLabel(kind);
+      const isCtc = kind === 'ctc_file';
+      // CTC-only: the agent behind the file (Sales Agent role, not the Owner
+      // field — Owner is whoever runs the file, usually the TC) and the Zoho
+      // CRM deal it belongs to. Deal Type reuses group_tag (see KIND_LABEL).
+      const [agentId, setAgentId] = useState(p.agent_id || '');
+      const [agents, setAgents] = useState([]);
+      const [zohoDealId, setZohoDealId] = useState(p.zoho_deal_id || '');
+      const [zohoDealName, setZohoDealName] = useState(p.zoho_deal_name || '');
+      const [dealQuery, setDealQuery] = useState('');
+      const [dealResults, setDealResults] = useState(null);   // null = not searched
+      const [dealBusy, setDealBusy] = useState(false);
+      useEffect(() => {
+        if (!isCtc) return;
+        const c = window.SupabaseAuth?._client; if (!c) return;
+        c.from('profiles').select('id,first_name,last_name,email,access').eq('status', 'active').overlaps('access', ['agent'])
+          .then(({ data }) => setAgents((data || []).map(x => ({ id: x.id, name: [x.first_name, x.last_name].filter(Boolean).join(' ') || x.email }))));
+      }, [isCtc]);
+      async function searchDeal(q) {
+        const query = (q || dealQuery || name).trim(); if (query.length < 2) return;
+        setDealBusy(true);
+        const { ok, data } = await callZoho({ action: 'search_deals', query });
+        setDealBusy(false);
+        // search_deals returns the best one; surface it (and how many matched) so
+        // the user confirms rather than trusting a silent auto-link.
+        setDealResults(ok ? (data.deal ? [data.deal] : []) : []);
+      }
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
       const lbl = { fontSize: 11, color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500, margin: '0 0 5px', fontFamily: C.fontSans };
       const inp = { width: '100%', padding: '9px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 14, outline: 'none', fontFamily: C.fontSans, boxSizing: 'border-box' };
@@ -4246,7 +4279,8 @@ Rules:
         if (!name.trim() || saving) return;
         setSaving(true);
         try {
-          const fields = { name: name.trim(), record_type: kind, status, outcome: outcome.trim() || null, group_tag: groupTag.trim() || null, owner_id: ownerId || null, started_at: startedAt || null, target_date: targetDate || null };
+          const fields = { name: name.trim(), record_type: kind, status, outcome: outcome.trim() || null, group_tag: groupTag.trim() || null, owner_id: ownerId || null, started_at: startedAt || null, target_date: targetDate || null, agent_id: isCtc ? (agentId || null) : undefined, zoho_deal_id: isCtc ? (zohoDealId || null) : undefined, zoho_deal_name: isCtc ? (zohoDealName || null) : undefined };
+          Object.keys(fields).forEach(k => { if (fields[k] === undefined) delete fields[k]; });
           let id = p.id;
           if (id) await ProjectDB.update(id, fields);
           else { const created = await ProjectDB.create(fields, user); id = created && created.id; }
@@ -4265,8 +4299,44 @@ Rules:
             {field('Outcome', <textarea value={outcome} onChange={e => setOutcome(e.target.value)} rows={2} placeholder="One sentence — what this is trying to achieve" style={{ ...inp, resize: 'vertical', lineHeight: 1.5 }} />)}
             <div style={{ display: 'flex', gap: 10 }}>
               <div style={{ flex: 1 }}>{field('Status', <select value={status} onChange={e => setStatus(e.target.value)} style={inp}>{PROJECT_STATUS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select>)}</div>
-              <div style={{ flex: 1 }}>{field(KL.groupLabel, <input value={groupTag} onChange={e => setGroupTag(e.target.value)} placeholder={KL.groupPlaceholder} style={inp} />)}</div>
+              <div style={{ flex: 1 }}>{field(KL.groupLabel, isCtc
+                ? <select value={groupTag} onChange={e => setGroupTag(e.target.value)} style={inp}>
+                    <option value="">(Not set)</option>
+                    {DEAL_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    {groupTag && !DEAL_TYPES.includes(groupTag) && <option value={groupTag}>{groupTag}</option>}
+                  </select>
+                : <input value={groupTag} onChange={e => setGroupTag(e.target.value)} placeholder={KL.groupPlaceholder} style={inp} />)}</div>
             </div>
+            {isCtc && field('Agent', <select value={agentId} onChange={e => setAgentId(e.target.value)} style={inp}>
+              <option value="">(No agent)</option>
+              {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              {agentId && !agents.some(a => a.id === agentId) && <option value={agentId}>{(team.find(m => m.id === agentId) || {}).name || 'Current agent'}</option>}
+            </select>)}
+            {isCtc && field('Zoho deal', (
+              <div>
+                {zohoDealId ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 11px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 6 }}>
+                    <i className="ti ti-link" style={{ fontSize: 13, color: dark ? '#C9A45A' : '#AD832F', flexShrink: 0 }} />
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{zohoDealName || zohoDealId}</span>
+                    <button type="button" onClick={() => { setZohoDealId(''); setZohoDealName(''); setDealResults(null); }} style={{ background: 'none', border: 'none', color: sub, cursor: 'pointer', fontSize: 12, fontFamily: C.fontSans }}>Unlink</button>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input value={dealQuery} onChange={e => setDealQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); searchDeal(); } }} placeholder={name ? ('Search Zoho deals — e.g. ' + name) : 'Search Zoho deals by address or client'} style={inp} />
+                      <button type="button" onClick={() => searchDeal()} disabled={dealBusy} style={{ padding: '0 14px', background: dark ? '#06101F' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: '0.8rem', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}>{dealBusy ? '…' : 'Find'}</button>
+                    </div>
+                    {dealResults && dealResults.length === 0 && <div style={{ fontSize: 12, color: sub, fontFamily: C.fontSans, marginTop: 6 }}>No deal matched. Buyer deals are often named after the client, not the address — try the client's surname.</div>}
+                    {dealResults && dealResults.map(dl => (
+                      <div key={dl.id} onClick={() => { setZohoDealId(dl.id); setZohoDealName(dl.name || ''); setDealResults(null); }} style={{ marginTop: 6, padding: '9px 11px', border: `1px solid ${bord}`, borderRadius: 6, cursor: 'pointer', fontFamily: C.fontSans }}>
+                        <div style={{ fontSize: 13.5, color: ink }}>{dl.name}</div>
+                        <div style={{ fontSize: 11.5, color: sub, marginTop: 2 }}>{[dl.stage, dl.Type || dl.type, dl.owner].filter(Boolean).join(' · ')}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
             {field('Owner', <select value={ownerId} onChange={e => setOwnerId(e.target.value)} style={inp}><option value="">(No owner)</option>{team.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>)}
             <div style={{ display: 'flex', gap: 10 }}>
               <div style={{ flex: 1 }}>{field('Started', <input type="date" value={startedAt || ''} onChange={e => setStartedAt(e.target.value)} style={inp} />)}</div>

@@ -18993,6 +18993,10 @@ const dotsItem = {
 };
 
 // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
+// When AI Chat became a single ongoing conversation. Chats last touched
+// before this are from the old multi-conversation era and are never
+// auto-resumed. See AI-CHAT-PURPOSE-SPEC.md.
+const CHAT_PIVOT_AT = '2026-09-08T00:00:00Z';
 function BottomZone({
   active,
   activeMoreView,
@@ -23450,11 +23454,23 @@ function App({
     refreshConversations();
   }, []);
   // One ongoing chat per person, synced across their devices — no history
-  // list to pick from, so on load we simply re-open the most recent one.
-  // (Conversations are still stored; only the UI for browsing them is gone.)
+  // list to pick from, so on load we re-open the current one.
+  //
+  // Two guards, both learned the hard way:
+  //  - Only chats from AFTER the single-chat pivot are resumed. Everything
+  //    older belongs to the multi-conversation era; resuming those walked
+  //    people backwards through their whole history, because clearing one
+  //    surfaced the next. Those rows stay in the database, they just never
+  //    re-open.
+  //  - Resume at most once per page load. Clearing archives the current
+  //    chat, which refreshes this list, which would otherwise immediately
+  //    resume something else — the "delete it and a new one appears" bug.
+  const resumedOnce = useRef(false);
   useEffect(() => {
-    if (currentConvId || !conversations.length) return;
-    const live = conversations.filter(c => !c.archived).sort((x, y) => String(y.updatedAt || '').localeCompare(String(x.updatedAt || '')));
+    if (resumedOnce.current || currentConvId || !conversations.length) return;
+    resumedOnce.current = true;
+    const since = Date.parse(CHAT_PIVOT_AT);
+    const live = conversations.filter(c => !c.archived && Date.parse(c.updatedAt || 0) >= since).sort((x, y) => Date.parse(y.updatedAt || 0) - Date.parse(x.updatedAt || 0));
     if (live.length) selectConversation(live[0].id);
   }, [conversations]);
   // Clear = archive the current chat and start empty. Archived rather than

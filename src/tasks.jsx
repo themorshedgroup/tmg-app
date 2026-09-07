@@ -3286,7 +3286,12 @@ Rules:
         load();
       }
 
-      const shown = rows.filter(r => filter === 'all' ? true
+      // Newsletters and marketing blasts are identified from their own headers
+      // at ingest (no AI, no cost) and kept out of every view except their own,
+      // so the list is the mail that might actually belong to a file.
+      const shown = rows.filter(r => filter === 'bulk' ? r.is_bulk
+        : r.is_bulk ? false
+        : filter === 'all' ? true
         : filter === 'filed' ? (r.status === 'approved')
         : (r.status === 'new' || r.status === 'suggested'));
 
@@ -3298,9 +3303,10 @@ Rules:
       return (
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 20px 30px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-            {chip('open', 'Needs filing', rows.filter(r => r.status === 'new' || r.status === 'suggested').length)}
-            {chip('filed', 'Filed', rows.filter(r => r.status === 'approved').length)}
-            {chip('all', 'All', rows.length)}
+            {chip('open', 'Needs filing', rows.filter(r => !r.is_bulk && (r.status === 'new' || r.status === 'suggested')).length)}
+            {chip('filed', 'Filed', rows.filter(r => !r.is_bulk && r.status === 'approved').length)}
+            {chip('all', 'All', rows.filter(r => !r.is_bulk).length)}
+            {rows.some(r => r.is_bulk) && chip('bulk', 'Newsletters', rows.filter(r => r.is_bulk).length)}
             <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
               {isAdmin && (
                 <button onClick={pullNow} disabled={pulling} title="Check the switched-on mailboxes for new mail right now (no AI, no cost)" style={{ padding: '7px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? '#0A1730' : '#fff', color: sub, fontSize: 12, cursor: pulling ? 'default' : 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 6 }}>

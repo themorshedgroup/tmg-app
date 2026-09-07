@@ -87,7 +87,12 @@ const CURSOR_OVERLAP_S = 60;       // re-scan the last minute each sweep; dedup 
 // Received mail only. `-from:me` drops the owner's own sends, and chats/drafts/
 // spam/trash are never CTC correspondence. Archived mail is still included
 // (no `in:inbox`) so a fast-archiving agent's mail is not lost.
-const BASE_QUERY = "-in:chats -in:drafts -in:spam -in:trash -from:me";
+// Layer 1 of the bulk filter: Google already sorts promotions/social/forums,
+// so excluding them here means that mail is never fetched, never stored, and
+// never costs anything. `category:updates` is deliberately KEPT — that is
+// where DocuSign, lenders and title companies land, which is exactly the mail
+// a CTC file needs.
+const BASE_QUERY = "-in:chats -in:drafts -in:spam -in:trash -from:me -category:promotions -category:social -category:forums";
 
 // ── Triage tuning ────────────────────────────────────────────────────────
 const TRIAGE_DEFAULT_LIMIT = 15;
@@ -233,6 +238,23 @@ function normMessageId(raw: string): string | null {
   return s ? s.slice(0, 500) : null;
 }
 
+// Layer 2 of the bulk filter. Newsletters and marketing blasts are REQUIRED to
+// identify themselves — RFC 2369 List-Unsubscribe / List-Id, RFC 3834
+// Auto-Submitted, and the long-standing Precedence: bulk|list convention. So
+// this is a definition, not a guess, and it costs nothing: the headers ride
+// along on the metadata fetch we already make, and no model is involved.
+// Kept OUT of triage rather than deleted, so a false positive is recoverable.
+function bulkReason(headers: any[]): string | null {
+  const h = (n: string) => gmailHeader(headers, n).trim();
+  if (h("List-Unsubscribe")) return "list-unsubscribe";
+  if (h("List-Id")) return "mailing-list";
+  const prec = h("Precedence").toLowerCase();
+  if (prec === "bulk" || prec === "list" || prec === "junk") return "precedence:" + prec;
+  const auto = h("Auto-Submitted").toLowerCase();
+  if (auto && auto !== "no") return "auto-submitted";
+  return null;
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // ACTION: poll
 // ═════════════════════════════════════════════════════════════════════════
@@ -349,7 +371,7 @@ async function pollMailbox(sb: any, mb: any, opts: { lookbackDays: number }) {
       const metas = await mapLimit(ids, METADATA_CONCURRENCY, async (id) => {
         const u = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages/" + encodeURIComponent(id));
         u.searchParams.set("format", "metadata");
-        ["From", "To", "Subject", "Date", "Message-ID"].forEach((h) => u.searchParams.append("metadataHeaders", h));
+        ["From", "To", "Subject", "Date", "Message-ID", "List-Unsubscribe", "List-Id", "Precedence", "Auto-Submitted"].forEach((h) => u.searchParams.append("metadataHeaders", h));
         const r = await fetch(u.toString(), { headers: { Authorization: "Bearer " + accessToken } });
         if (!r.ok) return null;
         return await r.json().catch(() => null);
@@ -397,6 +419,8 @@ async function pollMailbox(sb: any, mb: any, opts: { lookbackDays: number }) {
           email_date: internalMs ? new Date(internalMs).toISOString() : null,
           internal_date_ms: internalMs,
           status: "new",
+          is_bulk: !!bulkReason(headers),
+          bulk_reason: bulkReason(headers),
         };
         if (!byMsgId.has(rfc)) { byMsgId.set(rfc, row); rows.push(row); }
       }
@@ -755,6 +779,7 @@ Deno.serve(async (req) => {
       let q = sb.from("ctc_emails")
         .select("id,rfc_message_id,gmail_message_id,mailbox_user_id,mailbox_email,from_addr,from_name,to_addr,subject,snippet,email_date")
         .eq("status", "new")
+        .eq("is_bulk", false)   // the model is the only paid step — never spend it on a newsletter
         .order("email_date", { ascending: false })
         .limit(limit);
       if (Array.isArray(body.email_ids) && body.email_ids.length) {

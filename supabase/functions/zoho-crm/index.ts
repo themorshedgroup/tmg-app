@@ -270,6 +270,38 @@ async function zohoIdFromProfile(sb: any, userId: string | null): Promise<string
   } catch (_) { return null; }
 }
 
+// The owner a created record must carry: whoever is logged into the APP, never
+// whoever owns the Zoho API connection. Zoho silently files an Owner-less
+// record under the connection owner, so every create path has to set this —
+// which is exactly what kept going wrong, one forgotten call site at a time.
+//
+// Order of certainty: the id stored on the profile, then the caller's email
+// (Zoho rejects an address it doesn't know rather than defaulting), then a
+// scope-free harvest by name. The org's grant lacks ZohoCRM.users.READ, so the
+// harvest is the only lookup available.
+async function ownerForCaller(
+  sb: any, conn: any, accessToken: string, apiDomain: string,
+  auth: any, ownerEmail: string,
+): Promise<{ owner: any | null; warning: string | null }> {
+  let callerName: string | null = null;
+  if (sb && auth?.userId && auth.userId !== "service") {
+    try {
+      const { data } = await sb.from("profiles")
+        .select("first_name, last_name").eq("id", auth.userId).maybeSingle();
+      if (data) callerName = [data.first_name, data.last_name].filter(Boolean).join(" ") || null;
+    } catch (_) { /* fall through to the other strategies */ }
+  }
+  const storedZohoId = await zohoIdFromProfile(sb, auth?.userId || null);
+  if (storedZohoId) return { owner: { id: storedZohoId }, warning: null };
+  if (ownerEmail) return { owner: { email: ownerEmail }, warning: null };
+  if (callerName) {
+    const resolved = await resolveZohoOwner(sb, conn, accessToken, apiDomain, "", callerName);
+    if (resolved.id) return { owner: { id: resolved.id }, warning: null };
+    return { owner: null, warning: `Could not match you to a Zoho CRM user (tried name "${callerName}"), so Zoho assigned this record to the API connection owner instead. Detail: ${resolved.trace.join(" → ")}` };
+  }
+  return { owner: null, warning: "No account email was available for the submitter, so Zoho assigned this record to the API connection owner instead." };
+}
+
 async function resolveZohoOwner(
   sb: any, conn: any, accessToken: string, apiDomain: string,
   email: string, fullName: string | null
@@ -453,26 +485,13 @@ Deno.serve(async (req) => {
       const ownerEmail = typeof body.owner_email === "string" ? body.owner_email.trim() : "";
       // The submitter's profile name enables the unambiguous-name fallback when their
       // TMG login email doesn't match their Zoho user email exactly.
-      let callerName: string | null = null;
-      if (auth.userId && auth.userId !== "service") {
-        const { data: callerProf } = await sb
-          .from("profiles").select("first_name, last_name").eq("id", auth.userId).maybeSingle();
-        if (callerProf) callerName = [callerProf.first_name, callerProf.last_name].filter(Boolean).join(" ") || null;
-      }
-      // Same order of certainty as create_health_goal: stored id, then let
-      // Zoho resolve the submitter's email itself (it rejects an address it
-      // doesn't know rather than defaulting the owner), and only then warn.
-      const storedZohoId = await zohoIdFromProfile(sb, auth.userId);
-      if (storedZohoId) {
-        record.Owner = { id: storedZohoId };
-      } else if (ownerEmail) {
-        record.Owner = { email: ownerEmail };
-      } else if (callerName) {
-        const resolved = await resolveZohoOwner(sb, conn, accessToken, apiDomain, "", callerName);
-        if (resolved.id) record.Owner = { id: resolved.id };
-        else ownerWarning = `Could not match you to a Zoho CRM user (tried name "${callerName}"), so Zoho assigned this record to the API connection owner instead. Detail: ${resolved.trace.join(" → ")}`;
-      } else {
-        ownerWarning = "No account email was available for the submitter, so Zoho assigned this record to the API connection owner instead.";
+      // Shared with create_record and create_contact, so the three create paths
+      // cannot drift apart again — a forgotten Owner on any one of them is the
+      // "assigned to Symon again" report.
+      {
+        const r = await ownerForCaller(sb, conn, accessToken, apiDomain, auth, ownerEmail);
+        if (r.owner) record.Owner = r.owner;
+        ownerWarning = r.warning;
       }
 
       const crmRes = await zohoFetch(
@@ -832,6 +851,13 @@ Deno.serve(async (req) => {
 
       const rec: any = { Last_Name: last };
       if (first) rec.First_Name = first;
+      // Same reason as create_record: an Owner-less contact becomes the API
+      // connection owner's.
+      {
+        const oe = typeof body.owner_email === "string" ? body.owner_email.trim() : "";
+        const { owner } = await ownerForCaller(sb, conn, accessToken, apiDomain, auth, oe);
+        if (owner) rec.Owner = owner;
+      }
       const r = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Contacts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -860,6 +886,30 @@ Deno.serve(async (req) => {
       const conn = await loadConnection(sb);
       const accessToken = await getZohoToken(sb, conn);
       const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      // This is the app's general-purpose write door — new Contacts and every
+      // task from the CRM drawer come through here — and it used to post the
+      // record exactly as the browser sent it. Anything that forgot an Owner
+      // was silently filed under the API connection owner, which is the
+      // "assigned to Symon again" report.
+      //
+      // A client-supplied Owner WINS, and is only filled in when absent. That
+      // ordering is deliberate: the Calls tab lets an admin log work on behalf
+      // of a chosen agent and sends that agent's Zoho id, which is more
+      // specific than the session. Overriding it would silently re-file every
+      // on-behalf-of entry under the admin, and deleting it when resolution
+      // failed would be worse than doing nothing at all.
+      //
+      // The spoofing trade-off is accepted knowingly: this is an internal team
+      // app where logging for a teammate is a real workflow, not a threat.
+      const ownerEmail = typeof body.owner_email === "string" ? body.owner_email.trim() : "";
+      let warning: string | null = null;
+      if (!record.Owner) {
+        const r = await ownerForCaller(sb, conn, accessToken, apiDomain, auth, ownerEmail);
+        if (r.owner) record.Owner = r.owner;
+        warning = r.warning;
+      }
+
       const r = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/${moduleName}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -869,7 +919,9 @@ Deno.serve(async (req) => {
       const row = d?.data?.[0];
       if (!r.ok || row?.status !== "success")
         return json({ error: row?.message || d?.message || "Could not create record", detail: d }, r.ok ? 400 : r.status);
-      return json({ ok: true, id: row?.details?.id || null }, 200);
+      const newId = row?.details?.id || null;
+      await stampSubmission(sb, moduleName, newId, auth.userId, null);
+      return json({ ok: true, id: newId, owner_warning: warning }, 200);
     }
 
     // ── Update a record in any module [write] ───────────────────────

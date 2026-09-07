@@ -4644,8 +4644,9 @@ Rules:
       const [dispSub, setDispSub] = useState(null);   // 'layout' | 'group' | 'sort' | 'cols' | null
       const [completedOpen, setCompletedOpen] = useState(false);
       const [ctxMenu, setCtxMenu] = useState(null);   // { x, y, task }
-      // Surface switcher (standalone only): My Tasks | CTC Files | Projects.
-      const [surface, setSurface] = useState(() => localStorage.getItem('tmg-tasks-surface') || 'my');
+      // Surface switcher (standalone only): My Tasks | Projects | Rocks. CTC
+      // Files moved to More (index.jsx CtcFilesFrame) — see the useState below.
+      const [surface, setSurface] = useState(() => { const s = localStorage.getItem('tmg-tasks-surface'); return s === 'ctc' ? 'my' : (s || 'my'); });   // CTC Files moved to More — see index.jsx CtcFilesFrame
       const [surfaceMenuOpen, setSurfaceMenuOpen] = useState(false);
       const [navItems, setNavItems] = useState([]);   // sidebar: every project/CTC file, for the per-item rows
       const [openItemId, setOpenItemId] = useState(null);
@@ -5069,7 +5070,11 @@ Rules:
       // clickable page title. Shared across all surfaces; passed into ProjectsSurface.
       // surfaceKind maps a surface id to the record_type ProjectsSurface loads —
       // Rocks are just projects with record_type='rock' ("same under the hood").
-      const SURFACE_OPTS = [['my', 'My Tasks'], ['ctc', 'CTC Files'], ['projects', 'Projects'], ['rocks', 'Rocks']];
+      // CTC Files is reached from More — More is the module the user asked to add
+      // it to — not from this switcher; surfaceLabel/surfaceKind below still cover
+      // 'ctc' because the #ctc permalink (opened from More) routes through this
+      // same surface state.
+      const SURFACE_OPTS = [['my', 'My Tasks'], ['projects', 'Projects'], ['rocks', 'Rocks']];
       const surfaceLabel = { my: 'My Tasks', ctc: 'CTC Files', projects: 'Projects', rocks: 'Rocks' };
       const surfaceKind = { ctc: 'ctc_file', projects: 'project', rocks: 'rock' };
       const surfaceTitle = (fontSize) => (
@@ -5131,7 +5136,6 @@ Rules:
           <i className="ti ti-plus" style={{ fontSize: 12 }} />{label}
         </div>
       );
-      const ctcNavItems = navItems.filter(i => i.record_type === 'ctc_file');
       const projNavItems = navItems.filter(i => i.record_type === 'project');
       const rockNavItems = navItems.filter(i => i.record_type === 'rock');
       const sbGroup = (children) => <div style={{ marginBottom: 20 }}>{children}</div>;
@@ -5139,7 +5143,6 @@ Rules:
         <div style={{ width: 230, flexShrink: 0, borderRight: `1px solid ${bord}`, padding: '18px 0', background: dark ? '#08132A' : '#FCFBF8', overflowY: 'auto' }}>
           {sbGroup(<React.Fragment>{sbSectionHead('Tasks', true)}{sbRow('my', 'My Tasks', data.tasks.length)}</React.Fragment>)}
           {sbGroup(<React.Fragment>{sbSectionHead('Company')}{sbRow('rocks', 'Rocks', rockNavItems.length)}{rockNavItems.map(sbItemRow)}{sbAddRow('New rock', () => { setSurface('rocks'); setOpenItemId('new'); })}</React.Fragment>)}
-          {sbGroup(<React.Fragment>{sbSectionHead('CTC Files')}{sbRow('ctc', 'All files', ctcNavItems.length)}{ctcNavItems.map(sbItemRow)}{sbAddRow('New file', () => { setSurface('ctc'); setOpenItemId('new'); })}</React.Fragment>)}
           {sbGroup(<React.Fragment>{sbSectionHead('Projects')}{sbRow('projects', 'All projects', projNavItems.length)}{projNavItems.map(sbItemRow)}{sbAddRow('New project', () => { setSurface('projects'); setOpenItemId('new'); })}</React.Fragment>)}
         </div>
       );
@@ -5282,7 +5285,22 @@ Rules:
       return (
         <React.Fragment>
           <div onClick={(e) => e.stopPropagation()} style={containerStyle}>
-            {embed ? (
+            {surface !== 'my' ? (
+              /* A non-My-Tasks surface (CTC Files, Projects, Rocks). Hoisted
+                 above the embed/standalone split below: nothing embedded ever
+                 needed this until CTC Files moved out of Tasks into its own
+                 More tab (2026-09-08), reusing this exact iframe. The embed
+                 branch beneath was written when My Tasks was the only thing
+                 anyone ever embedded — its own `surface !== 'my'` checks are
+                 now unreachable dead code, left in place rather than untangled.
+                 No hideSidebar: this is the ONLY chrome around the surface now
+                 (no outer navSidebar here), so ProjectsSurface's own file-list
+                 pane is what lets the user browse into a file. plainSurfaceTitle
+                 always (not the narrow-width dropdown variant): this tab shows
+                 ONE surface only — no switching to My Tasks/Projects/Rocks
+                 from inside it. */
+              <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} openCtcTab={openCtcTab} onCtcTabConsumed={() => setOpenCtcTab(null)} />
+            ) : embed ? (
               /* ══════ EMBEDDED POPOUT — unchanged, out of scope for the My Tasks redesign ══════ */
               wide ? (
                 <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>

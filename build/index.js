@@ -12417,6 +12417,70 @@ function TimeOffFrame({
     }
   }));
 }
+
+// CTC Files used to live inside the Tasks app's own surface switcher;
+// moved here (2026-09-08) so it's reachable without opening Tasks at all.
+// Same tasks.html bundle, opened straight to its #ctc route.
+function CtcFilesFrame({
+  dark,
+  onBack
+}) {
+  const ink = dark ? '#fff' : '#001A4A';
+  const src = 'tasks.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + TASKS_POPOUT_VERSION + '#ctc';
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      background: dark ? '#000D26' : '#FCFBF8'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '7px 8px 7px 10px',
+      borderBottom: `1px solid ${dark ? '#0D1E3A' : '#E4DFD4'}`,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    "aria-label": "Back",
+    style: {
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      padding: 0,
+      display: 'flex',
+      alignItems: 'center',
+      color: dark ? '#C9A45A' : '#AD832F'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    style: {
+      fontSize: 20
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontFamily: "'Jost', sans-serif",
+      fontSize: 13,
+      fontWeight: 600,
+      letterSpacing: '0.02em',
+      color: ink
+    }
+  }, "CTC Files")), /*#__PURE__*/React.createElement("iframe", {
+    src: src,
+    title: "CTC Files",
+    style: {
+      flex: 1,
+      width: '100%',
+      border: 'none',
+      display: 'block'
+    }
+  }));
+}
 function SharedDrivesTab({
   dark,
   onBack
@@ -23194,7 +23258,7 @@ const ROUTE_TABS = TABS.filter(t => t.id !== 'more').map(t => t.id);
 // against on load, so a view missing from this list survives being opened
 // but silently falls back to AI Chat on refresh — ADD A NEW MORE SCREEN
 // HERE as well as to allMoreDefs, or reloading it dumps you on chat.
-const ROUTE_MORE = ['guide', 'drives', 'directory', 'timeoff', 'expsurvey', 'healthgoals', 'sffu', 'admin', 'app-masterplan'];
+const ROUTE_MORE = ['guide', 'drives', 'directory', 'ctc', 'timeoff', 'expsurvey', 'healthgoals', 'sffu', 'admin', 'app-masterplan'];
 function parseRoute(hash) {
   const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
   if (ROUTE_MORE.indexOf(h) !== -1) return {
@@ -23228,7 +23292,7 @@ function parsePath() {
 // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
 // /tasks app. The top-bar icons open it in an iframe popout inside the content
 // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-const TASKS_POPOUT_VERSION = '20260813a'; // bump when tasks.html changes to bust the iframe/standalone-link cache
+const TASKS_POPOUT_VERSION = '20260908a'; // bump when tasks.html changes to bust the iframe/standalone-link cache
 function TaskFramePopover({
   which,
   zoneH,
@@ -24345,6 +24409,13 @@ function App({
     id: 'directory',
     label: 'Company Directory',
     icon: 'ti-users'
+  }] : [])
+  // Moved out of the Tasks app's own surface switcher (2026-09-08) — CTC
+  // Files is now a first-class More tab, same iframe embed as Time Off etc.
+  .concat(!appSet || appSet.has('ctc') ? [{
+    id: 'ctc',
+    label: 'CTC Files',
+    icon: 'ti-clipboard-check'
   }] : []).concat([{
     id: 'timeoff',
     label: 'Time Off',
@@ -25428,6 +25499,9 @@ function App({
     dark: dark,
     onBack: () => setMoreMenuOpen(true)
   }) : moreView === 'directory' ? /*#__PURE__*/React.createElement(CompanyDirectory, {
+    dark: dark,
+    onBack: () => setMoreMenuOpen(true)
+  }) : moreView === 'ctc' ? /*#__PURE__*/React.createElement(CtcFilesFrame, {
     dark: dark,
     onBack: () => setMoreMenuOpen(true)
   }) : moreView === 'expsurvey' ? /*#__PURE__*/React.createElement(ExpSurvey, {

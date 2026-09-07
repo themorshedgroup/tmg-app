@@ -4435,6 +4435,23 @@ Rules:
       );
     }
 
+    // CTC Files used to live inside the Tasks app's own surface switcher;
+    // moved here (2026-09-08) so it's reachable without opening Tasks at all.
+    // Same tasks.html bundle, opened straight to its #ctc route.
+    function CtcFilesFrame({ dark, onBack }) {
+      const ink = dark ? '#fff' : '#001A4A';
+      const src = 'tasks.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + TASKS_POPOUT_VERSION + '#ctc';
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: dark ? '#000D26' : '#FCFBF8' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px 7px 10px', borderBottom: `1px solid ${dark ? '#0D1E3A' : '#E4DFD4'}`, flexShrink: 0 }}>
+            <button onClick={onBack} aria-label="Back" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', color: dark ? '#C9A45A' : '#AD832F' }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} /></button>
+            <span style={{ flex: 1, minWidth: 0, fontFamily: "'Jost', sans-serif", fontSize: 13, fontWeight: 600, letterSpacing: '0.02em', color: ink }}>CTC Files</span>
+          </div>
+          <iframe src={src} title="CTC Files" style={{ flex: 1, width: '100%', border: 'none', display: 'block' }} />
+        </div>
+      );
+    }
+
     function SharedDrivesTab({ dark, onBack }) {
       const J = "'Jost', sans-serif";
       const [query, setQuery] = useState('');
@@ -8753,7 +8770,7 @@ Rules:
     // against on load, so a view missing from this list survives being opened
     // but silently falls back to AI Chat on refresh — ADD A NEW MORE SCREEN
     // HERE as well as to allMoreDefs, or reloading it dumps you on chat.
-    const ROUTE_MORE = ['guide', 'drives', 'directory', 'timeoff', 'expsurvey', 'healthgoals', 'sffu', 'admin', 'app-masterplan'];
+    const ROUTE_MORE = ['guide', 'drives', 'directory', 'ctc', 'timeoff', 'expsurvey', 'healthgoals', 'sffu', 'admin', 'app-masterplan'];
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
@@ -8774,7 +8791,7 @@ Rules:
     // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
     // /tasks app. The top-bar icons open it in an iframe popout inside the content
     // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-    const TASKS_POPOUT_VERSION = '20260813a';  // bump when tasks.html changes to bust the iframe/standalone-link cache
+    const TASKS_POPOUT_VERSION = '20260908a';  // bump when tasks.html changes to bust the iframe/standalone-link cache
     function TaskFramePopover({ which, zoneH, onClose }) {
       const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
       useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
@@ -9030,6 +9047,9 @@ Rules:
         .concat([{ id: 'guide', label: 'Guide', icon: 'ti-book' }])
         .concat((!appSet || appSet.has('drives')) ? [{ id: 'drives', label: 'Shared Drives', icon: 'ti-folders' }] : [])
         .concat((!appSet || appSet.has('directory')) ? [{ id: 'directory', label: 'Company Directory', icon: 'ti-users' }] : [])
+        // Moved out of the Tasks app's own surface switcher (2026-09-08) — CTC
+        // Files is now a first-class More tab, same iframe embed as Time Off etc.
+        .concat((!appSet || appSet.has('ctc')) ? [{ id: 'ctc', label: 'CTC Files', icon: 'ti-clipboard-check' }] : [])
         .concat([{ id: 'timeoff', label: 'Time Off', icon: 'ti-calendar-off' }])
         .concat([{ id: 'expsurvey', label: 'Exp Survey', icon: 'ti-qrcode' }])
         .concat([{ id: 'healthgoals', label: 'Health Goals', icon: 'ti-heartbeat' }])
@@ -9669,6 +9689,7 @@ Rules:
               : moreView === 'app-masterplan' && isAdmin ? <AppRoadmap dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'drives' ? <SharedDrivesTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'directory' ? <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />
+              : moreView === 'ctc' ? <CtcFilesFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'expsurvey' ? <ExpSurvey dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'healthgoals' ? <HealthGoalsTab dark={dark} ownerName={myName} ownerEmail={(user && user.email) || ''} isAdmin={isAdmin} />
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />

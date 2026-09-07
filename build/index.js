@@ -18887,7 +18887,7 @@ function BottomZone({
   onChange,
   dark,
   isWide,
-  onOpenAttach,
+  onClearChat,
   pendingAttachments,
   onRemoveAttach,
   input,
@@ -19040,8 +19040,8 @@ function BottomZone({
       maxHeight: 136
     }
   }), /*#__PURE__*/React.createElement("button", {
-    onClick: onOpenAttach,
-    title: "Attach file or photo",
+    onClick: onClearChat,
+    title: "Clear this chat",
     style: {
       flexShrink: 0,
       width: 32,
@@ -19057,7 +19057,7 @@ function BottomZone({
       fontSize: 17
     }
   }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-paperclip"
+    className: "ti ti-trash"
   })), /*#__PURE__*/React.createElement("button", {
     onClick: onSend,
     disabled: loading,
@@ -23336,6 +23336,27 @@ function App({
   useEffect(() => {
     refreshConversations();
   }, []);
+  // One ongoing chat per person, synced across their devices — no history
+  // list to pick from, so on load we simply re-open the most recent one.
+  // (Conversations are still stored; only the UI for browsing them is gone.)
+  useEffect(() => {
+    if (currentConvId || !conversations.length) return;
+    const live = conversations.filter(c => !c.archived).sort((x, y) => String(y.updatedAt || '').localeCompare(String(x.updatedAt || '')));
+    if (live.length) selectConversation(live[0].id);
+  }, [conversations]);
+  // Clear = archive the current chat and start empty. Archived rather than
+  // deleted so nothing is actually lost.
+  async function clearChat() {
+    if (!currentConvId) {
+      newChat();
+      return;
+    }
+    try {
+      await archiveConversation(currentConvId, true);
+    } catch (e) {
+      newChat();
+    }
+  }
 
   // AI memory + projects load
   const refreshProjects = () => ProjectDB.list().then(setProjects);
@@ -23964,66 +23985,7 @@ function App({
     initial: aiMemory,
     onSave: saveMemory,
     onClose: () => setShowMemory(false)
-  }), openProjectId && (() => {
-    const p = projects.find(x => x.id === openProjectId);
-    return p ? /*#__PURE__*/React.createElement(ProjectModal, {
-      dark: dark,
-      project: p,
-      conversations: conversations,
-      onSaveFields: saveProject,
-      onDelete: deleteProject,
-      onClose: () => setOpenProjectId(null),
-      onOpenChat: cid => {
-        setOpenProjectId(null);
-        selectConversation(cid);
-      },
-      onNewChat: pid => {
-        setOpenProjectId(null);
-        setDrawerOpen(false);
-        newChat(pid);
-        setActiveTab('chat');
-      },
-      onMutated: pid => {
-        refreshProjects();
-        if (pid === activeProjectId) ProjectDB.listFiles(pid).then(setActiveProjectFiles);
-      }
-    }) : null;
-  })(), showNewProject && /*#__PURE__*/React.createElement(NewProjectModal, {
-    onCreate: async (name, instructions) => {
-      const p = await ProjectDB.create(name);
-      if (instructions) await ProjectDB.update(p.id, {
-        instructions
-      });
-      await refreshProjects();
-    },
-    onClose: () => setShowNewProject(false)
-  }), activeTab === 'chat' && !isWide && /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: '9px 12px 4px',
-      background: dark ? '#000D26' : C.bg,
-      flexShrink: 0
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setDrawerOpen(o => !o),
-    title: "Chat history",
-    style: {
-      width: 32,
-      height: 32,
-      borderRadius: 9,
-      cursor: 'pointer',
-      background: AI_UI.tint,
-      border: `0.5px solid ${AI_UI.border}`,
-      boxShadow: drawerOpen ? `0 0 0 2px ${AI_UI.primary}` : 'none',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      color: AI_UI.primary,
-      fontSize: 15,
-      transition: 'box-shadow 0.15s'
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-menu-2"
-  }))), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
       minHeight: 0,
@@ -24073,27 +24035,10 @@ function App({
         onCancel: () => setCalBrief(null)
       }) : null
     });
-    const sidebar = /*#__PURE__*/React.createElement(HistoryPanel, {
-      dark: dark,
-      conversations: conversations,
-      projects: projects,
-      currentConvId: currentConvId,
-      wide: isWide,
-      onSelect: selectConversation,
-      onNewChat: () => {
-        newChat();
-        setDrawerOpen(false);
-      },
-      onPin: pinConversation,
-      onArchive: archiveConversation,
-      onRename: renameConversation,
-      onDelete: removeConversation,
-      onShare: shareConversation,
-      onOpenMemory: () => setShowMemory(true),
-      onNewProject: () => setShowNewProject(true),
-      onOpenProject: id => setOpenProjectId(id),
-      onMoveToProject: (convId, pid) => moveConversationToProject(convId, pid)
-    });
+    // The assistant is one ongoing chat now: no history sidebar, no
+    // drawer, no per-conversation header. Conversations and Projects
+    // still exist in the database — only the UI for browsing and
+    // filing them is gone, so the decision stays reversible.
     return isWide ? /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
@@ -24101,28 +24046,13 @@ function App({
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
-        width: 240,
-        flexShrink: 0,
-        height: '100%',
-        borderRight: '0.5px solid #EDE7DC'
-      }
-    }, sidebar), /*#__PURE__*/React.createElement("div", {
-      style: {
         flex: 1,
         minWidth: 0,
         height: '100%',
         display: 'flex',
         flexDirection: 'column'
       }
-    }, openConv && /*#__PURE__*/React.createElement(ChatPanelHeader, {
-      conv: openConv,
-      projectName: activeProject ? activeProject.name : null,
-      onPin: pinConversation,
-      onShare: shareConversation,
-      onRename: renameConversation,
-      onArchive: archiveConversation,
-      onDelete: removeConversation
-    }), /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement("div", {
       style: {
         flex: 1,
         minHeight: 0
@@ -24132,26 +24062,7 @@ function App({
         position: 'relative',
         height: '100%'
       }
-    }, aiChat, drawerOpen && /*#__PURE__*/React.createElement("div", {
-      onClick: () => setDrawerOpen(false),
-      style: {
-        position: 'absolute',
-        inset: 0,
-        zIndex: 29,
-        background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)'
-      }
-    }), drawerOpen && /*#__PURE__*/React.createElement("div", {
-      style: {
-        position: 'absolute',
-        top: 0,
-        bottom: 0,
-        [historySide]: 0,
-        width: '82%',
-        maxWidth: 320,
-        zIndex: 30,
-        boxShadow: '0 0 28px rgba(0,0,0,0.18)'
-      }
-    }, sidebar));
+    }, aiChat);
   })(), activeTab === 'teamchat' && /*#__PURE__*/React.createElement(ChatTab, {
     dark: dark
   }), activeTab === 'calls' && /*#__PURE__*/React.createElement(CallsTab, {
@@ -24235,7 +24146,7 @@ function App({
     },
     dark: dark,
     isWide: isWide,
-    onOpenAttach: openFilePicker,
+    onClearChat: clearChat,
     pendingAttachments: pendingAttachments,
     onRemoveAttach: removeAttachment,
     input: input,

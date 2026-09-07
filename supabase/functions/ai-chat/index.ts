@@ -115,6 +115,37 @@ Deno.serve(async (req) => {
       return json({ error: "Request must include a non-empty 'messages' array." }, 400);
     }
 
+    // ── Cost controls (server-side, so the browser can't opt out) ──────────
+    // The assistant is now one ongoing chat that is only cleared by hand, so
+    // its history would otherwise grow without limit and be re-sent in full on
+    // every message. Only the tail is sent — older turns fall out of context.
+    const MAX_HISTORY = 20;
+    const trimmed = messages.length > MAX_HISTORY ? messages.slice(-MAX_HISTORY) : messages;
+
+    // And a hard ceiling on one request. AI Chat averaged 21,000 input tokens a
+    // call before this — pasted documents, not conversation. Roughly 4 chars a
+    // token, so ~48k chars is ~12k tokens: far above any real conversation,
+    // far below a pasted report.
+    const MAX_INPUT_CHARS = 48000;
+    const payloadChars = JSON.stringify(trimmed).length + String(system || "").length;
+    if (payloadChars > MAX_INPUT_CHARS) {
+      return json({
+        error: "That's too long for the TMG assistant — it's built for questions about your CRM, tasks, deals and calls, not for analysing pasted documents. Use Gemini (in Google Workspace) for that.",
+        chars: payloadChars, limit: MAX_INPUT_CHARS,
+      }, 413);
+    }
+
+    // Scope, appended server-side so it survives whatever the page sends.
+    const SCOPE = [
+      "You are The Morshed Group's in-app assistant. You answer using the TMG",
+      "data provided to you in this conversation — CRM records, tasks, deals,",
+      "calls, KPIs, calendar, and the user's connected email.",
+      "If something cannot be answered from that data or from the conversation",
+      "itself, say so briefly and suggest Gemini (in Google Workspace) instead.",
+      "Never invent a record, a number, a name or a date that you were not given.",
+    ].join(" ");
+    const scopedSystem = system ? `${system}\n\n${SCOPE}` : SCOPE;
+
     // Single source of truth for the model — from the ai_config table.
     const model = await getActiveModel();
 
@@ -125,7 +156,7 @@ Deno.serve(async (req) => {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({ model, max_tokens, system, messages }),
+      body: JSON.stringify({ model, max_tokens, system: scopedSystem, messages: trimmed }),
     });
 
     const data = await anthropicRes.json();

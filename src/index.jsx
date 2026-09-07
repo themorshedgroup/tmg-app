@@ -7145,7 +7145,7 @@ Rules:
     const dotsItem = { display: 'block', width: '100%', textAlign: 'left', border: 'none', background: 'none', cursor: 'pointer', fontFamily: C.fontSans, fontSize: 11, color: '#001A4A', padding: '8px 10px', borderRadius: 7 };
 
     // Fixed bottom zone: pill-shaped input bar (AI tab only) + floating pill nav (always).
-    function BottomZone({ active, activeMoreView, tabs, onChange, dark, isWide, onOpenAttach, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, activeMoreView, tabs, onChange, dark, isWide, onClearChat, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
       const navTabs = tabs || TABS;
       const isAI = active === 'chat';
       const pending = pendingAttachments || [];
@@ -7220,13 +7220,16 @@ Rules:
                   resize: 'none', boxSizing: 'border-box', display: 'block', height: 20, maxHeight: 136,
                 }}
               />
-              {/* Attach file / photo */}
-              <button onClick={onOpenAttach} title="Attach file or photo" style={{
+              {/* Clear this chat. Replaces the old attach button: uploads were the
+                  expensive path (AI Chat averaged 21k input tokens a call, which
+                  is pasted documents, not conversation) and that work belongs in
+                  Gemini now. */}
+              <button onClick={onClearChat} title="Clear this chat" style={{
                 flexShrink: 0, width: 32, height: isWide ? 36 : 32, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 background: 'none', border: 'none', cursor: 'pointer',
                 color: AI_UI.primary, opacity: 0.7, fontSize: 17,
               }}>
-                <i className="ti ti-paperclip" />
+                <i className="ti ti-trash" />
               </button>
               {/* Send */}
               <button onClick={onSend} disabled={loading} style={{
@@ -8515,6 +8518,21 @@ Rules:
 
       const refreshConversations = () => ConvDB.loadConversations().then(setConversations);
       useEffect(() => { refreshConversations(); }, []);
+      // One ongoing chat per person, synced across their devices — no history
+      // list to pick from, so on load we simply re-open the most recent one.
+      // (Conversations are still stored; only the UI for browsing them is gone.)
+      useEffect(() => {
+        if (currentConvId || !conversations.length) return;
+        const live = conversations.filter(c => !c.archived)
+          .sort((x, y) => String(y.updatedAt || '').localeCompare(String(x.updatedAt || '')));
+        if (live.length) selectConversation(live[0].id);
+      }, [conversations]);
+      // Clear = archive the current chat and start empty. Archived rather than
+      // deleted so nothing is actually lost.
+      async function clearChat() {
+        if (!currentConvId) { newChat(); return; }
+        try { await archiveConversation(currentConvId, true); } catch (e) { newChat(); }
+      }
 
       // AI memory + projects load
       const refreshProjects = () => ProjectDB.list().then(setProjects);
@@ -8884,25 +8902,8 @@ Rules:
           {showProfile && <ProfilePanel dark={dark} user={user} profile={profile} name={myName} avatar={myAvatar} dotColor={dotColor} away={away} statusText={statusText} statusEmoji={statusEmoji} onToggleAway={toggleAway} onOpenStatus={() => setShowStatus(true)} onClose={() => setShowProfile(false)} historySide={historySide} setHistorySide={setHistorySide} setDark={setDark} fontScale={fontScale} setFontScale={setFontScale} navItems={navForSettings} moreMenuItems={moreItems} onReorderNav={handleReorderNav} onReorderMore={handleReorderMore} onMoveToMore={handleMoveToMore} onMoveToNav={handleMoveToNav} />}
           {showStatus && <StatusModal dark={dark} initialText={statusText} initialEmoji={statusEmoji} onSave={saveStatus} onClose={() => setShowStatus(false)} />}
           {showMemory && <GlobalMemoryModal dark={dark} initial={aiMemory} onSave={saveMemory} onClose={() => setShowMemory(false)} />}
-          {openProjectId && (() => {
-            const p = projects.find(x => x.id === openProjectId);
-            return p ? <ProjectModal dark={dark} project={p} conversations={conversations} onSaveFields={saveProject} onDelete={deleteProject} onClose={() => setOpenProjectId(null)} onOpenChat={(cid) => { setOpenProjectId(null); selectConversation(cid); }} onNewChat={(pid) => { setOpenProjectId(null); setDrawerOpen(false); newChat(pid); setActiveTab('chat'); }} onMutated={(pid) => { refreshProjects(); if (pid === activeProjectId) ProjectDB.listFiles(pid).then(setActiveProjectFiles); }} /> : null;
-          })()}
-          {showNewProject && <NewProjectModal onCreate={async (name, instructions) => { const p = await ProjectDB.create(name); if (instructions) await ProjectDB.update(p.id, { instructions }); await refreshProjects(); }} onClose={() => setShowNewProject(false)} />}
-          {/* Chat-history hamburger — mobile only; the sidebar is already always-visible on wide screens */}
-          {activeTab === 'chat' && !isWide && (
-            <div style={{ padding: '9px 12px 4px', background: dark ? '#000D26' : C.bg, flexShrink: 0 }}>
-              <button onClick={() => setDrawerOpen(o => !o)} title="Chat history" style={{
-                width: 32, height: 32, borderRadius: 9, cursor: 'pointer',
-                background: AI_UI.tint, border: `0.5px solid ${AI_UI.border}`,
-                boxShadow: drawerOpen ? `0 0 0 2px ${AI_UI.primary}` : 'none',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: AI_UI.primary, fontSize: 15, transition: 'box-shadow 0.15s',
-              }}>
-                <i className="ti ti-menu-2" />
-              </button>
-            </div>
-          )}
+          {/* Projects UI removed — see AI-CHAT-PURPOSE-SPEC.md. The tables and
+              ProjectDB layer stay, so this is reversible. */}
           <div style={{ flex: 1, minHeight: 0, paddingBottom: zoneH }}>
             {activeTab === 'chat' && (() => {
               const openConv = conversations.find(c => c.id === currentConvId) || null;
@@ -8927,22 +8928,19 @@ Rules:
                   ) : null}
                 />
               );
-              const sidebar = (
-                <HistoryPanel dark={dark} conversations={conversations} projects={projects} currentConvId={currentConvId} wide={isWide} onSelect={selectConversation} onNewChat={() => { newChat(); setDrawerOpen(false); }} onPin={pinConversation} onArchive={archiveConversation} onRename={renameConversation} onDelete={removeConversation} onShare={shareConversation} onOpenMemory={() => setShowMemory(true)} onNewProject={() => setShowNewProject(true)} onOpenProject={(id) => setOpenProjectId(id)} onMoveToProject={(convId, pid) => moveConversationToProject(convId, pid)} />
-              );
+              // The assistant is one ongoing chat now: no history sidebar, no
+              // drawer, no per-conversation header. Conversations and Projects
+              // still exist in the database — only the UI for browsing and
+              // filing them is gone, so the decision stays reversible.
               return isWide ? (
                 <div style={{ display: 'flex', height: '100%' }}>
-                  <div style={{ width: 240, flexShrink: 0, height: '100%', borderRight: '0.5px solid #EDE7DC' }}>{sidebar}</div>
                   <div style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column' }}>
-                    {openConv && <ChatPanelHeader conv={openConv} projectName={activeProject ? activeProject.name : null} onPin={pinConversation} onShare={shareConversation} onRename={renameConversation} onArchive={archiveConversation} onDelete={removeConversation} />}
                     <div style={{ flex: 1, minHeight: 0 }}>{aiChat}</div>
                   </div>
                 </div>
               ) : (
                 <div style={{ position: 'relative', height: '100%' }}>
                   {aiChat}
-                  {drawerOpen && <div onClick={() => setDrawerOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 29, background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)' }} />}
-                  {drawerOpen && <div style={{ position: 'absolute', top: 0, bottom: 0, [historySide]: 0, width: '82%', maxWidth: 320, zIndex: 30, boxShadow: '0 0 28px rgba(0,0,0,0.18)' }}>{sidebar}</div>}
                 </div>
               );
             })()}
@@ -8993,7 +8991,7 @@ Rules:
             }}
             dark={dark}
             isWide={isWide}
-            onOpenAttach={openFilePicker}
+            onClearChat={clearChat}
             pendingAttachments={pendingAttachments}
             onRemoveAttach={removeAttachment}
             input={input}

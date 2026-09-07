@@ -2003,6 +2003,17 @@ const CALENDAR_PILLS = [{
   },
   enabled: true
 }];
+// Clear Chat lives in the pill row rather than the composer — it's an action
+// on the conversation, like the others, not a text-entry control.
+const CLEAR_PILL = {
+  id: 'clear-chat',
+  label: 'Clear Chat',
+  icon: 'ti-trash',
+  type: 'clear',
+  config: {},
+  enabled: true
+};
+
 // Prompt-only — the AI just asks conversationally, no special dispatch needed.
 const DEAL_PILL = {
   id: 'fb-deal',
@@ -2040,13 +2051,6 @@ const SOON_PILLS = [{
   id: 'soon-email',
   label: 'Email Summary',
   icon: 'ti-mail',
-  type: 'soon',
-  config: {},
-  enabled: true
-}, {
-  id: 'soon-calls',
-  label: "Today's Call List",
-  icon: 'ti-phone',
   type: 'soon',
   config: {},
   enabled: true
@@ -2766,7 +2770,7 @@ function CalendarBriefCard({
 }
 
 // Pinned in the compact (active-chat) pill row; everything else lives behind the ⋯ overflow.
-const AI_PINNED_PILL_IDS = ['new-chat', 'fb-task'];
+const AI_PINNED_PILL_IDS = ['new-chat', 'fb-task', 'clear-chat'];
 const AI_COMPACT_ROW_H = 54;
 function AIChatTab({
   user,
@@ -2797,9 +2801,6 @@ function AIChatTab({
   }, []);
   const empty = messages.length === 0 && !flowCard;
   const allPills = pills || [];
-  // Row 1 = live pills, row 2 = "coming soon" placeholders — not an arbitrary half-split.
-  const marqueeRow1 = allPills.filter(p => p.type !== 'soon');
-  const marqueeRow2 = allPills.filter(p => p.type === 'soon');
   const pinnedPills = allPills.filter(p => AI_PINNED_PILL_IDS.includes(p.id));
 
   // "Coming soon" pills render neutral black/white (not the live AI_UI accent) with a SOON badge.
@@ -2855,28 +2856,6 @@ function AIChatTab({
         color: '#1A1A1A'
       }
     }, p.label));
-  };
-  const marqueeRow = (items, dir) => {
-    if (!items.length) return null;
-    const loopItems = reducedMotion ? items : items.concat(items);
-    return /*#__PURE__*/React.createElement("div", {
-      style: {
-        overflow: 'hidden',
-        paddingTop: 10,
-        marginTop: -10,
-        maskImage: 'linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent)',
-        WebkitMaskImage: 'linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent)'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      className: reducedMotion ? '' : `tmg-marquee-track ${dir}`,
-      style: {
-        display: 'flex',
-        gap: 9,
-        width: reducedMotion ? '100%' : 'max-content',
-        justifyContent: reducedMotion ? 'center' : 'flex-start',
-        flexWrap: reducedMotion ? 'wrap' : 'nowrap'
-      }
-    }, loopItems.map((p, i) => pillChip(p, p.id + '-' + i, false))));
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -2943,21 +2922,7 @@ function AIChatTab({
       marginTop: 8,
       letterSpacing: '0.04em'
     }
-  }, "What would you like to do?"), allPills.length > 0 &&
-  /*#__PURE__*/
-  // Bleed past both ancestors' padding (16px scroll area + 24px empty-state = 40px
-  // each side) so the marquee actually spans the full screen, not just its column.
-  React.createElement("div", {
-    style: {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 10,
-      marginTop: 22,
-      width: 'calc(100% + 80px)',
-      marginLeft: -40,
-      marginRight: -40
-    }
-  }, marqueeRow(marqueeRow1, 'left'), marqueeRow(marqueeRow2, 'right'))) : messages.map((m, i) => {
+  }, "What would you like to do?")) : messages.map((m, i) => {
     const isUser = m.role === 'user';
     return /*#__PURE__*/React.createElement("div", {
       key: i,
@@ -3055,7 +3020,7 @@ function AIChatTab({
       fontSize: '0.9rem',
       fontStyle: 'italic'
     }
-  }, "Thinking\u2026"))), !empty && allPills.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Thinking\u2026"))), allPills.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       position: 'absolute',
       left: 0,
@@ -20271,7 +20236,6 @@ function BottomZone({
   onChange,
   dark,
   isWide,
-  onClearChat,
   pendingAttachments,
   onRemoveAttach,
   input,
@@ -20424,25 +20388,6 @@ function BottomZone({
       maxHeight: 136
     }
   }), /*#__PURE__*/React.createElement("button", {
-    onClick: onClearChat,
-    title: "Clear this chat",
-    style: {
-      flexShrink: 0,
-      width: 32,
-      height: isWide ? 36 : 32,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'none',
-      border: 'none',
-      cursor: 'pointer',
-      color: AI_UI.primary,
-      opacity: 0.7,
-      fontSize: 17
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-trash"
-  })), /*#__PURE__*/React.createElement("button", {
     onClick: onSend,
     disabled: loading,
     style: {
@@ -24863,7 +24808,7 @@ function App({
   const pillVisible = p => !p.roles || !p.roles.length || isAdmin || p.roles.some(r => myRoles.includes(r));
   const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false && pillVisible(p));
   // New Chat first, then every visible pill — there's only one unified mode now.
-  const shownPills = [NEW_CHAT_PILL].concat(effectivePills).concat(CALENDAR_PILLS).concat([DEAL_PILL]).concat(SOON_PILLS);
+  const shownPills = [NEW_CHAT_PILL].concat(effectivePills).concat(CALENDAR_PILLS).concat([DEAL_PILL]).concat(SOON_PILLS).concat([CLEAR_PILL]);
   useEffect(() => {
     localStorage.setItem('tmg-history-side', historySide);
   }, [historySide]);
@@ -25211,6 +25156,10 @@ function App({
     }
     if (pill.id === 'new-chat' || pill.type === 'newchat') {
       newChat();
+      return;
+    }
+    if (pill.type === 'clear') {
+      clearChat();
       return;
     }
     if (pill.id === 'fb-kpis' || pill.config && pill.config.kpi) {
@@ -25564,7 +25513,6 @@ function App({
     },
     dark: dark,
     isWide: isWide,
-    onClearChat: clearChat,
     pendingAttachments: pendingAttachments,
     onRemoveAttach: removeAttachment,
     input: input,

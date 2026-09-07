@@ -1147,6 +1147,10 @@ Rules:
       { id: 'cal-daily',  label: "Today's Brief", icon: 'ti-calendar-stats', colorLight: '#5A3FA0', colorDark: '#B79CEB', type: 'calendar', mode: 'work', config: { kind: 'daily' },  enabled: true },
       { id: 'cal-weekly', label: 'Weekly Brief',  icon: 'ti-calendar',       colorLight: '#5A3FA0', colorDark: '#B79CEB', type: 'calendar', mode: 'work', config: { kind: 'weekly' }, enabled: true },
     ];
+    // Clear Chat lives in the pill row rather than the composer — it's an action
+    // on the conversation, like the others, not a text-entry control.
+    const CLEAR_PILL = { id: 'clear-chat', label: 'Clear Chat', icon: 'ti-trash', type: 'clear', config: {}, enabled: true };
+
     // Prompt-only — the AI just asks conversationally, no special dispatch needed.
     const DEAL_PILL = { id: 'fb-deal', label: 'Deals Update', icon: 'ti-currency-dollar', type: 'soon', config: {}, enabled: true };
 
@@ -1157,7 +1161,6 @@ Rules:
       { id: 'soon-ctc',     label: 'CTC File Update',           icon: 'ti-refresh',        type: 'soon', config: {}, enabled: true },
       { id: 'soon-timeoff', label: 'File Time Off',             icon: 'ti-calendar-off',   type: 'soon', config: {}, enabled: true },
       { id: 'soon-email',   label: 'Email Summary',             icon: 'ti-mail',           type: 'soon', config: {}, enabled: true },
-      { id: 'soon-calls',   label: "Today's Call List",         icon: 'ti-phone',          type: 'soon', config: {}, enabled: true },
       { id: 'soon-score',   label: 'Latest Scorecard',          icon: 'ti-trophy',         type: 'soon', config: {}, enabled: true },
     ];
 
@@ -1499,7 +1502,7 @@ Rules:
     }
 
     // Pinned in the compact (active-chat) pill row; everything else lives behind the ⋯ overflow.
-    const AI_PINNED_PILL_IDS = ['new-chat', 'fb-task'];
+    const AI_PINNED_PILL_IDS = ['new-chat', 'fb-task', 'clear-chat'];
     const AI_COMPACT_ROW_H = 54;
 
     function AIChatTab({ user, messages, loading, dark, pills, onPill, flowCard, flowKey, projectName }) {
@@ -1522,9 +1525,6 @@ Rules:
 
       const empty = messages.length === 0 && !flowCard;
       const allPills = pills || [];
-      // Row 1 = live pills, row 2 = "coming soon" placeholders — not an arbitrary half-split.
-      const marqueeRow1 = allPills.filter(p => p.type !== 'soon');
-      const marqueeRow2 = allPills.filter(p => p.type === 'soon');
       const pinnedPills = allPills.filter(p => AI_PINNED_PILL_IDS.includes(p.id));
 
       // "Coming soon" pills render neutral black/white (not the live AI_UI accent) with a SOON badge.
@@ -1553,24 +1553,6 @@ Rules:
         );
       };
 
-      const marqueeRow = (items, dir) => {
-        if (!items.length) return null;
-        const loopItems = reducedMotion ? items : items.concat(items);
-        return (
-          <div style={{
-            overflow: 'hidden', paddingTop: 10, marginTop: -10,
-            maskImage: 'linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent)',
-            WebkitMaskImage: 'linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent)',
-          }}>
-            <div className={reducedMotion ? '' : `tmg-marquee-track ${dir}`} style={{
-              display: 'flex', gap: 9, width: reducedMotion ? '100%' : 'max-content',
-              justifyContent: reducedMotion ? 'center' : 'flex-start', flexWrap: reducedMotion ? 'wrap' : 'nowrap',
-            }}>
-              {loopItems.map((p, i) => pillChip(p, p.id + '-' + i, false))}
-            </div>
-          </div>
-        );
-      };
 
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
@@ -1591,14 +1573,6 @@ Rules:
                 <div style={{ fontSize: '0.8rem', color: C.textSecondary, marginTop: 8, letterSpacing: '0.04em' }}>
                   What would you like to do?
                 </div>
-                {allPills.length > 0 && (
-                  // Bleed past both ancestors' padding (16px scroll area + 24px empty-state = 40px
-                  // each side) so the marquee actually spans the full screen, not just its column.
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 22, width: 'calc(100% + 80px)', marginLeft: -40, marginRight: -40 }}>
-                    {marqueeRow(marqueeRow1, 'left')}
-                    {marqueeRow(marqueeRow2, 'right')}
-                  </div>
-                )}
               </div>
             ) : (
               messages.map((m, i) => {
@@ -1651,8 +1625,12 @@ Rules:
               </div>
             )}
           </div>
-          {/* Compact pill row — active chat only. ⋯ opens every action; two are pinned inline. */}
-          {!empty && allPills.length > 0 && (
+          {/* Pill row — steady, always directly above the chat bar, in both an
+              empty and an active chat. It used to be two auto-scrolling marquee
+              rows floating mid-screen on a fresh chat, which moved the thing you
+              were trying to press. ⋯ opens every action; the pinned ones sit
+              inline. */}
+          {allPills.length > 0 && (
             <div style={{
               position: 'absolute', left: 0, right: 0, bottom: 0, height: AI_COMPACT_ROW_H,
               display: 'flex', alignItems: 'center', gap: 7, overflowX: 'auto', padding: '0 16px',
@@ -7850,7 +7828,7 @@ Rules:
     // auto-resumed. See AI-CHAT-PURPOSE-SPEC.md.
     const CHAT_PIVOT_AT = '2026-09-08T00:00:00Z';
 
-    function BottomZone({ active, activeMoreView, tabs, onChange, dark, isWide, onClearChat, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
+    function BottomZone({ active, activeMoreView, tabs, onChange, dark, isWide, pendingAttachments, onRemoveAttach, input, setInput, onSend, loading, zoneRef }) {
       const navTabs = tabs || TABS;
       const isAI = active === 'chat';
       const pending = pendingAttachments || [];
@@ -7925,17 +7903,6 @@ Rules:
                   resize: 'none', boxSizing: 'border-box', display: 'block', height: 20, maxHeight: 136,
                 }}
               />
-              {/* Clear this chat. Replaces the old attach button: uploads were the
-                  expensive path (AI Chat averaged 21k input tokens a call, which
-                  is pasted documents, not conversation) and that work belongs in
-                  Gemini now. */}
-              <button onClick={onClearChat} title="Clear this chat" style={{
-                flexShrink: 0, width: 32, height: isWide ? 36 : 32, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: AI_UI.primary, opacity: 0.7, fontSize: 17,
-              }}>
-                <i className="ti ti-trash" />
-              </button>
               {/* Send */}
               <button onClick={onSend} disabled={loading} style={{
                 flexShrink: 0, width: isWide ? 36 : 32, height: isWide ? 36 : 32, marginRight: 4, borderRadius: '50%', border: 'none',
@@ -9315,7 +9282,7 @@ Rules:
       const pillVisible = (p) => !p.roles || !p.roles.length || isAdmin || p.roles.some(r => myRoles.includes(r));
       const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false && pillVisible(p));
       // New Chat first, then every visible pill — there's only one unified mode now.
-      const shownPills = [NEW_CHAT_PILL].concat(effectivePills).concat(CALENDAR_PILLS).concat([DEAL_PILL]).concat(SOON_PILLS);
+      const shownPills = [NEW_CHAT_PILL].concat(effectivePills).concat(CALENDAR_PILLS).concat([DEAL_PILL]).concat(SOON_PILLS).concat([CLEAR_PILL]);
       useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
 
       // Per-conversation draft autosave (device-local). Key 'new' before a conversation exists.
@@ -9574,6 +9541,7 @@ Rules:
         if (!pill) return;
         if (pill.type === 'soon') { alert('“' + pill.label + '” is coming soon.'); return; }
         if (pill.id === 'new-chat' || pill.type === 'newchat') { newChat(); return; }
+        if (pill.type === 'clear') { clearChat(); return; }
         if (pill.id === 'fb-kpis' || (pill.config && pill.config.kpi)) {
           setTaskInstruction(null); setKpiInstruction(null);
           setMessages(prev => [...prev, { role: 'assistant', content: 'Let’s get started 👋 — would you like to fill out a form, or paste your notes?' }]);
@@ -9727,7 +9695,6 @@ Rules:
             }}
             dark={dark}
             isWide={isWide}
-            onClearChat={clearChat}
             pendingAttachments={pendingAttachments}
             onRemoveAttach={removeAttachment}
             input={input}

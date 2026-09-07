@@ -3788,7 +3788,7 @@ Rules:
             <div style={{ fontSize: '0.95rem', fontWeight: 600, color: ink, lineHeight: 1.25, marginBottom: 8, fontFamily: C.fontSans }}>{p.name}</div>
             {(p.group_tag || p.owner_id) && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                {p.group_tag && <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '3px 7px', borderRadius: 3, background: dark ? 'rgba(255,255,255,.08)' : '#F7F4EE', color: sub, fontWeight: 500, fontFamily: C.fontSans }}>{p.group_tag}</span>}
+                {p.group_tag && <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '3px 7px', borderRadius: 3, background: dark ? 'rgba(255,255,255,.08)' : '#F7F4EE', color: sub, fontWeight: 500, fontFamily: C.fontSans }}>{p.group_tag}</span>}{isCtc && !p.zoho_deal_id && <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 6px', borderRadius: 3, background: dark ? 'rgba(155,28,28,.22)' : '#FBE7E7', color: dark ? '#F08A8A' : '#9B1C1C', fontWeight: 500, fontFamily: C.fontSans, marginLeft: 6 }}>No Zoho deal</span>}
                 {p.owner_id && <span style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: '0.7rem', color: sub, fontFamily: C.fontSans }}>{avatar(p.owner_id, 16)}{nameOf(p.owner_id)}</span>}
               </div>
             )}
@@ -3822,7 +3822,7 @@ Rules:
           <div key={p.id} onClick={() => { setCurrent(p); setPview('detail'); setAddTask(''); setAddMs(''); }} style={{ display: 'flex', alignItems: 'center', padding: '10px 18px', borderBottom: `1px solid ${bord}`, gap: 12, cursor: 'pointer' }}>
             <div style={{ width: 224, flexShrink: 0 }}>
               <div style={{ fontSize: '0.82rem', fontWeight: 500, color: ink, marginBottom: p.group_tag ? 4 : 0, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
-              {p.group_tag && <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 6px', borderRadius: 3, background: dark ? 'rgba(255,255,255,.08)' : '#F7F4EE', color: sub, fontWeight: 500, fontFamily: C.fontSans }}>{p.group_tag}</span>}
+              {p.group_tag && <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 6px', borderRadius: 3, background: dark ? 'rgba(255,255,255,.08)' : '#F7F4EE', color: sub, fontWeight: 500, fontFamily: C.fontSans }}>{p.group_tag}</span>}{isCtc && !p.zoho_deal_id && <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 6px', borderRadius: 3, background: dark ? 'rgba(155,28,28,.22)' : '#FBE7E7', color: dark ? '#F08A8A' : '#9B1C1C', fontWeight: 500, fontFamily: C.fontSans, marginLeft: 6 }}>No Zoho deal</span>}
             </div>
             <div style={{ width: 146, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
               {p._nextMs ? (
@@ -3923,6 +3923,9 @@ Rules:
           <React.Fragment>
             {fld('Owner', p.owner_id ? <React.Fragment>{avatar(p.owner_id, 16)}{nameOf(p.owner_id)}</React.Fragment> : '—')}
             {isCtc && fld('Agent', p.agent_id ? <React.Fragment>{avatar(p.agent_id, 16)}{nameOf(p.agent_id)}</React.Fragment> : '—')}
+            {isCtc && fld('Zoho deal', p.zoho_deal_id
+              ? <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><i className="ti ti-link" style={{ fontSize: 12, color: gold }} />{p.zoho_deal_name || 'Linked'}</span>
+              : <span className="nodeal" style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 7px', borderRadius: 3, background: dark ? 'rgba(155,28,28,.22)' : '#FBE7E7', color: dark ? '#F08A8A' : '#9B1C1C', fontWeight: 500 }}>No Zoho deal</span>)}
             {fld('Type', KL.singular)}
             {fld(KL.groupLabel, p.group_tag || '—')}
             {fld('Status', <React.Fragment><span style={{ width: 7, height: 7, borderRadius: '50%', background: projStatusMeta(p.status).color }} />{projStatusMeta(p.status).label}</React.Fragment>)}

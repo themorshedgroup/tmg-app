@@ -10239,7 +10239,20 @@ function ProjectsSurface({
         fontWeight: 500,
         fontFamily: C.fontSans
       }
-    }, p.group_tag), p.owner_id && /*#__PURE__*/React.createElement("span", {
+    }, p.group_tag), isCtc && !p.zoho_deal_id && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.58rem',
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        padding: '2px 6px',
+        borderRadius: 3,
+        background: dark ? 'rgba(155,28,28,.22)' : '#FBE7E7',
+        color: dark ? '#F08A8A' : '#9B1C1C',
+        fontWeight: 500,
+        fontFamily: C.fontSans,
+        marginLeft: 6
+      }
+    }, "No Zoho deal"), p.owner_id && /*#__PURE__*/React.createElement("span", {
       style: {
         display: 'flex',
         alignItems: 'center',
@@ -10385,7 +10398,20 @@ function ProjectsSurface({
         fontWeight: 500,
         fontFamily: C.fontSans
       }
-    }, p.group_tag)), /*#__PURE__*/React.createElement("div", {
+    }, p.group_tag), isCtc && !p.zoho_deal_id && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.58rem',
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        padding: '2px 6px',
+        borderRadius: 3,
+        background: dark ? 'rgba(155,28,28,.22)' : '#FBE7E7',
+        color: dark ? '#F08A8A' : '#9B1C1C',
+        fontWeight: 500,
+        fontFamily: C.fontSans,
+        marginLeft: 6
+      }
+    }, "No Zoho deal")), /*#__PURE__*/React.createElement("div", {
       style: {
         width: 146,
         flexShrink: 0,
@@ -10801,7 +10827,31 @@ function ProjectsSurface({
         textAlign: 'right'
       }
     }, v));
-    return /*#__PURE__*/React.createElement(React.Fragment, null, fld('Owner', p.owner_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.owner_id, 16), nameOf(p.owner_id)) : '—'), isCtc && fld('Agent', p.agent_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.agent_id, 16), nameOf(p.agent_id)) : '—'), fld('Type', KL.singular), fld(KL.groupLabel, p.group_tag || '—'), fld('Status', /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    return /*#__PURE__*/React.createElement(React.Fragment, null, fld('Owner', p.owner_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.owner_id, 16), nameOf(p.owner_id)) : '—'), isCtc && fld('Agent', p.agent_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.agent_id, 16), nameOf(p.agent_id)) : '—'), isCtc && fld('Zoho deal', p.zoho_deal_id ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-link",
+      style: {
+        fontSize: 12,
+        color: gold
+      }
+    }), p.zoho_deal_name || 'Linked') : /*#__PURE__*/React.createElement("span", {
+      className: "nodeal",
+      style: {
+        fontSize: 11,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        padding: '2px 7px',
+        borderRadius: 3,
+        background: dark ? 'rgba(155,28,28,.22)' : '#FBE7E7',
+        color: dark ? '#F08A8A' : '#9B1C1C',
+        fontWeight: 500
+      }
+    }, "No Zoho deal")), fld('Type', KL.singular), fld(KL.groupLabel, p.group_tag || '—'), fld('Status', /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
       style: {
         width: 7,
         height: 7,

@@ -687,7 +687,7 @@ const EXTRACT_SYSTEM = [
   "- If there are no such events, return {\"events\":[]}. Never invent one.",
 ].join("\n");
 
-async function askClaude(apiKey: string, prompt: string, maxTokens = 900) {
+async function askClaude(apiKey: string, prompt: string, maxTokens = 900, sb: any = null) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
@@ -698,6 +698,22 @@ async function askClaude(apiKey: string, prompt: string, maxTokens = 900) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error?.message || "Claude API error");
+  // Log the spend. This runs hourly on cron with no signed-in user, so user_id
+  // is null — the admin usage card's per-person view skips null rows on
+  // purpose, while the per-feature and per-model views count them. Without
+  // this the crawler was the single largest consumer of Claude tokens and
+  // showed up nowhere in the app at all.
+  if (sb) {
+    try {
+      await sb.from("usage_log").insert({
+        user_id: null,
+        feature: "christies_events",
+        model: data.model || MODEL,
+        input_tokens: data.usage?.input_tokens ?? 0,
+        output_tokens: data.usage?.output_tokens ?? 0,
+      });
+    } catch (_) { /* never fail the crawl over logging */ }
+  }
   return (data?.content || []).filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("\n").trim();
 }
 function parseJsonObject(text: string): any | null {
@@ -1105,7 +1121,7 @@ async function syncSource(sb: any, src: any, opts: { lookbackDays: number; anthr
         "BODY (fetched live, not stored):",
         body.slice(0, MAX_BODY_CHARS),
       ].join("\n");
-      extracted = parseJsonObject(await askClaude(opts.anthropicKey, prompt));
+      extracted = parseJsonObject(await askClaude(opts.anthropicKey, prompt, 900, sb));
       // Recorded only on a SUCCESSFUL call, and before the events are pushed: a
       // rate-limited or timed-out call must be retried next run, but an email the
       // model has answered on — even with "no events here" — must never be paid

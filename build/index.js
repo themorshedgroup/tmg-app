@@ -5709,6 +5709,11 @@ function AdminUsers() {
 
 // Claude pricing — USD per 1,000,000 tokens, matched by model-id substring.
 // Update these when Anthropic changes prices; historical rows re-cost on view.
+// $ per million tokens, from Anthropic's published pricing (checked
+// 2026-09-07). Longest matching key wins — see priceFor — so 'claude-opus-4-8'
+// can't be swallowed by 'claude-opus-4', which is a different price entirely
+// ($5/$25 vs the retired Opus 4's $15/$75) and was overstating Opus 4.8 spend
+// threefold.
 const PRICING = {
   'claude-3-5-haiku': {
     in: 0.80,
@@ -5726,13 +5731,49 @@ const PRICING = {
     in: 15.00,
     out: 75.00
   },
+  'claude-haiku-4-5': {
+    in: 1.00,
+    out: 5.00
+  },
   'claude-haiku-4': {
     in: 1.00,
     out: 5.00
   },
+  'claude-sonnet-5': {
+    in: 2.00,
+    out: 10.00
+  },
+  'claude-sonnet-4-6': {
+    in: 3.00,
+    out: 15.00
+  },
+  'claude-sonnet-4-5': {
+    in: 3.00,
+    out: 15.00
+  },
   'claude-sonnet-4': {
     in: 3.00,
     out: 15.00
+  },
+  'claude-opus-5': {
+    in: 5.00,
+    out: 25.00
+  },
+  'claude-opus-4-8': {
+    in: 5.00,
+    out: 25.00
+  },
+  'claude-opus-4-7': {
+    in: 5.00,
+    out: 25.00
+  },
+  'claude-opus-4-6': {
+    in: 5.00,
+    out: 25.00
+  },
+  'claude-opus-4-5': {
+    in: 5.00,
+    out: 25.00
   },
   'claude-opus-4': {
     in: 15.00,
@@ -5745,13 +5786,18 @@ const PRICING = {
     out: 32.00
   }
 };
+// Longest key first, so a model matches its own price and not a shorter
+// prefix's. Returns null for a model we have no price for — the cost is then
+// shown as unpriced rather than quietly billed at some other model's rate,
+// which is how Sonnet 5 spend was being costed as Sonnet 3.5.
 const priceFor = model => {
   const m = model || '';
-  const k = Object.keys(PRICING).find(x => m.includes(x));
-  return PRICING[k] || PRICING['claude-3-5-sonnet'];
+  const k = Object.keys(PRICING).filter(x => m.includes(x)).sort((a, b) => b.length - a.length)[0];
+  return k ? PRICING[k] : null;
 };
 const rowCost = r => {
   const p = priceFor(r.model);
+  if (!p) return 0;
   return (Number(r.input_tokens) || 0) / 1e6 * p.in + (Number(r.output_tokens) || 0) / 1e6 * p.out;
 };
 const fmtTok = n => {
@@ -5763,6 +5809,7 @@ const fmtUsd = n => '$' + (Number(n) || 0).toFixed(2);
 // Friendly names for the feature tags written to usage_log by each surface.
 const FEATURE_LABEL = {
   ai_chat: 'AI Chat',
+  christies_events: "Christie's Crawler",
   kpi: 'KPI Entry',
   add_todo: 'Add To-Do',
   intake_form: 'Intake Forms',
@@ -5854,6 +5901,9 @@ function AdminUsage() {
       groups[k].outTok += Number(r.output_tokens) || 0;
       groups[k].calls += Number(r.calls) || 0;
       groups[k].cost += rowCost(r);
+      // Tokens we have no published price for — surfaced instead of
+      // being silently costed at another model's rate.
+      if (!priceFor(r.model)) groups[k].unpriced = (groups[k].unpriced || 0) + (Number(r.input_tokens) || 0) + (Number(r.output_tokens) || 0);
     });
   }
   const list = Object.entries(groups).map(([k, v]) => ({
@@ -5865,12 +5915,14 @@ function AdminUsage() {
     inTok: s.inTok + u.inTok,
     outTok: s.outTok + u.outTok,
     calls: s.calls + u.calls,
-    cost: s.cost + u.cost
+    cost: s.cost + u.cost,
+    unpriced: s.unpriced + (u.unpriced || 0)
   }), {
     inTok: 0,
     outTok: 0,
     calls: 0,
-    cost: 0
+    cost: 0,
+    unpriced: 0
   });
   const overCap = Object.entries(monthByUser).filter(([id, v]) => v.cost > MONTHLY_CAP_USD).map(([id, v]) => ({
     id,
@@ -5918,7 +5970,33 @@ function AdminUsage() {
       marginBottom: 8,
       lineHeight: 1.5
     }
-  }, "Estimated Claude spend, approximate (public token prices). Excludes voice-note transcription minutes (billed by OpenAI Whisper)."), model && /*#__PURE__*/React.createElement("div", {
+  }, "Estimated Claude spend, approximate (public token prices). Excludes voice-note transcription minutes (billed by OpenAI Whisper)."), total.unpriced > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 8,
+      background: '#FFF8E6',
+      border: `1px solid ${C.gold}55`,
+      borderRadius: 10,
+      padding: '8px 12px',
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-alert-triangle",
+    style: {
+      fontSize: 14,
+      color: C.gold,
+      marginTop: 1,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textSecondary,
+      fontFamily: C.fontSans,
+      lineHeight: 1.5
+    }
+  }, fmtTok(total.unpriced), " tokens came from a model with no price on file, so they are counted but cost nothing here. The real spend is higher than shown \u2014 add the model to PRICING.")), model && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: '0.68rem',
       color: C.textMuted,

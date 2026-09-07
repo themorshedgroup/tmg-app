@@ -5373,7 +5373,7 @@ Rules:
       return out;
     }
 
-    function CallsTab({ dark, ownerName, isAdmin }) {
+    function CallsTab({ dark, ownerName, ownerEmail, isAdmin }) {
       const J = "'Jost', sans-serif";
       const [view, setView] = useState('list');       // 'list' | 'capacity' (admin only)
       const [agent, setAgent] = useState('');         // '' = all agents; otherwise an owner name
@@ -6046,6 +6046,7 @@ Rules:
               dark={dark}
               ownerId={logOwnerId}
               ownerName={logOwnerName}
+              ownerEmail={ownerEmail}
               dateIso={dates[day] || cIso(new Date())}
               onDone={(name, items) => {
                 setKpiToast('Logged for ' + name + ': ' + items.map(i => i.count + ' × ' + (i.subject || i.type)).join(', '));
@@ -6091,7 +6092,7 @@ Rules:
     //
     //  So this sheet does the two things that one can't: pick any contact, and
     //  show the cadence facts BEFORE the choice is made.
-    function AddKpiSheet({ dark, ownerId, ownerName, dateIso, onDone, onClose }) {
+    function AddKpiSheet({ dark, ownerId, ownerName, ownerEmail, dateIso, onDone, onClose }) {
       const J = "'Jost', sans-serif";
       const [meta, setMeta] = useState(null);
       const [q, setQ] = useState('');
@@ -6170,28 +6171,31 @@ Rules:
       const callType = picklist.find(o => /^call$/i.test(o)) || picklist.find(o => /call/i.test(o));
       // Call options are subject-driven: both are Task Type "Call", and only
       // the subject separates a touch from a follow-up.
-      const callOpts = callType ? [
-        { key: 'touch', label: 'Touch Call', type: callType, subject: (n) => (tier ? tier + ' ' : '') + 'Touch Call: ' + n },
-        { key: 'follow', label: 'Follow Up Call', type: callType, subject: (n) => 'Follow Up Call : ' + n },
-      ] : [];
-      const otherOpts = LOG_ACTIVITIES
-        .map(a => ({ ...a, type: picklist.find(o => a.match.test(o)) }))
-        .filter(a => a.type)
-        .map(a => ({ key: a.key, label: a.label, type: a.type, requireCount: a.requireCount, subject: null }));
-      const options = callOpts.concat(otherOpts);
+      // The chat form's six, verbatim — KPI_OPTIONS holds the Agent_KPIs
+      // picklist strings, so the two screens speak one vocabulary instead of
+      // the Tasks Task_Type names this sheet used to mix in.
+      const options = KPI_OPTIONS.map(k => ({ key: k, label: k, requireCount: /hotzone/i.test(k) }));
 
       const chosen = options.filter(o => sel[o.key] !== undefined);
       const unfilled = chosen.filter(o => !(Number(sel[o.key]) > 0));
-      const items = chosen.filter(o => Number(sel[o.key]) > 0).map(o => ({
-        type: o.type, count: Number(sel[o.key]),
-        subject: o.subject ? o.subject(contact ? contact.name : '') : null,
+      const filled = chosen.filter(o => Number(sel[o.key]) > 0);
+      // Calls are written straight to Tasks; everything else goes on an
+      // Agent_KPI record, which is what raises its own Note / Hotzone / Pop-by
+      // / Lunch tasks. Splitting is what keeps each one counted exactly once.
+      const callPicks = filled.filter(o => CALL_KPI_LABELS.includes(o.key));
+      const otherPicks = filled.filter(o => !CALL_KPI_LABELS.includes(o.key));
+      const items = callPicks.map(o => ({
+        type: callType, count: Number(sel[o.key]),
+        subject: o.key === 'Touch Call'
+          ? (tier ? tier + ' ' : '') + 'Touch Call: ' + (contact ? contact.name : '')
+          : 'Follow Up Call : ' + (contact ? contact.name : ''),
       }));
-      const total = items.reduce((n, it) => n + it.count, 0);
-      const canAdd = !!contact && !!items.length && !unfilled.length && total <= LOG_MAX_TASKS && !busy;
+      const total = filled.reduce((n, o) => n + Number(sel[o.key]), 0);
+      const canAdd = !!contact && !!filled.length && !unfilled.length && total <= LOG_MAX_TASKS && !busy;
       // Claiming a touch call the cadence does not support is exactly what the
       // validation queue exists to catch — so it is called out here, before it
       // is written, rather than by somebody else a week later.
-      const claimingEarlyTouch = sel.touch !== undefined && dueForTouch === false;
+      const claimingEarlyTouch = sel['Touch Call'] !== undefined && dueForTouch === false;
 
       function toggle(o) {
         setSel(s => { const n = { ...s }; if (n[o.key] !== undefined) delete n[o.key]; else n[o.key] = o.requireCount ? '' : 1; return n; });
@@ -6206,8 +6210,26 @@ Rules:
         if (!canAdd) return;
         setBusy(true); setErr('');
         try {
-          await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: dateIso || cIso(new Date()), ownerId });
-          onDone(contact.name, items);
+          const when = dateIso || cIso(new Date());
+          const done = [];
+          if (items.length) {
+            await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: when, ownerId });
+            items.forEach(it => done.push({ count: it.count, subject: it.subject }));
+          }
+          if (otherPicks.length) {
+            const hz = otherPicks.find(o => /hotzone/i.test(o.key));
+            await createAgentKpi({
+              owner: ownerName, owner_email: ownerEmail || null, kpi_date: when,
+              persons: [{
+                name: contact.name, contact_id: contact.id,
+                kpis: otherPicks.map(o => o.key),
+                hotzone_count: hz ? Number(sel[hz.key]) : null,
+              }],
+              others: [],
+            });
+            otherPicks.forEach(o => done.push({ count: Number(sel[o.key]), subject: o.key }));
+          }
+          onDone(contact.name, done);
           onClose();
         } catch (e) {
           const p = e && e.partial;
@@ -6336,9 +6358,10 @@ Rules:
                     You’re logging a touch call {gapDays} days after the last one, against a {interval}-day cadence. This is the case that gets sent for validation.
                   </div>
                 )}
-                {items.length > 0 && (
+                {(items.length > 0 || otherPicks.length > 0) && (
                   <div style={{ fontFamily: J, fontSize: 8, color: mutedCol, marginBottom: 8, lineHeight: 1.6 }}>
-                    {items.map((it, i) => <div key={i}>{it.count} × {it.subject || activitySubject(it.type, contact.name)}</div>)}
+                    {items.map((it, i) => <div key={'c' + i}>{it.count} × {it.subject}</div>)}
+                    {otherPicks.map(o => <div key={'o' + o.key}>{Number(sel[o.key])} × {o.key} — {contact.name}</div>)}
                   </div>
                 )}
                 {err && <div style={{ fontFamily: J, fontSize: 9, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>{err}</div>}
@@ -9637,7 +9660,7 @@ Rules:
               );
             })()}
             {activeTab === 'teamchat' && <ChatTab dark={dark} />}
-            {activeTab === 'calls' && <CallsTab dark={dark} ownerName={myName} isAdmin={isAdmin} />}
+            {activeTab === 'calls' && <CallsTab dark={dark} ownerName={myName} ownerEmail={(profile && profile.email) || null} isAdmin={isAdmin} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'deals' && <DealsTab />}
             {activeTab === 'more' && (

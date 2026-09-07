@@ -1590,6 +1590,133 @@ async function matchZohoContacts(name) {
   if (!ok) throw new Error(data.error || 'Contact match failed');
   return data.matches || [];
 }
+// A call is ALWAYS written as a Task, never as an Agent_KPI person row —
+// whichever screen it was logged from.
+//
+// An Agent_KPI row carrying "Touch Call" is what makes Zoho raise a
+// "Validate <tier> Touch Call" task for a human to check by hand, because
+// the agent had no way to see when the contact was last called and so could
+// only ever claim a touch. The Calls tab now shows that date up front, so
+// the check has no purpose — and the report counts Tasks by Task Type
+// anyway, so a call written straight to Tasks is counted exactly once,
+// with no chore attached.
+//
+// Everything that is NOT a call stays on the Agent_KPI record, which
+// generates its own Note / Hotzone / Pop-by / Lunch tasks. Splitting rather
+// than duplicating is what keeps the count honest: a call stripped out here
+// is not on the record, so nothing generates a second row for it.
+const CALL_KPI_LABELS = ['Touch Call', 'Follow Up Call'];
+
+// A Zoho USER id for a name, harvested from tasks that user already owns.
+// There is no users.READ scope on this grant, so a task's Owner is the only
+// available lookup. Null means "could not identify" — the caller must treat
+// that as a warning, because an ownerless task is credited to the API
+// connection instead of the agent.
+const ZOHO_USER_ID_CACHE = {};
+async function resolveZohoUserIdByName(name) {
+  const key = String(name || '').trim().toLowerCase();
+  if (!key) return null;
+  if (key in ZOHO_USER_ID_CACHE) return ZOHO_USER_ID_CACHE[key];
+  let id = null;
+  try {
+    const r = await callZoho({
+      action: 'search_tasks',
+      owner: name,
+      per_page: 200
+    });
+    if (r.ok) {
+      const counts = {};
+      (r.data.tasks || []).forEach(t => {
+        if (t.Owner && t.Owner.id) counts[t.Owner.id] = (counts[t.Owner.id] || 0) + 1;
+      });
+      id = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
+    }
+  } catch (e) {
+    return null;
+  } // unknown, so don't cache it as "none"
+  ZOHO_USER_ID_CACHE[key] = id;
+  return id;
+}
+
+// Writes every call on a KPI payload straight to Tasks. Returns what landed
+// so the confirmation can say so honestly.
+async function writeCallKpisAsTasks(payload) {
+  const rows = [];
+  (payload.persons || []).forEach(p => {
+    const calls = (p.kpis || []).filter(k => CALL_KPI_LABELS.includes(k));
+    if (calls.length && p.contact_id) rows.push({
+      person: p,
+      calls
+    });
+  });
+  if (!rows.length) return {
+    made: 0,
+    failed: [],
+    skipped: 0
+  };
+  const meta = await resolveTaskTypes();
+  const opts = meta && meta.options || [];
+  const callType = opts.find(o => /^call$/i.test(o)) || opts.find(o => /call/i.test(o));
+  if (!callType) return {
+    made: 0,
+    failed: ['Zoho has no "Call" task type.'],
+    skipped: rows.length
+  };
+  const ownerId = await resolveZohoUserIdByName(payload.owner);
+  const dateIso = payload.kpi_date || kpiTodayStr();
+  let made = 0;
+  const failed = [];
+  for (const r of rows) {
+    // The tier belongs to the contact, so the subject reads the way every
+    // other cadence task in this org reads: "B Touch Call: Jane Doe".
+    let tier = null;
+    try {
+      const h = await lastCallFor(r.person.contact_id);
+      tier = h && h.tier || null;
+    } catch (e) {}
+    const items = r.calls.map(k => ({
+      type: callType,
+      count: 1,
+      subject: k === 'Touch Call' ? (tier ? tier + ' ' : '') + 'Touch Call: ' + r.person.name : 'Follow Up Call : ' + r.person.name
+    }));
+    try {
+      const res = await createActivityTasks({
+        items,
+        typeField: meta.api,
+        contact: {
+          id: r.person.contact_id,
+          name: r.person.name
+        },
+        dateIso,
+        ownerId
+      });
+      made += res.made || 0;
+    } catch (e) {
+      const part = e && e.partial;
+      if (part && part.made) made += part.made;
+      failed.push(r.person.name + ' — ' + (e && e.message || e));
+    }
+  }
+  return {
+    made,
+    failed,
+    ownerUnknown: !ownerId
+  };
+}
+
+// The same payload with every call removed, for the Agent_KPI record. A
+// person left with no KPIs at all drops off it entirely.
+function withoutCallKpis(payload) {
+  const persons = (payload.persons || []).map(p => ({
+    ...p,
+    kpis: (p.kpis || []).filter(k => !CALL_KPI_LABELS.includes(k))
+  })).filter(p => (p.kpis || []).length);
+  return {
+    ...payload,
+    persons
+  };
+}
+
 // Client_Classification is a real picklist on this org's Contacts module —
 // verified live, and already carried by ~1,870 of 2,112 contacts (A 280,
 // B 736, C 853). Mobile is a plain writable phone field. Both are REQUIRED
@@ -24929,8 +25056,19 @@ function App({
     let content;
     if (KPI_LIVE) {
       try {
-        const res = await createAgentKpi(payload);
-        content = 'Submitted to Zoho — Agent KPI created' + (res && res.id ? ' (id ' + res.id + ')' : '') + '.\n\n' + preview;
+        // Calls go straight to Tasks — same as the Calls tab — so no
+        // "Validate ... Touch Call" chore is ever raised for them. What is
+        // left goes on the Agent_KPI record as before.
+        const callRes = await writeCallKpisAsTasks(payload);
+        const rest = withoutCallKpis(payload);
+        const needsRecord = (rest.persons || []).length > 0 || (rest.others || []).length > 0 || rest.ctc_hours !== null && rest.ctc_hours !== undefined && rest.ctc_hours !== '';
+        const res = needsRecord ? await createAgentKpi(rest) : null;
+        const bits = [];
+        if (callRes.made) bits.push(callRes.made + ' call' + (callRes.made === 1 ? '' : 's') + ' logged as tasks (no validation needed)');
+        if (res) bits.push('Agent KPI created' + (res.id ? ' (id ' + res.id + ')' : ''));
+        content = (bits.length ? 'Submitted to Zoho — ' + bits.join('; ') + '.' : 'Nothing to submit.') + '\n\n' + preview;
+        if (callRes.failed && callRes.failed.length) content += '\n\n⚠️ Some calls did not save:\n' + callRes.failed.map(f => '• ' + f).join('\n');
+        if (callRes.made && callRes.ownerUnknown) content += '\n\n⚠️ Could not match you to a Zoho user, so those call tasks may be credited to the API connection rather than to you.';
         // Zoho silently reassigns the record when the submitter can't be matched to a Zoho
         // user — say so here rather than letting it be found later in the CRM.
         if (res && res.owner_warning) content += '\n\n⚠️ Owner not set to you: ' + res.owner_warning;

@@ -24397,6 +24397,16 @@ function App({
     if (!m.href && ROUTE_MORE.indexOf(m.id) === -1) console.warn('[nav] "' + m.id + '" is missing from ROUTE_MORE — refreshing it will fall back to AI Chat.');
   });
   const allItemMap = Object.fromEntries(TABS.concat(allMoreDefs).concat([tasksNavItem]).map(it => [it.id, it]));
+
+  // Browser tab title follows the open tab — "Calls - TMG App" — so a
+  // pinned or backgrounded tab says which screen it is, and history entries
+  // are distinguishable. Falls back to the bare app name for anything
+  // unlabelled.
+  useEffect(() => {
+    const id = activeTab === 'more' ? moreView || 'directory' : activeTab;
+    const label = (allItemMap[id] || {}).label || '';
+    document.title = label ? label + ' - TMG App' : 'TMG App';
+  }, [activeTab, moreView]);
   // Build nav + more from config, falling back to defaults.
   const buildLists = () => {
     if (!navConfig) return {

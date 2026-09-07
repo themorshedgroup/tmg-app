@@ -8404,6 +8404,36 @@ function MailboxAdminPanel({
   useEffect(() => {
     load();
   }, []);
+
+  // Per-person Gmail filter, e.g. label:CTC. This narrows the QUERY sent
+  // to Gmail, so anything outside it is never fetched in the first place —
+  // not fetched and then discarded. Someone can be included without the
+  // app ever touching the rest of their mailbox.
+  const [filterDraft, setFilterDraft] = useState({});
+  async function save(m, patch) {
+    setBusy(m.user_id);
+    setErr('');
+    // enabled is required by the function, so carry the current value
+    // through when we're only changing the filter.
+    const {
+      ok,
+      data
+    } = await callCtcEmails({
+      action: 'set_mailbox',
+      user_id: m.user_id,
+      enabled: patch.enabled !== undefined ? patch.enabled : m.enabled,
+      ...(patch.query_extra !== undefined ? {
+        query_extra: patch.query_extra
+      } : {})
+    });
+    setBusy(null);
+    if (!ok) {
+      setErr(data.error || 'That did not go through.');
+      return;
+    }
+    if (data.warning) setErr(data.warning);
+    load();
+  }
   async function toggle(m) {
     setBusy(m.user_id);
     setErr('');
@@ -8486,7 +8516,11 @@ function MailboxAdminPanel({
       lineHeight: 1.6,
       marginBottom: 12
     }
-  }, "Switching someone on starts pulling their received mail into the Emails tab every 15 minutes. Only sender, subject, date and a short preview are stored \u2014 never the message itself. Nothing is collected until that person has also connected their own Google account, and they can disconnect it at any time."), err && /*#__PURE__*/React.createElement("div", {
+  }, "Switching someone on starts pulling their received mail into the Emails tab every 15 minutes. Only sender, subject, date and a short preview are stored \u2014 never the message itself. Nothing is collected until that person has also connected their own Google account, and they can disconnect it at any time.", /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8
+    }
+  }, "Use ", /*#__PURE__*/React.createElement("strong", null, "Only"), " to limit a person to part of their mailbox \u2014 ", /*#__PURE__*/React.createElement("code", null, "label:CTC"), " reads just the emails they've labelled CTC, and the rest is never even requested from Gmail. Leave it blank to read the whole inbox. Labels with spaces need quotes: ", /*#__PURE__*/React.createElement("code", null, "label:\"CTC Files\""), ".")), err && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12.5,
       color: '#9B1C1C',
@@ -8508,11 +8542,14 @@ function MailboxAdminPanel({
   }, "Nobody has the Sales Agent or Transaction Coordinator role yet.") : rows.map(m => /*#__PURE__*/React.createElement("div", {
     key: m.user_id,
     style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 12,
       padding: '11px 2px',
       borderBottom: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -8559,7 +8596,50 @@ function MailboxAdminPanel({
       background: m.enabled ? dark ? 'rgba(15,110,86,.16)' : '#E6F2EC' : 'transparent',
       color: m.enabled ? teal : sub
     }
-  }, busy === m.user_id ? '…' : m.enabled ? 'On' : 'Off'))))));
+  }, busy === m.user_id ? '…' : m.enabled ? 'On' : 'Off')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginTop: 7
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: sub,
+      fontFamily: C.fontSans,
+      flexShrink: 0
+    }
+  }, "Only"), /*#__PURE__*/React.createElement("input", {
+    value: filterDraft[m.user_id] !== undefined ? filterDraft[m.user_id] : m.query_extra || '',
+    onChange: e => setFilterDraft(d => ({
+      ...d,
+      [m.user_id]: e.target.value
+    })),
+    onKeyDown: e => {
+      if (e.key === 'Enter') e.currentTarget.blur();
+    },
+    onBlur: e => {
+      const v = e.target.value.trim();
+      if (v === (m.query_extra || '')) return;
+      save(m, {
+        query_extra: v
+      });
+    },
+    placeholder: "whole inbox \u2014 or e.g. label:CTC",
+    style: {
+      flex: 1,
+      minWidth: 0,
+      padding: '5px 8px',
+      background: dark ? '#06101F' : '#F7F4EE',
+      border: `1px solid ${bord}`,
+      borderRadius: 6,
+      color: ink,
+      fontSize: 12,
+      outline: 'none',
+      fontFamily: C.fontSans
+    }
+  })))))));
 }
 function CtcEmailsTab({
   dark,

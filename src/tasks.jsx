@@ -3134,6 +3134,27 @@ Rules:
       }
       useEffect(() => { load(); }, []);
 
+      // Per-person Gmail filter, e.g. label:CTC. This narrows the QUERY sent
+      // to Gmail, so anything outside it is never fetched in the first place —
+      // not fetched and then discarded. Someone can be included without the
+      // app ever touching the rest of their mailbox.
+      const [filterDraft, setFilterDraft] = useState({});
+
+      async function save(m, patch) {
+        setBusy(m.user_id); setErr('');
+        // enabled is required by the function, so carry the current value
+        // through when we're only changing the filter.
+        const { ok, data } = await callCtcEmails({
+          action: 'set_mailbox', user_id: m.user_id,
+          enabled: patch.enabled !== undefined ? patch.enabled : m.enabled,
+          ...(patch.query_extra !== undefined ? { query_extra: patch.query_extra } : {}),
+        });
+        setBusy(null);
+        if (!ok) { setErr(data.error || 'That did not go through.'); return; }
+        if (data.warning) setErr(data.warning);
+        load();
+      }
+
       async function toggle(m) {
         setBusy(m.user_id); setErr('');
         const { ok, data } = await callCtcEmails({ action: 'set_mailbox', user_id: m.user_id, enabled: !m.enabled });
@@ -3154,12 +3175,16 @@ Rules:
             <div style={{ padding: 16, overflowY: 'auto' }}>
               <div style={{ fontSize: 12.5, color: sub, fontFamily: C.fontSans, lineHeight: 1.6, marginBottom: 12 }}>
                 Switching someone on starts pulling their received mail into the Emails tab every 15 minutes. Only sender, subject, date and a short preview are stored — never the message itself. Nothing is collected until that person has also connected their own Google account, and they can disconnect it at any time.
+                <div style={{ marginTop: 8 }}>
+                  Use <strong>Only</strong> to limit a person to part of their mailbox — <code>label:CTC</code> reads just the emails they've labelled CTC, and the rest is never even requested from Gmail. Leave it blank to read the whole inbox. Labels with spaces need quotes: <code>label:"CTC Files"</code>.
+                </div>
               </div>
               {err && <div style={{ fontSize: 12.5, color: '#9B1C1C', marginBottom: 10, fontFamily: C.fontSans }}>{err}</div>}
               {loading ? <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans }}>Loading…</div>
                 : !rows.length ? <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans }}>Nobody has the Sales Agent or Transaction Coordinator role yet.</div>
                 : rows.map(m => (
-                  <div key={m.user_id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 2px', borderBottom: `1px solid ${bord}` }}>
+                  <div key={m.user_id} style={{ padding: '11px 2px', borderBottom: `1px solid ${bord}` }}>
+                   <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13.5, color: ink, fontFamily: C.fontSans }}>{m.name || m.email}</div>
                       <div style={{ fontSize: 11.5, color: sub, fontFamily: C.fontSans, marginTop: 2 }}>
@@ -3172,6 +3197,22 @@ Rules:
                     <button onClick={() => toggle(m)} disabled={busy === m.user_id} style={{ flexShrink: 0, padding: '6px 12px', borderRadius: 16, fontSize: 12, fontFamily: C.fontSans, cursor: busy === m.user_id ? 'default' : 'pointer', border: `1px solid ${m.enabled ? teal : bord}`, background: m.enabled ? (dark ? 'rgba(15,110,86,.16)' : '#E6F2EC') : 'transparent', color: m.enabled ? teal : sub }}>
                       {busy === m.user_id ? '…' : m.enabled ? 'On' : 'Off'}
                     </button>
+                   </div>
+                   {/* Narrow what we ask Gmail for. Blank = the whole inbox. */}
+                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7 }}>
+                     <span style={{ fontSize: 11, color: sub, fontFamily: C.fontSans, flexShrink: 0 }}>Only</span>
+                     <input
+                       value={filterDraft[m.user_id] !== undefined ? filterDraft[m.user_id] : (m.query_extra || '')}
+                       onChange={e => setFilterDraft(d => ({ ...d, [m.user_id]: e.target.value }))}
+                       onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                       onBlur={e => {
+                         const v = e.target.value.trim();
+                         if (v === (m.query_extra || '')) return;
+                         save(m, { query_extra: v });
+                       }}
+                       placeholder="whole inbox — or e.g. label:CTC"
+                       style={{ flex: 1, minWidth: 0, padding: '5px 8px', background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 6, color: ink, fontSize: 12, outline: 'none', fontFamily: C.fontSans }} />
+                   </div>
                   </div>
                 ))}
             </div>

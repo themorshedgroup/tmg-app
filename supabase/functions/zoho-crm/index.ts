@@ -939,20 +939,34 @@ Deno.serve(async (req) => {
       // page visit is a ~100-call, 90+ second fetch. Uses the Search Records API (same one
       // search_tasks already uses) since the plain list endpoint has no criteria filtering.
       const statusNot = typeof body.status_not === "string" && body.status_not ? body.status_not : null;
+      // owner_id: narrow the pull to ONE Zoho user, server-side. Owner cannot be
+      // filtered by NAME without the ZohoCRM.users.READ scope this org's grant
+      // does not have — but every task record carries Owner.id, so the caller can
+      // learn its own id from its own tasks and pass it here. Worth doing for two
+      // reasons beyond speed: it keeps a per-agent pull well under Zoho's ~2,000
+      // record paging ceiling (past which a month silently goes incomplete), and
+      // it stops the whole team's calls being shipped to one agent's browser.
+      // Digits only — the value goes straight into a criteria string.
+      const ownerId = /^[0-9]{1,32}$/.test(String(body.owner_id || "")) ? String(body.owner_id) : null;
       const fields =
         Array.isArray(body.fields) && body.fields.length
           ? body.fields.filter(Boolean).join(",")
           : "Owner,Subject,Status,Due_Date,Closed_Time,Description,Who_Id,What_Id,Priority";
 
-      const base = statusNot
+      // Criteria filtering only exists on the Search endpoint, so any filter at
+      // all forces that path.
+      const useSearch = !!(statusNot || ownerId);
+      const base = useSearch
         ? `https://${apiDomain}/crm/v6/${moduleName}/search`
         : `https://${apiDomain}/crm/v6/${moduleName}`;
       const url = new URL(base);
       url.searchParams.set("fields", fields);
       url.searchParams.set("per_page", String(per));
-      if (statusNot) {
-        const val = String(statusNot).replace(/[()]/g, "").slice(0, 80);
-        url.searchParams.set("criteria", `(Status:not_equal:${val})`);
+      if (useSearch) {
+        const crit: string[] = [];
+        if (statusNot) crit.push(`(Status:not_equal:${String(statusNot).replace(/[()]/g, "").slice(0, 80)})`);
+        if (ownerId) crit.push(`(Owner:equals:${ownerId})`);
+        url.searchParams.set("criteria", crit.length > 1 ? "(" + crit.join("and") + ")" : crit[0]);
       }
       if (pageToken) url.searchParams.set("page_token", pageToken);
       else url.searchParams.set("page", String(page));

@@ -8751,7 +8751,11 @@ function CtcEmailsTab({
     }
     load();
   }
-  const shown = rows.filter(r => filter === 'all' ? true : filter === 'filed' ? r.status === 'approved' : r.status === 'new' || r.status === 'suggested');
+
+  // Newsletters and marketing blasts are identified from their own headers
+  // at ingest (no AI, no cost) and kept out of every view except their own,
+  // so the list is the mail that might actually belong to a file.
+  const shown = rows.filter(r => filter === 'bulk' ? r.is_bulk : r.is_bulk ? false : filter === 'all' ? true : filter === 'filed' ? r.status === 'approved' : r.status === 'new' || r.status === 'suggested');
   const fmt = d => d ? new Date(d).toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
@@ -8787,7 +8791,7 @@ function CtcEmailsTab({
       flexWrap: 'wrap',
       marginBottom: 12
     }
-  }, chip('open', 'Needs filing', rows.filter(r => r.status === 'new' || r.status === 'suggested').length), chip('filed', 'Filed', rows.filter(r => r.status === 'approved').length), chip('all', 'All', rows.length), /*#__PURE__*/React.createElement("div", {
+  }, chip('open', 'Needs filing', rows.filter(r => !r.is_bulk && (r.status === 'new' || r.status === 'suggested')).length), chip('filed', 'Filed', rows.filter(r => !r.is_bulk && r.status === 'approved').length), chip('all', 'All', rows.filter(r => !r.is_bulk).length), rows.some(r => r.is_bulk) && chip('bulk', 'Newsletters', rows.filter(r => r.is_bulk).length), /*#__PURE__*/React.createElement("div", {
     style: {
       marginLeft: 'auto',
       display: 'flex',

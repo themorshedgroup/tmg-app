@@ -5066,10 +5066,13 @@ Rules:
     //  then keeps only the calls. It's ~10 sequential requests, so it loads
     //  once on demand and is cached; there's a Refresh for when it's stale.
     const CALL_ORG_KEY = 'tmg-calls-org-v1';
-    function loadOrgCache() {
+    function loadOrgCache(scope) {
       try {
         const p = JSON.parse(localStorage.getItem(CALL_ORG_KEY) || 'null');
         if (!p || !Array.isArray(p.calls) || !p.cachedAt) return null;
+        // An agent's owner-filtered pull and an admin's org-wide pull share this
+        // key; serving one to the other would show the wrong month entirely.
+        if ((p.scope || '') !== (scope || '')) return null;
         return p;
       } catch (e) { return null; }
     }
@@ -5090,16 +5093,27 @@ Rules:
     // ceiling is real and shared with /crm-tasks — surfaced as `capped` rather
     // than quietly showing a short month.
     const ORG_PAGE_CEILING = 10;
-    async function fetchOrgOpenCalls(typeField, onProgress) {
+    // ownerId narrows the pull to one agent server-side. That criteria shape is
+    // unverified against this org's Tasks module, so it is treated as an
+    // optimisation, never a requirement: if Zoho refuses it we pull the whole
+    // team instead and carry on. The view filters by owner for display either
+    // way, so the only thing lost in the fallback is speed and the 2,000-record
+    // headroom — never correctness of what is shown.
+    async function fetchOrgOpenCalls(typeField, onProgress, ownerId) {
       let all = [], page = 1, token = null, more = true, capped = false;
+      let scoped = !!ownerId;
       while (more) {
         const args = {
           action: 'list_tasks', per_page: 200, status_not: 'Completed',
           fields: ['Owner', 'Subject', 'Status', 'Due_Date', 'Who_Id', typeField].filter(Boolean),
         };
+        if (scoped) args.owner_id = ownerId;
         if (token) args.page_token = token; else args.page = page;
         const res = await callZoho(args);
         if (!res.ok) {
+          // Only ever retried once, on the very first page, and only to drop the
+          // filter — so this cannot loop.
+          if (scoped && page === 1 && !token) { scoped = false; all = []; continue; }
           if (page === 1 && !token) throw new Error((res.data && res.data.error) || 'Could not load team calls.');
           break;
         }
@@ -5128,7 +5142,7 @@ Rules:
           cname: (t.Who_Id && t.Who_Id.name) || '',
         });
       });
-      return { calls, capped };
+      return { calls, capped, scoped };
     }
     // Preview fixture — localhost has no Zoho connection.
     function devOrgCalls() {
@@ -5290,6 +5304,22 @@ Rules:
       }, [buckets, overdue, clipped, daySig, busy, dataAt]);
 
       const ownerOf = (t) => (t.Owner && t.Owner.name) || 'Unassigned';
+
+      // The agent's own Zoho USER id, learned from their own call tasks. There
+      // is no way to look a Zoho user up by name (that needs a scope this grant
+      // lacks), but every task record carries its Owner id — so the tasks the
+      // call list already fetched are the lookup. Most-common id rather than the
+      // first, because the day queries match the owner by substring and could in
+      // principle pull in a name that contains theirs.
+      const myOwnerId = useMemo(() => {
+        if (team || !myOwner) return null;
+        const counts = {};
+        [].concat(
+          (buckets && buckets.yesterday) || [], (buckets && buckets.today) || [],
+          (buckets && buckets.tomorrow) || [], (overdue && overdue.list) || []
+        ).forEach(t => { const id = t.Owner && t.Owner.id; if (id) counts[id] = (counts[id] || 0) + 1; });
+        return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
+      }, [team, myOwner, buckets, overdue]);
 
       // The agent picker is built from the people who actually own calls in
       // Zoho — not from the TMG staff list — so the names always match what
@@ -5641,7 +5671,7 @@ Rules:
           )}
 
           {(team || myOwner) && view === 'capacity' ? (
-            <CapacityView dark={dark} agent={agent} setAgent={setAgent} agents={agents} team={team} me={myOwner} />
+            <CapacityView dark={dark} agent={agent} setAgent={setAgent} agents={agents} team={team} me={myOwner} meId={myOwnerId} />
           ) : (
           <React.Fragment>
           {/* Header */}
@@ -5916,7 +5946,7 @@ Rules:
           || '';
     }
 
-    function CapacityView({ dark, agent, setAgent, agents, team, me }) {
+    function CapacityView({ dark, agent, setAgent, agents, team, me, meId }) {
       const J = "'Jost', sans-serif";
       const [calls, setCalls] = useState(null);       // trimmed org-wide open calls | null while loading
       const [capped, setCapped] = useState(false);
@@ -5936,10 +5966,13 @@ Rules:
       const addCol    = dark ? '#C9A45A' : '#AD832F';
       const redCol    = dark ? '#F87171' : '#9B1C1C';
 
+      // An agent pulls only their own calls; an admin needs everyone.
+      const scope = (!team && meId) ? meId : '';
+
       async function load(force) {
         setErr('');
         if (!force) {
-          const c = loadOrgCache();
+          const c = loadOrgCache(scope);
           if (c) { setCalls(c.calls); setCapped(!!c.capped); setCachedAt(c.cachedAt); return; }
         }
         setBusy(true); setProgress(0);
@@ -5951,15 +5984,20 @@ Rules:
         }
         try {
           const typeField = await resolveTaskTypeField();
-          const { calls: got, capped: cap } = await fetchOrgOpenCalls(typeField, setProgress);
+          const { calls: got, capped: cap } = await fetchOrgOpenCalls(typeField, setProgress, scope || null);
           setCalls(got); setCapped(cap); setCachedAt(Date.now());
-          saveOrgCache({ calls: got, capped: cap });
+          // Cached under the scope that was REQUESTED, so a fallback result is
+          // still reused instead of re-asking Zoho on every visit.
+          saveOrgCache({ calls: got, capped: cap, scope });
         } catch (e) {
           setErr((e && e.message) || String(e));
           setCalls([]);
         } finally { setBusy(false); }
       }
-      useEffect(() => { load(false); }, []);
+      // meId arrives with the call list, which may land after this mounts — so
+      // this reloads once the scope is known rather than staying on the
+      // unfiltered pull for the session.
+      useEffect(() => { load(false); }, [scope]);
 
       const todayIso = useMemo(() => cIso(new Date()), []);
       const year = anchor.getFullYear(), month = anchor.getMonth();

@@ -5618,8 +5618,11 @@ Rules:
             </span>
           </div>
 
-          {/* Admin sub-tabs — agents keep the single-purpose call list */}
-          {team && (
+          {/* Capacity is for everyone — an agent just gets their own month, with
+              no picker and no route to anyone else's board (see CapacityView).
+              Without a resolvable name there is nothing to scope it to, so the
+              tabs stay hidden and the call list explains why. */}
+          {(team || myOwner) && (
             <div style={{ display: 'flex', background: dark ? '#040C1C' : '#FCFBF8', borderBottom: `1px solid ${coachBord}`, flexShrink: 0 }}>
               {[['list', 'Call List'], ['capacity', 'Capacity']].map(([id, label]) => {
                 const on = view === id;
@@ -5637,8 +5640,8 @@ Rules:
             </div>
           )}
 
-          {team && view === 'capacity' ? (
-            <CapacityView dark={dark} agent={agent} setAgent={setAgent} agents={agents} />
+          {(team || myOwner) && view === 'capacity' ? (
+            <CapacityView dark={dark} agent={agent} setAgent={setAgent} agents={agents} team={team} me={myOwner} />
           ) : (
           <React.Fragment>
           {/* Header */}
@@ -5901,7 +5904,19 @@ Rules:
       );
     }
 
-    function CapacityView({ dark, agent, setAgent, agents }) {
+    // Zoho's user name and the TMG profile name are typed in separately, so an
+    // exact match is not safe to assume — the call list's own owner filter
+    // already compares them loosely. Same rule here, or an agent whose Zoho
+    // record reads "Tarek Morshed Jr" would just see an empty month.
+    function matchOwner(owners, name) {
+      const n = String(name || '').trim().toLowerCase();
+      if (!n) return '';
+      return (owners || []).find(o => String(o).toLowerCase() === n)
+          || (owners || []).find(o => { const l = String(o).toLowerCase(); return l.includes(n) || n.includes(l); })
+          || '';
+    }
+
+    function CapacityView({ dark, agent, setAgent, agents, team, me }) {
       const J = "'Jost', sans-serif";
       const [calls, setCalls] = useState(null);       // trimmed org-wide open calls | null while loading
       const [capped, setCapped] = useState(false);
@@ -5956,6 +5971,13 @@ Rules:
       // whole roster rather than only whoever happens to have a call this month.
       const owners = useMemo(() => Array.from(new Set((calls || []).map(c => c.owner))).sort(), [calls]);
       const pickable = useMemo(() => Array.from(new Set((agents || []).concat(owners))).sort(), [agents, owners]);
+      // An agent is pinned to their own calendar: no picker, no per-person
+      // summary, no way to select anyone else. Only an admin gets the choice.
+      const mine = useMemo(() => (team ? '' : matchOwner(owners, me)), [team, owners, me]);
+      const who = team ? agent : mine;
+      // Loaded, has a name, and still nothing under it — say so instead of
+      // showing a blank month that looks like "no calls this month".
+      const nameUnmatched = !team && calls !== null && !!me && !mine;
 
       const booked = useMemo(() => {
         const out = {};   // owner -> iso -> [call]
@@ -5981,8 +6003,8 @@ Rules:
         }).sort((a, b) => (b.booked + b.projected) - (a.booked + a.projected));
       }, [owners, booked, projection, monthKey]);
 
-      const dayBooked = (iso) => (agent ? ((booked[agent] || {})[iso] || []) : []);
-      const dayProjected = (iso) => (agent ? ((projection.byOwner[agent] || {})[iso] || []) : []);
+      const dayBooked = (iso) => (who ? ((booked[who] || {})[iso] || []) : []);
+      const dayProjected = (iso) => (who ? ((projection.byOwner[who] || {})[iso] || []) : []);
 
       const navBtn = { width: 26, height: 26, borderRadius: '50%', border: 'none', cursor: 'pointer', background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
       const lead = new Date(year, month, 1).getDay();   // blank cells before the 1st
@@ -5997,7 +6019,9 @@ Rules:
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {/* Agent + month controls */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px 6px', flexShrink: 0 }}>
-            <AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={pickable} />
+            {team
+              ? <AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={pickable} />
+              : <div style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Your calls{mine ? ' — ' + mine : ''}</div>}
             <button onClick={() => !busy && load(true)} disabled={busy} title="Refresh from Zoho" style={{ ...navBtn, opacity: busy ? 0.5 : 1 }}>
               <i className="ti ti-refresh" style={{ fontSize: 12 }} />
             </button>
@@ -6033,7 +6057,11 @@ Rules:
                   </div>
                 )}
 
-                {!agent ? (
+                {nameUnmatched ? (
+                  <div style={{ padding: '20px 0', fontFamily: J, fontSize: 9, color: addCol, lineHeight: 1.6 }}>
+                    No calls in Zoho are owned by <b>{me}</b>. The name on your TMG profile has to match your Zoho user name — ask Symon to check it.
+                  </div>
+                ) : !who ? (
                   /* No agent picked — the month at a glance, per person. */
                   monthTotals.length === 0
                     ? <div style={{ padding: '24px 0', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>No open calls found.</div>
@@ -6101,7 +6129,12 @@ Rules:
                     </div>
                   </div>
                 )}
-                {cachedAt && <div style={{ marginTop: 12, fontFamily: J, fontSize: 8, color: mutedCol, textAlign: 'center' }}>Team calls loaded {callAgo(cachedAt)}{calls ? ' · ' + calls.length.toLocaleString() + ' open' : ''}</div>}
+                {/* An agent is only ever shown their own slice, so quoting the
+                    org-wide total at them would be both wrong and confusing. */}
+                {cachedAt && (() => {
+                  const n = team ? (calls || []).length : (calls || []).filter(c => c.owner === who).length;
+                  return <div style={{ marginTop: 12, fontFamily: J, fontSize: 8, color: mutedCol, textAlign: 'center' }}>{team ? 'Team calls' : 'Your calls'} loaded {callAgo(cachedAt)}{calls ? ' · ' + n.toLocaleString() + ' open' : ''}</div>;
+                })()}
               </React.Fragment>
             )}
           </div>
@@ -6111,7 +6144,7 @@ Rules:
             <div onClick={() => setOpenDay(null)} style={{ position: 'fixed', inset: 0, zIndex: 60, background: 'rgba(0,13,38,0.35)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
               <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '16px 16px calc(18px + env(safe-area-inset-bottom))', maxHeight: '78vh', overflowY: 'auto' }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 3 }}>
-                  <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: headTitle }}>{agent}</div>
+                  <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: headTitle }}>{who}</div>
                   <button onClick={() => setOpenDay(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 15 }} /></button>
                 </div>
                 <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 10 }}>

@@ -15067,7 +15067,7 @@ function CallsTab({
       textTransform: 'uppercase',
       color: '#fff'
     }
-  }, buckets === null ? 'Loading calls…' : todayCount + ' today' + (overdueShown ? '  ·  ' + overdueShown + (overdue && overdue.capped ? '+' : '') + ' overdue' : '') + (team ? '  ·  ' + (agent || 'All agents') : ''))), team && /*#__PURE__*/React.createElement("div", {
+  }, buckets === null ? 'Loading calls…' : todayCount + ' today' + (overdueShown ? '  ·  ' + overdueShown + (overdue && overdue.capped ? '+' : '') + ' overdue' : '') + (team ? '  ·  ' + (agent || 'All agents') : ''))), (team || myOwner) && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       background: dark ? '#040C1C' : '#FCFBF8',
@@ -15094,11 +15094,13 @@ function CallsTab({
         marginBottom: -1
       }
     }, label);
-  })), team && view === 'capacity' ? /*#__PURE__*/React.createElement(CapacityView, {
+  })), (team || myOwner) && view === 'capacity' ? /*#__PURE__*/React.createElement(CapacityView, {
     dark: dark,
     agent: agent,
     setAgent: setAgent,
-    agents: agents
+    agents: agents,
+    team: team,
+    me: myOwner
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -15722,11 +15724,26 @@ function AgentPicker({
     value: a
   }, a)));
 }
+
+// Zoho's user name and the TMG profile name are typed in separately, so an
+// exact match is not safe to assume — the call list's own owner filter
+// already compares them loosely. Same rule here, or an agent whose Zoho
+// record reads "Tarek Morshed Jr" would just see an empty month.
+function matchOwner(owners, name) {
+  const n = String(name || '').trim().toLowerCase();
+  if (!n) return '';
+  return (owners || []).find(o => String(o).toLowerCase() === n) || (owners || []).find(o => {
+    const l = String(o).toLowerCase();
+    return l.includes(n) || n.includes(l);
+  }) || '';
+}
 function CapacityView({
   dark,
   agent,
   setAgent,
-  agents
+  agents,
+  team,
+  me
 }) {
   const J = "'Jost', sans-serif";
   const [calls, setCalls] = useState(null); // trimmed org-wide open calls | null while loading
@@ -15806,6 +15823,13 @@ function CapacityView({
   // whole roster rather than only whoever happens to have a call this month.
   const owners = useMemo(() => Array.from(new Set((calls || []).map(c => c.owner))).sort(), [calls]);
   const pickable = useMemo(() => Array.from(new Set((agents || []).concat(owners))).sort(), [agents, owners]);
+  // An agent is pinned to their own calendar: no picker, no per-person
+  // summary, no way to select anyone else. Only an admin gets the choice.
+  const mine = useMemo(() => team ? '' : matchOwner(owners, me), [team, owners, me]);
+  const who = team ? agent : mine;
+  // Loaded, has a name, and still nothing under it — say so instead of
+  // showing a blank month that looks like "no calls this month".
+  const nameUnmatched = !team && calls !== null && !!me && !mine;
   const booked = useMemo(() => {
     const out = {}; // owner -> iso -> [call]
     (calls || []).forEach(c => {
@@ -15832,8 +15856,8 @@ function CapacityView({
       };
     }).sort((a, b) => b.booked + b.projected - (a.booked + a.projected));
   }, [owners, booked, projection, monthKey]);
-  const dayBooked = iso => agent ? (booked[agent] || {})[iso] || [] : [];
-  const dayProjected = iso => agent ? (projection.byOwner[agent] || {})[iso] || [] : [];
+  const dayBooked = iso => who ? (booked[who] || {})[iso] || [] : [];
+  const dayProjected = iso => who ? (projection.byOwner[who] || {})[iso] || [] : [];
   const navBtn = {
     width: 26,
     height: 26,
@@ -15875,12 +15899,24 @@ function CapacityView({
       padding: '9px 14px 6px',
       flexShrink: 0
     }
-  }, /*#__PURE__*/React.createElement(AgentPicker, {
+  }, team ? /*#__PURE__*/React.createElement(AgentPicker, {
     dark: dark,
     agent: agent,
     setAgent: setAgent,
     agents: pickable
-  }), /*#__PURE__*/React.createElement("button", {
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontFamily: J,
+      fontSize: 10,
+      fontWeight: 600,
+      color: headTitle,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, "Your calls", mine ? ' — ' + mine : ''), /*#__PURE__*/React.createElement("button", {
     onClick: () => !busy && load(true),
     disabled: busy,
     title: "Refresh from Zoho",
@@ -15997,7 +16033,15 @@ function CapacityView({
       marginBottom: 8,
       lineHeight: 1.5
     }
-  }, projection.unprojected, " contact", projection.unprojected === 1 ? '' : 's', " can't be projected \u2014 their last call is overdue or lands on a weekend/holiday, so there's no reliable date to count forward from. Reschedule them in Cadence Health on /crm-tasks."), !agent ? ( /* No agent picked — the month at a glance, per person. */
+  }, projection.unprojected, " contact", projection.unprojected === 1 ? '' : 's', " can't be projected \u2014 their last call is overdue or lands on a weekend/holiday, so there's no reliable date to count forward from. Reschedule them in Cadence Health on /crm-tasks."), nameUnmatched ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '20px 0',
+      fontFamily: J,
+      fontSize: 9,
+      color: addCol,
+      lineHeight: 1.6
+    }
+  }, "No calls in Zoho are owned by ", /*#__PURE__*/React.createElement("b", null, me), ". The name on your TMG profile has to match your Zoho user name \u2014 ask Symon to check it.") : !who ? ( /* No agent picked — the month at a glance, per person. */
   monthTotals.length === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '24px 0',
@@ -16221,15 +16265,18 @@ function CapacityView({
       color: redCol,
       fontWeight: 800
     }
-  }, "\u2715"), " weekend / holiday"))), cachedAt && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 12,
-      fontFamily: J,
-      fontSize: 8,
-      color: mutedCol,
-      textAlign: 'center'
-    }
-  }, "Team calls loaded ", callAgo(cachedAt), calls ? ' · ' + calls.length.toLocaleString() + ' open' : ''))), openDay && /*#__PURE__*/React.createElement("div", {
+  }, "\u2715"), " weekend / holiday"))), cachedAt && (() => {
+    const n = team ? (calls || []).length : (calls || []).filter(c => c.owner === who).length;
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 12,
+        fontFamily: J,
+        fontSize: 8,
+        color: mutedCol,
+        textAlign: 'center'
+      }
+    }, team ? 'Team calls' : 'Your calls', " loaded ", callAgo(cachedAt), calls ? ' · ' + n.toLocaleString() + ' open' : '');
+  })())), openDay && /*#__PURE__*/React.createElement("div", {
     onClick: () => setOpenDay(null),
     style: {
       position: 'fixed',
@@ -16266,7 +16313,7 @@ function CapacityView({
       fontWeight: 600,
       color: headTitle
     }
-  }, agent), /*#__PURE__*/React.createElement("button", {
+  }, who), /*#__PURE__*/React.createElement("button", {
     onClick: () => setOpenDay(null),
     style: {
       background: 'none',

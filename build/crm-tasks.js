@@ -1055,7 +1055,7 @@ async function fetchContactPhones() {
 // default there's never a completed call to compute FROM, and anything
 // relying on it looks baseline-less even when the contact has real call
 // history in Zoho. This fetches just the missing contacts' history live
-// via `tasks_for_contacts` — scoped to only the contacts that actually came back empty locally,
+// via a per-contact Who_Id search — scoped to only the contacts that actually came back empty locally,
 // not a blanket reload. Cached per contact id like the spouse-link fetch.
 const LAST_COMPLETED_CACHE = new Map(); // contact id -> completed task-like | null
 function clearLastCompletedCache() {

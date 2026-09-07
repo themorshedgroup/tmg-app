@@ -15583,6 +15583,16 @@ function AddKpiSheet({
     setSearching(true);
     setErr('');
     try {
+      if (callsIsDev()) {
+        await new Promise(r => setTimeout(r, 250));
+        setHits(['Ariana Hall', 'Jeremy Bell', 'Michael Beeler'].filter(n => n.toLowerCase().includes(term.toLowerCase())).map((n, i) => ({
+          id: '5500000000000' + i * 2,
+          full_name: n,
+          email: n.split(' ')[0].toLowerCase() + '@example.com'
+        })));
+        setSearching(false);
+        return;
+      }
       const r = await callZoho({
         action: 'match_contacts',
         name: term

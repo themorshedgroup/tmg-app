@@ -511,6 +511,18 @@
 
           {scope === 'team' ? (
             <React.Fragment>
+              {/* Pending approvals belong here first — "Team" is where a manager
+                  actually looks to review a report's request. It used to render
+                  ONLY under "Mine", above "My requests", which meant a manager
+                  who (reasonably) clicked "Team" looking for it saw nothing —
+                  just the roster below, with no mention of anything pending. */}
+              {toReview.length ? (
+                <React.Fragment>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 700, color: C.gold, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>Requests to review ({toReview.length})</div>
+                  {toReview.map(reviewRow)}
+                  <div style={{ height: 14 }} />
+                </React.Fragment>
+              ) : null}
               <div style={{ fontSize: '0.72rem', fontWeight: 700, color: t.sub, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 10 }}>Team time off — {new Date().getFullYear()} ({activeProfiles.length})</div>
               {activeProfiles.length ? activeProfiles.map(rosterRow) : <div style={{ fontSize: '0.82rem', color: t.muted, fontFamily: C.fontSans, padding: '4px 2px' }}>No one on the roster yet.</div>}
             </React.Fragment>

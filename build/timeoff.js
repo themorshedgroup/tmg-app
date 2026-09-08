@@ -1206,7 +1206,21 @@ function TimeOffTab({
         fontFamily: C.fontSans
       }
     }, o.l);
-  })) : null, scope === 'team' ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  })) : null, scope === 'team' ? /*#__PURE__*/React.createElement(React.Fragment, null, toReview.length ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 700,
+      color: C.gold,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      marginBottom: 10
+    }
+  }, "Requests to review (", toReview.length, ")"), toReview.map(reviewRow), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 14
+    }
+  })) : null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: '0.72rem',
       fontWeight: 700,

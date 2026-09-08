@@ -14398,11 +14398,11 @@ function capTone(n, dark) {
 // underneath it.
 const capHatch = dark => dark ? 'repeating-linear-gradient(45deg, rgba(201,164,90,0.20) 0, rgba(201,164,90,0.20) 1.5px, transparent 1.5px, transparent 6px)' : 'repeating-linear-gradient(45deg, rgba(0,26,74,0.13) 0, rgba(0,26,74,0.13) 1.5px, transparent 1.5px, transparent 6px)';
 
-// Matches /crm-tasks: six months in one scrollable window, arrows shift
-// the whole window rather than stepping a month at a time.
-const CAPACITY_MONTHS_SHOWN = 6;
+// Continuous view: starts with 2 months, a "Load more" button appends 2
+// more at a time. No back/forward window-shifting — it only grows.
+const CAPACITY_MONTHS_STEP = 2;
 const CAL_MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const CAL_DOW = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const CAL_DOW = ['M', 'T', 'W', 'T', 'F', 'S', 'S']; // Monday first — hard rule for every calendar view in this app
 
 // ─── Team-wide open calls (capacity source) ──────────────────────
 //  The per-day search the call list uses is capped at 200 rows and can't
@@ -17012,11 +17012,7 @@ function CapacityView({
   const [progress, setProgress] = useState(0);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const [anchor, setAnchor] = useState(() => {
-    const d = new Date();
-    d.setDate(1);
-    return d;
-  });
+  const [monthsLoaded, setMonthsLoaded] = useState(CAPACITY_MONTHS_STEP);
   const [showProjected, setShowProjected] = useState(true);
   const [openDay, setOpenDay] = useState(null); // 'YYYY-MM-DD' | null
 
@@ -17091,17 +17087,20 @@ function CapacityView({
     load(false);
   }, [scope]);
   const todayIso = useMemo(() => cIso(new Date()), []);
-  // Six months stacked in one continuously-scrollable view, the way the
-  // /crm-tasks grid works — cadence runs months ahead, so paging one month
-  // at a time hid exactly the load this view exists to show. The arrows
-  // shift the WHOLE window, not one month.
+  // Stacked in one continuously-scrollable view, the way the /crm-tasks
+  // grid works — cadence runs months ahead, so paging one month at a time
+  // hid exactly the load this view exists to show. Starts with 2 months;
+  // "Load more" grows the window, it never shifts.
+  const baseMonth = useMemo(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d;
+  }, []);
   const months = useMemo(() => Array.from({
-    length: CAPACITY_MONTHS_SHOWN
-  }, (_, i) => new Date(anchor.getFullYear(), anchor.getMonth() + i, 1)), [anchor.getTime()]);
+    length: monthsLoaded
+  }, (_, i) => new Date(baseMonth.getFullYear(), baseMonth.getMonth() + i, 1)), [baseMonth, monthsLoaded]);
   const monthKeyOf = m => m.getFullYear() + '-' + String(m.getMonth() + 1).padStart(2, '0');
-  const first = months[0],
-    last = months[months.length - 1];
-  const rangeLabel = CAL_MON[first.getMonth()].slice(0, 3) + ' ' + first.getFullYear() + ' – ' + CAL_MON[last.getMonth()].slice(0, 3) + ' ' + last.getFullYear();
+  const last = months[months.length - 1];
   // Projection stops at the end of the last visible month rather than
   // running forever.
   const endIso = cIso(new Date(last.getFullYear(), last.getMonth() + 1, 0));
@@ -17166,11 +17165,12 @@ function CapacityView({
     justifyContent: 'center',
     flexShrink: 0
   };
-  const shiftWindow = dir => setAnchor(a => new Date(a.getFullYear(), a.getMonth() + dir * CAPACITY_MONTHS_SHOWN, 1));
   const cellsFor = m => {
     const dim = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+    // Monday-first: Date#getDay() is Sunday-based (0=Sun), so shift it.
+    const lead = (new Date(m.getFullYear(), m.getMonth(), 1).getDay() + 6) % 7;
     return Array.from({
-      length: new Date(m.getFullYear(), m.getMonth(), 1).getDay()
+      length: lead
     }, () => null).concat(Array.from({
       length: dim
     }, (_, i) => i + 1));
@@ -17226,42 +17226,6 @@ function CapacityView({
     className: "ti ti-refresh",
     style: {
       fontSize: 12
-    }
-  }))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 12,
-      padding: '2px 14px 8px',
-      flexShrink: 0
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => shiftWindow(-1),
-    title: 'Back ' + CAPACITY_MONTHS_SHOWN + ' months',
-    style: navBtn
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-chevron-left",
-    style: {
-      fontSize: 13
-    }
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontFamily: J,
-      fontSize: 11,
-      fontWeight: 600,
-      color: headTitle,
-      minWidth: 150,
-      textAlign: 'center'
-    }
-  }, rangeLabel), /*#__PURE__*/React.createElement("button", {
-    onClick: () => shiftWindow(1),
-    title: 'Forward ' + CAPACITY_MONTHS_SHOWN + ' months',
-    style: navBtn
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-chevron-right",
-    style: {
-      fontSize: 13
     }
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -17325,15 +17289,7 @@ function CapacityView({
       marginBottom: 8,
       lineHeight: 1.5
     }
-  }, "Zoho stops paging open tasks at 2,000 records, so the months below may be missing calls. /crm-tasks hits the same ceiling."), showProjected && projection.unprojected > 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontFamily: J,
-      fontSize: 8,
-      color: addCol,
-      marginBottom: 8,
-      lineHeight: 1.5
-    }
-  }, projection.unprojected, " contact", projection.unprojected === 1 ? '' : 's', " can't be projected \u2014 their last call is overdue or lands on a weekend/holiday, so there's no reliable date to count forward from. Reschedule them in Cadence Health on /crm-tasks."), nameUnmatched ? /*#__PURE__*/React.createElement("div", {
+  }, "Zoho stops paging open tasks at 2,000 records, so the months below may be missing calls. /crm-tasks hits the same ceiling."), nameUnmatched ? /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '20px 0',
       fontFamily: J,
@@ -17438,7 +17394,7 @@ function CapacityView({
     return /*#__PURE__*/React.createElement("div", {
       key: mk,
       style: {
-        marginBottom: 18
+        marginBottom: 14
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -17446,29 +17402,31 @@ function CapacityView({
         fontSize: 10,
         fontWeight: 700,
         color: headTitle,
-        marginBottom: 6
+        marginBottom: 5
       }
     }, CAL_MON[mm], " ", yy), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'grid',
-        gridTemplateColumns: 'repeat(7, 1fr)',
-        gap: 3,
-        marginBottom: 4
+        gridTemplateColumns: 'repeat(7, 23px)',
+        gap: 2,
+        marginBottom: 3,
+        justifyContent: 'center'
       }
     }, CAL_DOW.map((d, i) => /*#__PURE__*/React.createElement("div", {
       key: i,
       style: {
         textAlign: 'center',
         fontFamily: J,
-        fontSize: 8,
+        fontSize: 7,
         fontWeight: 700,
-        color: i === 0 || i === 6 ? redCol : mutedCol
+        color: i === 5 || i === 6 ? redCol : mutedCol
       }
     }, d))), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'grid',
-        gridTemplateColumns: 'repeat(7, 1fr)',
-        gap: 3
+        gridTemplateColumns: 'repeat(7, 23px)',
+        gap: 2,
+        justifyContent: 'center'
       }
     }, cellsFor(m).map((d, i) => {
       if (d === null) return /*#__PURE__*/React.createElement("div", {
@@ -17492,8 +17450,7 @@ function CapacityView({
         style: {
           position: 'relative',
           aspectRatio: '1 / 1',
-          minHeight: 34,
-          borderRadius: 7,
+          borderRadius: 4,
           border: `1px solid ${iso === todayIso ? dark ? '#C9A45A' : '#001A4A' : bord}`,
           background: bg,
           display: 'flex',
@@ -17505,17 +17462,17 @@ function CapacityView({
       }, /*#__PURE__*/React.createElement("div", {
         style: {
           position: 'absolute',
-          top: 2,
-          left: 4,
+          top: 1,
+          left: 2,
           fontFamily: J,
-          fontSize: 7,
+          fontSize: 5.5,
           fontWeight: 600,
           color: off ? redCol : mutedCol
         }
       }, d), n ? /*#__PURE__*/React.createElement("span", {
         style: {
           fontFamily: J,
-          fontSize: 12,
+          fontSize: 9,
           fontWeight: 700,
           color: tone.fg,
           lineHeight: 1
@@ -17523,11 +17480,11 @@ function CapacityView({
       }, n) : null, p ? /*#__PURE__*/React.createElement("span", {
         style: {
           fontFamily: J,
-          fontSize: 7,
+          fontSize: 5.5,
           fontWeight: 700,
           color: headTitle,
           opacity: 0.45,
-          lineHeight: 1.4
+          lineHeight: 1.3
         }
       }, n ? '+' : '', p) : null, off && /*#__PURE__*/React.createElement("span", {
         style: {
@@ -17536,7 +17493,7 @@ function CapacityView({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          fontSize: 17,
+          fontSize: 11,
           fontWeight: 800,
           color: redCol,
           opacity: 0.42,
@@ -17547,12 +17504,14 @@ function CapacityView({
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
-      flexWrap: 'wrap',
-      gap: 10,
-      marginTop: 4,
+      alignItems: 'center',
+      gap: 7,
+      marginTop: 6,
+      marginBottom: 10,
       fontFamily: J,
-      fontSize: 8,
-      color: mutedCol
+      fontSize: 7,
+      color: mutedCol,
+      overflowX: 'auto'
     }
   }, [['1–4', 1], ['5–7', 5], ['8+', 8]].map(([lab, n]) => {
     const t = capTone(n, dark);
@@ -17561,30 +17520,65 @@ function CapacityView({
       style: {
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 4
+        gap: 3,
+        flexShrink: 0
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: {
-        width: 11,
-        height: 11,
-        borderRadius: 3,
+        width: 9,
+        height: 9,
+        borderRadius: 2,
         background: t.bg,
         border: `1px solid ${bord}`,
-        display: 'inline-block'
+        display: 'inline-block',
+        flexShrink: 0
       }
-    }), lab, " calls");
+    }), lab);
   }), /*#__PURE__*/React.createElement("span", {
     style: {
       display: 'inline-flex',
       alignItems: 'center',
-      gap: 4
+      gap: 3,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 9,
+      height: 9,
+      borderRadius: 2,
+      background: capHatch(dark),
+      border: `1px solid ${bord}`,
+      display: 'inline-block',
+      flexShrink: 0
+    }
+  }), "projected"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 3,
+      flexShrink: 0
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
       color: redCol,
       fontWeight: 800
     }
-  }, "\u2715"), " weekend / holiday"))), cachedAt && (() => {
+  }, "\u2715"), "weekend/holiday")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setMonthsLoaded(n => n + CAPACITY_MONTHS_STEP),
+    style: {
+      display: 'block',
+      margin: '0 auto',
+      padding: '7px 16px',
+      borderRadius: 20,
+      border: 'none',
+      cursor: 'pointer',
+      background: addBg,
+      color: addCol,
+      fontFamily: J,
+      fontSize: 9,
+      fontWeight: 700
+    }
+  }, "Load ", CAPACITY_MONTHS_STEP, " more months")), cachedAt && (() => {
     const n = team ? (calls || []).length : (calls || []).filter(c => c.owner === who).length;
     return /*#__PURE__*/React.createElement("div", {
       style: {

@@ -19087,6 +19087,10 @@ function HealthGoalsTab({
   const [adding, setAdding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [newGoal, setNewGoal] = useState('');
+  // Whose goal this is. Admins can file for anyone on the roster; everyone
+  // else only ever for themselves (the server enforces that too — the
+  // picker is a convenience, not the control).
+  const [goalFor, setGoalFor] = useState('');
   const monthName = HG_MONTHS[monthIdx];
   const weeks = hgWeeks(year, monthIdx);
   const ink = dark ? '#FFFFFF' : '#001A4A';
@@ -19259,7 +19263,7 @@ function HealthGoalsTab({
       goal,
       month: monthName,
       status: 'In Progress',
-      owner_email: ownerEmail
+      owner_email: isAdmin && goalFor ? goalFor : ownerEmail
     });
     setSaving(false);
     if (!ok) {
@@ -19268,6 +19272,7 @@ function HealthGoalsTab({
     }
     if (data.owner_warning) setNote(data.owner_warning);
     setNewGoal('');
+    setGoalFor('');
     setAdding(false);
     load();
   };
@@ -19426,15 +19431,7 @@ function HealthGoalsTab({
           cursor: 'pointer',
           fontWeight: 600
         }
-      }, "+ Add your goal") : dash, rec && submitters[rec.id] && submitters[rec.id] !== label && /*#__PURE__*/React.createElement("div", {
-        style: {
-          fontFamily: J,
-          fontSize: 9,
-          color: muted,
-          marginTop: 4,
-          fontStyle: 'italic'
-        }
-      }, "logged by ", submitters[rec.id])), weeks.map((w, i) => {
+      }, "+ Add your goal") : dash), weeks.map((w, i) => {
         // No goal logged = nothing to tick: dashes, like the
         // paper version of this table.
         if (!rec) return /*#__PURE__*/React.createElement("td", {
@@ -19612,7 +19609,28 @@ function HealthGoalsTab({
       color: gold,
       marginBottom: 6
     }
-  }, "New goal for ", monthName), /*#__PURE__*/React.createElement("textarea", {
+  }, "New goal for ", monthName), isAdmin && /*#__PURE__*/React.createElement("select", {
+    value: goalFor,
+    onChange: e => setGoalFor(e.target.value),
+    style: {
+      width: '100%',
+      boxSizing: 'border-box',
+      fontFamily: J,
+      fontSize: 12,
+      color: ink,
+      background: dark ? '#050B16' : '#FCFBF8',
+      border: `1px solid ${line}`,
+      borderRadius: 8,
+      padding: '8px 9px',
+      marginBottom: 8,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Myself"), hgRoster(year, monthIdx).filter(pn => (pn.emails || []).length && !hgOwns(pn, me)).map(pn => /*#__PURE__*/React.createElement("option", {
+    key: pn.key,
+    value: pn.emails[0]
+  }, pn.name))), /*#__PURE__*/React.createElement("textarea", {
     value: newGoal,
     onChange: e => setNewGoal(e.target.value),
     placeholder: "e.g. Gym 3x a week + no soda",

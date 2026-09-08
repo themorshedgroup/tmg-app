@@ -7351,6 +7351,10 @@ Rules:
       const [adding, setAdding] = useState(false);
       const [saving, setSaving] = useState(false);
       const [newGoal, setNewGoal] = useState('');
+      // Whose goal this is. Admins can file for anyone on the roster; everyone
+      // else only ever for themselves (the server enforces that too — the
+      // picker is a convenience, not the control).
+      const [goalFor, setGoalFor] = useState('');
 
       const monthName = HG_MONTHS[monthIdx];
       const weeks = hgWeeks(year, monthIdx);
@@ -7475,11 +7479,14 @@ Rules:
         const goal = newGoal.trim();
         if (!goal) return;
         setSaving(true); setNote('');
-        const { ok, data } = await callZoho({ action: 'create_health_goal', goal, month: monthName, status: 'In Progress', owner_email: ownerEmail });
+        const { ok, data } = await callZoho({
+          action: 'create_health_goal', goal, month: monthName, status: 'In Progress',
+          owner_email: (isAdmin && goalFor) ? goalFor : ownerEmail,
+        });
         setSaving(false);
         if (!ok) { setNote(data.error || 'Could not save to Zoho.'); return; }
         if (data.owner_warning) setNote(data.owner_warning);
-        setNewGoal(''); setAdding(false); load();
+        setNewGoal(''); setGoalFor(''); setAdding(false); load();
       };
 
       const stepMonth = (dir) => {
@@ -7550,14 +7557,6 @@ Rules:
                             : isMine(person, rec) ? (
                               <span onClick={() => setAdding(true)} style={{ color: gold, cursor: 'pointer', fontWeight: 600 }}>+ Add your goal</span>
                             ) : dash}
-                          {/* Only worth saying when it disagrees with the row —
-                              a goal sitting under the wrong name is exactly the
-                              failure this record exists to catch. */}
-                          {rec && submitters[rec.id] && submitters[rec.id] !== label && (
-                            <div style={{ fontFamily: J, fontSize: 9, color: muted, marginTop: 4, fontStyle: 'italic' }}>
-                              logged by {submitters[rec.id]}
-                            </div>
-                          )}
                         </td>
                         {weeks.map((w, i) => {
                           // No goal logged = nothing to tick: dashes, like the
@@ -7618,6 +7617,18 @@ Rules:
           {adding && (
             <div style={{ padding: '12px 14px', borderBottom: `1px solid ${line}`, background: cardBg, flexShrink: 0 }}>
               <div style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.14em', fontWeight: 600, textTransform: 'uppercase', color: gold, marginBottom: 6 }}>New goal for {monthName}</div>
+              {isAdmin && (
+                <select
+                  value={goalFor}
+                  onChange={e => setGoalFor(e.target.value)}
+                  style={{ width: '100%', boxSizing: 'border-box', fontFamily: J, fontSize: 12, color: ink, background: dark ? '#050B16' : '#FCFBF8', border: `1px solid ${line}`, borderRadius: 8, padding: '8px 9px', marginBottom: 8, cursor: 'pointer' }}
+                >
+                  <option value="">Myself</option>
+                  {hgRoster(year, monthIdx)
+                    .filter(pn => (pn.emails || []).length && !hgOwns(pn, me))
+                    .map(pn => <option key={pn.key} value={pn.emails[0]}>{pn.name}</option>)}
+                </select>
+              )}
               <textarea
                 value={newGoal}
                 onChange={e => setNewGoal(e.target.value)}

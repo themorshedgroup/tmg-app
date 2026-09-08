@@ -64,7 +64,7 @@ async function authorizeCaller(req: Request) {
 
   const { data: profile, error: pErr } = await sb
     .from("profiles")
-    .select("status")
+    .select("status, access")
     .eq("id", user.id)
     .single();
   if (pErr || !profile)
@@ -72,7 +72,15 @@ async function authorizeCaller(req: Request) {
   if (profile.status !== "active")
     return { ok: false as const, status: 403, error: "Account is not active." };
 
-  return { ok: true as const, userId: user.id, sb };
+  // profiles.access is a text[] of roles; admin/operations are the elevated
+  // ones (same rule the app uses). Needed so an admin can file a health goal on
+  // someone else's behalf while everyone else stays limited to their own.
+  const roles: string[] = Array.isArray(profile.access)
+    ? profile.access.map((r: any) => String(r).toLowerCase())
+    : String(profile.access || "").toLowerCase().split(/[,\s]+/).filter(Boolean);
+  const isAdmin = roles.some((r) => r === "admin" || r === "operations");
+
+  return { ok: true as const, userId: user.id, sb, isAdmin };
 }
 
 // ── Zoho OAuth: refresh token → access token ──────────────────────────
@@ -680,8 +688,24 @@ Deno.serve(async (req) => {
       //      "let Zoho default the owner" path did;
       //   3. nothing usable → refuse, rather than let Zoho default it to the API
       //      connection owner and file one person's goal under Symon's name.
-      const storedZohoId = await zohoIdFromProfile(sb, auth.userId);
-      if (storedZohoId) record.Owner = { id: storedZohoId };
+      // Filing for someone else is an admin action, and "someone else" means an
+      // address that isn't the caller's own — not merely "an address was sent".
+      // Symon's app login (manager@) differs from his Zoho user (symon@), so
+      // treating any supplied email as delegation would break him filing for
+      // himself. Non-admins always get their own account regardless of what the
+      // page asked for, so a page can't quietly attribute a goal to a colleague.
+      let callerZohoId: string | null = null;
+      let callerEmail = "";
+      if (auth.userId && auth.userId !== "service") {
+        const { data: cp } = await sb
+          .from("profiles").select("zoho_user_id, email").eq("id", auth.userId).maybeSingle();
+        callerZohoId = (cp?.zoho_user_id || "").trim() || null;
+        callerEmail = String(cp?.email || "").toLowerCase();
+      }
+      const target = ownerEmail.toLowerCase();
+      const delegating = !!target && target !== callerEmail && (auth as any).isAdmin === true;
+      if (delegating) record.Owner = { email: ownerEmail };
+      else if (callerZohoId) record.Owner = { id: callerZohoId };
       else if (ownerEmail) record.Owner = { email: ownerEmail };
       else {
         return json({
@@ -998,6 +1022,36 @@ Deno.serve(async (req) => {
     }
 
     // ── Create a record in any module [write] ──────────────────────
+    // ── A record's own change history [read-only] ──────────────────
+    //  Zoho keeps an audit trail per record, including the BEFORE and AFTER of
+    //  every field edit. It is the only way to recover a value the app itself
+    //  overwrote, because nothing client-side stores the previous one.
+    if (action === "record_timeline") {
+      const moduleName = (body.module || "Tasks").trim().replace(/[^A-Za-z0-9_]/g, "");
+      const ids = Array.isArray(body.ids) ? body.ids.filter(Boolean).slice(0, 60) : [];
+      if (!ids.length) return json({ timelines: {} }, 200);
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+      const out: Record<string, any> = {};
+      const B = 6;
+      for (let i = 0; i < ids.length; i += B) {
+        const batch = ids.slice(i, i + B);
+        const res = await Promise.all(batch.map(async (id: string) => {
+          try {
+            const r = await zohoFetch(sb, conn, accessToken,
+              `https://${apiDomain}/crm/v6/${moduleName}/${id}/__timeline?per_page=50`, {});
+            if (r.status === 204) return [id, []];
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) return [id, { error: d?.message || `HTTP ${r.status}`, detail: d }];
+            return [id, d.__timeline || d.timeline || []];
+          } catch (e) { return [id, { error: String(e) }]; }
+        }));
+        for (const [id, v] of res) out[id as string] = v;
+      }
+      return json({ timelines: out }, 200);
+    }
+
     if (action === "create_record") {
       const moduleName = (body.module || "Tasks").trim();
       const record = body.record;

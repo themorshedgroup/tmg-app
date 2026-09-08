@@ -14397,6 +14397,10 @@ function capTone(n, dark) {
 // pattern says "predicted, not booked" without muddying the load colour
 // underneath it.
 const capHatch = dark => dark ? 'repeating-linear-gradient(45deg, rgba(201,164,90,0.20) 0, rgba(201,164,90,0.20) 1.5px, transparent 1.5px, transparent 6px)' : 'repeating-linear-gradient(45deg, rgba(0,26,74,0.13) 0, rgba(0,26,74,0.13) 1.5px, transparent 1.5px, transparent 6px)';
+
+// Matches /crm-tasks: six months in one scrollable window, arrows shift
+// the whole window rather than stepping a month at a time.
+const CAPACITY_MONTHS_SHOWN = 6;
 const CAL_MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const CAL_DOW = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
@@ -17087,11 +17091,20 @@ function CapacityView({
     load(false);
   }, [scope]);
   const todayIso = useMemo(() => cIso(new Date()), []);
-  const year = anchor.getFullYear(),
-    month = anchor.getMonth();
-  const monthKey = year + '-' + String(month + 1).padStart(2, '0');
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const endIso = cIso(new Date(year, month + 1, 0));
+  // Six months stacked in one continuously-scrollable view, the way the
+  // /crm-tasks grid works — cadence runs months ahead, so paging one month
+  // at a time hid exactly the load this view exists to show. The arrows
+  // shift the WHOLE window, not one month.
+  const months = useMemo(() => Array.from({
+    length: CAPACITY_MONTHS_SHOWN
+  }, (_, i) => new Date(anchor.getFullYear(), anchor.getMonth() + i, 1)), [anchor.getTime()]);
+  const monthKeyOf = m => m.getFullYear() + '-' + String(m.getMonth() + 1).padStart(2, '0');
+  const first = months[0],
+    last = months[months.length - 1];
+  const rangeLabel = CAL_MON[first.getMonth()].slice(0, 3) + ' ' + first.getFullYear() + ' – ' + CAL_MON[last.getMonth()].slice(0, 3) + ' ' + last.getFullYear();
+  // Projection stops at the end of the last visible month rather than
+  // running forever.
+  const endIso = cIso(new Date(last.getFullYear(), last.getMonth() + 1, 0));
 
   // Everyone who owns an open call, so the picker in this view lists the
   // whole roster rather than only whoever happens to have a call this month.
@@ -17125,7 +17138,8 @@ function CapacityView({
     unprojected: 0
   }, [visible, endIso, todayIso, showProjected]);
   const monthTotals = useMemo(() => {
-    const inMonth = iso => iso && iso.slice(0, 7) === monthKey;
+    const keys = new Set(months.map(monthKeyOf));
+    const inMonth = iso => iso && keys.has(iso.slice(0, 7));
     return owners.map(o => {
       const b = Object.keys(booked[o] || {}).filter(inMonth).reduce((n, k) => n + booked[o][k].length, 0);
       const pm = projection.byOwner[o] || {};
@@ -17136,7 +17150,7 @@ function CapacityView({
         projected: p
       };
     }).sort((a, b) => b.booked + b.projected - (a.booked + a.projected));
-  }, [owners, booked, projection, monthKey]);
+  }, [owners, booked, projection, months]);
   const dayBooked = iso => who ? (booked[who] || {})[iso] || [] : [];
   const dayProjected = iso => who ? (projection.byOwner[who] || {})[iso] || [] : [];
   const navBtn = {
@@ -17152,12 +17166,15 @@ function CapacityView({
     justifyContent: 'center',
     flexShrink: 0
   };
-  const lead = new Date(year, month, 1).getDay(); // blank cells before the 1st
-  const cells = Array.from({
-    length: lead
-  }, () => null).concat(Array.from({
-    length: daysInMonth
-  }, (_, i) => i + 1));
+  const shiftWindow = dir => setAnchor(a => new Date(a.getFullYear(), a.getMonth() + dir * CAPACITY_MONTHS_SHOWN, 1));
+  const cellsFor = m => {
+    const dim = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+    return Array.from({
+      length: new Date(m.getFullYear(), m.getMonth(), 1).getDay()
+    }, () => null).concat(Array.from({
+      length: dim
+    }, (_, i) => i + 1));
+  };
   const openList = openDay ? dayBooked(openDay) : [];
   const openProj = openDay ? dayProjected(openDay) : [];
   const openTally = {};
@@ -17220,7 +17237,8 @@ function CapacityView({
       flexShrink: 0
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setAnchor(new Date(year, month - 1, 1)),
+    onClick: () => shiftWindow(-1),
+    title: 'Back ' + CAPACITY_MONTHS_SHOWN + ' months',
     style: navBtn
   }, /*#__PURE__*/React.createElement("i", {
     className: "ti ti-chevron-left",
@@ -17233,11 +17251,12 @@ function CapacityView({
       fontSize: 11,
       fontWeight: 600,
       color: headTitle,
-      minWidth: 118,
+      minWidth: 150,
       textAlign: 'center'
     }
-  }, CAL_MON[month], " ", year), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setAnchor(new Date(year, month + 1, 1)),
+  }, rangeLabel), /*#__PURE__*/React.createElement("button", {
+    onClick: () => shiftWindow(1),
+    title: 'Forward ' + CAPACITY_MONTHS_SHOWN + ' months',
     style: navBtn
   }, /*#__PURE__*/React.createElement("i", {
     className: "ti ti-chevron-right",
@@ -17403,115 +17422,134 @@ function CapacityView({
     }));
   }))) :
   /*#__PURE__*/
-  /* One agent — the month as a calendar. Capped in width so the
-     day cells stay square-ish and readable on a wide screen
-     instead of stretching into billboards. */
+  /* One agent — every month in the window, stacked and scrolled
+     as one continuous view. Capped in width so the day cells
+     stay square-ish on a wide screen instead of stretching into
+     billboards. */
   React.createElement("div", {
     style: {
       maxWidth: 420,
       margin: '0 auto'
     }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'grid',
-      gridTemplateColumns: 'repeat(7, 1fr)',
-      gap: 3,
-      marginBottom: 4
-    }
-  }, CAL_DOW.map((d, i) => /*#__PURE__*/React.createElement("div", {
-    key: i,
-    style: {
-      textAlign: 'center',
-      fontFamily: J,
-      fontSize: 8,
-      fontWeight: 700,
-      color: i === 0 || i === 6 ? redCol : mutedCol
-    }
-  }, d))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'grid',
-      gridTemplateColumns: 'repeat(7, 1fr)',
-      gap: 3
-    }
-  }, cells.map((d, i) => {
-    if (d === null) return /*#__PURE__*/React.createElement("div", {
-      key: 'b' + i
-    });
-    const iso = monthKey + '-' + String(d).padStart(2, '0');
-    const n = dayBooked(iso).length;
-    const p = dayProjected(iso).length;
-    const off = !cIsWorkday(new Date(year, month, d));
-    const tone = capTone(n, dark);
-    // Booked calls keep the solid load colour. A day with
-    // nothing booked but cadence heading for it gets the
-    // hatch only — it isn't real load yet, it just isn't as
-    // free as a blank cell makes it look.
-    const base = n ? tone.bg : 'transparent';
-    const bg = p ? capHatch(dark) + ', ' + base : base;
-    const openable = n || p;
+  }, months.map(m => {
+    const mk = monthKeyOf(m);
+    const mm = m.getMonth(),
+      yy = m.getFullYear();
     return /*#__PURE__*/React.createElement("div", {
-      key: iso,
-      onClick: () => openable && setOpenDay(iso),
+      key: mk,
       style: {
-        position: 'relative',
-        aspectRatio: '1 / 1',
-        minHeight: 34,
-        borderRadius: 7,
-        border: `1px solid ${iso === todayIso ? dark ? '#C9A45A' : '#001A4A' : bord}`,
-        background: bg,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        cursor: openable ? 'pointer' : 'default'
+        marginBottom: 18
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
-        position: 'absolute',
-        top: 2,
-        left: 4,
         fontFamily: J,
-        fontSize: 7,
-        fontWeight: 600,
-        color: off ? redCol : mutedCol
-      }
-    }, d), n ? /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontFamily: J,
-        fontSize: 12,
-        fontWeight: 700,
-        color: tone.fg,
-        lineHeight: 1
-      }
-    }, n) : null, p ? /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontFamily: J,
-        fontSize: 7,
+        fontSize: 10,
         fontWeight: 700,
         color: headTitle,
-        opacity: 0.45,
-        lineHeight: 1.4
+        marginBottom: 6
       }
-    }, n ? '+' : '', p) : null, off && /*#__PURE__*/React.createElement("span", {
+    }, CAL_MON[mm], " ", yy), /*#__PURE__*/React.createElement("div", {
       style: {
-        position: 'absolute',
-        inset: 0,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: 17,
-        fontWeight: 800,
-        color: redCol,
-        opacity: 0.42,
-        pointerEvents: 'none'
+        display: 'grid',
+        gridTemplateColumns: 'repeat(7, 1fr)',
+        gap: 3,
+        marginBottom: 4
       }
-    }, "\u2715"));
-  })), /*#__PURE__*/React.createElement("div", {
+    }, CAL_DOW.map((d, i) => /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        textAlign: 'center',
+        fontFamily: J,
+        fontSize: 8,
+        fontWeight: 700,
+        color: i === 0 || i === 6 ? redCol : mutedCol
+      }
+    }, d))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(7, 1fr)',
+        gap: 3
+      }
+    }, cellsFor(m).map((d, i) => {
+      if (d === null) return /*#__PURE__*/React.createElement("div", {
+        key: 'b' + i
+      });
+      const iso = mk + '-' + String(d).padStart(2, '0');
+      const n = dayBooked(iso).length;
+      const p = dayProjected(iso).length;
+      const off = !cIsWorkday(new Date(yy, mm, d));
+      const tone = capTone(n, dark);
+      // Booked calls keep the solid load colour. A day with
+      // nothing booked but cadence heading for it gets the
+      // hatch only — it isn't real load yet, it just isn't as
+      // free as a blank cell makes it look.
+      const base = n ? tone.bg : 'transparent';
+      const bg = p ? capHatch(dark) + ', ' + base : base;
+      const openable = n || p;
+      return /*#__PURE__*/React.createElement("div", {
+        key: iso,
+        onClick: () => openable && setOpenDay(iso),
+        style: {
+          position: 'relative',
+          aspectRatio: '1 / 1',
+          minHeight: 34,
+          borderRadius: 7,
+          border: `1px solid ${iso === todayIso ? dark ? '#C9A45A' : '#001A4A' : bord}`,
+          background: bg,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: openable ? 'pointer' : 'default'
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          position: 'absolute',
+          top: 2,
+          left: 4,
+          fontFamily: J,
+          fontSize: 7,
+          fontWeight: 600,
+          color: off ? redCol : mutedCol
+        }
+      }, d), n ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: J,
+          fontSize: 12,
+          fontWeight: 700,
+          color: tone.fg,
+          lineHeight: 1
+        }
+      }, n) : null, p ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontFamily: J,
+          fontSize: 7,
+          fontWeight: 700,
+          color: headTitle,
+          opacity: 0.45,
+          lineHeight: 1.4
+        }
+      }, n ? '+' : '', p) : null, off && /*#__PURE__*/React.createElement("span", {
+        style: {
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 17,
+          fontWeight: 800,
+          color: redCol,
+          opacity: 0.42,
+          pointerEvents: 'none'
+        }
+      }, "\u2715"));
+    })));
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexWrap: 'wrap',
       gap: 10,
-      marginTop: 12,
+      marginTop: 4,
       fontFamily: J,
       fontSize: 8,
       color: mutedCol
@@ -17614,7 +17652,7 @@ function CapacityView({
       color: mutedCol,
       marginBottom: 10
     }
-  }, CAL_MON[month], " ", Number(openDay.slice(8)), " \u2014 ", openList.length, " booked", openProj.length ? ' · ' + openProj.length + ' projected' : ''), Object.keys(openTally).length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, CAL_MON[Number(openDay.slice(5, 7)) - 1], " ", Number(openDay.slice(8)), " \u2014 ", openList.length, " booked", openProj.length ? ' · ' + openProj.length + ' projected' : ''), Object.keys(openTally).length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexWrap: 'wrap',

@@ -3422,7 +3422,16 @@ const TaskDB = {
   client() {
     return window.SupabaseAuth?._client || null;
   },
-  async loadAll() {
+  // My Tasks means MINE. It used to mean every task in the company, which
+  // nobody noticed while that was a few dozen rows — then Zoho sync landed
+  // 2,875 CTC tasks and the list became everyone's transaction checklists,
+  // most with no assignee at all. Scoped here rather than filtered in the
+  // UI so the query stays small: this is also what made the screen slow.
+  //   mine = I'm the assignee, OR I'm the assigner (I delegated it), OR I
+  //   created it (quick-add sets no assignee, so those are mine too).
+  // A CTC task with nobody on it belongs to its file, not to a person —
+  // it's still there under CTC Files.
+  async loadAll(userId) {
     const c = this.client();
     if (!c) return {
       tasks: [],
@@ -3430,17 +3439,44 @@ const TaskDB = {
       projById: {},
       labelsByTask: {}
     };
-    const [tRes, pRes, prRes, lRes] = await Promise.all([pageAll(c, 'tasks', '*', {
+    const uid = userId || window.SupabaseAuth?._state?.session?.user?.id || null;
+    if (!uid) return {
+      tasks: [],
+      peopleByTask: {},
+      projById: {},
+      labelsByTask: {}
+    };
+    const [minePpl, madeRes, prRes] = await Promise.all([pageAll(c, 'task_people', 'task_id,role', {
+      eq: ['user_id', uid]
+    }), pageAll(c, 'tasks', '*', {
+      eq: ['created_by', uid],
       order: 'created_at'
-    }), pageAll(c, 'task_people', 'task_id,user_id,role'), pageAll(c, 'projects', 'id,name,archived'), pageAll(c, 'task_labels', 'task_id,user_id,label')]);
+    }), pageAll(c, 'projects', 'id,name,archived')]);
+    const made = madeRes.data || [];
+    const madeIds = new Set(made.map(t => t.id));
+    const wantIds = [...new Set((minePpl.data || []).filter(r => r.role === 'assignee' || r.role === 'assigner').map(r => r.task_id))].filter(id => !madeIds.has(id));
+    const fetched = await chunked(wantIds, 150, ids => pageAll(c, 'tasks', '*', {
+      in: ['id', ids]
+    }));
+    const tasksRaw = made.concat(fetched);
+    const ids = tasksRaw.map(t => t.id);
+
+    // People/labels only for the tasks actually shown — these are per-task
+    // rows, so fetching them for the whole company is what really hurt.
+    const [pplRows, lblRows] = await Promise.all([chunked(ids, 150, batch => pageAll(c, 'task_people', 'task_id,user_id,role', {
+      in: ['task_id', batch]
+    })), chunked(ids, 150, batch => pageAll(c, 'task_labels', 'task_id,user_id,label', {
+      in: ['task_id', batch]
+    }))]);
     const peopleByTask = {};
-    (pRes.data || []).forEach(p => {
+    pplRows.forEach(p => {
       (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p);
     });
     const labelsByTask = {};
-    (lRes.data || []).forEach(l => {
+    lblRows.forEach(l => {
       (labelsByTask[l.task_id] = labelsByTask[l.task_id] || []).push(l);
     });
+
     // Archived projects (e.g. the App Masterplan roadmap) never surface in the
     // regular Tasks list — they're a separate admin-only surface (RoadmapDB).
     const archivedIds = new Set((prRes.data || []).filter(p => p.archived).map(p => p.id));
@@ -3448,7 +3484,7 @@ const TaskDB = {
     (prRes.data || []).forEach(p => {
       if (!p.archived) projById[p.id] = p.name;
     });
-    const tasks = (tRes.data || []).filter(t => !t.project_id || !archivedIds.has(t.project_id));
+    const tasks = tasksRaw.filter(t => !t.project_id || !archivedIds.has(t.project_id)).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
     return {
       tasks,
       peopleByTask,
@@ -4209,6 +4245,15 @@ const TaskEmailDB = {
 // quietly missing tasks too. Anything that must return a WHOLE table goes
 // through here. task_people/task_labels are per-task rows, so they cross
 // 1000 even earlier than tasks does.
+// An `in` filter travels in the URL, so a few hundred ids would 414 the
+// request. Batch, run the batches together, flatten.
+async function chunked(ids, size, run) {
+  if (!ids.length) return [];
+  const batches = [];
+  for (let i = 0; i < ids.length; i += size) batches.push(ids.slice(i, i + size));
+  const res = await Promise.all(batches.map(run));
+  return res.flatMap(r => r && r.data || []);
+}
 async function pageAll(c, table, cols, opts) {
   const SIZE = 1000;
   const o = opts || {};
@@ -4217,6 +4262,7 @@ async function pageAll(c, table, cols, opts) {
   for (;;) {
     let q = c.from(table).select(cols);
     if (o.eq) q = q.eq(o.eq[0], o.eq[1]);
+    if (o.in) q = q.in(o.in[0], o.in[1]);
     if (o.order) q = q.order(o.order, {
       ascending: false
     });
@@ -4249,14 +4295,32 @@ const ProjectDB = {
   async loadFull(recordType) {
     const c = this.client();
     if (!c) return [];
-    const [pRes, tRes, pplRes] = await Promise.all([pageAll(c, 'projects', '*', {
+    // Only this surface's own records, filtered in the query — Projects and
+    // Rocks used to pay for loading every CTC task in the company.
+    const pRes = await pageAll(c, 'projects', '*', {
       eq: ['archived', false],
       order: 'created_at'
-    }),
-    // full rows — a task opened from inside a project needs every field
-    // TaskDetail/TaskForm can show, not just the summary columns
-    pageAll(c, 'tasks', '*'), pageAll(c, 'task_people', 'task_id,user_id,role')]);
+    });
     const projects = (pRes.data || []).filter(p => (p.record_type || 'project') === recordType);
+    const projIds = projects.map(p => p.id);
+    // LIGHT columns only. The list, board, timeline and milestone spine
+    // render from these; a task OPENED into TaskDetail/TaskForm is
+    // re-fetched in full by id (openTaskFull below), so nothing downstream
+    // sees a partial row. Full rows for ~2,900 tasks was multiple MB of
+    // JSON on every visit to this screen.
+    const TASK_COLS = 'id,project_id,title,status,priority,due_at,is_milestone,completed_at,updated_at,created_at,parent_task_id,zoho_tasklist_name';
+    const tRows = await chunked(projIds, 100, ids => pageAll(c, 'tasks', TASK_COLS, {
+      in: ['project_id', ids]
+    }));
+    const pplRows = await chunked(tRows.map(t => t.id), 150, ids => pageAll(c, 'task_people', 'task_id,user_id,role', {
+      in: ['task_id', ids]
+    }));
+    const tRes = {
+        data: tRows
+      },
+      pplRes = {
+        data: pplRows
+      };
     const peopleByTask = {};
     (pplRes.data || []).forEach(p => {
       (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p);
@@ -9529,8 +9593,25 @@ function ProjectsSurface({
     const proj = current && fresh.find(x => x.id === current.id);
     if (proj) {
       setCurrent(proj);
-      if (focusTaskId) setOpenTask(proj._tasks.find(x => x.id === focusTaskId) || null);
+      if (focusTaskId) openTaskFull(proj._tasks.find(x => x.id === focusTaskId) || null);
     }
+  }
+  // loadFull carries only the columns the list/board/timeline draw, so a
+  // task being OPENED has to be re-read in full — TaskDetail and TaskForm
+  // show description, context, links, decision, recurrence, Zoho ids.
+  // Shows the light row immediately, then swaps in the full one, so
+  // opening still feels instant.
+  async function openTaskFull(t) {
+    if (!t) {
+      setOpenTask(null);
+      return;
+    }
+    setOpenTask(t);
+    const full = await TaskDB.getById(t.id);
+    if (full) setOpenTask(prev => prev && prev.id === t.id ? {
+      ...full,
+      _people: t._people || prev._people || []
+    } : prev);
   }
   async function onTaskStatus(task, status) {
     await TaskDB.update(task.id, task, {
@@ -10615,7 +10696,7 @@ function ProjectsSurface({
   };
   const detailTaskRow = t => /*#__PURE__*/React.createElement("div", {
     key: t.id,
-    onClick: () => setOpenTask(t),
+    onClick: () => openTaskFull(t),
     style: {
       display: 'flex',
       alignItems: 'center',
@@ -11009,7 +11090,7 @@ function ProjectsSurface({
       setTaskEditing(false);
     },
     onStatus: s => onTaskStatus(openTask, s),
-    onOpenSubtask: child => setOpenTask(child)
+    onOpenSubtask: child => openTaskFull(child)
   })));
 
   // Matches the prototype's .vtabs/.vtab exactly.
@@ -11129,14 +11210,14 @@ function ProjectsSurface({
   const boardTab = p => /*#__PURE__*/React.createElement(TaskBoard, {
     items: p._tasks,
     dark: dark,
-    onOpen: setOpenTask,
+    onOpen: openTaskFull,
     onDrop: onBoardDrop,
     showSource: false
   });
   const timelineTab = p => /*#__PURE__*/React.createElement(TaskTimeline, {
     items: p._tasks,
     dark: dark,
-    onOpen: setOpenTask
+    onOpen: openTaskFull
   });
   const detailView = () => {
     const p = current;
@@ -13061,7 +13142,7 @@ function TasksScreen({
   const withMeta = t => withMetaFrom(t, data);
   async function reload() {
     setLoading(true);
-    const [d, tm, links] = await Promise.all([TaskDB.loadAll(), ProfileDB.loadAll(), TaskEmailDB.loadAllByTask()]);
+    const [d, tm, links] = await Promise.all([TaskDB.loadAll(user && user.id), ProfileDB.loadAll(), TaskEmailDB.loadAllByTask()]);
     const enriched = {
       ...d,
       tasks: d.tasks.map(t => enrich(t, d.projById))

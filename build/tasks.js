@@ -3468,13 +3468,7 @@ const TaskDB = {
     })), chunked(ids, 150, batch => pageAll(c, 'task_labels', 'task_id,user_id,label', {
       in: ['task_id', batch]
     }))]);
-    // Every loaded task gets an entry (even []), so "people known" and
-    // "people never fetched" are distinguishable — TasksScreen fetches on
-    // demand only for tasks outside this list.
     const peopleByTask = {};
-    ids.forEach(id => {
-      peopleByTask[id] = [];
-    });
     pplRows.forEach(p => {
       (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p);
     });
@@ -3509,17 +3503,12 @@ const TaskDB = {
     } = await c.from('tasks').select('*').eq('id', id).single();
     return data || null;
   },
-  // null (not []) on failure. Callers store the result as "this task's
-  // people are known", and a dropped request that read as "known: nobody"
-  // let the next Save delete every real assignee.
   async loadPeopleFor(id) {
     const c = this.client();
-    if (!c) return null;
+    if (!c) return [];
     const {
-      data,
-      error
+      data
     } = await c.from('task_people').select('task_id,user_id,role').eq('task_id', id);
-    if (error) return null;
     return data || [];
   },
   async findOrCreateProject(name, user) {
@@ -3528,7 +3517,7 @@ const TaskDB = {
     const nm = name.trim();
     const {
       data: ex
-    } = await c.from('projects').select('id').ilike('name', nm).eq('archived', false).limit(1).maybeSingle();
+    } = await c.from('projects').select('id').ilike('name', nm).limit(1).maybeSingle();
     if (ex) return ex.id;
     const {
       data,
@@ -3561,9 +3550,6 @@ const TaskDB = {
       parent_task_id: fields.parent_task_id || null,
       created_by: user?.id || null
     };
-    // is_milestone lives in wd (not base) so the column-fallback below still
-    // strips it — "Add a milestone…" used to create a plain task because
-    // neither object carried the flag (audit C10).
     const wd = {
       weekly_priority: fields.weekly_priority || null,
       weekly_rank: fields.weekly_rank || null,
@@ -3573,8 +3559,7 @@ const TaskDB = {
       decision_due_has_time: fields.decision_due_has_time || null,
       recur_interval: fields.recur_interval || null,
       recur_unit: fields.recur_unit || null,
-      recur_copy_fields: fields.recur_copy_fields || null,
-      is_milestone: !!fields.is_milestone
+      recur_copy_fields: fields.recur_copy_fields || null
     };
     let res = await c.from('tasks').insert({
       ...base,
@@ -4005,23 +3990,10 @@ const TaskDB = {
       };
     }
     const rows = data || [];
-    // Carry the linked tasks' titles: My Tasks only holds the caller's own
-    // tasks now, so a dependency on a teammate's task has no row to look
-    // the title up in (audit C23).
-    const otherIds = [...new Set(rows.map(r => r.predecessor_id === taskId ? r.successor_id : r.predecessor_id).filter(Boolean))];
-    const titles = {};
-    if (otherIds.length) {
-      const tRows = await chunked(otherIds, 150, ids => c.from('tasks').select('id,title').in('id', ids));
-      tRows.forEach(t => {
-        titles[t.id] = t.title;
-      });
-    }
     return {
       predecessors: rows.filter(r => r.successor_id === taskId),
       // tasks that must come before this one
-      successors: rows.filter(r => r.predecessor_id === taskId),
-      // tasks that come after this one
-      titles
+      successors: rows.filter(r => r.predecessor_id === taskId) // tasks that come after this one
     };
   },
   async addLink(predecessorId, successorId) {
@@ -4554,15 +4526,12 @@ const ProjectDB = {
   async sidebarList() {
     const c = this.client();
     if (!c) return [];
-    // Counts come from the same project_task_stats() RPC loadFull uses —
-    // the old `select('project_id')` was silently capped at 1,000 rows, so
-    // sidebar counts disagreed with each project's own "x / y" (audit C14).
-    const [pRes, sRes] = await Promise.all([c.from('projects').select('id,name,record_type').eq('archived', false).order('name', {
+    const [pRes, tRes] = await Promise.all([c.from('projects').select('id,name,record_type').eq('archived', false).order('name', {
       ascending: true
-    }), c.rpc('project_task_stats')]);
+    }), c.from('tasks').select('project_id')]);
     const counts = {};
-    (sRes.data || []).forEach(r => {
-      if (r.project_id) counts[r.project_id] = r.total || 0;
+    (tRes.data || []).forEach(t => {
+      if (t.project_id) counts[t.project_id] = (counts[t.project_id] || 0) + 1;
     });
     return (pRes.data || []).map(p => ({
       id: p.id,
@@ -5613,9 +5582,8 @@ function DateField({
   const stepMonth = n => setCursor(c => new Date(c.getFullYear(), c.getMonth() + n, 1));
   const stepYear = n => setCursor(c => new Date(c.getFullYear() + n, c.getMonth(), 1));
   const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
-  // Monday-first (hard rule, every calendar view): getDay() is Sunday-based, so shift it.
   const gridStart = new Date(first);
-  gridStart.setDate(1 - (first.getDay() + 6) % 7);
+  gridStart.setDate(1 - first.getDay());
   const cells = Array.from({
     length: 42
   }, (_, i) => {
@@ -5749,7 +5717,7 @@ function DateField({
       gap: 2,
       marginBottom: 3
     }
-  }, ['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((w, i) => /*#__PURE__*/React.createElement("div", {
+  }, ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w, i) => /*#__PURE__*/React.createElement("div", {
     key: i,
     style: {
       textAlign: 'center',
@@ -6051,18 +6019,13 @@ function TaskForm({
   const [status, setStatus] = useState(t.status || 'todo');
   const [myLabels, setMyLabels] = useState([]);
   const [labelInput, setLabelInput] = useState('');
-  // Seed people from `_people` (raw task_people rows) when the explicit
-  // arrays are absent: a task opened from inside a Project/CTC File carries
-  // only `_people`, and the empty form then deleted every assignee on
-  // Save (audit C8).
-  const byRole = r => (t._people || []).filter(p => p.role === r).map(p => p.user_id);
-  const [assignees, setAssignees] = useState(t._assignees || byRole('assignee'));
-  const [assigners, setAssigners] = useState(t._assigners || byRole('assigner'));
+  const [assignees, setAssignees] = useState(t._assignees || []);
+  const [assigners, setAssigners] = useState(t._assigners || []);
   const [workingUrl, setWorkingUrl] = useState(t.working_url || '');
   const [emailLink, setEmailLink] = useState(t.email_link || '');
   const [description, setDescription] = useState(t.description || '');
   const [context, setContext] = useState(t.context || '');
-  const [decisionMakers, setDecisionMakers] = useState(t._decisionMakers || byRole('decision_maker'));
+  const [decisionMakers, setDecisionMakers] = useState(t._decisionMakers || []);
   const [decisionQuestion, setDecisionQuestion] = useState(t.decision_question || '');
   const [decisionDueDate, setDecisionDueDate] = useState(_initDecDate);
   const [decisionHasTime, setDecisionHasTime] = useState(t.decision_due_has_time != null ? !!t.decision_due_has_time : !!(_initDecHM && _initDecHM !== '00:00'));
@@ -6077,17 +6040,7 @@ function TaskForm({
   const [planOpen, setPlanOpen] = useState(!!(t.weekly_priority || t.weekly_rank != null || t.daily_priority || t.daily_rank != null));
   const [decisionOpen, setDecisionOpen] = useState(false);
   useEffect(() => {
-    TaskDB.loadProjects().then(rows => {
-      const list = rows || [];
-      setProjects(list);
-      // A task with a project_id but no _projectName (re-read by id, not
-      // via the list) showed "(No project)" and Save nulled its project
-      // (audit C9). Resolve the id against the loaded list instead.
-      if (!t._projectName && t.project_id) {
-        const m = list.find(p => p.id === t.project_id);
-        if (m && m.name) setProject(prev => prev || m.name);
-      }
-    });
+    TaskDB.loadProjects().then(rows => setProjects(rows || []));
   }, []);
   useEffect(() => {
     if (!t.id) return;
@@ -7049,7 +7002,7 @@ function TaskDetail({
     }
   }
   // ── Dependencies
-  const titleOf = id => ((allTasks || []).find(t => t.id === id) || {}).title || (links.titles || {})[id] || '(task)';
+  const titleOf = id => ((allTasks || []).find(t => t.id === id) || {}).title || '(task)';
   async function addDep() {
     if (!linkPick) return;
     if (linkDir === 'pred') await TaskDB.addLink(linkPick, task.id);else await TaskDB.addLink(task.id, linkPick);
@@ -8332,14 +8285,10 @@ function TaskDetail({
 // so each teammate manages their own labels/colors.
 const LABEL_COLORS = ['#E24B4A', '#E0A93B', '#378ADD', '#7F77DD', '#1D9E75', '#E07B00', '#D4537E', '#6B7280', '#2BA8A0', '#9B5DE5', '#3BB0C9', '#7FB800'];
 const labelKey = uid => 'tmg-labels-' + (uid || 'anon');
-
-// onSaved (optional) fires after a successful save instead of onClose, so
-// the caller can reload task rows — Cancel stays a cheap onClose (audit C21).
 function LabelManager({
   dark,
   user,
-  onClose,
-  onSaved
+  onClose
 }) {
   const J = C.fontSans;
   const uid = user && user.id;
@@ -8422,10 +8371,8 @@ function LabelManager({
         color: x.color
       }))));
     } catch (e) {}
-    // Stay disabled through onSaved's reload — re-enabling first left
-    // "Save changes" tappable on a screen that was already on its way out.
-    await (onSaved || onClose)();
     setSaving(false);
+    onClose();
   }
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -9521,9 +9468,6 @@ function ZohoLinkModal({
 // Self-contained: list + detail + create/edit form, mobile + desktop.
 // `titleNode(fontSize)` renders the shared My Tasks/CTC Files/Projects switcher.
 // ══════════════════════════════════════════════════════════════════════
-// onChanged (optional) fires after every reload() so the owner can refresh
-// anything derived from the same rows — TasksScreen's sidebar list was
-// stale after create/archive/quick-add until a surface switch (audit C6/C16).
 function ProjectsSurface({
   kind,
   dark,
@@ -9534,8 +9478,7 @@ function ProjectsSurface({
   openId,
   onOpenIdConsumed,
   openCtcTab,
-  onCtcTabConsumed,
-  onChanged
+  onCtcTabConsumed
 }) {
   const isCtc = kind === 'ctc_file';
   const zohoSyncable = ZOHO_SYNCABLE_KINDS.includes(kind); // ctc_file + project (e.g. "Accountability") — not rock
@@ -9565,10 +9508,6 @@ function ProjectsSurface({
   const [dtab, setDtab] = useState('overview'); // 'overview' | 'list' | 'board'
   const [openTask, setOpenTask] = useState(null);
   const [taskEditing, setTaskEditing] = useState(false);
-  // A routed/sidebar id that isn't in the list (archived, deleted, not
-  // visible). Used to say so instead of silently showing the list and
-  // rewriting the pasted URL (audit C7). Cleared when the user navigates.
-  const [routeMiss, setRouteMiss] = useState(null);
   const [zohoLinkOpen, setZohoLinkOpen] = useState(false); // ctc_file only — see ZohoLinkModal
   // 'files' | 'emails'. Seeded from the route (#ctc/emails) so a pasted
   // link to the Emails tab lands there, not on the file list.
@@ -9650,9 +9589,6 @@ function ProjectsSurface({
   // current. Guarded on the id so a hydrated row replacing itself doesn't
   // re-fetch, and on _hydrated so reload() (which returns un-hydrated rows)
   // re-hydrates the open record automatically.
-  // Keyed on the object itself: two quick-adds in a row each set a fresh
-  // un-hydrated row with the same id/_hydrated, which an id-keyed effect
-  // never re-ran for, so the second task stayed missing (audit L1).
   useEffect(() => {
     if (!current || current._hydrated) return;
     let on = true;
@@ -9662,7 +9598,7 @@ function ProjectsSurface({
     return () => {
       on = false;
     };
-  }, [current]);
+  }, [current && current.id, current && current._hydrated]);
 
   // Record-level URL, so the address bar stays copy-pasteable inside a
   // project too. Same rules as the router's writer: replaceState only,
@@ -9670,10 +9606,6 @@ function ProjectsSurface({
   useEffect(() => {
     if (TASKS_EMBED) return; // embed: URL is invisible, history is shared
     if (location.hash.indexOf('=') !== -1) return;
-    // Hold off while a sidebar/deep-link open is still pending (the rows
-    // may not be in yet), and after a miss — otherwise the pasted link is
-    // overwritten with the plain list token before anyone sees it (C7).
-    if (openId != null || routeMiss) return;
     const seg = ROUTE_SEG_BY_KIND[kind];
     if (!seg) return;
     // This surface owns its whole hash — list and record alike.
@@ -9685,10 +9617,7 @@ function ProjectsSurface({
       } catch (e) {}
     }, 120);
     return () => clearTimeout(t);
-    // `kind` is a dep: switching Projects <-> Rocks (list to list) changed
-    // nothing else here, so the hash kept the previous surface's token and
-    // a refresh landed on the wrong surface (audit C2).
-  }, [kind, current && current.id, dtab, pview, ctcTab, openId, routeMiss]);
+  }, [current && current.id, dtab, pview, ctcTab]);
   const wide = useWide(700);
   useEffect(() => {
     localStorage.setItem(gKey, group);
@@ -9711,7 +9640,6 @@ function ProjectsSurface({
     const r = await ProjectDB.loadFull(kind);
     setRows(r);
     setLoading(false);
-    if (onChanged) onChanged();
     return r;
   }
   useEffect(() => {
@@ -9719,9 +9647,6 @@ function ProjectsSurface({
     setCurrent(null);
     reload();
   }, [kind]);
-  useEffect(() => {
-    if (pview !== 'list') setRouteMiss(null);
-  }, [pview]);
 
   // Sidebar-initiated navigation: jump straight to a specific project/file
   // ('new' opens the create form instead). Waits for `rows` if they haven't
@@ -9745,9 +9670,6 @@ function ProjectsSurface({
       // looked broken until reload.
       else {
         setPview('list');
-        setRouteMiss({
-          id: openId
-        });
         PENDING_ROUTE.id = null;
         PENDING_ROUTE.tab = null;
       }
@@ -9757,10 +9679,7 @@ function ProjectsSurface({
 
   // Reload this container's data and re-select both `current` and (if given)
   // the task being viewed, so edits/status-changes reflect immediately.
-  // `reopen` — only re-open the task drawer when the caller had it open.
-  // Ticking a List checkbox or dragging a Board card used to pop the task
-  // open every time (audit C12).
-  async function refreshContainer(focusTaskId, reopen) {
+  async function refreshContainer(focusTaskId) {
     const fresh = await reload();
     const proj0 = current && fresh.find(x => x.id === current.id);
     if (proj0) {
@@ -9768,7 +9687,7 @@ function ProjectsSurface({
       // about to re-open is actually in _tasks.
       const proj = await ProjectDB.hydrate(proj0);
       setCurrent(proj);
-      if (reopen && focusTaskId) openTaskFull(proj._tasks.find(x => x.id === focusTaskId) || null);
+      if (focusTaskId) openTaskFull(proj._tasks.find(x => x.id === focusTaskId) || null);
     }
   }
   // loadFull carries only the columns the list/board/timeline draw, so a
@@ -9781,32 +9700,18 @@ function ProjectsSurface({
       setOpenTask(null);
       return;
     }
-    // A subtask row arrives with no _people at all. Marking it undefined
-    // (not []) keeps Edit gated until the real list lands, so Save can't
-    // wipe assignees it never saw (audit C8).
-    const known = t._people || ((current && current._tasks || []).find(x => x.id === t.id) || {})._people;
-    setOpenTask({
-      ...t,
-      _people: known
-    });
-    const [full, ppl] = await Promise.all([TaskDB.getById(t.id), known ? Promise.resolve(known) : TaskDB.loadPeopleFor(t.id)]);
-    // Keep _projectName: the raw row has only project_id, and TaskForm
-    // seeds its Project field from the name — dropping it showed
-    // "(No project)" and Save detached the task from this file (audit C9).
-    // Only claim THIS container's name when the task really belongs to it;
-    // a subtask created here carries no project_id, and labelling it with
-    // the container silently attached it on Save.
+    setOpenTask(t);
+    const full = await TaskDB.getById(t.id);
     if (full) setOpenTask(prev => prev && prev.id === t.id ? {
       ...full,
-      _people: ppl == null ? prev._people : ppl,
-      _projectName: t._projectName || prev._projectName || (current && full.project_id === current.id ? current.name : '')
+      _people: t._people || prev._people || []
     } : prev);
   }
   async function onTaskStatus(task, status) {
     await TaskDB.update(task.id, task, {
       status
     }, user);
-    await refreshContainer(task.id, !!(openTask && openTask.id === task.id));
+    await refreshContainer(task.id);
   }
   async function toggleTaskDone(t) {
     await onTaskStatus(t, t.status === 'done' ? 'todo' : 'done');
@@ -9822,9 +9727,7 @@ function ProjectsSurface({
   async function onTaskSave(form) {
     const due_at = form.due ? new Date(form.due).toISOString() : null;
     const decision_due_at = form.decisionDue ? new Date(form.decisionDue).toISOString() : null;
-    // The container we're already inside wins over a name lookup — an
-    // archived file with the same name used to capture the task instead.
-    const project_id = form.project ? current && form.project === current.name ? current.id : await TaskDB.findOrCreateProject(form.project, user) : null;
+    const project_id = form.project ? await TaskDB.findOrCreateProject(form.project, user) : null;
     const pl = form.planning || {};
     const fields = {
       title: form.title,
@@ -9856,7 +9759,7 @@ function ProjectsSurface({
     let taskId;
     if (openTask && openTask.id) {
       await TaskDB.update(openTask.id, openTask, fields, user);
-      if (openTask._people !== undefined) await TaskDB.setPeople(openTask.id, people);
+      await TaskDB.setPeople(openTask.id, people);
       taskId = openTask.id;
     } else {
       const created = await TaskDB.create(fields, people, user);
@@ -9867,7 +9770,7 @@ function ProjectsSurface({
       await TaskDB.setDecisionOptions(taskId, form.decisionOptions || []);
     }
     setTaskEditing(false);
-    await refreshContainer(taskId, true);
+    await refreshContainer(taskId);
   }
   const nameOf = id => (team.find(m => m.id === id) || {}).name || '';
   const initialsOf = id => {
@@ -9879,17 +9782,12 @@ function ProjectsSurface({
     d.setHours(0, 0, 0, 0);
     return d;
   })();
-  // started_at/target_date are date-only strings straight from <input
-  // type=date>. `new Date('2026-09-15')` is UTC midnight, which is Sep 14
-  // in every US timezone — so Target showed a day early and a project due
-  // today was painted overdue (audit C15). Build date-only values as local.
-  const parseD = d => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? new Date(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) : new Date(d);
-  const fmtD = d => d ? parseD(d).toLocaleDateString('en-US', {
+  const fmtD = d => d ? new Date(d).toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric'
   }) : '—';
-  const isOverdue = d => d && parseD(d) < today0;
-  const daysTo = d => d ? Math.round((parseD(d) - today0) / 86400000) : '—';
+  const isOverdue = d => d && new Date(d) < today0;
+  const daysTo = d => d ? Math.round((new Date(d) - today0) / 86400000) : '—';
 
   // ── CTC-only: "attention" flag + hero color, derived from real open-task
   // status (stuck / overdue) rather than a stored field — mirrors the
@@ -9976,7 +9874,7 @@ function ProjectsSurface({
       fontFamily: C.fontSans
     }
   }, label, active && '✓');
-  const GROUP_OPTS = isCtc ? [['none', 'None'], ['status', 'Status'], ['group', 'Group'], ['agent', 'Agent'], ['owner', 'Owner']] : [['none', 'None'], ['status', 'Status'], ['group', 'Group'], ['owner', 'Owner']];
+  const GROUP_OPTS = [['none', 'None'], ['status', 'Status'], ['group', 'Group'], ['owner', 'Owner']];
   const SORT_OPTS = [['target', 'Target date'], ['name', 'Name'], ['progress', 'Progress'], ['created', 'Recently added']];
   // .btn.on ported: border-color gold-soft, color navy, background gold-pale
   // — shown whenever the chip's selection differs from its default.
@@ -10159,7 +10057,7 @@ function ProjectsSurface({
     const map = {};
     filtered.forEach(p => {
       let key;
-      if (group === 'status') key = projStatusMeta(p.status).label;else if (group === 'group') key = p.group_tag || 'No group';else if (group === 'agent') key = nameOf(p.agent_id) || 'Unassigned';else key = nameOf(p.owner_id) || 'Unassigned';
+      if (group === 'status') key = projStatusMeta(p.status).label;else if (group === 'group') key = p.group_tag || 'No group';else key = nameOf(p.owner_id) || 'Unassigned';
       (map[key] = map[key] || []).push(p);
     });
     return Object.keys(map).sort((a, b) => a.localeCompare(b)).map(k => [k, sortRows(map[k])]);
@@ -10538,7 +10436,7 @@ function ProjectsSurface({
         marginBottom: 8,
         fontFamily: C.fontSans
       }
-    }, p.name), (p.group_tag || p.agent_id) && /*#__PURE__*/React.createElement("div", {
+    }, p.name), (p.group_tag || p.owner_id) && /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
         alignItems: 'center',
@@ -10570,7 +10468,7 @@ function ProjectsSurface({
         fontFamily: C.fontSans,
         marginLeft: 6
       }
-    }, "No Zoho deal"), p.agent_id && /*#__PURE__*/React.createElement("span", {
+    }, "No Zoho deal"), p.owner_id && /*#__PURE__*/React.createElement("span", {
       style: {
         display: 'flex',
         alignItems: 'center',
@@ -10579,7 +10477,7 @@ function ProjectsSurface({
         color: sub,
         fontFamily: C.fontSans
       }
-    }, avatar(p.agent_id, 16), nameOf(p.agent_id))), p._nextMs && /*#__PURE__*/React.createElement("div", {
+    }, avatar(p.owner_id, 16), nameOf(p.owner_id))), p._nextMs && /*#__PURE__*/React.createElement("div", {
       style: {
         borderRadius: 5,
         padding: '9px 11px',
@@ -10794,7 +10692,7 @@ function ProjectsSurface({
         color: sub,
         fontFamily: C.fontSans
       }
-    }, p.agent_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.agent_id, 16), nameOf(p.agent_id).split(' ')[0]) : '—'), /*#__PURE__*/React.createElement("div", {
+    }, p.owner_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.owner_id, 16), nameOf(p.owner_id).split(' ')[0]) : '—'), /*#__PURE__*/React.createElement("div", {
       style: {
         width: 96,
         flexShrink: 0,
@@ -10808,40 +10706,6 @@ function ProjectsSurface({
   };
 
   // ── list body ──
-  const routeMissBar = routeMiss && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 10,
-      margin: wide ? '12px 34px 0' : '10px 14px 0',
-      padding: '9px 12px',
-      borderRadius: 6,
-      border: `1px solid ${bord}`,
-      background: dark ? 'rgba(155,28,28,.14)' : '#FBF0F0',
-      color: dark ? '#F08A8A' : '#9B1C1C',
-      fontSize: '0.78rem',
-      fontFamily: C.fontSans
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-alert-circle",
-    style: {
-      fontSize: 15,
-      flexShrink: 0
-    }
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      flex: 1
-    }
-  }, "That ", KL.singular.toLowerCase(), " is archived or no longer exists \u2014 the link you followed doesn't point anywhere."), /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-x",
-    onClick: () => setRouteMiss(null),
-    "aria-label": "Dismiss",
-    style: {
-      fontSize: 14,
-      cursor: 'pointer',
-      flexShrink: 0
-    }
-  }));
   const listBody = (rowFn, wideList) => {
     if (loading) return /*#__PURE__*/React.createElement("div", {
       style: {
@@ -10851,7 +10715,7 @@ function ProjectsSurface({
         fontFamily: C.fontSans
       }
     }, "Loading\u2026");
-    if (!filtered.length) return /*#__PURE__*/React.createElement(React.Fragment, null, routeMissBar, /*#__PURE__*/React.createElement("div", {
+    if (!filtered.length) return /*#__PURE__*/React.createElement("div", {
       style: {
         color: sub,
         fontSize: '0.82rem',
@@ -10859,10 +10723,10 @@ function ProjectsSurface({
         textAlign: 'center',
         fontFamily: C.fontSans
       }
-    }, "No ", KL.plural.toLowerCase(), " yet. Tap ", /*#__PURE__*/React.createElement("b", null, "New"), " to add one."));
-    return /*#__PURE__*/React.createElement(React.Fragment, null, routeMissBar, grouped().map(([label, items], gi) => /*#__PURE__*/React.createElement("div", {
+    }, "No ", KL.plural.toLowerCase(), " yet. Tap ", /*#__PURE__*/React.createElement("b", null, "New"), " to add one.");
+    return grouped().map(([label, items], gi) => /*#__PURE__*/React.createElement("div", {
       key: label || gi
-    }, label && groupHeadRow(label, items.length, group === 'status' ? projStatusMeta((items[0] || {}).status).color : gold), items.map(rowFn))));
+    }, label && groupHeadRow(label, items.length, group === 'status' ? projStatusMeta((items[0] || {}).status).color : gold), items.map(rowFn)));
   };
 
   // ── DETAIL ──
@@ -11300,12 +11164,7 @@ function ProjectsSurface({
       minHeight: 0,
       overflowY: 'auto'
     }
-  }, taskEditing ? openTask._people === undefined ? /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: 20,
-      color: sub
-    }
-  }, "Loading\u2026") : /*#__PURE__*/React.createElement(TaskForm, {
+  }, taskEditing ? /*#__PURE__*/React.createElement(TaskForm, {
     dark: dark,
     task: openTask,
     team: team,
@@ -13352,58 +13211,30 @@ function TasksScreen({
     }
     localStorage.setItem('tmg-tasks-surface', surface);
   }, [surface]);
-  // Sidebar rows + counts. Also handed to ProjectsSurface as onChanged so a
-  // create/archive/quick-add there shows up here at once (audit C6/C16).
-  const refreshNav = () => ProjectDB.sidebarList().then(setNavItems);
   useEffect(() => {
-    refreshNav();
+    ProjectDB.sidebarList().then(setNavItems);
   }, [surface]);
-  // A #task/<id> that resolves to nothing — say so instead of silently
-  // showing the list (audit C7). Cleared when the user navigates.
-  const [routeNotice, setRouteNotice] = useState(null);
-  // True while a #task/<id> is being looked up — freezes the URL writer so
-  // the pasted link survives long enough to be read (or reported dead).
-  const [routePending, setRoutePending] = useState(false);
-  useEffect(() => {
-    if (view !== 'list' || surface !== 'my') setRouteNotice(null);
-  }, [view, surface]);
   useEffect(() => {
     const r = requestAnimationFrame(() => setVis(true));
     return () => cancelAnimationFrame(r);
   }, []);
-  // A task handed in from Calendar/Decisions renders only on the My Tasks
-  // surface — force it (as a visit, not a saved preference) or the click
-  // lands on a Projects/Rocks list with no task (audit C4/C18/C19). The
-  // flag is set only when the surface actually changes: setting it with
-  // no change leaves it armed and swallows the user's next real switch.
   useEffect(() => {
-    if (!initialTask) return;
-    if (surface !== 'my') {
-      routeFromUrl.current = true;
-      setSurface('my');
+    if (initialTask) {
+      setCurrent(initialTask);
+      setView('detail');
     }
-    setCurrent(initialTask);
-    setView('detail');
   }, [initialTask]);
   const bg = dark ? '#000D26' : '#FCFBF8',
     bord = dark ? '#152545' : '#E4DFD4',
     ink = dark ? '#fff' : '#001A4A',
     sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B',
     gold = dark ? '#C9A45A' : '#AD832F';
-  // People for tasks that aren't mine (reached by link, as a subtask, or
-  // from Calendar) are fetched one at a time and kept OUT of `data` — a
-  // reload() replaces peopleByTask wholesale, and parking them in there
-  // meant every checkbox tick re-emptied the open task's Details (C3/C17).
-  const [extraPeople, setExtraPeople] = useState({});
-  // undefined = never fetched. [] = fetched, genuinely nobody. The two must
-  // stay distinguishable: Save may only write people it actually seeded.
-  const peopleFor = id => data.peopleByTask[id] !== undefined ? data.peopleByTask[id] : extraPeople[id];
   const enrich = (t, projById) => ({
     ...t,
     _projectName: t.project_id ? projById[t.project_id] || '' : ''
   });
   const withMetaFrom = (t, d) => {
-    const ppl = (d.peopleByTask[t.id] !== undefined ? d.peopleByTask[t.id] : extraPeople[t.id]) || [];
+    const ppl = d.peopleByTask[t.id] || [];
     return {
       ...enrich(t, d.projById),
       _assignees: ppl.filter(p => p.role === 'assignee').map(p => p.user_id),
@@ -13412,12 +13243,8 @@ function TasksScreen({
     };
   };
   const withMeta = t => withMetaFrom(t, data);
-  // 'Loading…' only on the first load. Every later reload (checkbox, status,
-  // quick-add) keeps the current rows on screen until the new ones land —
-  // swapping the subtree reset scroll and dropped quick-add focus (audit C20).
-  const firstLoad = useRef(true);
   async function reload() {
-    if (firstLoad.current) setLoading(true);
+    setLoading(true);
     const [d, tm, links] = await Promise.all([TaskDB.loadAll(user && user.id), ProfileDB.loadAll(), TaskEmailDB.loadAllByTask()]);
     const enriched = {
       ...d,
@@ -13429,7 +13256,6 @@ function TasksScreen({
       name: ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || 'User'
     })));
     setLinksByTask(links || {});
-    firstLoad.current = false;
     setLoading(false);
     return enriched;
   }
@@ -13456,25 +13282,6 @@ function TasksScreen({
   useEffect(() => {
     reload();
   }, []);
-  // My Tasks holds only the caller's tasks, so a task reached by link, as a
-  // subtask, or from Calendar has no entry in data.peopleByTask — Details
-  // showed dashes and Edit → Save deleted every assignee (audit C3/C17).
-  // Fetch that task's people on demand and merge them in. Re-runs after a
-  // reload() replaces the map (one tiny query while a foreign task is open).
-  useEffect(() => {
-    const id = current && current.id;
-    if (!id || peopleFor(id) !== undefined) return;
-    let on = true;
-    TaskDB.loadPeopleFor(id).then(ppl => {
-      if (on && ppl) setExtraPeople(m => ({
-        ...m,
-        [id]: ppl
-      }));
-    });
-    return () => {
-      on = false;
-    };
-  }, [current && current.id, data.peopleByTask, extraPeople]);
   // ── Deep-link router ──────────────────────────────────────────────
   // One reader, one writer, for every view: #tasks, #task/<id>, #ctc,
   // #ctc/<id>[/<tab>], #projects, #project/<id>[/<tab>], #rocks,
@@ -13485,22 +13292,15 @@ function TasksScreen({
   // save/status change. It runs once on mount, then only on hashchange.
   const routeApplied = useRef(false);
   useEffect(() => {
-    // Don't persist a route-driven surface switch — but only disarm the
-    // saved-surface writer when the surface actually moves. Arming it on a
-    // no-op left the flag set and swallowed the user's next real switch.
-    const goSurface = s => setSurface(prev => {
-      if (prev !== s) routeFromUrl.current = true;
-      return s;
-    });
     const applyRoute = async hash => {
       const r = parseTaskRoute(hash);
       if (!r) return;
+      routeFromUrl.current = true; // don't persist a route-driven surface switch
       if (r.type === 'list') {
         setOpenCtcTab(r.ctcTab || null);
-        goSurface(r.surface);
+        setSurface(r.surface);
         setView('list');
         setCurrent(null);
-        setRouteNotice(null);
         return;
       }
       if (r.type === 'record') {
@@ -13509,27 +13309,18 @@ function TasksScreen({
         PENDING_ROUTE.kind = r.kind;
         PENDING_ROUTE.id = r.id;
         PENDING_ROUTE.tab = r.tab;
-        goSurface(r.surface);
+        setSurface(r.surface);
         setOpenItemId(r.id);
         return;
       }
       // A task lives under any surface, but only the My Tasks surface can
       // render a task detail — force it, or the link silently no-ops for
-      // anyone whose last surface was CTC/Projects/Rocks. Switch BEFORE the
-      // lookup and hold the URL writer: otherwise the pasted link was
-      // replaced by #tasks (or the old surface) mid-fetch, so a dead link
-      // couldn't be read back off the address bar (audit C7).
-      goSurface('my');
-      setRoutePending(true);
+      // anyone whose last surface was CTC/Projects/Rocks.
       const found = (data.tasks || []).find(t => t.id === r.id) || (await TaskDB.getById(r.id));
-      setRoutePending(false);
       if (found) {
+        setSurface('my');
         setCurrent(found);
         setView('detail');
-      } else {
-        setView('list');
-        setCurrent(null);
-        setRouteNotice('That task no longer exists, or you don’t have access to it.');
       }
     };
     // Consume a deep link stashed before the OAuth round-trip (see the
@@ -13543,12 +13334,9 @@ function TasksScreen({
         if (st && st.h && Date.now() - (st.t || 0) < 60000) initial = st.h;
       }
     } catch (e) {}
-    // A mount that was handed a task (Calendar/Decisions click) must not
-    // re-apply the stale hash on top of it — that reopened the previously
-    // open task, or the plain list, instead of the one clicked (audit C18).
     if (!routeApplied.current) {
       routeApplied.current = true;
-      if (!initialTask) applyRoute(initial);
+      applyRoute(initial);
     }
     const onHash = () => applyRoute(location.hash);
     window.addEventListener('hashchange', onHash);
@@ -13566,9 +13354,6 @@ function TasksScreen({
     // owned end-to-end by its ProjectsSurface (list AND record), so the
     // two writers can never race over the same hash.
     if (surface !== 'my') return;
-    // Hold while a deep link is still resolving, and after one turned out
-    // to be dead — both cases must leave the pasted URL alone (audit C7).
-    if (routePending || routeNotice) return;
     const hash = view === 'detail' && current ? 'task/' + current.id : 'tasks';
     const t = setTimeout(() => {
       // coalesce: Safari throws past ~100 replaceState/10s
@@ -13577,7 +13362,7 @@ function TasksScreen({
       } catch (e) {}
     }, 120);
     return () => clearTimeout(t);
-  }, [surface, view, current && current.id, routePending, routeNotice]);
+  }, [surface, view, current && current.id]);
   useEffect(() => {
     if (view === 'list') {
       try {
@@ -13625,18 +13410,7 @@ function TasksScreen({
     let taskId;
     if (current && current.id) {
       await TaskDB.update(current.id, current, fields, user);
-      // Never rewrite people the form was never seeded with (the on-demand
-      // fetch above hadn't landed when Edit was clicked) — that's a wipe.
-      if (peopleFor(current.id) !== undefined) {
-        await TaskDB.setPeople(current.id, people);
-        setExtraPeople(m => {
-          const n = {
-            ...m
-          };
-          delete n[current.id];
-          return n;
-        }); // re-read on next open
-      }
+      await TaskDB.setPeople(current.id, people);
       taskId = current.id;
     } else {
       const created = await TaskDB.create(fields, people, user);
@@ -13646,12 +13420,7 @@ function TasksScreen({
       await TaskDB.setLabels(taskId, user && user.id, form.labels || []);
       await TaskDB.setDecisionOptions(taskId, form.decisionOptions || []);
     }
-    // A save can create a project (free-text Project field) or move a task
-    // between them — the sidebar rows/counts are stale until we re-ask.
-    // Deliberately here and not in reload(): every checkbox tick calls
-    // reload(), and re-querying the sidebar on each one is pure waste.
     await reload();
-    refreshNav();
     setView('list');
     setCurrent(null);
   }
@@ -14042,45 +13811,11 @@ function TasksScreen({
       fontSize: 14
     }
   }), "New");
-  const routeNoticeBar = routeNotice && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 10,
-      margin: '0 0 10px',
-      padding: '9px 12px',
-      borderRadius: 6,
-      border: `1px solid ${bord}`,
-      background: dark ? 'rgba(155,28,28,.14)' : '#FBF0F0',
-      color: dark ? '#F08A8A' : '#9B1C1C',
-      fontSize: '0.78rem',
-      fontFamily: C.fontSans
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-alert-circle",
-    style: {
-      fontSize: 15,
-      flexShrink: 0
-    }
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      flex: 1
-    }
-  }, routeNotice), /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-x",
-    onClick: () => setRouteNotice(null),
-    "aria-label": "Dismiss",
-    style: {
-      fontSize: 14,
-      cursor: 'pointer',
-      flexShrink: 0
-    }
-  }));
   const listInner = compact => /*#__PURE__*/React.createElement("div", {
     style: {
       padding: compact ? '10px 10px 24px' : '12px 14px 24px'
     }
-  }, routeNoticeBar, loading ? /*#__PURE__*/React.createElement("div", {
+  }, loading ? /*#__PURE__*/React.createElement("div", {
     style: {
       color: sub,
       fontSize: '0.82rem',
@@ -14094,16 +13829,7 @@ function TasksScreen({
       textAlign: 'center'
     }
   }, "No tasks yet. Tap ", /*#__PURE__*/React.createElement("b", null, "New"), " to add one.") : /*#__PURE__*/React.createElement(React.Fragment, null, renderList()));
-  const detailPane = view === 'form' ? current && peopleFor(current.id) === undefined
-  // Editing a task whose people haven't landed yet: seeding the form
-  // from nothing and saving would delete every assignee. It's one tiny
-  // query, so this placeholder is sub-second.
-  ? /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: 20,
-      color: sub
-    }
-  }, "Loading\u2026") : /*#__PURE__*/React.createElement(TaskForm, {
+  const detailPane = view === 'form' ? /*#__PURE__*/React.createElement(TaskForm, {
     dark: dark,
     task: current ? withMeta(current) : null,
     team: team,
@@ -14113,7 +13839,7 @@ function TasksScreen({
   }) : view === 'detail' && current ? /*#__PURE__*/React.createElement(TaskDetail, {
     dark: dark,
     task: withMeta(current),
-    people: peopleFor(current.id) || [],
+    people: data.peopleByTask[current.id] || [],
     team: team,
     user: user,
     allTasks: data.tasks,
@@ -14135,11 +13861,7 @@ function TasksScreen({
   }) : view === 'labels' ? /*#__PURE__*/React.createElement(LabelManager, {
     dark: dark,
     user: user,
-    onClose: () => setView('list'),
-    onSaved: async () => {
-      await reload();
-      setView('list');
-    }
+    onClose: () => setView('list')
   }) : null;
   // ── Container chrome: embed → fill the iframe (it provides the panel chrome);
   // standalone → a real full-bleed page under the top bar, NOT a floating popout
@@ -15405,7 +15127,6 @@ function TasksScreen({
      plainSurfaceTitle, not the narrow dropdown: that tab is one
      surface, with no switching to My Tasks/Projects/Rocks. */
   React.createElement(ProjectsSurface, {
-    key: surface,
     kind: surfaceKind[surface] || 'project',
     dark: dark,
     user: user,
@@ -15414,8 +15135,7 @@ function TasksScreen({
     openId: openItemId,
     onOpenIdConsumed: () => setOpenItemId(null),
     openCtcTab: openCtcTab,
-    onCtcTabConsumed: () => setOpenCtcTab(null),
-    onChanged: refreshNav
+    onCtcTabConsumed: () => setOpenCtcTab(null)
   }) : embed ? ( /* ══════ EMBEDDED POPOUT — unchanged, out of scope for the My Tasks redesign ══════ */
   wide ? /*#__PURE__*/React.createElement("div", {
     style: {
@@ -15609,14 +15329,7 @@ function TasksScreen({
       flexDirection: 'column',
       minHeight: 0
     }
-  }, surface !== 'my' ?
-  /*#__PURE__*/
-  /* key={surface}: a Projects <-> Rocks switch REMOUNTS the
-     surface (fresh rows/loading), so a sidebar click or deep
-     link to the other kind opens the record instead of the
-     previous kind's stale list consuming the id (audit C1/C11). */
-  React.createElement(ProjectsSurface, {
-    key: surface,
+  }, surface !== 'my' ? /*#__PURE__*/React.createElement(ProjectsSurface, {
     kind: surfaceKind[surface] || 'project',
     dark: dark,
     user: user,
@@ -15626,8 +15339,7 @@ function TasksScreen({
     openId: openItemId,
     onOpenIdConsumed: () => setOpenItemId(null),
     openCtcTab: openCtcTab,
-    onCtcTabConsumed: () => setOpenCtcTab(null),
-    onChanged: refreshNav
+    onCtcTabConsumed: () => setOpenCtcTab(null)
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '26px 34px 0',
@@ -15665,7 +15377,7 @@ function TasksScreen({
       flexDirection: 'column',
       padding: '14px 34px 0'
     }
-  }, routeNoticeBar, loading ? /*#__PURE__*/React.createElement("div", {
+  }, loading ? /*#__PURE__*/React.createElement("div", {
     style: {
       color: sub,
       fontSize: '0.82rem',
@@ -15837,7 +15549,6 @@ function TasksScreen({
     onClose: () => setMailboxOpen(false)
   })))) : ( /* ── Mobile: single column, no sidebar — title dropdown switches surfaces ── */
   surface !== 'my' ? /*#__PURE__*/React.createElement(ProjectsSurface, {
-    key: surface,
     kind: surfaceKind[surface] || 'project',
     dark: dark,
     user: user,
@@ -15846,8 +15557,7 @@ function TasksScreen({
     openId: openItemId,
     onOpenIdConsumed: () => setOpenItemId(null),
     openCtcTab: openCtcTab,
-    onCtcTabConsumed: () => setOpenCtcTab(null),
-    onChanged: refreshNav
+    onCtcTabConsumed: () => setOpenCtcTab(null)
   }) : view !== 'list' ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -15981,11 +15691,7 @@ function TasksScreen({
       display: 'flex',
       flexDirection: 'column'
     }
-  }, routeNotice && /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: '10px 14px 0'
-    }
-  }, routeNoticeBar), loading ? /*#__PURE__*/React.createElement("div", {
+  }, loading ? /*#__PURE__*/React.createElement("div", {
     style: {
       color: sub,
       fontSize: '0.82rem',
@@ -21478,38 +21184,22 @@ function App({
       dark: dark,
       onToggleDark: () => setDark(d => !d),
       onCalendar: () => {
-        setTasksFocus(null);
-        if (showCalendar) {
-          setShowCalendar(false);
-          setShowTasks(true);
-        } else {
-          setShowCalendar(true);
-          setShowTasks(false);
-          setShowDecisions(false);
-        }
+        setShowCalendar(s => !s);
+        setShowTasks(false);
+        setShowDecisions(false);
       },
       calendarOpen: showCalendar,
       onTasks: () => {
+        setShowTasks(s => !s);
         setShowCalendar(false);
         setShowDecisions(false);
         setTasksFocus(null);
-        if (showTasks) {
-          try {
-            if (location.hash.replace(/^#\/?/, '') !== 'tasks') location.hash = 'tasks';else window.dispatchEvent(new HashChangeEvent('hashchange'));
-          } catch (e) {}
-        } else setShowTasks(true);
       },
       tasksOpen: showTasks,
       onDecisions: () => {
-        setTasksFocus(null);
-        if (showDecisions) {
-          setShowDecisions(false);
-          setShowTasks(true);
-        } else {
-          setShowDecisions(true);
-          setShowCalendar(false);
-          setShowTasks(false);
-        }
+        setShowDecisions(s => !s);
+        setShowCalendar(false);
+        setShowTasks(false);
       },
       decisionsOpen: showDecisions,
       avatar: myAvatar,
@@ -21525,7 +21215,6 @@ function App({
         setTasksFocus(t);
       },
       onClose: () => {
-        setTasksFocus(null);
         setShowCalendar(false);
         setShowTasks(true);
       }
@@ -21545,7 +21234,6 @@ function App({
         setTasksFocus(t);
       },
       onClose: () => {
-        setTasksFocus(null);
         setShowDecisions(false);
         setShowTasks(true);
       }

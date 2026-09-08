@@ -24322,11 +24322,17 @@ function App({
   // Tasks lives in the main nav, not More (moved 2026-08-10) — kept as its own
   // item rather than a TABS entry since it needs TASKS_POPOUT_VERSION, which
   // isn't defined yet at TABS' top-level position in the file.
+  // #tasks is load-bearing, not decorative: with no hash at all, tasks.html
+  // has nothing to route on and falls back to whatever surface (My Tasks /
+  // Projects / Rocks) was last viewed, persisted in localStorage — so
+  // clicking the main Tasks nav could land on Rocks with no way back except
+  // reopening Tasks from inside itself. #tasks forces My Tasks every time,
+  // matching what the TopBar's own Tasks icon already does below.
   const tasksNavItem = {
     id: 'tasks',
     label: 'Tasks',
     icon: 'ti-checklist',
-    href: 'tasks.html?v=' + TASKS_POPOUT_VERSION
+    href: 'tasks.html?v=' + TASKS_POPOUT_VERSION + '#tasks'
   };
   // All possible items the user could see (access-filtered). Tasks was never
   // gated by appSet before, so it's spliced in after filtering to preserve that.

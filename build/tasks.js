@@ -4308,18 +4308,25 @@ const ProjectDB = {
     // re-fetched in full by id (openTaskFull below), so nothing downstream
     // sees a partial row. Full rows for ~2,900 tasks was multiple MB of
     // JSON on every visit to this screen.
-    const TASK_COLS = 'id,project_id,title,status,priority,due_at,is_milestone,completed_at,updated_at,created_at,parent_task_id,zoho_tasklist_name';
-    const tRows = await chunked(projIds, 100, ids => pageAll(c, 'tasks', TASK_COLS, {
-      in: ['project_id', ids]
-    }));
-    const pplRows = await chunked(tRows.map(t => t.id), 150, ids => pageAll(c, 'task_people', 'task_id,user_id,role', {
-      in: ['task_id', ids]
-    }));
+    // MILESTONES ONLY (a handful per file) — the list draws the milestone
+    // chain, next-milestone date and progress from these. Everything else
+    // the list needs is a COUNT, which project_task_stats() returns as one
+    // row per project instead of shipping ~2,900 task rows to the browser.
+    // A file's actual tasks load when that file is opened (hydrate below).
+    const MS_COLS = 'id,project_id,title,status,priority,due_at,is_milestone,completed_at,updated_at,created_at,parent_task_id,zoho_tasklist_name';
+    const [msRows, statsRes] = await Promise.all([chunked(projIds, 100, ids => pageAll(c, 'tasks', MS_COLS, {
+      in: ['project_id', ids],
+      eq: ['is_milestone', true]
+    })), c.rpc('project_task_stats')]);
+    const statsBy = {};
+    (statsRes && statsRes.data || []).forEach(r => {
+      statsBy[r.project_id] = r;
+    });
     const tRes = {
-        data: tRows
+        data: msRows
       },
       pplRes = {
-        data: pplRows
+        data: []
       };
     const peopleByTask = {};
     (pplRes.data || []).forEach(p => {
@@ -4342,29 +4349,97 @@ const ProjectDB = {
       // _projectName: TaskForm reads this to pre-fill the Project field when
       // editing a task opened from inside its own container — without it the
       // field shows blank and saving would detach the task (project_id: null).
-      const ts = (tasksByProj[p.id] || []).map(t => ({
+      const ms = (tasksByProj[p.id] || []).map(t => ({
         ...t,
         _projectName: p.name
       }));
-      const milestones = ts.filter(t => t.is_milestone).slice().sort(dueCmp);
+      const milestones = ms.slice().sort(dueCmp);
       const doneMs = milestones.filter(m => m.status === 'done').length;
       const totalMs = milestones.length;
       const nextMs = milestones.find(m => m.status !== 'done') || null;
-      const openTasks = ts.filter(t => t.status !== 'done').slice().sort(dueCmp);
-      const collaborators = Array.from(new Set(ts.flatMap(t => (peopleByTask[t.id] || []).filter(x => x.role === 'assignee').map(x => x.user_id))));
+      const st = statsBy[p.id] || {
+        total: 0,
+        done: 0,
+        stuck: 0,
+        overdue: 0,
+        any_dates: false
+      };
+      // _tasks stays EMPTY until this record is opened — _hydrated says
+      // which it is, so the detail view can show a loading state instead of
+      // an empty task list. Counts below come from project_task_stats().
       return {
         ...p,
-        _tasks: ts,
+        _tasks: [],
+        _hydrated: false,
         _milestones: milestones,
         _doneMs: doneMs,
         _totalMs: totalMs,
         _nextMs: nextMs,
         _progress: totalMs ? Math.round(doneMs / totalMs * 100) : 0,
-        _openTasks: openTasks,
-        _taskCount: ts.length,
-        _collaborators: collaborators
+        _openTasks: [],
+        _collaborators: [],
+        _taskCount: st.total || 0,
+        _doneCount: st.done || 0,
+        _stuck: st.stuck || 0,
+        _overdue: st.overdue || 0,
+        _anyDates: !!st.any_dates
       };
     });
+  },
+  // Load ONE record's tasks — called when it is opened, never for the list.
+  // Returns the same shape loadFull builds, with _hydrated: true. Milestone
+  // fields are recomputed from the full set so a status change made in the
+  // detail view shows up without a full reload.
+  async hydrate(p) {
+    const c = this.client();
+    if (!c || !p) return p;
+    const {
+      data: rows
+    } = await pageAll(c, 'tasks', '*', {
+      eq: ['project_id', p.id]
+    });
+    const ts0 = rows || [];
+    const ppl = await chunked(ts0.map(t => t.id), 150, ids => pageAll(c, 'task_people', 'task_id,user_id,role', {
+      in: ['task_id', ids]
+    }));
+    const peopleByTask = {};
+    ppl.forEach(x => {
+      (peopleByTask[x.task_id] = peopleByTask[x.task_id] || []).push(x);
+    });
+    const dueCmp = (a, b) => {
+      if (!a.due_at && !b.due_at) return 0;
+      if (!a.due_at) return 1;
+      if (!b.due_at) return -1;
+      return new Date(a.due_at) - new Date(b.due_at);
+    };
+    const ts = ts0.map(t => ({
+      ...t,
+      _people: peopleByTask[t.id] || [],
+      _projectName: p.name
+    }));
+    const milestones = ts.filter(t => t.is_milestone).slice().sort(dueCmp);
+    const doneMs = milestones.filter(m => m.status === 'done').length;
+    const totalMs = milestones.length;
+    const nextMs = milestones.find(m => m.status !== 'done') || null;
+    const openTasks = ts.filter(t => t.status !== 'done').slice().sort(dueCmp);
+    const collaborators = Array.from(new Set(ts.flatMap(t => (peopleByTask[t.id] || []).filter(x => x.role === 'assignee').map(x => x.user_id))));
+    return {
+      ...p,
+      _tasks: ts,
+      _hydrated: true,
+      _milestones: milestones,
+      _doneMs: doneMs,
+      _totalMs: totalMs,
+      _nextMs: nextMs,
+      _progress: totalMs ? Math.round(doneMs / totalMs * 100) : 0,
+      _openTasks: openTasks,
+      _taskCount: ts.length,
+      _doneCount: ts.length - openTasks.length,
+      _collaborators: collaborators,
+      _stuck: openTasks.filter(t => t.status === 'stuck').length,
+      _overdue: openTasks.filter(t => t.due_at && new Date(t.due_at) < new Date()).length,
+      _anyDates: ts.some(t => t.due_at)
+    };
   },
   async create(fields, user) {
     const c = this.client();
@@ -9509,6 +9584,22 @@ function ProjectsSurface({
     setOpenTask(null);
     setTaskEditing(false);
   }, [current && current.id]);
+  // "Whatever CTC file they open, that's what gets loaded." The list ships
+  // counts + milestones only; a record's tasks load the moment it becomes
+  // current. Guarded on the id so a hydrated row replacing itself doesn't
+  // re-fetch, and on _hydrated so reload() (which returns un-hydrated rows)
+  // re-hydrates the open record automatically.
+  useEffect(() => {
+    if (!current || current._hydrated) return;
+    let on = true;
+    ProjectDB.hydrate(current).then(full => {
+      if (on && full) setCurrent(prev => prev && prev.id === full.id ? full : prev);
+    });
+    return () => {
+      on = false;
+    };
+  }, [current && current.id, current && current._hydrated]);
+
   // Record-level URL, so the address bar stays copy-pasteable inside a
   // project too. Same rules as the router's writer: replaceState only,
   // coalesced, never inside the iframe, never over the OAuth hash.
@@ -9590,8 +9681,11 @@ function ProjectsSurface({
   // the task being viewed, so edits/status-changes reflect immediately.
   async function refreshContainer(focusTaskId) {
     const fresh = await reload();
-    const proj = current && fresh.find(x => x.id === current.id);
-    if (proj) {
+    const proj0 = current && fresh.find(x => x.id === current.id);
+    if (proj0) {
+      // reload() returns un-hydrated rows; hydrate here so the task we're
+      // about to re-open is actually in _tasks.
+      const proj = await ProjectDB.hydrate(proj0);
       setCurrent(proj);
       if (focusTaskId) openTaskFull(proj._tasks.find(x => x.id === focusTaskId) || null);
     }
@@ -9698,22 +9792,25 @@ function ProjectsSurface({
   // ── CTC-only: "attention" flag + hero color, derived from real open-task
   // status (stuck / overdue) rather than a stored field — mirrors the
   // reference's blocked/overdue/clear/dates-missing states. ──
+  // Counts come from project_task_stats() so the list needs no task rows;
+  // once a record is opened its own tasks are loaded and are more current
+  // than the stats snapshot, so prefer them.
   const attentionOf = p => {
-    const stuck = p._openTasks.filter(t => t.status === 'stuck').length;
+    const stuck = p._hydrated ? p._openTasks.filter(t => t.status === 'stuck').length : p._stuck || 0;
     if (stuck) return {
       text: stuck + (stuck === 1 ? ' task blocked' : ' tasks blocked'),
       tone: 'red'
     };
-    const overdue = p._openTasks.filter(t => t.due_at && new Date(t.due_at) < today0).length;
+    const overdue = p._hydrated ? p._openTasks.filter(t => t.due_at && new Date(t.due_at) < today0).length : p._overdue || 0;
     if (overdue) return {
       text: overdue + (overdue === 1 ? ' task overdue' : ' tasks overdue'),
       tone: 'red'
     };
-    if (p._taskCount === 0) return {
+    if (!p._taskCount) return {
       text: 'No tasks yet',
       tone: 'sub'
     };
-    const anyDates = p._tasks.some(t => t.due_at);
+    const anyDates = p._hydrated ? p._tasks.some(t => t.due_at) : !!p._anyDates;
     if (!anyDates) return {
       text: 'Dates missing',
       tone: 'sub'
@@ -10981,7 +11078,7 @@ function ProjectsSurface({
       style: {
         color: isOverdue(p.target_date) ? lateColor : ink
       }
-    }, fmtD(p.target_date))), fld('Tasks', p._taskCount - p._openTasks.length + ' / ' + p._taskCount), fld('Collaborators', p._collaborators.length ? /*#__PURE__*/React.createElement("span", {
+    }, fmtD(p.target_date))), fld('Tasks', (p._hydrated ? p._taskCount - p._openTasks.length : p._doneCount || 0) + ' / ' + p._taskCount), fld('Collaborators', p._collaborators.length ? /*#__PURE__*/React.createElement("span", {
       style: {
         display: 'flex'
       }
@@ -11167,7 +11264,13 @@ function ProjectsSurface({
         minWidth: 0,
         overflowY: 'auto'
       }
-    }, p._tasks.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    }, !p._hydrated ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.8rem',
+        color: sub,
+        fontFamily: C.fontSans
+      }
+    }, "Loading tasks\u2026") : p._tasks.length === 0 ? /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: '0.8rem',
         color: sub,

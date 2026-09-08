@@ -1267,10 +1267,10 @@ Rules:
       async loadAll() {
         const c = this.client(); if (!c) return { tasks: [], peopleByTask: {}, projById: {}, labelsByTask: {} };
         const [tRes, pRes, prRes, lRes] = await Promise.all([
-          c.from('tasks').select('*').order('created_at', { ascending: false }),
-          c.from('task_people').select('task_id,user_id,role'),
-          c.from('projects').select('id,name,archived'),
-          c.from('task_labels').select('task_id,user_id,label'),
+          pageAll(c, 'tasks', '*', { order: 'created_at' }),
+          pageAll(c, 'task_people', 'task_id,user_id,role'),
+          pageAll(c, 'projects', 'id,name,archived'),
+          pageAll(c, 'task_labels', 'task_id,user_id,label'),
         ]);
         const peopleByTask = {};
         (pRes.data || []).forEach(p => { (peopleByTask[p.task_id] = peopleByTask[p.task_id] || []).push(p); });
@@ -1682,6 +1682,31 @@ Rules:
       },
     };
 
+    // PostgREST caps a select with no range at the project's max-rows (1000
+    // here) and truncates SILENTLY — no error, no flag, just fewer rows. That
+    // sat unnoticed until Zoho task sync pushed the tasks table past 1000
+    // (2,880 rows on 2026-09-09): My Tasks showed a suspiciously round 1000
+    // and the ~1,880 oldest tasks were invisible, and every CTC file was
+    // quietly missing tasks too. Anything that must return a WHOLE table goes
+    // through here. task_people/task_labels are per-task rows, so they cross
+    // 1000 even earlier than tasks does.
+    async function pageAll(c, table, cols, opts) {
+      const SIZE = 1000;
+      const o = opts || {};
+      let out = [], from = 0;
+      for (;;) {
+        let q = c.from(table).select(cols);
+        if (o.eq) q = q.eq(o.eq[0], o.eq[1]);
+        if (o.order) q = q.order(o.order, { ascending: false });
+        const { data, error } = await q.range(from, from + SIZE - 1);
+        if (error) { console.error('[pageAll] ' + table + ':', error.message); break; }
+        out = out.concat(data || []);
+        if (!data || data.length < SIZE) break;
+        from += SIZE;
+      }
+      return { data: out };
+    }
+
     // ─── ProjectDB — the Tasks → Projects / CTC Files surfaces ──────────
     // Projects live in the same `projects` table (record_type tells them apart).
     // Milestones are NOT stored here: a milestone is a task with is_milestone=true
@@ -1693,9 +1718,11 @@ Rules:
       async loadFull(recordType) {
         const c = this.client(); if (!c) return [];
         const [pRes, tRes, pplRes] = await Promise.all([
-          c.from('projects').select('*').eq('archived', false).order('created_at', { ascending: false }),
-          c.from('tasks').select('*'),   // full rows — a task opened from inside a project needs every field TaskDetail/TaskForm can show, not just the summary columns
-          c.from('task_people').select('task_id,user_id,role'),
+          pageAll(c, 'projects', '*', { eq: ['archived', false], order: 'created_at' }),
+          // full rows — a task opened from inside a project needs every field
+          // TaskDetail/TaskForm can show, not just the summary columns
+          pageAll(c, 'tasks', '*'),
+          pageAll(c, 'task_people', 'task_id,user_id,role'),
         ]);
         const projects = (pRes.data || []).filter(p => (p.record_type || 'project') === recordType);
         const peopleByTask = {};
@@ -5285,20 +5312,22 @@ Rules:
       return (
         <React.Fragment>
           <div onClick={(e) => e.stopPropagation()} style={containerStyle}>
-            {surface !== 'my' ? (
-              /* A non-My-Tasks surface (CTC Files, Projects, Rocks). Hoisted
-                 above the embed/standalone split below: nothing embedded ever
-                 needed this until CTC Files moved out of Tasks into its own
-                 More tab (2026-09-08), reusing this exact iframe. The embed
-                 branch beneath was written when My Tasks was the only thing
-                 anyone ever embedded — its own `surface !== 'my'` checks are
-                 now unreachable dead code, left in place rather than untangled.
-                 No hideSidebar: this is the ONLY chrome around the surface now
-                 (no outer navSidebar here), so ProjectsSurface's own file-list
-                 pane is what lets the user browse into a file. plainSurfaceTitle
-                 always (not the narrow-width dropdown variant): this tab shows
-                 ONE surface only — no switching to My Tasks/Projects/Rocks
-                 from inside it. */
+            {embed && surface !== 'my' ? (
+              /* A non-My-Tasks surface inside an iframe — i.e. More -> CTC
+                 Files, which embeds this page at #ctc. Nothing embedded ever
+                 needed a non-My-Tasks surface until that moved out of Tasks
+                 (2026-09-08); the embed branch below was written when My Tasks
+                 was the only thing anyone embedded, so it ignores `surface`
+                 entirely and would render My Tasks here.
+                 Deliberately scoped to `embed`: on the standalone page the
+                 branch further down already renders these surfaces WITH the
+                 shared navSidebar (and hideSidebar so there's only one
+                 sidebar). Hoisting this above that split dropped the shared
+                 sidebar from Projects/Rocks on the standalone page.
+                 No hideSidebar here: inside the iframe this is the only chrome,
+                 so ProjectsSurface's own list pane is what lets you browse.
+                 plainSurfaceTitle, not the narrow dropdown: that tab is one
+                 surface, with no switching to My Tasks/Projects/Rocks. */
               <ProjectsSurface kind={surfaceKind[surface] || 'project'} dark={dark} user={user} team={team} titleNode={plainSurfaceTitle} openId={openItemId} onOpenIdConsumed={() => setOpenItemId(null)} openCtcTab={openCtcTab} onCtcTabConsumed={() => setOpenCtcTab(null)} />
             ) : embed ? (
               /* ══════ EMBEDDED POPOUT — unchanged, out of scope for the My Tasks redesign ══════ */

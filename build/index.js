@@ -4521,14 +4521,33 @@ const TaskDB = {
       console.error('[TaskDB] spawnRecurrence:', error.message);
       return;
     }
+    // Carry the people over, and make sure SOMEONE ends up on the new
+    // occurrence: My Tasks lists only assigned work, so with the
+    // "Assignees & assigners" chip switched off the next instance had
+    // nobody on it and the task silently stopped repeating on screen.
+    let carried = [];
     if (has('people')) {
       const {
         data: ppl
       } = await c.from('task_people').select('user_id,role').eq('task_id', task.id);
-      if (ppl && ppl.length) await c.from('task_people').insert(ppl.map(p => ({
+      carried = ppl || [];
+      if (carried.length) await c.from('task_people').insert(carried.map(p => ({
         task_id: data.id,
         user_id: p.user_id,
         role: p.role
+      })));
+    }
+    if (!carried.some(p => p.role === 'assignee' || p.role === 'decision_maker') && !base.project_id) {
+      // Nothing carried and no file to sit under — fall back to whoever the
+      // original was assigned to, else the person who completed it.
+      const {
+        data: prev
+      } = await c.from('task_people').select('user_id').eq('task_id', task.id).eq('role', 'assignee');
+      const owners = prev && prev.length ? prev.map(p => p.user_id) : [user && user.id].filter(Boolean);
+      if (owners.length) await c.from('task_people').insert(owners.map(uid => ({
+        task_id: data.id,
+        user_id: uid,
+        role: 'assignee'
       })));
     }
     if (has('decision')) {
@@ -5018,7 +5037,14 @@ async function createTaskFromAI(payload, user) {
     assigner: matchIds(payload.assigners),
     decision_maker: matchIds(payload.decisionMakers || payload.decisionMaker)
   };
-  const created = await TaskDB.create(fields, people, user);
+  // "Add a to-do" with nobody named is yours — My Tasks lists only what's
+  // assigned, and matchIds silently drops any name not on the roster, so
+  // an unowned task would be confirmed to the user and then be unfindable.
+  const owned = people.assignee && people.assignee.length || people.decision_maker && people.decision_maker.length ? people : {
+    ...people,
+    assignee: [user && user.id].filter(Boolean)
+  };
+  const created = await TaskDB.create(fields, owned, user);
   if (created && created.id) {
     const opts = (payload.decisionOptions || []).map(o => typeof o === 'string' ? {
       body: o,

@@ -1875,7 +1875,19 @@ Rules:
         if (res.error && /column|schema cache|PGRST204|42703/i.test((res.error.message || '') + (res.error.code || ''))) { const b2 = { ...base }; delete b2.recur_interval; delete b2.recur_unit; delete b2.recur_copy_fields; res = await c.from('tasks').insert(b2).select().single(); }
         const { data, error } = res;
         if (error) { console.error('[TaskDB] spawnRecurrence:', error.message); return; }
-        if (has('people')) { const { data: ppl } = await c.from('task_people').select('user_id,role').eq('task_id', task.id); if (ppl && ppl.length) await c.from('task_people').insert(ppl.map(p => ({ task_id: data.id, user_id: p.user_id, role: p.role }))); }
+        // Carry the people over, and make sure SOMEONE ends up on the new
+        // occurrence: My Tasks lists only assigned work, so with the
+        // "Assignees & assigners" chip switched off the next instance had
+        // nobody on it and the task silently stopped repeating on screen.
+        let carried = [];
+        if (has('people')) { const { data: ppl } = await c.from('task_people').select('user_id,role').eq('task_id', task.id); carried = ppl || []; if (carried.length) await c.from('task_people').insert(carried.map(p => ({ task_id: data.id, user_id: p.user_id, role: p.role }))); }
+        if (!carried.some(p => p.role === 'assignee' || p.role === 'decision_maker') && !base.project_id) {
+          // Nothing carried and no file to sit under — fall back to whoever the
+          // original was assigned to, else the person who completed it.
+          const { data: prev } = await c.from('task_people').select('user_id').eq('task_id', task.id).eq('role', 'assignee');
+          const owners = (prev && prev.length) ? prev.map(p => p.user_id) : [user && user.id].filter(Boolean);
+          if (owners.length) await c.from('task_people').insert(owners.map(uid => ({ task_id: data.id, user_id: uid, role: 'assignee' })));
+        }
         if (has('decision')) { const { data: opts } = await c.from('task_decision_options').select('body,is_chosen,sort').eq('task_id', task.id); if (opts && opts.length) await c.from('task_decision_options').insert(opts.map(o => ({ task_id: data.id, body: o.body, is_chosen: false, sort: o.sort }))); }
         await this.addActivity(task.id, 'system', 'Recurring task completed — next instance created', user);
         await this.addActivity(data.id, 'system', 'Created from a recurring task', user);
@@ -2146,7 +2158,12 @@ Rules:
         assigner: matchIds(payload.assigners),
         decision_maker: matchIds(payload.decisionMakers || payload.decisionMaker),
       };
-      const created = await TaskDB.create(fields, people, user);
+      // "Add a to-do" with nobody named is yours — My Tasks lists only what's
+      // assigned, and matchIds silently drops any name not on the roster, so
+      // an unowned task would be confirmed to the user and then be unfindable.
+      const owned = ((people.assignee && people.assignee.length) || (people.decision_maker && people.decision_maker.length))
+        ? people : { ...people, assignee: [user && user.id].filter(Boolean) };
+      const created = await TaskDB.create(fields, owned, user);
       if (created && created.id) {
         const opts = (payload.decisionOptions || []).map(o => (typeof o === 'string' ? { body: o, is_chosen: false } : { body: (o && o.body) || '', is_chosen: !!(o && o.is_chosen) }));
         if (opts.length) await TaskDB.setDecisionOptions(created.id, opts);

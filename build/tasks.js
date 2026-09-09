@@ -3446,19 +3446,19 @@ const TaskDB = {
       projById: {},
       labelsByTask: {}
     };
-    const [minePpl, madeRes, prRes] = await Promise.all([pageAll(c, 'task_people', 'task_id,role', {
+    const [minePpl, prRes] = await Promise.all([pageAll(c, 'task_people', 'task_id,role', {
       eq: ['user_id', uid]
-    }), pageAll(c, 'tasks', '*', {
-      eq: ['created_by', uid],
-      order: 'created_at'
     }), pageAll(c, 'projects', 'id,name,archived')]);
-    const made = madeRes.data || [];
-    const madeIds = new Set(made.map(t => t.id));
-    const wantIds = [...new Set((minePpl.data || []).filter(r => r.role === 'assignee' || r.role === 'assigner').map(r => r.task_id))].filter(id => !madeIds.has(id));
-    const fetched = await chunked(wantIds, 150, ids => pageAll(c, 'tasks', '*', {
+    // My Tasks means assigned to me, and nothing else. A CTC file's tasks
+    // are deliberately left unassigned until someone picks one up, so
+    // "I created it" and "I assigned it to someone else" would both fill
+    // this list with work that is not actually anyone's yet.
+    // decision_maker stays in — a decision waiting on you IS assigned to
+    // you, and it is what the Decisions tab reads from.
+    const wantIds = [...new Set((minePpl.data || []).filter(r => r.role === 'assignee' || r.role === 'decision_maker').map(r => r.task_id))];
+    const tasksRaw = await chunked(wantIds, 150, ids => pageAll(c, 'tasks', '*', {
       in: ['id', ids]
     }));
-    const tasksRaw = made.concat(fetched);
     const ids = tasksRaw.map(t => t.id);
 
     // People/labels only for the tasks actually shown — these are per-task
@@ -3859,14 +3859,33 @@ const TaskDB = {
       console.error('[TaskDB] spawnRecurrence:', error.message);
       return;
     }
+    // Carry the people over, and make sure SOMEONE ends up on the new
+    // occurrence: My Tasks lists only assigned work, so with the
+    // "Assignees & assigners" chip switched off the next instance had
+    // nobody on it and the task silently stopped repeating on screen.
+    let carried = [];
     if (has('people')) {
       const {
         data: ppl
       } = await c.from('task_people').select('user_id,role').eq('task_id', task.id);
-      if (ppl && ppl.length) await c.from('task_people').insert(ppl.map(p => ({
+      carried = ppl || [];
+      if (carried.length) await c.from('task_people').insert(carried.map(p => ({
         task_id: data.id,
         user_id: p.user_id,
         role: p.role
+      })));
+    }
+    if (!carried.some(p => p.role === 'assignee' || p.role === 'decision_maker') && !base.project_id) {
+      // Nothing carried and no file to sit under — fall back to whoever the
+      // original was assigned to, else the person who completed it.
+      const {
+        data: prev
+      } = await c.from('task_people').select('user_id').eq('task_id', task.id).eq('role', 'assignee');
+      const owners = prev && prev.length ? prev.map(p => p.user_id) : [user && user.id].filter(Boolean);
+      if (owners.length) await c.from('task_people').insert(owners.map(uid => ({
+        task_id: data.id,
+        user_id: uid,
+        role: 'assignee'
       })));
     }
     if (has('decision')) {
@@ -3883,6 +3902,21 @@ const TaskDB = {
     await this.addActivity(task.id, 'system', 'Recurring task completed — next instance created', user);
     await this.addActivity(data.id, 'system', 'Created from a recurring task', user);
     return data;
+  },
+  // My Tasks lists only what's assigned to you, so a task created with
+  // nobody on it and no file to sit under is invisible everywhere the
+  // moment it's saved. Anything created from a personal surface (quick-add,
+  // the My Tasks form, an email, the AI pill) falls back to its creator.
+  // Tasks created INSIDE a CTC file / project deliberately don't use this —
+  // those are a shared pool and stay blank until someone picks one up.
+  ownedBy(people, user) {
+    const p = people || {};
+    if (p.assignee && p.assignee.length || p.decision_maker && p.decision_maker.length) return p;
+    const me = [user && user.id].filter(Boolean);
+    return me.length ? {
+      ...p,
+      assignee: me
+    } : p;
   },
   async setPeople(taskId, people) {
     // { assignee:[ids], assigner:[ids], decision_maker:[ids] }
@@ -4023,6 +4057,27 @@ const TaskDB = {
       // tasks that come after this one
       titles
     };
+  },
+  // The dependency picker used to offer only the tasks already on screen
+  // (your own, or the open file's), so you simply could not depend on a
+  // teammate's task. This searches every task the caller is allowed to see.
+  async searchTasks(q, excludeId) {
+    const c = this.client();
+    const term = (q || '').trim();
+    if (!c || term.length < 2) return [];
+    let sel = c.from('tasks').select('id,title,project_id').ilike('title', '%' + term + '%');
+    if (excludeId) sel = sel.neq('id', excludeId);
+    const {
+      data,
+      error
+    } = await sel.order('created_at', {
+      ascending: false
+    }).limit(25);
+    if (error) {
+      console.error('[TaskDB] searchTasks:', error.message);
+      return [];
+    }
+    return data || [];
   },
   async addLink(predecessorId, successorId) {
     const c = this.client();
@@ -4611,7 +4666,14 @@ async function createTaskFromAI(payload, user) {
     assigner: matchIds(payload.assigners),
     decision_maker: matchIds(payload.decisionMakers || payload.decisionMaker)
   };
-  const created = await TaskDB.create(fields, people, user);
+  // "Add a to-do" with nobody named is yours — My Tasks lists only what's
+  // assigned, and matchIds silently drops any name not on the roster, so
+  // an unowned task would be confirmed to the user and then be unfindable.
+  const owned = people.assignee && people.assignee.length || people.decision_maker && people.decision_maker.length ? people : {
+    ...people,
+    assignee: [user && user.id].filter(Boolean)
+  };
+  const created = await TaskDB.create(fields, owned, user);
   if (created && created.id) {
     const opts = (payload.decisionOptions || []).map(o => typeof o === 'string' ? {
       body: o,
@@ -6916,6 +6978,9 @@ function TaskDetail({
     successors: []
   });
   const [linkPick, setLinkPick] = useState('');
+  const [linkQ, setLinkQ] = useState('');
+  const [linkHits, setLinkHits] = useState([]);
+  const [linkSearching, setLinkSearching] = useState(false);
   const [linkDir, setLinkDir] = useState('pred'); // 'pred' = picked comes before this; 'succ' = after
   // Thread
   const [summary, setSummary] = useState(task.context || '');
@@ -7050,6 +7115,28 @@ function TaskDetail({
   }
   // ── Dependencies
   const titleOf = id => ((allTasks || []).find(t => t.id === id) || {}).title || (links.titles || {})[id] || '(task)';
+  // Debounced so typing doesn't fire a query per keystroke.
+  useEffect(() => {
+    if (linkQ.trim().length < 2) {
+      setLinkHits([]);
+      setLinkSearching(false);
+      return;
+    }
+    setLinkSearching(true);
+    let on = true;
+    const t = setTimeout(() => {
+      TaskDB.searchTasks(linkQ, task.id).then(r => {
+        if (on) {
+          setLinkHits(r);
+          setLinkSearching(false);
+        }
+      });
+    }, 250);
+    return () => {
+      on = false;
+      clearTimeout(t);
+    };
+  }, [linkQ, task.id]);
   async function addDep() {
     if (!linkPick) return;
     if (linkDir === 'pred') await TaskDB.addLink(linkPick, task.id);else await TaskDB.addLink(task.id, linkPick);
@@ -7455,7 +7542,18 @@ function TaskDetail({
     value: "pred"
   }, "Predecessor (before)"), /*#__PURE__*/React.createElement("option", {
     value: "succ"
-  }, "Successor (after)")), /*#__PURE__*/React.createElement("select", {
+  }, "Successor (after)")), /*#__PURE__*/React.createElement("input", {
+    value: linkQ,
+    onChange: e => {
+      setLinkQ(e.target.value);
+      setLinkPick('');
+    },
+    placeholder: "Search any task\u2026",
+    style: {
+      ...tinp,
+      flex: '2 1 150px'
+    }
+  }), /*#__PURE__*/React.createElement("select", {
     value: linkPick,
     onChange: e => setLinkPick(e.target.value),
     style: {
@@ -7464,7 +7562,7 @@ function TaskDetail({
     }
   }, /*#__PURE__*/React.createElement("option", {
     value: ""
-  }, "Pick a task\u2026"), (allTasks || []).filter(t => t.id !== task.id).map(t => /*#__PURE__*/React.createElement("option", {
+  }, linkSearching ? 'Searching…' : linkQ.trim().length >= 2 && !linkHits.length ? 'No tasks match' : 'Pick a task…'), (linkQ.trim().length >= 2 ? linkHits : allTasks || []).filter(t => t.id !== task.id).map(t => /*#__PURE__*/React.createElement("option", {
     key: t.id,
     value: t.id
   }, t.title))), /*#__PURE__*/React.createElement("button", {
@@ -9812,9 +9910,29 @@ function ProjectsSurface({
     } : prev);
   }
   async function onTaskStatus(task, status) {
-    await TaskDB.update(task.id, task, {
-      status
-    }, user);
+    const was = task.status;
+    const paint = st => {
+      setCurrent(p => p && p._tasks ? {
+        ...p,
+        _tasks: p._tasks.map(x => x.id === task.id ? {
+          ...x,
+          status: st
+        } : x)
+      } : p);
+      setOpenTask(o => o && o.id === task.id ? {
+        ...o,
+        status: st
+      } : o);
+    };
+    paint(status); // same reason as My Tasks: don't make them wait to see the tick
+    try {
+      await TaskDB.update(task.id, task, {
+        status
+      }, user);
+    } catch (e) {
+      paint(was);
+      return;
+    }
     await refreshContainer(task.id, !!(openTask && openTask.id === task.id));
   }
   async function toggleTaskDone(t) {
@@ -13461,7 +13579,7 @@ function TasksScreen({
   async function onCreateTaskFromEmail(thread) {
     const created = await TaskDB.create({
       title: (thread.subject || 'New task').slice(0, 200)
-    }, {}, user);
+    }, TaskDB.ownedBy({}, user), user);
     if (!created) return;
     await TaskEmailDB.attach(created.id, thread, user, true);
     await reload();
@@ -13653,16 +13771,17 @@ function TasksScreen({
     if (current && current.id) {
       await TaskDB.update(current.id, current, fields, user);
       // Never rewrite people the form was never seeded with (the on-demand
-      // fetch above hadn't landed when Edit was clicked) — that's a wipe.
-      // Never rewrite people the form was never seeded with — that's a wipe.
-      // If the earlier read failed, try once more here rather than silently
-      // dropping the assignees the user just picked.
+      // Never rewrite people the form was never seeded with — that's a
+      // wipe. If the earlier read failed, try once more here rather than
+      // silently dropping the assignees the user just picked.
       let known = peopleFor(current.id);
       if (known === undefined) known = await TaskDB.loadPeopleFor(current.id);
       if (known) await TaskDB.setPeople(current.id, people);
       taskId = current.id;
     } else {
-      const created = await TaskDB.create(fields, people, user);
+      // New task from My Tasks with nobody named — it's yours, or it would
+      // disappear from this list the moment it saved.
+      const created = await TaskDB.create(fields, TaskDB.ownedBy(people, user), user);
       taskId = created && created.id;
     }
     if (taskId) {
@@ -13685,16 +13804,38 @@ function TasksScreen({
     });
     setPeopleTried(null);
   }
+  // Paint the new status straight away, then persist. The round trip is
+  // most of a second and the row used to sit there looking untouched, so
+  // people tapped it twice. Put back exactly what was there if it fails.
+  const patchStatus = (id, st) => {
+    setData(d => ({
+      ...d,
+      tasks: (d.tasks || []).map(x => x.id === id ? {
+        ...x,
+        status: st
+      } : x)
+    }));
+    setCurrent(cur => cur && cur.id === id ? {
+      ...cur,
+      status: st
+    } : cur);
+  };
   async function changeStatus(task, status) {
-    await TaskDB.update(task.id, task, {
-      status
-    }, user);
+    const was = task.status;
+    patchStatus(task.id, status);
+    try {
+      await TaskDB.update(task.id, task, {
+        status
+      }, user);
+    } catch (e) {
+      patchStatus(task.id, was);
+      return;
+    }
     const d = await reload();
     const fresh = (d.tasks || []).find(x => x.id === task.id);
-    setCurrent(fresh || {
-      ...task,
-      status
-    }); // subtasks aren't in the top-level list — fall back to optimistic
+    // Only re-seat the open task — ticking a row while viewing a DIFFERENT
+    // task used to swap the detail pane out from under you.
+    if (fresh) setCurrent(cur => cur && cur.id === task.id ? fresh : cur);
   }
   // Row-level done/undone toggle — a separate hit target from opening the
   // drawer (rows call this with stopPropagation), same status path as the
@@ -13707,11 +13848,13 @@ function TasksScreen({
   async function quickAddMyTask() {
     const title = quickAddVal.trim();
     if (!title) return;
+    // Assigned to you: My Tasks only shows what's assigned, so an
+    // unassigned quick-add would save and vanish on the same keystroke.
     await TaskDB.create({
       title,
       status: 'todo',
       priority: 'medium'
-    }, {}, user);
+    }, TaskDB.ownedBy({}, user), user);
     setQuickAddVal('');
     await reload();
   }

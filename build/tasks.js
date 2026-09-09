@@ -646,6 +646,7 @@ async function callGenerateImage(prompt, quality = 'medium') {
 
 // ─── Google Calendar (read-only) via edge function ──────────────
 const CAL_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-calendar';
+const GTASKS_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-tasks-sync';
 const CAL_IS_DEV = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:');
 // Mirrors the same constant in timeoff.html — the shared "TMG" team calendar (confirmed by
 // Symon). The two Google-provided holiday calendars are read-only and qualify for the
@@ -661,6 +662,38 @@ async function callCalendar(payload) {
     data: devCalendarMock(payload)
   };
   const res = await fetch(CAL_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken(),
+      'apikey': SUPABASE_ANON
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json().catch(() => ({}));
+  return {
+    ok: res.ok,
+    status: res.status,
+    data
+  };
+}
+// Two-way Google Tasks sync. A cron runs this for everyone every 15
+// minutes; this is only the "Sync now" button, which does the same work
+// for the person pressing it.
+async function callGoogleTasks(payload) {
+  if (CAL_IS_DEV) return {
+    ok: true,
+    status: 200,
+    data: {
+      ok: true,
+      result: {
+        pushed: 0,
+        pulled: 0,
+        updated: 0
+      }
+    }
+  };
+  const res = await fetch(GTASKS_ENDPOINT, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -3450,7 +3483,9 @@ const TEAM_GROUPS = [{
 const groupMembers = (team, groupId) => {
   const g = TEAM_GROUPS.find(x => x.id === groupId);
   if (!g) return [];
-  return (team || []).filter(m => (!m.status || m.status === 'active') && g.match(m));
+  // No access tags at all means it isn't a person's login — the shared
+  // "The Morshed Group" account has none, and it shouldn't collect tasks.
+  return (team || []).filter(m => (!m.status || m.status === 'active') && (m.access || []).length && g.match(m));
 };
 // Only admins/operations may fan a task out to other people's lists.
 const canBulkAssign = (team, user) => {
@@ -3631,30 +3666,13 @@ const TaskDB = {
     }
     await this.setPeople(data.id, people || {});
     await this.addActivity(data.id, 'system', fields.parent_task_id ? 'Subtask created' : 'Task created', user);
-    this.syncToGoogleTasks(data, user);
+    // Google Tasks is no longer pushed from here. The old version wrote to
+    // whoever CREATED the task, which is the wrong person the moment you
+    // assign work to someone else, and it only ever fired on create. The
+    // google-tasks-sync cron now owns every Google write, in both
+    // directions, for the person the task is actually assigned to.
     this.syncToZohoProjects(data, null, user);
     return data;
-  },
-  // Push to the caller's Google Tasks list if they've enabled auto-sync
-  // (profiles.calendar_prefs.autoSyncTasks). Fire-and-forget, fails silently —
-  // same fail-open pattern as the rest of the Google Calendar integration.
-  async syncToGoogleTasks(task, user) {
-    const c = this.client();
-    if (!c || !user) return;
-    try {
-      const {
-        data: prof
-      } = await c.from('profiles').select('calendar_prefs').eq('id', user.id).single();
-      if (!prof?.calendar_prefs?.autoSyncTasks) return;
-      await callCalendar({
-        action: 'create-task',
-        task: {
-          title: task.title,
-          notes: task.description || undefined,
-          due: task.due_at || undefined
-        }
-      });
-    } catch (e) {}
   },
   // Push a task's synced fields (plan §2.1: title/description/due_at/
   // priority/status only) to its linked Zoho Projects project — but ONLY
@@ -17605,12 +17623,15 @@ function CalendarPopover({
   // ── Display settings (per-user, this device): which calendars show + the two rail zones ──
   const [showSettings, setShowSettings] = useState(false);
   const [calList, setCalList] = useState([]); // [{ id, summary, color, primary }]
+  // autoSyncTasks defaults ON: the sync is meant to just run, and asking
+  // ten people to find a toggle is how it ends up running for nobody. The
+  // edge function reads it the same way — only an explicit false opts out.
   const CAL_PREFS_DEFAULT = {
     primaryTz: 'America/Chicago',
     secondaryTz: 'Asia/Manila',
     secondaryTzEnabled: false,
     hidden: [],
-    autoSyncTasks: false
+    autoSyncTasks: true
   };
   const calPrefsKey = 'tmg-cal-prefs' + (user ? '-' + user.id : '');
   const [calPrefs, setCalPrefs] = useState(() => {
@@ -17637,6 +17658,41 @@ function CalendarPopover({
     } catch (e) {}
     ProfileDB.setCalendarPrefs(next);
   };
+  // ── Google Tasks sync state ──
+  // Read straight from the table (each person can only see their own row)
+  // rather than through the function, so opening Settings costs one cheap
+  // query instead of a Google round trip.
+  const [gtsState, setGtsState] = useState(null);
+  const [gtsBusy, setGtsBusy] = useState(false);
+  const loadGtsState = async () => {
+    const c = window.SupabaseAuth?._client;
+    if (!c || !user) return;
+    const {
+      data
+    } = await c.from('google_tasks_sync_state').select('*').eq('user_id', user.id).maybeSingle();
+    setGtsState(data || null);
+  };
+  const syncTasksNow = async () => {
+    if (gtsBusy) return;
+    setGtsBusy(true);
+    try {
+      await callGoogleTasks({
+        action: 'run_me'
+      });
+    } catch (e) {}
+    await loadGtsState();
+    setGtsBusy(false);
+  };
+  const sinceLabel = iso => {
+    if (!iso) return null;
+    const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + (mins === 1 ? ' minute ago' : ' minutes ago');
+    const hrs = Math.round(mins / 60);
+    if (hrs < 24) return hrs + (hrs === 1 ? ' hour ago' : ' hours ago');
+    const days = Math.round(hrs / 24);
+    return days + (days === 1 ? ' day ago' : ' days ago');
+  };
   const primaryTz = calPrefs.primaryTz || 'America/Chicago';
   const secondaryTz = calPrefs.secondaryTz || 'Asia/Manila';
   const showSecondaryTz = !!calPrefs.secondaryTzEnabled;
@@ -17651,6 +17707,9 @@ function CalendarPopover({
       c = true;
     };
   }, []);
+  useEffect(() => {
+    if (showSettings) loadGtsState();
+  }, [showSettings]);
 
   // ── Event create / edit / delete ──
   const [editing, setEditing] = useState(null); // null | { mode:'create'|'edit', ...form }
@@ -19882,15 +19941,54 @@ function CalendarPopover({
       fontSize: 12,
       color: K.date
     }
-  }, "Google Task auto-sync"), /*#__PURE__*/React.createElement("span", {
+  }, "Sync my tasks with Google Tasks"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: K.muted,
+      lineHeight: 1.5
+    }
+  }, "Anything assigned to you shows up in Google Tasks, and anything assigned to you in a meeting agenda shows up here. Runs by itself every 15 minutes.")), toggle(calPrefs.autoSyncTasks !== false, () => savePrefs({
+    autoSyncTasks: calPrefs.autoSyncTasks === false
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...settRow,
+      borderTop: `0.5px solid ${K.rowBd}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 2,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      color: K.date
+    }
+  }, gtsState && gtsState.last_ok_at ? 'Last synced ' + sinceLabel(gtsState.last_ok_at) : 'Not synced yet'), gtsState && (gtsState.pushed || gtsState.pulled) ? /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: J,
       fontSize: 10,
       color: K.muted
     }
-  }, "New tasks are automatically added to Google Tasks")), toggle(!!calPrefs.autoSyncTasks, () => savePrefs({
-    autoSyncTasks: !calPrefs.autoSyncTasks
-  })))), settHead('Calendars to Show'), /*#__PURE__*/React.createElement("div", {
+  }, gtsState.pushed, " sent to Google \xB7 ", gtsState.pulled, " brought in from an agenda") : null, gtsState && gtsState.last_error ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 10,
+      color: '#C0392B',
+      lineHeight: 1.5
+    }
+  }, gtsState.last_error) : null), /*#__PURE__*/React.createElement("button", {
+    onClick: syncTasksNow,
+    disabled: gtsBusy,
+    style: {
+      ...settPill,
+      opacity: gtsBusy ? 0.5 : 1
+    }
+  }, gtsBusy ? 'Syncing…' : 'Sync now'))), settHead('Calendars to Show'), /*#__PURE__*/React.createElement("div", {
     style: settCard
   }, calList.length === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {

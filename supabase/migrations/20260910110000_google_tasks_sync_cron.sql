@@ -1,0 +1,41 @@
+-- Documents (does not itself re-provision) the pg_cron job that runs
+-- google-tasks-sync every 15 minutes. Like the zoho-projects-poll job, the
+-- vault secret and cron.schedule() call were run once through
+-- `supabase db query --linked -f <scratch file>` rather than as a versioned
+-- migration, so the secret value never lands in git history.
+--
+-- Live job: jobname 'google-tasks-sync', schedule '*/15 * * * *', calls
+-- net.http_post() against .../functions/v1/google-tasks-sync with an
+-- Authorization header read live from vault.decrypted_secrets (name
+-- 'gtasks_cron_secret') on every run.
+--
+-- Fifteen minutes is well inside Google's allowance. The Tasks API permits
+-- 50,000 calls a day; ten people at four runs an hour costs a few thousand,
+-- and a person with nothing to sync costs one list call and no writes.
+--
+-- To redo this from scratch (new environment, or secret rotation):
+--   1. Generate a random value; `supabase secrets set
+--      GTASKS_CRON_SECRET=<value>` and redeploy google-tasks-sync.
+--   2. Through `supabase db query --linked -f <scratch file>` (NOT a
+--      migration), run:
+--        delete from vault.secrets where name = 'gtasks_cron_secret';
+--        select vault.create_secret('<same value>', 'gtasks_cron_secret', '...');
+--        select cron.unschedule(jobid) from cron.job where jobname = 'google-tasks-sync';
+--        select cron.schedule('google-tasks-sync', '*/15 * * * *', $c$
+--          select net.http_post(
+--            url := 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/google-tasks-sync',
+--            headers := jsonb_build_object('Content-Type','application/json',
+--              'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'gtasks_cron_secret')),
+--            body := '{"action":"run"}'::jsonb,
+--            timeout_milliseconds := 120000
+--          );
+--        $c$);
+--
+-- Deploy the function with `supabase functions deploy google-tasks-sync
+-- --no-verify-jwt` — the cron has no user session and authenticates with the
+-- secret above; a signed-in person's JWT is still validated inside the
+-- function, so "Sync now" in Calendar Settings keeps working.
+
+create extension if not exists pg_cron with schema extensions;
+create extension if not exists pg_net with schema extensions;
+create extension if not exists supabase_vault with schema vault;

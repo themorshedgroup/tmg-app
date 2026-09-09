@@ -1802,20 +1802,12 @@ Rules:
         if (error) { console.error('[TaskDB] create:', error.message); throw error; }
         await this.setPeople(data.id, people || {});
         await this.addActivity(data.id, 'system', fields.parent_task_id ? 'Subtask created' : 'Task created', user);
-        this.syncToGoogleTasks(data, user);
+        // Google Tasks is no longer pushed from here. The old version wrote to
+        // whoever CREATED the task, which is the wrong person the moment you
+        // assign work to someone else, and it only ever fired on create. The
+        // google-tasks-sync cron now owns every Google write, in both
+        // directions, for the person the task is actually assigned to.
         return data;
-      },
-
-      // Push to the caller's Google Tasks list if they've enabled auto-sync
-      // (profiles.calendar_prefs.autoSyncTasks). Fire-and-forget, fails silently —
-      // same fail-open pattern as the rest of the Google Calendar integration.
-      async syncToGoogleTasks(task, user) {
-        const c = this.client(); if (!c || !user) return;
-        try {
-          const { data: prof } = await c.from('profiles').select('calendar_prefs').eq('id', user.id).single();
-          if (!prof?.calendar_prefs?.autoSyncTasks) return;
-          await callCalendar({ action: 'create-task', task: { title: task.title, notes: task.description || undefined, due: task.due_at || undefined } });
-        } catch (e) {}
       },
 
       async update(id, oldTask, fields, user) {

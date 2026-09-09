@@ -3514,14 +3514,16 @@ const TaskDB = {
       tasks: [],
       peopleByTask: {},
       projById: {},
-      labelsByTask: {}
+      labelsByTask: {},
+      childrenByTask: {}
     };
     const uid = userId || window.SupabaseAuth?._state?.session?.user?.id || null;
     if (!uid) return {
       tasks: [],
       peopleByTask: {},
       projById: {},
-      labelsByTask: {}
+      labelsByTask: {},
+      childrenByTask: {}
     };
     const [minePpl, prRes] = await Promise.all([pageAll(c, 'task_people', 'task_id,role', {
       eq: ['user_id', uid]
@@ -3536,7 +3538,15 @@ const TaskDB = {
     const tasksRaw = await chunked(wantIds, 150, ids => pageAll(c, 'tasks', '*', {
       in: ['id', ids]
     }));
-    const ids = tasksRaw.map(t => t.id);
+    // Subtasks are created with nobody on them, so under the assigned-to-me
+    // rule they'd be invisible here — you could add one and watch it
+    // disappear. Fetch the children of my tasks and hang them off their
+    // parent instead of listing them at the top level.
+    const parentIds = tasksRaw.map(t => t.id);
+    const kidRows = await chunked(parentIds, 150, batch => pageAll(c, 'tasks', '*', {
+      in: ['parent_task_id', batch]
+    }));
+    const ids = [...new Set(parentIds.concat(kidRows.map(t => t.id)))];
 
     // People/labels only for the tasks actually shown — these are per-task
     // rows, so fetching them for the whole company is what really hurt.
@@ -3567,12 +3577,29 @@ const TaskDB = {
     (prRes.data || []).forEach(p => {
       if (!p.archived) projById[p.id] = p.name;
     });
-    const tasks = tasksRaw.filter(t => !t.project_id || !archivedIds.has(t.project_id)).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    // A child that is ALSO assigned to me is already in tasksRaw; keep one
+    // copy, and let the parent own it so it isn't listed twice.
+    const seen = new Set();
+    const merged = tasksRaw.concat(kidRows).filter(t => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+    const visible = merged.filter(t => !t.project_id || !archivedIds.has(t.project_id));
+    const byId = new Set(visible.map(t => t.id));
+    const childrenByTask = {};
+    visible.forEach(t => {
+      if (t.parent_task_id && byId.has(t.parent_task_id)) (childrenByTask[t.parent_task_id] = childrenByTask[t.parent_task_id] || []).push(t);
+    });
+    Object.keys(childrenByTask).forEach(k => childrenByTask[k].sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0)));
+    const tasks = visible.filter(t => !t.parent_task_id || !byId.has(t.parent_task_id)) // children render under their parent
+    .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
     return {
       tasks,
       peopleByTask,
       projById,
-      labelsByTask
+      labelsByTask,
+      childrenByTask
     };
   },
   // For permalinks (tasks.html#task/<id>) — a task can belong to any
@@ -4098,12 +4125,26 @@ const TaskDB = {
     });
     return data || [];
   },
+  // Inherit the parent's project. A subtask used to be created with no
+  // project_id at all, so a subtask of a CTC file task belonged to no file
+  // and vanished from that file's list — visible only by opening its
+  // parent. (refreshContainer still carries the fallback for the older
+  // rows created before this.)
   async createSubtask(parentId, title, user) {
+    const c = this.client();
+    let projectId = null;
+    if (c) {
+      const {
+        data: par
+      } = await c.from('tasks').select('project_id').eq('id', parentId).maybeSingle();
+      projectId = par && par.project_id || null;
+    }
     return this.create({
       title: title.trim(),
       status: 'todo',
       priority: 'medium',
-      parent_task_id: parentId
+      parent_task_id: parentId,
+      project_id: projectId
     }, {}, user);
   },
   // Predecessor / Successor links. predecessor_id must come before successor_id.
@@ -7000,7 +7041,7 @@ function TaskForm({
       fontFamily: C.fontSans,
       opacity: !title.trim() ? 0.5 : 1
     }
-  }, saving ? 'Saving…' : task ? 'Save changes' : 'Create task'), /*#__PURE__*/React.createElement("button", {
+  }, saving ? 'Saving…' : t.id ? 'Save changes' : 'Create task'), /*#__PURE__*/React.createElement("button", {
     onClick: onCancel,
     style: {
       flex: 1,
@@ -7026,6 +7067,7 @@ function TaskDetail({
   onDelete,
   onStatus,
   onOpenSubtask,
+  onSubtaskAdded,
   emailLinks,
   onEmailChanged,
   initialTab,
@@ -7229,6 +7271,8 @@ function TaskDetail({
     fontFamily: C.fontSans
   };
   const hasDecision = decisionOpts.length > 0 || !!task.decision_question || ppl('decision_maker') !== '—' || !!task.decision_due_at;
+  // The list behind this drawer counts subtasks too, so tell it — otherwise
+  // the new subtask is only visible in here until the next full reload.
   async function addSub() {
     if (!subTitle.trim() || addingSub) return;
     setAddingSub(true);
@@ -7236,6 +7280,7 @@ function TaskDetail({
       await TaskDB.createSubtask(task.id, subTitle.trim(), user);
       setSubTitle('');
       setSubs(await TaskDB.loadSubtasks(task.id));
+      if (onSubtaskAdded) onSubtaskAdded();
     } finally {
       setAddingSub(false);
     }
@@ -9790,6 +9835,12 @@ function ProjectsSurface({
   const [dtab, setDtab] = useState('overview'); // 'overview' | 'list' | 'board'
   const [openTask, setOpenTask] = useState(null);
   const [taskEditing, setTaskEditing] = useState(false);
+  // Creating a task in here used to mean the one-line quick-add box and
+  // nothing else — no description, no due date, no assignee — because the
+  // full form was only ever wired to open on an EXISTING task. This opens
+  // it for a new one, with the file already filled in.
+  const [newTaskOpen, setNewTaskOpen] = useState(null); // null | seed title
+  const [subsOpen, setSubsOpen] = useState({}); // parent id -> subtasks shown
   // A routed/sidebar id that isn't in the list (archived, deleted, not
   // visible). Used to say so instead of silently showing the list and
   // rewriting the pasted URL (audit C7). Cleared when the user navigates.
@@ -10114,12 +10165,20 @@ function ProjectsSurface({
       if (!known) known = await TaskDB.loadPeopleFor(openTask.id); // the pre-fetch failed — one more try before skipping
       if (known) await TaskDB.setPeople(openTask.id, people);
       taskId = openTask.id;
-    }
-    // No group-assign branch here on purpose: inside a container this form
-    // only ever opens on an EXISTING task (new ones come from quick-add),
-    // so it could never fire. To hand a whole group a task in a Project or
-    // CTC file, use New in My Tasks and set that file in the Project field.
-    else {
+    } else if (form.bulkGroup) {
+      // Reachable now that this form opens for NEW tasks too: one copy each
+      // for everyone in the group, all landing in this file.
+      const {
+        made
+      } = await TaskDB.createForEach(groupMembers(team, form.bulkGroup).map(m => m.id), fields, {
+        assigner: form.assigners,
+        decision_maker: form.decisionMakers || []
+      }, user);
+      for (const t of made) {
+        await TaskDB.setLabels(t.id, user && user.id, form.labels || []);
+        await TaskDB.setDecisionOptions(t.id, form.decisionOptions || []);
+      }
+    } else {
       const created = await TaskDB.create(fields, people, user);
       taskId = created && created.id;
     }
@@ -11188,6 +11247,116 @@ function ProjectsSurface({
       }
     }, m.status === 'done' ? 'Completed ' + fmtD(m.completed_at || m.updated_at) : m.due_at ? 'Due ' + fmtD(m.due_at) : 'No date')));
   };
+  const newTaskOverlay = () => /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '14px 20px',
+      borderBottom: `1px solid ${bord}`,
+      flexShrink: 0,
+      background: dark ? '#0A1730' : '#fff'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-chevron-left",
+    onClick: () => setNewTaskOpen(null),
+    style: {
+      fontSize: 16,
+      cursor: 'pointer',
+      color: sub,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontSize: 11,
+      letterSpacing: '0.14em',
+      textTransform: 'uppercase',
+      color: sub,
+      fontFamily: C.fontSans,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap'
+    }
+  }, current && current.name || KL.plural, " / New task")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement(TaskForm, {
+    dark: dark,
+    task: {
+      title: newTaskOpen || '',
+      _projectName: current && current.name || ''
+    },
+    team: team,
+    user: user,
+    onSave: async form => {
+      await onTaskSave(form);
+      setNewTaskOpen(null);
+    },
+    onCancel: () => setNewTaskOpen(null)
+  })));
+  // Subtasks live in _tasks alongside their parents (they inherit the
+  // file's project_id), so the parent/child map is derived here rather
+  // than fetched.
+  const kidsOf = id => (current && current._tasks || []).filter(t => t.parent_task_id === id);
+  const isChildHere = t => !!t.parent_task_id && (current && current._tasks || []).some(x => x.id === t.parent_task_id);
+  const subToggle = t => {
+    const kids = kidsOf(t.id);
+    if (!kids.length) return null;
+    const open = !!subsOpen[t.id];
+    const done = kids.filter(k => k.status === 'done').length;
+    return /*#__PURE__*/React.createElement("span", {
+      onClick: e => {
+        e.stopPropagation();
+        setSubsOpen(o => ({
+          ...o,
+          [t.id]: !o[t.id]
+        }));
+      },
+      title: open ? 'Hide subtasks' : 'Show subtasks',
+      style: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3,
+        flexShrink: 0,
+        padding: '1px 6px 1px 3px',
+        borderRadius: 10,
+        border: `1px solid ${bord}`,
+        color: sub,
+        fontSize: '0.62rem',
+        fontWeight: 600,
+        fontFamily: C.fontSans,
+        cursor: 'pointer'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: 'ti ti-chevron-' + (open ? 'down' : 'right'),
+      style: {
+        fontSize: 11
+      }
+    }), /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-subtask",
+      style: {
+        fontSize: 11
+      }
+    }), done, "/", kids.length);
+  };
+  const withSubs = rowFn => t => {
+    const kids = kidsOf(t.id);
+    if (!kids.length) return rowFn(t);
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: t.id
+    }, rowFn(t), subsOpen[t.id] && /*#__PURE__*/React.createElement("div", {
+      style: {
+        paddingLeft: 22,
+        borderLeft: `1px solid ${bord}`,
+        marginLeft: 4
+      }
+    }, kids.map(k => rowFn(k))));
+  };
   const detailTaskRow = t => /*#__PURE__*/React.createElement("div", {
     key: t.id,
     onClick: () => openTaskFull(t),
@@ -11257,7 +11426,7 @@ function ProjectsSurface({
       textOverflow: 'ellipsis',
       textDecoration: t.status === 'done' ? 'line-through' : 'none'
     }
-  }, t.title), /*#__PURE__*/React.createElement("span", {
+  }, t.title), subToggle(t), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: '0.62rem',
       fontWeight: 600,
@@ -11384,7 +11553,30 @@ function ProjectsSurface({
       fontFamily: C.fontSans,
       opacity: addTask.trim() ? 1 : 0.5
     }
-  }, "Add task")));
+  }, "Add task")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setNewTaskOpen(addTask.trim());
+      setAddTask('');
+    },
+    style: {
+      alignSelf: 'flex-start',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      background: 'none',
+      border: 'none',
+      padding: '2px 0',
+      color: gold,
+      fontSize: 12,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      fontSize: 12
+    }
+  }), "New task with a description, dates and people"));
   // Relative-time label for "Last synced" (no existing helper in this
   // file covers this — fmtD is absolute-date-only).
   const timeAgo = iso => {
@@ -11589,7 +11781,8 @@ function ProjectsSurface({
       setTaskEditing(false);
     },
     onStatus: s => onTaskStatus(openTask, s),
-    onOpenSubtask: child => openTaskFull(child)
+    onOpenSubtask: child => openTaskFull(child),
+    onSubtaskAdded: () => refreshContainer(null, false)
   })));
 
   // Matches the prototype's .vtabs/.vtab exactly.
@@ -11623,7 +11816,7 @@ function ProjectsSurface({
     const tasklistNames = p._tasks.some(t => t.zoho_tasklist_name);
     if (tasklistNames) {
       const groups = {};
-      p._tasks.forEach(t => {
+      p._tasks.filter(t => !isChildHere(t)).forEach(t => {
         const key = t.zoho_tasklist_name || 'Other tasks';
         (groups[key] = groups[key] || []).push(t);
       });
@@ -11657,7 +11850,7 @@ function ProjectsSurface({
           color: sub,
           fontFamily: C.fontSans
         }
-      }, key, " \xB7 ", groups[key].length)), groups[key].map(detailTaskRow))), addInputs);
+      }, key, " \xB7 ", groups[key].length)), groups[key].map(withSubs(detailTaskRow)))), addInputs);
     }
     return /*#__PURE__*/React.createElement("div", {
       style: {
@@ -11679,7 +11872,7 @@ function ProjectsSurface({
         fontFamily: C.fontSans
       }
     }, "No tasks yet.") : TASK_STATUS.map(col => {
-      const items = p._tasks.filter(t => t.status === col.id);
+      const items = p._tasks.filter(t => t.status === col.id && !isChildHere(t));
       if (!items.length) return null;
       return /*#__PURE__*/React.createElement("div", {
         key: col.id,
@@ -11709,7 +11902,7 @@ function ProjectsSurface({
           color: sub,
           fontFamily: C.fontSans
         }
-      }, col.label, " \xB7 ", items.length)), items.map(detailTaskRow));
+      }, col.label, " \xB7 ", items.length)), items.map(withSubs(detailTaskRow)));
     }), addInputs);
   };
   const boardTab = p => /*#__PURE__*/React.createElement(TaskBoard, {
@@ -11727,6 +11920,7 @@ function ProjectsSurface({
   const detailView = () => {
     const p = current;
     if (!p) return null;
+    if (newTaskOpen !== null && !wide) return newTaskOverlay();
     if (openTask && !wide) return taskDetailOverlay(); // mobile: no room for a drawer, full swap like before
     const spine = /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -12029,7 +12223,10 @@ function ProjectsSurface({
         setOpenTask(null);
         setTaskEditing(false);
       }
-    }, taskDetailOverlay())) : /*#__PURE__*/React.createElement(React.Fragment, null, header, dtabBar, dtab === 'overview' ? /*#__PURE__*/React.createElement("div", {
+    }, taskDetailOverlay()), newTaskOpen !== null && /*#__PURE__*/React.createElement(TaskDrawer, {
+      dark: dark,
+      onClose: () => setNewTaskOpen(null)
+    }, newTaskOverlay())) : /*#__PURE__*/React.createElement(React.Fragment, null, header, dtabBar, dtab === 'overview' ? /*#__PURE__*/React.createElement("div", {
       style: {
         flex: 1,
         minHeight: 0,
@@ -13946,8 +14143,72 @@ function TasksScreen({
     tasks: [],
     peopleByTask: {},
     projById: {},
-    labelsByTask: {}
+    labelsByTask: {},
+    childrenByTask: {}
   });
+  // Which parents are expanded to show their subtasks. Per-device and
+  // per-session on purpose: it's a way of looking at the list, not a
+  // property of the task.
+  const [subsOpen, setSubsOpen] = useState({});
+  const kidsOf = id => (data.childrenByTask || {})[id] || [];
+  // The affordance Symon asked for: a row with subtasks says so, and opens
+  // in place instead of making you open the task to find out.
+  const subToggle = t => {
+    const kids = kidsOf(t.id);
+    if (!kids.length) return null;
+    const open = !!subsOpen[t.id];
+    const done = kids.filter(k => k.status === 'done').length;
+    return /*#__PURE__*/React.createElement("span", {
+      onClick: e => {
+        e.stopPropagation();
+        setSubsOpen(o => ({
+          ...o,
+          [t.id]: !o[t.id]
+        }));
+      },
+      title: open ? 'Hide subtasks' : 'Show subtasks',
+      style: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3,
+        flexShrink: 0,
+        padding: '1px 6px 1px 3px',
+        borderRadius: 10,
+        border: `1px solid ${bord}`,
+        color: sub,
+        fontSize: '0.62rem',
+        fontWeight: 600,
+        fontFamily: C.fontSans,
+        cursor: 'pointer'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: 'ti ti-chevron-' + (open ? 'down' : 'right'),
+      style: {
+        fontSize: 11
+      }
+    }), /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-subtask",
+      style: {
+        fontSize: 11
+      }
+    }), done, "/", kids.length);
+  };
+  // Renders a parent row, then its subtasks indented beneath it when open.
+  // Wrapping the row function rather than every call site keeps the eight
+  // grouping branches in renderGroupedList untouched.
+  const withSubs = rowFn => t => {
+    const kids = kidsOf(t.id);
+    if (!kids.length) return rowFn(t);
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: t.id
+    }, rowFn(t), subsOpen[t.id] && /*#__PURE__*/React.createElement("div", {
+      style: {
+        paddingLeft: 22,
+        borderLeft: `1px solid ${bord}`,
+        marginLeft: 10
+      }
+    }, kids.map(k => rowFn(k))));
+  };
   const [team, setTeam] = useState([]);
   const [loading, setLoading] = useState(true);
   // { [taskId]: [link, ...] } — every task's linked Gmail threads [brief §2.1].
@@ -14518,6 +14779,13 @@ function TasksScreen({
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
         fontSize: '0.86rem',
         fontWeight: 600,
         color: ink,
@@ -14526,7 +14794,7 @@ function TasksScreen({
         overflow: 'hidden',
         textOverflow: 'ellipsis'
       }
-    }, t.title), /*#__PURE__*/React.createElement("div", {
+    }, t.title), subToggle(t)), /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: '0.68rem',
         color: sub,
@@ -14625,6 +14893,10 @@ function TasksScreen({
     }
   }, label)));
   const renderList = () => {
+    // taskRow takes a second argument, so wrap the two shapes separately
+    // rather than passing the function itself to withSubs.
+    const rowWithStatus = withSubs(t => taskRow(t, true));
+    const rowPlain = withSubs(t => taskRow(t, false));
     // Secondary sort applied WITHIN each group (or as a tie-breaker in the flat due list).
     const PRI = {
       high: 0,
@@ -14645,7 +14917,7 @@ function TasksScreen({
     };
     if (sortBy === 'due') {
       const sorted = [...data.tasks].sort((a, b) => dueCmp(a, b) || byThen(a, b));
-      return /*#__PURE__*/React.createElement("div", null, groupHead(dark ? '#C9A45A' : '#AD832F', 'By due date · ' + sorted.length), sorted.map(t => taskRow(t, true)));
+      return /*#__PURE__*/React.createElement("div", null, groupHead(dark ? '#C9A45A' : '#AD832F', 'By due date · ' + sorted.length), sorted.map(rowWithStatus));
     }
     if (sortBy === 'label') {
       const groups = {};
@@ -14662,11 +14934,11 @@ function TasksScreen({
         style: {
           marginBottom: 16
         }
-      }, groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length), groups[n].slice().sort(byThen).map(t => taskRow(t, true)))), unlabeled.length > 0 && /*#__PURE__*/React.createElement("div", {
+      }, groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length), groups[n].slice().sort(byThen).map(rowWithStatus))), unlabeled.length > 0 && /*#__PURE__*/React.createElement("div", {
         style: {
           marginBottom: 16
         }
-      }, groupHead(sub, 'Unlabeled · ' + unlabeled.length), unlabeled.slice().sort(byThen).map(t => taskRow(t, true))));
+      }, groupHead(sub, 'Unlabeled · ' + unlabeled.length), unlabeled.slice().sort(byThen).map(rowWithStatus)));
     }
     return TASK_STATUS.map(col => {
       const items = data.tasks.filter(t => t.status === col.id).sort(byThen);
@@ -14676,7 +14948,7 @@ function TasksScreen({
         style: {
           marginBottom: 16
         }
-      }, groupHead(col.color, col.label + ' · ' + items.length), items.map(t => taskRow(t, false)));
+      }, groupHead(col.color, col.label + ' · ' + items.length), items.map(rowPlain));
     });
   };
   // ── Shared header controls (reused by both layouts) ──
@@ -14901,6 +15173,7 @@ function TasksScreen({
       setCurrent(child);
       setView('detail');
     },
+    onSubtaskAdded: () => reload(),
     emailLinks: linksByTask[current.id] || [],
     onEmailChanged: onEmailAttached,
     initialTab: emailTabFocus ? 'email' : undefined,
@@ -15839,7 +16112,7 @@ function TasksScreen({
         fontFamily: C.fontSans,
         textDecoration: t.status === 'done' ? 'line-through' : 'none'
       }
-    }, t.title), emailIconMini(t)), /*#__PURE__*/React.createElement("div", {
+    }, t.title), subToggle(t), emailIconMini(t)), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
         alignItems: 'center',
@@ -15929,7 +16202,7 @@ function TasksScreen({
         textOverflow: 'ellipsis',
         textDecoration: t.status === 'done' ? 'line-through' : 'none'
       }
-    }, t.title), emailIconMini(t)), cols.includes('source') && /*#__PURE__*/React.createElement("div", {
+    }, t.title), subToggle(t), emailIconMini(t)), cols.includes('source') && /*#__PURE__*/React.createElement("div", {
       style: {
         width: 150,
         flexShrink: 0,
@@ -16558,7 +16831,7 @@ function TasksScreen({
     style: {
       padding: '4px 0 24px'
     }
-  }, renderGroupedList(deskRow)), quickAddRow)), view !== 'list' && /*#__PURE__*/React.createElement(TaskDrawer, {
+  }, renderGroupedList(withSubs(deskRow))), quickAddRow)), view !== 'list' && /*#__PURE__*/React.createElement(TaskDrawer, {
     dark: dark,
     onClose: back
   }, /*#__PURE__*/React.createElement("div", {
@@ -16799,7 +17072,7 @@ function TasksScreen({
     style: {
       padding: '10px 14px 24px'
     }
-  }, renderGroupedList(taskRowNew), quickAddRow)))))), ctxMenu && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, renderGroupedList(withSubs(taskRowNew)), quickAddRow)))))), ctxMenu && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     onClick: () => setCtxMenu(null),
     onContextMenu: e => {
       e.preventDefault();

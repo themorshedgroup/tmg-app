@@ -1137,8 +1137,6 @@ Rules:
       { id: 'fb-kpis', label: 'Add KPIs',  icon: 'ti-chart-bar', colorLight: '#AD832F', colorDark: '#C9A45A',               type: 'prompt', mode: 'work', config: { kpi: true, prompt: 'Enter KPI' },                       enabled: true },
     ];
 
-    // Built-in pill, always shown first — starts a fresh chat.
-    const NEW_CHAT_PILL = { id: 'new-chat', label: 'New Chat', icon: 'ti-message-plus', colorLight: '#001A4A', colorDark: 'rgba(255,255,255,0.6)', type: 'newchat', config: {} };
 
     // Built-in Calendar Brief + Deals Update pills — always shown, like New Chat.
     // Hardcoded so they need no admin row or SQL; each opens the interactive
@@ -1502,13 +1500,13 @@ Rules:
     }
 
     // Pinned in the compact (active-chat) pill row; everything else lives behind the ⋯ overflow.
-    const AI_PINNED_PILL_IDS = ['new-chat', 'fb-task', 'clear-chat'];
+    // New Chat pill removed — Clear Chat covers a fresh start now.
+    const AI_PINNED_PILL_IDS = ['fb-task', 'clear-chat'];
     const AI_COMPACT_ROW_H = 54;
 
     function AIChatTab({ user, messages, loading, dark, pills, onPill, flowCard, flowKey, projectName }) {
       const firstName = (user?.user_metadata?.full_name || 'there').split(' ')[0];
       const scrollRef = useRef(null);
-      const [showActions, setShowActions] = useState(false);
       const [reducedMotion, setReducedMotion] = useState(() => typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
       useEffect(() => {
@@ -1526,6 +1524,10 @@ Rules:
       const empty = messages.length === 0 && !flowCard;
       const allPills = pills || [];
       const pinnedPills = allPills.filter(p => AI_PINNED_PILL_IDS.includes(p.id));
+      // Everything else — the pill row no longer hides anything behind a
+      // "..." button, so this is just "the rest", rendered right after the
+      // pinned ones.
+      const restPills = allPills.filter(p => !AI_PINNED_PILL_IDS.includes(p.id));
 
       // "Coming soon" pills render neutral black/white (not the live AI_UI accent) with a SOON badge.
       // Every pill renders in neutral black/white — "SOON" is the only thing that marks a
@@ -1626,51 +1628,21 @@ Rules:
             )}
           </div>
           {/* Pill row — steady, always directly above the chat bar, in both an
-              empty and an active chat. It used to be two auto-scrolling marquee
-              rows floating mid-screen on a fresh chat, which moved the thing you
-              were trying to press. ⋯ opens every action; the pinned ones sit
-              inline. */}
+              empty and an active chat. Used to be two auto-scrolling marquee
+              rows floating mid-screen; then a "..." button hiding everything
+              but two pills behind a bottom sheet, which wasn't opening
+              reliably. Now every pill is just here, in one line: the pinned
+              ones (Add To-Do, Clear Chat) first, then the rest in their usual
+              order. Horizontal scroll if it runs past the screen width. */}
           {allPills.length > 0 && (
             <div style={{
               position: 'absolute', left: 0, right: 0, bottom: 0, height: AI_COMPACT_ROW_H,
               display: 'flex', alignItems: 'center', gap: 7, overflowX: 'auto', padding: '0 16px',
               borderTop: `1px solid ${dark ? '#152545' : C.border}`, background: dark ? '#000D26' : C.bg,
             }}>
-              <button onClick={() => setShowActions(true)} title="More actions" style={{
-                flexShrink: 0, width: 30, height: 30, borderRadius: '50%', cursor: 'pointer',
-                border: `0.5px solid ${AI_UI.border}`, background: AI_UI.tint,
-                display: 'flex', alignItems: 'center', justifyContent: 'center', color: AI_UI.primary,
-              }}>
-                <i className="ti ti-dots" style={{ fontSize: 15 }} />
-              </button>
               {pinnedPills.map(p => pillChip(p, p.id, true))}
+              {restPills.map(p => pillChip(p, p.id, true))}
             </div>
-          )}
-          {/* All quick actions — bottom sheet from the ⋯ button, bounded to the chat message area. */}
-          {!empty && showActions && (
-            <React.Fragment>
-              <div onClick={() => setShowActions(false)} style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: AI_COMPACT_ROW_H, zIndex: 24, background: dark ? 'rgba(0,0,0,0.28)' : 'rgba(0,13,38,0.12)' }} />
-              <div style={{ position: 'absolute', left: 0, right: 0, bottom: AI_COMPACT_ROW_H, zIndex: 25, maxHeight: '60%', overflowY: 'auto', background: '#F5F0E8', borderRadius: '16px 16px 0 0', boxShadow: '0 -8px 28px rgba(0,0,0,0.18)', padding: '8px 8px calc(8px + env(safe-area-inset-bottom))' }}>
-                {allPills.map(p => {
-                  const soon = p.type === 'soon';
-                  return (
-                    <button key={p.id} onClick={() => { setShowActions(false); onPill(p); }} style={{
-                      display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', cursor: 'pointer',
-                      padding: '12px 12px', borderRadius: 10, border: 'none', background: 'none',
-                    }}>
-                      <i className={`ti ${p.icon}`} style={{ fontSize: 16, color: '#1A1A1A', flexShrink: 0 }} />
-                      <span style={{ flex: 1, minWidth: 0, fontFamily: "'Jost', sans-serif", fontSize: 13, fontWeight: 500, color: '#001A4A' }}>{p.label}</span>
-                      {soon && (
-                        <span style={{
-                          flexShrink: 0, padding: '2px 7px', borderRadius: 8, background: '#1A1A1A', color: '#fff',
-                          fontFamily: "'Jost', sans-serif", fontSize: 8, fontWeight: 700, letterSpacing: '0.08em',
-                        }}>SOON</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </React.Fragment>
           )}
         </div>
       );
@@ -9316,7 +9288,7 @@ Rules:
       const pillVisible = (p) => !p.roles || !p.roles.length || isAdmin || p.roles.some(r => myRoles.includes(r));
       const effectivePills = (pills && pills.length ? pills : FALLBACK_PILLS).filter(p => p.enabled !== false && pillVisible(p));
       // New Chat first, then every visible pill — there's only one unified mode now.
-      const shownPills = [NEW_CHAT_PILL].concat(effectivePills).concat(CALENDAR_PILLS).concat([DEAL_PILL]).concat(SOON_PILLS).concat([CLEAR_PILL]);
+      const shownPills = effectivePills.concat(CALENDAR_PILLS).concat([DEAL_PILL]).concat(SOON_PILLS).concat([CLEAR_PILL]);
       useEffect(() => { localStorage.setItem('tmg-history-side', historySide); }, [historySide]);
 
       // Per-conversation draft autosave (device-local). Key 'new' before a conversation exists.

@@ -172,6 +172,19 @@
     };
 
     const timeoffDate = (v) => new Date(String(v || '').replace(' ', 'T'));
+    // A bare 'YYYY-MM-DD' string (hire_date has no time component) parses as
+    // UTC MIDNIGHT under the ES spec — timeoffDate/new Date() on it, then read
+    // back with local getters, silently lands on the PREVIOUS day in any
+    // timezone behind UTC (all of the Americas, where TMG operates). Every
+    // request's start_at/end_at already carries a 'T...' time, which parses as
+    // local and is unaffected — this only ever bit hire_date. Read the
+    // calendar digits straight out of the string instead of round-tripping
+    // through a Date object, so proration lands on the real hire date.
+    const timeoffLocalDateOnly = (v) => {
+      const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (!m) return null;
+      return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    };
     const timeoffFmtHours = (h) => String(Math.round((Number(h) || 0) * 100) / 100);
     function timeoffClientHours(startISO, endISO, fullDay, hpw) {
       const s = timeoffDate(startISO), e = timeoffDate(endISO);
@@ -191,14 +204,13 @@
     // (bad data) → 0 for this year.
     function timeoffProration(hireDateStr, year) {
       if (!hireDateStr) return 1;
-      const hire = timeoffDate(hireDateStr);
-      if (isNaN(hire)) return 1;
-      const hireYear = hire.getFullYear();
+      const hireDay = timeoffLocalDateOnly(hireDateStr);
+      if (!hireDay || isNaN(hireDay)) return 1;
+      const hireYear = hireDay.getFullYear();
       if (hireYear < year) return 1;
       if (hireYear > year) return 0;
       const yearStart = new Date(year, 0, 1);
       const yearEnd = new Date(year, 11, 31);
-      const hireDay = new Date(hire.getFullYear(), hire.getMonth(), hire.getDate());
       const daysInYear = Math.round((yearEnd - yearStart) / 86400000) + 1;
       const daysRemaining = Math.round((yearEnd - hireDay) / 86400000) + 1;
       return Math.max(0, Math.min(1, daysRemaining / daysInYear));
@@ -438,7 +450,7 @@
             {b.tracked ? (
               <div style={{ fontSize: '0.78rem', color: t.sub, fontFamily: C.fontSans, marginTop: 4 }}>
                 <b style={{ color: t.text }}>{timeoffFmtHours(b.remaining)}h</b> left · {timeoffFmtHours(b.used)}h used · {timeoffFmtHours(b.pending)}h pending · of {timeoffFmtHours(b.allot)}h
-                {b.proration < 1 ? <span style={{ color: C.gold }}> · prorated ({p.hire_date ? timeoffDate(p.hire_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'started'} start)</span> : null}
+                {b.proration < 1 ? <span style={{ color: C.gold }}> · prorated ({p.hire_date ? timeoffLocalDateOnly(p.hire_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'started'} start)</span> : null}
               </div>
             ) : null}
           </div>

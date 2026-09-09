@@ -1,3 +1,4 @@
+function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
   useState,
   useEffect,
@@ -3495,6 +3496,160 @@ const canBulkAssign = (team, user) => {
   const a = me && me.access || [];
   return a.includes('admin') || a.includes('operations');
 };
+
+// Deliberately NOT TaskDB.update. That stamps updated_at, and the Zoho
+// poller reads `updated_at > zoho_last_synced_at` as "somebody edited this
+// task in TMG" — so dragging a synced CTC row through it would invent a
+// conflict, write a bogus line into the task's activity feed, and push
+// TMG's stale values back over a real Zoho edit. Moving a row is not an
+// edit to the task, and nothing here should reach Zoho.
+const OrderDB = {
+  client() {
+    return window.SupabaseAuth?._client || null;
+  },
+  async setRank(id, col, val) {
+    const c = this.client();
+    if (!c) return;
+    const {
+      error
+    } = await c.from('tasks').update({
+      [col]: val
+    }).eq('id', id);
+    // Same column-fallback shape as TaskDB: on a database without the
+    // column the drag is simply inert rather than an error in your face.
+    if (error && /column|schema cache|PGRST204|42703/i.test((error.message || '') + (error.code || ''))) return;
+    if (error) {
+      console.error('[OrderDB] setRank:', error.message);
+      throw error;
+    }
+  },
+  // My Tasks is a different list for each person, so its order cannot live
+  // in a column on the shared task row: a task you delegated is in your
+  // list and in theirs, and one drag used to move it in both. An absent
+  // row here means "use tasks.my_rank", which is where new tasks start.
+  async loadMyOrder(userId) {
+    const c = this.client();
+    if (!c || !userId) return {};
+    const {
+      data
+    } = await pageAll(c, 'task_user_order', 'task_id,rank', {
+      eq: ['user_id', userId]
+    });
+    const out = {};
+    (data || []).forEach(r => {
+      out[r.task_id] = r.rank;
+    });
+    return out;
+  },
+  async setMyRank(userId, taskId, val) {
+    const c = this.client();
+    if (!c || !userId) return;
+    const {
+      error
+    } = await c.from('task_user_order').upsert({
+      user_id: userId,
+      task_id: taskId,
+      rank: val,
+      updated_at: new Date().toISOString()
+    }, {
+      onConflict: 'user_id,task_id'
+    });
+    // Same shape as setRank: on a database without the table the drag is
+    // inert rather than an error in your face.
+    if (error && /relation|does not exist|schema cache|PGRST20[45]|42P01/i.test((error.message || '') + (error.code || ''))) return;
+    if (error) {
+      console.error('[OrderDB] setMyRank:', error.message);
+      throw error;
+    }
+  },
+  async setMyRanks(userId, rows) {
+    const c = this.client();
+    if (!c || !userId || !rows.length) return;
+    const {
+      error
+    } = await c.from('task_user_order').upsert(rows.map(r => ({
+      user_id: userId,
+      task_id: r.id,
+      rank: r.rank,
+      updated_at: new Date().toISOString()
+    })), {
+      onConflict: 'user_id,task_id'
+    });
+    if (error) {
+      console.error('[OrderDB] setMyRanks:', error.message);
+      throw error;
+    }
+  },
+  // Renumbering only — never the normal path. One statement, one round trip.
+  async setRanks(col, rows) {
+    const c = this.client();
+    if (!c || !rows.length) return;
+    const {
+      error
+    } = await c.rpc('reorder_tasks', {
+      p_col: col,
+      p_rows: rows
+    });
+    if (error) {
+      console.error('[OrderDB] setRanks:', error.message);
+      throw error;
+    }
+  },
+  async loadTasklistOrder(projectId) {
+    const c = this.client();
+    if (!c || !projectId) return {};
+    const {
+      data,
+      error
+    } = await c.from('project_tasklist_order').select('tasklist_key,rank').eq('project_id', projectId);
+    if (error) return {}; // no table yet: fall back to the old order
+    const out = {};
+    (data || []).forEach(r => {
+      out[r.tasklist_key] = r.rank;
+    });
+    return out;
+  },
+  // One row per drop, same reasoning as tasks — a whole-array write would
+  // be last-one-wins between two people.
+  async setTasklistRank(projectId, key, rank, userId) {
+    const c = this.client();
+    if (!c) return;
+    const {
+      error
+    } = await c.from('project_tasklist_order').upsert({
+      project_id: projectId,
+      tasklist_key: key,
+      rank,
+      updated_by: userId || null,
+      updated_at: new Date().toISOString()
+    }, {
+      onConflict: 'project_id,tasklist_key'
+    });
+    if (error) {
+      console.error('[OrderDB] setTasklistRank:', error.message);
+      throw error;
+    }
+  },
+  async setTasklistRanks(projectId, rows, userId) {
+    const c = this.client();
+    if (!c || !rows.length) return;
+    const {
+      error
+    } = await c.from('project_tasklist_order').upsert(rows.map(r => ({
+      project_id: projectId,
+      tasklist_key: r.key,
+      rank: r.rank,
+      updated_by: userId || null,
+      updated_at: new Date().toISOString()
+    })), {
+      onConflict: 'project_id,tasklist_key'
+    });
+    if (error) {
+      console.error('[OrderDB] setTasklistRanks:', error.message);
+      throw error;
+    }
+  }
+};
 const TaskDB = {
   client() {
     return window.SupabaseAuth?._client || null;
@@ -3525,9 +3680,9 @@ const TaskDB = {
       labelsByTask: {},
       childrenByTask: {}
     };
-    const [minePpl, prRes] = await Promise.all([pageAll(c, 'task_people', 'task_id,role', {
+    const [minePpl, prRes, myOrd] = await Promise.all([pageAll(c, 'task_people', 'task_id,role', {
       eq: ['user_id', uid]
-    }), pageAll(c, 'projects', 'id,name,archived')]);
+    }), pageAll(c, 'projects', 'id,name,archived'), OrderDB.loadMyOrder(uid)]);
     // My Tasks means assigned to me, and nothing else. A CTC file's tasks
     // are deliberately left unassigned until someone picks one up, so
     // "I created it" and "I assigned it to someone else" would both fill
@@ -3592,8 +3747,14 @@ const TaskDB = {
       if (t.parent_task_id && byId.has(t.parent_task_id)) (childrenByTask[t.parent_task_id] = childrenByTask[t.parent_task_id] || []).push(t);
     });
     Object.keys(childrenByTask).forEach(k => childrenByTask[k].sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0)));
+    // my_rank on the row is the shared starting position (new tasks land at
+    // the top for everyone); a task_user_order row is THIS person's override
+    // of it. Overlaid onto the same field so nothing downstream changes.
     const tasks = visible.filter(t => !t.parent_task_id || !byId.has(t.parent_task_id)) // children render under their parent
-    .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    .map(t => myOrd[t.id] != null ? {
+      ...t,
+      my_rank: myOrd[t.id]
+    } : t).sort(rankCmp('my_rank'));
     return {
       tasks,
       peopleByTask,
@@ -4464,6 +4625,38 @@ async function chunked(ids, size, run) {
   const res = await Promise.all(batches.map(run));
   return res.flatMap(r => r && r.data || []);
 }
+
+// ── Manual order ────────────────────────────────────────────────────
+// Rows carry a rank; dropping one writes the midpoint between its new
+// neighbours, so a normal drag is ONE row's worth of write and two people
+// moving different rows never overwrite each other.
+// A row with no rank sorts last by created_at rather than into a random
+// slot — that's what keeps a list readable on a database that hasn't had
+// the migration yet. The id tiebreak makes two clients that computed the
+// same midpoint from the same stale neighbours render the tie identically,
+// instead of one of them seeing a phantom "it moved back".
+const RANK_STEP = 1024;
+function rankCmp(col) {
+  return (a, b) => {
+    const ar = a[col],
+      br = b[col];
+    if (ar != null && br != null) return ar - br || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    if (ar != null) return -1;
+    if (br != null) return 1;
+    const ca = new Date(a.created_at || 0) - new Date(b.created_at || 0);
+    return ca || (a.id < b.id ? -1 : 1);
+  };
+}
+function rankBetween(prev, next) {
+  // neighbour ranks; null at either end
+  if (prev == null && next == null) return RANK_STEP;
+  if (prev == null) return next - RANK_STEP;
+  if (next == null) return prev + RANK_STEP;
+  return (prev + next) / 2;
+}
+// Doubles run out of room after ~52 splits into the same gap. When that
+// happens the group is renumbered instead.
+const rankTooTight = (prev, next) => prev != null && next != null && Math.abs(next - prev) < 1e-6;
 async function pageAll(c, table, cols, opts) {
   const SIZE = 1000;
   const o = opts || {};
@@ -4609,9 +4802,11 @@ const ProjectDB = {
       eq: ['project_id', p.id]
     });
     const ts0 = rows || [];
-    const ppl = await chunked(ts0.map(t => t.id), 150, ids => pageAll(c, 'task_people', 'task_id,user_id,role', {
+    // The tasklist header order rides along with the people fetch, so
+    // opening a file still costs two round trips rather than three.
+    const [ppl, tlOrder] = await Promise.all([chunked(ts0.map(t => t.id), 150, ids => pageAll(c, 'task_people', 'task_id,user_id,role', {
       in: ['task_id', ids]
-    }));
+    })), OrderDB.loadTasklistOrder(p.id)]);
     const peopleByTask = {};
     ppl.forEach(x => {
       (peopleByTask[x.task_id] = peopleByTask[x.task_id] || []).push(x);
@@ -4622,11 +4817,15 @@ const ProjectDB = {
       if (!b.due_at) return -1;
       return new Date(a.due_at) - new Date(b.due_at);
     };
+    // Sorted in memory for the same reason as My Tasks — a missing column
+    // must leave the file readable, not empty. This also stops the file
+    // reshuffling itself between loads: the paged query has no ORDER BY,
+    // and unordered paging in Postgres has no stability guarantee.
     const ts = ts0.map(t => ({
       ...t,
       _people: peopleByTask[t.id] || [],
       _projectName: p.name
-    }));
+    })).sort(rankCmp('list_rank'));
     const milestones = ts.filter(t => t.is_milestone).slice().sort(dueCmp);
     const doneMs = milestones.filter(m => m.status === 'done').length;
     const totalMs = milestones.length;
@@ -4636,6 +4835,7 @@ const ProjectDB = {
     return {
       ...p,
       _tasks: ts,
+      _tlOrder: tlOrder,
       _hydrated: true,
       _milestones: milestones,
       _doneMs: doneMs,
@@ -9841,6 +10041,14 @@ function ProjectsSurface({
   // it for a new one, with the file already filled in.
   const [newTaskOpen, setNewTaskOpen] = useState(null); // null | seed title
   const [subsOpen, setSubsOpen] = useState({}); // parent id -> subtasks shown
+  // A reorder that fails must say so. A silent snap-back looks like the
+  // app losing your work.
+  const [orderErr, setOrderErr] = useState(null);
+  useEffect(() => {
+    if (!orderErr) return;
+    const t = setTimeout(() => setOrderErr(null), 6000);
+    return () => clearTimeout(t);
+  }, [orderErr]);
   // A routed/sidebar id that isn't in the list (archived, deleted, not
   // visible). Used to say so instead of silently showing the list and
   // rewriting the pasted URL (audit C7). Cleared when the user navigates.
@@ -11302,6 +11510,200 @@ function ProjectsSurface({
   // Subtasks live in _tasks alongside their parents (they inherit the
   // file's project_id), so the parent/child map is derived here rather
   // than fetched.
+  // ── Drag to reorder, shared with everyone who opens this file ──
+  const gkeyOf = t => t.zoho_tasklist_id || 'name:' + (t.zoho_tasklist_name || 'Other tasks');
+  const paintTasks = arr => setCurrent(p => p && p._tasks ? {
+    ...p,
+    _tasks: arr
+  } : p);
+
+  // `unranked` means a neighbour is really there but has no rank yet.
+  // rankBetween cannot tell that apart from "there is no neighbour", and
+  // reading it as the latter sends a row dropped at the BOTTOM to the top.
+  async function moveTaskTo(id, prevRank, nextRank, nextId, unranked) {
+    if (unranked || rankTooTight(prevRank, nextRank)) return renormaliseList(id, nextId);
+    const rank = rankBetween(prevRank, nextRank);
+    const was = ((current && current._tasks || []).find(t => t.id === id) || {}).list_rank;
+    paintTasks((current && current._tasks || []).map(t => t.id === id ? {
+      ...t,
+      list_rank: rank
+    } : t).slice().sort(rankCmp('list_rank')));
+    try {
+      await OrderDB.setRank(id, 'list_rank', rank);
+    }
+    // One row back, not a whole snapshot: restoring the array as it was at
+    // drop time would also throw away a teammate's change and any other
+    // drag that landed while this write was in flight.
+    catch (e) {
+      setCurrent(p => p && p._tasks ? {
+        ...p,
+        _tasks: p._tasks.map(t => t.id === id ? {
+          ...t,
+          list_rank: was
+        } : t).slice().sort(rankCmp('list_rank'))
+      } : p);
+      setOrderErr('Could not save the new order — it has been put back.');
+    }
+  }
+  // Only when a gap has collapsed after dozens of drops into the same slot.
+  // Re-reads the file's ranks first, so the window where this could stomp
+  // somebody else's single-row move is milliseconds wide.
+  // The slot is found by the id of the row below the drop, not by
+  // comparing rank values — two rows can share a rank, and then a
+  // value search lands one slot above where the finger actually was.
+  async function renormaliseList(id, nextId) {
+    const c = ProjectDB.client();
+    if (!c || !current) return;
+    const {
+      data
+    } = await c.from('tasks').select('id,list_rank').eq('project_id', current.id);
+    const live = (data || []).slice().sort(rankCmp('list_rank'));
+    const moved = live.filter(r => r.id !== id);
+    let at = nextId ? moved.findIndex(r => r.id === nextId) : -1;
+    if (at < 0) at = moved.length;
+    moved.splice(at, 0, {
+      id
+    });
+    const rows = moved.map((r, i) => ({
+      id: r.id,
+      rank: (i + 1) * RANK_STEP
+    }));
+    try {
+      await OrderDB.setRanks('list_rank', rows);
+      const byId = {};
+      rows.forEach(r => {
+        byId[r.id] = r.rank;
+      });
+      paintTasks((current && current._tasks || []).map(t => byId[t.id] != null ? {
+        ...t,
+        list_rank: byId[t.id]
+      } : t).slice().sort(rankCmp('list_rank')));
+    } catch (e) {
+      setOrderErr('Could not save the new order — it has been put back.');
+    }
+  }
+  // Keyboard / menu equivalent, and the escape hatch if a drag misbehaves.
+  function neighboursInGroup(id, dir) {
+    const el = document.querySelector('[data-drag-kind="task"][data-drag-id="' + id + '"]');
+    if (!el || !el.parentElement) return null;
+    const sibs = Array.from(el.parentElement.querySelectorAll(':scope > [data-drag-kind="task"]')).map(x => x.getAttribute('data-drag-id'));
+    const i = sibs.indexOf(id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= sibs.length) return null;
+    const all = current && current._tasks || [];
+    const row = x => x ? all.find(y => y.id === x) : null;
+    const prevId = dir < 0 ? sibs[j - 1] : sibs[j];
+    const nextId = dir < 0 ? sibs[j] : sibs[j + 1];
+    const prev = row(prevId),
+      next = row(nextId);
+    const unranked = !!prevId && (!prev || prev.list_rank == null) || !!nextId && (!next || next.list_rank == null);
+    return {
+      prev: prev ? prev.list_rank : null,
+      next: next ? next.list_rank : null,
+      nextId,
+      unranked
+    };
+  }
+  const moveTaskBy = (id, dir) => {
+    const n = neighboursInGroup(id, dir);
+    if (n) moveTaskTo(id, n.prev, n.next, n.nextId, n.unranked);
+  };
+
+  // Same group only. Moving between Zoho tasklists would mean rewriting
+  // zoho_tasklist_name, which the poller owns and would undo within five
+  // minutes; moving between status groups means "change the status",
+  // which the Board tab already does. sameParent stops the insertion line
+  // appearing over a row that is going to refuse the drop.
+  const rowDrag = useRowDrag((id, o) => {
+    const from = document.querySelector('[data-drag-kind="task"][data-drag-id="' + id + '"]');
+    if (!from || !o.el || from.parentElement !== o.el.parentElement) return;
+    const rows = Array.from(o.el.parentElement.querySelectorAll(':scope > [data-drag-kind="task"]')).map(el => el.getAttribute('data-drag-id')).filter(x => x !== id);
+    const i = rows.indexOf(o.id);
+    const prevId = o.before ? rows[i - 1] : rows[i];
+    const nextId = o.before ? rows[i] : rows[i + 1];
+    const byId = x => (current && current._tasks || []).find(t => t.id === x);
+    const prev = prevId ? byId(prevId) : null,
+      next = nextId ? byId(nextId) : null;
+    const unranked = !!prevId && (!prev || prev.list_rank == null) || !!nextId && (!next || next.list_rank == null);
+    moveTaskTo(id, prev ? prev.list_rank : null, next ? next.list_rank : null, nextId, unranked);
+  }, {
+    sameParent: true,
+    onReject: () => setOrderErr('A task can only move inside its own list.')
+  });
+  const tlDrop = async (key, o) => {
+    if (!current || key === o.id) return;
+    const keys = Array.from(document.querySelectorAll('[data-drag-kind="tasklist"]')).map(el => el.getAttribute('data-drag-id')).filter(k => k !== key);
+    const i = keys.indexOf(o.id);
+    const prevK = o.before ? keys[i - 1] : keys[i];
+    const nextK = o.before ? keys[i] : keys[i + 1];
+    const tlo = current && current._tlOrder || {};
+    // A file nobody has dragged has no stored ranks at all, so the first
+    // drop numbers every header from what is on screen; after that a drop
+    // is one row.
+    const known = keys.every(k => tlo[k] != null);
+    if (!known) {
+      const all = Array.from(document.querySelectorAll('[data-drag-kind="tasklist"]')).map(el => el.getAttribute('data-drag-id'));
+      const without = all.filter(k => k !== key);
+      const at = o.before ? without.indexOf(o.id) : without.indexOf(o.id) + 1;
+      without.splice(at, 0, key);
+      const rows = without.map((k, n) => ({
+        key: k,
+        rank: (n + 1) * RANK_STEP
+      }));
+      const map = {};
+      rows.forEach(r => {
+        map[r.key] = r.rank;
+      });
+      setCurrent(p => p ? {
+        ...p,
+        _tlOrder: map
+      } : p);
+      try {
+        await OrderDB.setTasklistRanks(current.id, rows, user && user.id);
+      } catch (e) {
+        setCurrent(p => p ? {
+          ...p,
+          _tlOrder: tlo
+        } : p);
+        setOrderErr('Could not save the new order — it has been put back.');
+      }
+      return;
+    }
+    const rank = rankBetween(prevK ? tlo[prevK] : null, nextK ? tlo[nextK] : null);
+    setCurrent(p => p ? {
+      ...p,
+      _tlOrder: {
+        ...tlo,
+        [key]: rank
+      }
+    } : p);
+    try {
+      await OrderDB.setTasklistRank(current.id, key, rank, user && user.id);
+    } catch (e) {
+      setCurrent(p => p ? {
+        ...p,
+        _tlOrder: tlo
+      } : p);
+      setOrderErr('Could not save the new order — it has been put back.');
+    }
+  };
+  // Headers each live inside their own group block, so they are not
+  // siblings — sameParent would refuse every header drop.
+  const tlDrag = useRowDrag(tlDrop);
+  // The keyboard equivalent, so a header is not the one thing on this
+  // screen that can only be moved with a pointer.
+  const moveTasklistBy = (key, dir) => {
+    const keys = Array.from(document.querySelectorAll('[data-drag-kind="tasklist"]')).map(el => el.getAttribute('data-drag-id'));
+    const i = keys.indexOf(key),
+      j = i + dir;
+    if (i < 0 || j < 0 || j >= keys.length) return;
+    const target = keys[j];
+    tlDrop(key, {
+      id: target,
+      before: dir < 0,
+      el: document.querySelector('[data-drag-kind="tasklist"][data-drag-id="' + target + '"]')
+    });
+  };
   const kidsOf = id => (current && current._tasks || []).filter(t => t.parent_task_id === id);
   const isChildHere = t => !!t.parent_task_id && (current && current._tasks || []).some(x => x.id === t.parent_task_id);
   const subToggle = t => {
@@ -11355,20 +11757,28 @@ function ProjectsSurface({
         borderLeft: `1px solid ${bord}`,
         marginLeft: 4
       }
-    }, kids.map(k => rowFn(k))));
+    }, kids.map(k => rowFn(k, true))));
   };
-  const detailTaskRow = t => /*#__PURE__*/React.createElement("div", {
+  const detailTaskRow = (t, isChild) => /*#__PURE__*/React.createElement("div", _extends({
     key: t.id,
-    onClick: () => openTaskFull(t),
+    onClick: () => openTaskFull(t)
+  }, isChild ? {} : {
+    'data-drag-kind': 'task',
+    'data-drag-id': t.id
+  }, {
     style: {
       display: 'flex',
       alignItems: 'center',
       gap: 10,
       padding: '9px 0',
-      borderBottom: `1px solid ${bord}`,
-      cursor: 'pointer'
+      cursor: 'pointer',
+      ...dragRowStyle(rowDrag, isChild ? null : t.id, gold, `1px solid ${bord}`)
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }), dragGrip(rowDrag, 'task', t.id, {
+    color: sub,
+    spacer: isChild,
+    onArrow: d => moveTaskBy(t.id, d)
+  }), /*#__PURE__*/React.createElement("div", {
     onClick: e => {
       e.stopPropagation();
       toggleTaskDone(t);
@@ -11812,6 +12222,119 @@ function ProjectsSurface({
   // Close") — group by that instead of status when any task here has one,
   // since a flat status-grouped dump of 100+ synced tasks isn't readable.
   // Plain (non-synced) task lists keep the original status grouping.
+  // Somebody else's drag should land on your screen, not wait for a
+  // reload. Scoped to the one file that is open — this is the app's first
+  // realtime subscription and the blast radius is deliberately tiny.
+  // It also fixes "they ticked a box and I can't see it" on the open file.
+  // Keep the client-only fields hydrate attached — a plain spread of the
+  // row would blank _people and _projectName.
+  const applyRow = n => setCurrent(p => p && p._tasks ? {
+    ...p,
+    _tasks: p._tasks.map(t => t.id === n.id ? {
+      ...t,
+      ...n,
+      _people: t._people,
+      _projectName: t._projectName
+    } : t).slice().sort(rankCmp('list_rank'))
+  } : p);
+  // Held, not dropped. Re-sorting under a moving finger yanks the list, but
+  // discarding the change left the row visibly wrong until the file was
+  // reopened — a teammate ticking a box mid-drag simply vanished.
+  const heldRows = useRef([]);
+  useEffect(() => {
+    if (rowDrag.drag || !heldRows.current.length) return;
+    const q = heldRows.current;
+    heldRows.current = [];
+    q.forEach(applyRow);
+  }, [rowDrag.drag]);
+  useEffect(() => {
+    const c = ProjectDB.client();
+    if (!c || !current || !current.id || typeof c.channel !== 'function') return;
+    let ch;
+    try {
+      ch = c.channel('proj-order-' + current.id).on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'tasks',
+        filter: 'project_id=eq.' + current.id
+      }, payload => {
+        const n = payload && payload.new;
+        if (!n || !n.id) return;
+        if (rowDrag.active.current) {
+          heldRows.current.push(n);
+          return;
+        }
+        applyRow(n);
+      }).on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'project_tasklist_order',
+        filter: 'project_id=eq.' + current.id
+      }, async () => {
+        const tlo = await OrderDB.loadTasklistOrder(current.id);
+        setCurrent(p => p ? {
+          ...p,
+          _tlOrder: tlo
+        } : p);
+      }).subscribe();
+    } catch (e) {
+      return;
+    }
+    return () => {
+      try {
+        c.removeChannel(ch);
+      } catch (e) {}
+    };
+  }, [current && current.id]);
+
+  // Coming back to a tab that has been in the background is the other half
+  // of "everyone sees the same order" — nothing in this app refetched on
+  // focus before, so a teammate's change could stay invisible for hours.
+  const refreshRef = useRef(null);
+  refreshRef.current = () => {
+    if (current && current.id && !rowDrag.active.current) refreshContainer(null, false);
+  };
+  useEffect(() => {
+    let hiddenAt = 0;
+    const onVis = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+        return;
+      }
+      if (hiddenAt && Date.now() - hiddenAt > 20000 && refreshRef.current) refreshRef.current();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onVis);
+    };
+  }, []);
+  const orderErrBar = orderErr ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      margin: '0 0 10px',
+      padding: '8px 11px',
+      borderRadius: 6,
+      border: `1px solid ${bord}`,
+      background: dark ? 'rgba(155,28,28,.14)' : '#FBF0F0',
+      color: dark ? '#F08A8A' : '#9B1C1C',
+      fontSize: '0.76rem',
+      fontFamily: C.fontSans
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-alert-circle",
+    style: {
+      fontSize: 14,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1
+    }
+  }, orderErr)) : null;
   const listTab = p => {
     const tasklistNames = p._tasks.some(t => t.zoho_tasklist_name);
     if (tasklistNames) {
@@ -11821,7 +12344,20 @@ function ProjectsSurface({
         (groups[key] = groups[key] || []).push(t);
       });
       const earliest = arr => Math.min(...arr.map(t => t.created_at ? new Date(t.created_at).getTime() : Date.now()));
-      const order = Object.keys(groups).sort((a, b) => earliest(groups[a]) - earliest(groups[b]));
+      // Keyed on the Zoho tasklist id where there is one, so renaming a
+      // list in Zoho keeps the position somebody set by hand here.
+      const gkey = name => gkeyOf(groups[name][0]);
+      const tlo = p._tlOrder || {};
+      const order = Object.keys(groups).sort((a, b) => {
+        const ra = tlo[gkey(a)],
+          rb = tlo[gkey(b)];
+        if (ra != null && rb != null) return ra - rb || (a < b ? -1 : 1);
+        if (ra != null) return -1; // hand-placed headers float above the rest
+        if (rb != null) return 1;
+        // Unchanged fallback, plus a name tiebreak — earliest() returns
+        // "now" for a null created_at, so two such groups compared unstably.
+        return earliest(groups[a]) - earliest(groups[b]) || (a < b ? -1 : 1);
+      });
       return /*#__PURE__*/React.createElement("div", {
         style: {
           padding: wide ? '14px 20px 24px' : '12px 14px 24px',
@@ -11829,19 +12365,25 @@ function ProjectsSurface({
           minWidth: 0,
           overflowY: 'auto'
         }
-      }, order.map(key => /*#__PURE__*/React.createElement("div", {
+      }, orderErrBar, order.map(key => /*#__PURE__*/React.createElement("div", {
         key: key,
         style: {
           marginBottom: 16
         }
       }, /*#__PURE__*/React.createElement("div", {
+        "data-drag-kind": "tasklist",
+        "data-drag-id": gkey(key),
         style: {
           display: 'flex',
           alignItems: 'center',
           gap: 6,
-          marginBottom: 7
+          marginBottom: 7,
+          ...dragRowStyle(tlDrag, gkey(key), gold, undefined)
         }
-      }, /*#__PURE__*/React.createElement("span", {
+      }, dragGrip(tlDrag, 'tasklist', gkey(key), {
+        color: sub,
+        onArrow: d => moveTasklistBy(gkey(key), d)
+      }), /*#__PURE__*/React.createElement("span", {
         style: {
           fontSize: '0.64rem',
           fontWeight: 700,
@@ -11859,7 +12401,7 @@ function ProjectsSurface({
         minWidth: 0,
         overflowY: 'auto'
       }
-    }, !p._hydrated ? /*#__PURE__*/React.createElement("div", {
+    }, orderErrBar, !p._hydrated ? /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: '0.8rem',
         color: sub,
@@ -12923,6 +13465,208 @@ function ProjectForm({
 // works both for My Tasks' own list and for a Project/CTC File/Rock's tasks
 // (ProjectsSurface). Real HTML5 drag-and-drop between status columns; drop
 // calls onDrop(taskId, newStatus) so the caller decides how to persist it.
+// ── Drag to reorder ─────────────────────────────────────────────────
+// Pointer events, not HTML5 draggable. The board's card drag uses
+// draggable/dataTransfer, which does not fire at all on iOS Safari touch —
+// and this app is on the team's phones, which is where the request came
+// from. Pointer events are one code path for mouse, trackpad and finger.
+//
+// Neighbours are read from the rendered DOM under the pointer, never
+// re-queried by id: grouped by Label or Assignee the same task is drawn
+// two or three times, and a lookup by id would find the wrong copy.
+function useRowDrag(onDrop, opts) {
+  const [drag, setDrag] = useState(null); // { kind, id }
+  const [over, setOver] = useState(null); // { kind, id, before, el }
+  const s = useRef({});
+  // Effects registered on an earlier render read this instead of `drag`,
+  // which would be frozen at whatever it was when they were set up.
+  const active = useRef(false);
+  // Same reason: the listeners below are registered once per drag and must
+  // call the CURRENT callbacks, not the ones from the render they started in.
+  const cb = useRef({});
+  cb.current = {
+    onDrop,
+    onReject: (opts || {}).onReject,
+    sameParent: !!(opts || {}).sameParent
+  };
+  const start = (e, kind, id) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // A second finger on a second grip used to start a whole second drag:
+    // two sets of window listeners sharing one s.current, so the first
+    // release dropped BOTH rows onto the same slot and left one autoscroll
+    // loop running with nothing able to cancel it. One drag at a time.
+    if (active.current) return;
+    const pid = e.pointerId;
+    try {
+      e.currentTarget.setPointerCapture(pid);
+    } catch (_) {}
+    setDrag({
+      kind,
+      id
+    });
+    setOver(null);
+    active.current = true;
+    // Where the row started. A drop into another group is refused, so the
+    // gold insertion line must not appear over one — a line that promises
+    // a drop and then does nothing reads as the feature being broken.
+    const startEl = e.currentTarget.closest('[data-drag-kind="' + kind + '"]');
+    const startParent = startEl && startEl.parentElement;
+    let pane = e.currentTarget;
+    while (pane && pane !== document.body) {
+      const oy = getComputedStyle(pane).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && pane.scrollHeight > pane.clientHeight) break;
+      pane = pane.parentElement;
+    }
+    s.current = {
+      pane,
+      y: 0,
+      raf: 0,
+      over: null,
+      reject: false,
+      done: false
+    };
+    // Autoscroll is required, not polish: the page hides every scrollbar,
+    // so a long list gives no hint that it scrolls at all.
+    const tick = () => {
+      const c = s.current;
+      if (c.pane) {
+        const r = c.pane.getBoundingClientRect();
+        const dTop = c.y - r.top,
+          dBot = r.bottom - c.y;
+        const d = dTop < 64 ? -(1 + (64 - Math.max(dTop, 0)) / 64 * 14) : dBot < 64 ? 1 + (64 - Math.max(dBot, 0)) / 64 * 14 : 0;
+        if (d) c.pane.scrollTop += d;
+      }
+      c.raf = requestAnimationFrame(tick);
+    };
+    s.current.raf = requestAnimationFrame(tick);
+    const move = ev => {
+      if (ev.pointerId !== pid) return;
+      s.current.y = ev.clientY;
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const row = el && el.closest('[data-drag-kind="' + kind + '"]');
+      if (!row) return;
+      if (cb.current.sameParent && startParent && row.parentElement !== startParent) {
+        s.current.reject = true;
+        if (s.current.over) {
+          s.current.over = null;
+          setOver(null);
+        }
+        return;
+      }
+      s.current.reject = false;
+      // elementFromPoint and that same element's rect share one coordinate
+      // frame, so the font-scale zoom cancels out. Arithmetic on offsetTop
+      // would land rows off by one for anyone who changed their font size.
+      const r = row.getBoundingClientRect();
+      const o = {
+        kind,
+        id: row.getAttribute('data-drag-id'),
+        before: ev.clientY < r.top + r.height / 2,
+        el: row
+      };
+      s.current.over = o;
+      setOver(o);
+    };
+    const end = ok => {
+      if (s.current.done) return; // pointercancel then pointerup is a real pair on iOS
+      s.current.done = true;
+      cancelAnimationFrame(s.current.raf);
+      active.current = false;
+      const o = s.current.over;
+      if (ok && o && o.id !== id) cb.current.onDrop(id, o);else if (ok && s.current.reject && cb.current.onReject) cb.current.onReject();
+      setDrag(null);
+      setOver(null);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', esc);
+    };
+    const up = ev => {
+      if (ev.pointerId === pid) end(true);
+    };
+    const cancel = ev => {
+      if (ev.pointerId === pid) end(false);
+    }; // an incoming call on iOS fires this
+    const esc = ev => {
+      if (ev.key === 'Escape') end(false);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('keydown', esc);
+  };
+  return {
+    drag,
+    over,
+    start,
+    active
+  };
+}
+
+// The grip is the only place a drag can start, so the row's own tap, its
+// right-click menu and the done circle never have to compete with it — no
+// press-and-hold delay, no "did I mean to drag or tap" guessing.
+// 14px wide to match the spacer the desktop header row already reserves.
+function dragGrip(rd, kind, id, opts) {
+  const o = opts || {};
+  if (o.spacer) return /*#__PURE__*/React.createElement("span", {
+    key: "g",
+    style: {
+      width: 14,
+      flexShrink: 0
+    }
+  });
+  return /*#__PURE__*/React.createElement("i", {
+    key: "g",
+    className: "ti ti-grip-vertical",
+    onPointerDown: e => {
+      if (o.dim) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (o.onPromote) o.onPromote();
+      } else rd.start(e, kind, id);
+    },
+    onClick: e => e.stopPropagation(),
+    title: o.dim ? 'Tap to switch to Manual order, then drag' : 'Drag to reorder',
+    tabIndex: o.dim ? -1 : 0,
+    onKeyDown: o.dim || !o.onArrow ? undefined : e => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        o.onArrow(e.key === 'ArrowUp' ? -1 : 1);
+      }
+    },
+    style: {
+      width: 14,
+      flexShrink: 0,
+      fontSize: 14,
+      color: o.color,
+      opacity: o.dim ? 0.3 : 0.5,
+      cursor: o.dim ? 'pointer' : 'grab',
+      touchAction: 'none',
+      padding: '9px 0',
+      margin: '-9px 0'
+    }
+  });
+}
+// Applied to a row while a drag is live. Without these a mouse drag selects
+// the row's text and an iOS press pops the copy/look-up bubble over it.
+// The insertion line is an inset shadow rather than a border: a border
+// changes the row's height, so the old version left every My Tasks card
+// with an open top edge and nudged every desk row down inside its group.
+const dragRowStyle = (rd, id, gold, baseBottom) => {
+  const o = rd.over;
+  const hit = o && o.id === id;
+  return {
+    opacity: rd.drag && rd.drag.id === id ? 0.4 : 1,
+    borderBottom: baseBottom,
+    boxShadow: hit ? o.before ? 'inset 0 2px 0 0 ' + gold : 'inset 0 -2px 0 0 ' + gold : undefined,
+    userSelect: rd.drag ? 'none' : undefined,
+    WebkitUserSelect: rd.drag ? 'none' : undefined,
+    WebkitTouchCallout: rd.drag ? 'none' : undefined
+  };
+};
 function TaskBoard({
   items,
   dark,
@@ -14150,6 +14894,23 @@ function TasksScreen({
   // per-session on purpose: it's a way of looking at the list, not a
   // property of the task.
   const [subsOpen, setSubsOpen] = useState({});
+  const reloadRef = useRef(null);
+  useEffect(() => {
+    let hiddenAt = 0;
+    const onVis = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+        return;
+      }
+      if (hiddenAt && Date.now() - hiddenAt > 20000 && reloadRef.current) reloadRef.current();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onVis);
+    };
+  }, []);
   const kidsOf = id => (data.childrenByTask || {})[id] || [];
   // The affordance Symon asked for: a row with subtasks says so, and opens
   // in place instead of making you open the task to find out.
@@ -14207,7 +14968,7 @@ function TasksScreen({
         borderLeft: `1px solid ${bord}`,
         marginLeft: 10
       }
-    }, kids.map(k => rowFn(k))));
+    }, kids.map(k => rowFn(k, true))));
   };
   const [team, setTeam] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -14227,6 +14988,149 @@ function TasksScreen({
   useEffect(() => {
     localStorage.setItem('tmg-tasks-sort', thenBy);
   }, [thenBy]);
+
+  // ── Drag to reorder ──
+  // Manual is a sort mode, so it composes with Group-by: the hand-set
+  // order is one list, and grouping just slices it. It is off entirely
+  // under Label and Assignee, where one task is drawn in several groups
+  // and a single position cannot mean two places at once — and under Due
+  // date, where the list is one flat run ordered by date, so a hand-set
+  // position has nowhere to sit. Leaving it on there let a drag write a
+  // rank, snap the row straight back, and quietly reshuffle the list the
+  // next time you grouped by anything else.
+  const manualOn = thenBy === 'manual';
+  const dragOff = sortBy === 'label' || sortBy === 'assignee' || sortBy === 'due';
+  const patchRank = (id, r) => setData(d => ({
+    ...d,
+    tasks: (d.tasks || []).map(x => x.id === id ? {
+      ...x,
+      my_rank: r
+    } : x)
+  }));
+  async function moveMyTaskTo(id, prevRank, nextRank, nextId, unranked) {
+    if (unranked || rankTooTight(prevRank, nextRank)) return renormaliseMy(id, nextId);
+    const rank = rankBetween(prevRank, nextRank);
+    const was = (data.tasks.find(x => x.id === id) || {}).my_rank;
+    patchRank(id, rank);
+    try {
+      await OrderDB.setMyRank(user && user.id, id, rank);
+    } catch (e) {
+      patchRank(id, was);
+      setOrderNote({
+        text: 'Could not save the new order — it has been put back.',
+        bad: true
+      });
+    }
+  }
+  // Renumbering only my own slice is now correct rather than a hazard:
+  // these ranks are written to my own rows, not to the shared task.
+  async function renormaliseMy(id, nextId) {
+    const live = (data.tasks || []).slice().sort(rankCmp('my_rank'));
+    const moved = live.filter(t => t.id !== id);
+    let at = nextId ? moved.findIndex(t => t.id === nextId) : -1;
+    if (at < 0) at = moved.length;
+    moved.splice(at, 0, {
+      id
+    });
+    const rows = moved.map((t, i) => ({
+      id: t.id,
+      rank: (i + 1) * RANK_STEP
+    }));
+    try {
+      await OrderDB.setMyRanks(user && user.id, rows);
+      const byId = {};
+      rows.forEach(r => {
+        byId[r.id] = r.rank;
+      });
+      setData(d => ({
+        ...d,
+        tasks: (d.tasks || []).map(t => byId[t.id] != null ? {
+          ...t,
+          my_rank: byId[t.id]
+        } : t)
+      }));
+    } catch (e) {
+      setOrderNote({
+        text: 'Could not save the new order — it has been put back.',
+        bad: true
+      });
+    }
+  }
+  function myNeighbours(id, dir) {
+    const el = document.querySelector('[data-drag-kind="mytask"][data-drag-id="' + id + '"]');
+    if (!el || !el.parentElement) return {
+      err: 'nodom'
+    }; // Board and Timeline draw no handles
+    const sibs = Array.from(el.parentElement.querySelectorAll(':scope > [data-drag-kind="mytask"]')).map(x => x.getAttribute('data-drag-id'));
+    const i = sibs.indexOf(id),
+      j = i + dir;
+    if (i < 0 || j < 0 || j >= sibs.length) return {
+      err: 'edge'
+    };
+    const row = x => x ? (data.tasks || []).find(y => y.id === x) : null;
+    const prevId = dir < 0 ? sibs[j - 1] : sibs[j];
+    const nextId = dir < 0 ? sibs[j] : sibs[j + 1];
+    const prev = row(prevId),
+      next = row(nextId);
+    const unranked = !!prevId && (!prev || prev.my_rank == null) || !!nextId && (!next || next.my_rank == null);
+    return {
+      prev: prev ? prev.my_rank : null,
+      next: next ? next.my_rank : null,
+      nextId,
+      unranked
+    };
+  }
+  const moveMyTaskBy = (id, dir) => {
+    if (!manualOn) {
+      setThenBy('manual');
+      setOrderNote({
+        text: 'Sorted manually — now use Move up / Move down, or drag the handle.'
+      });
+      return;
+    }
+    const n = myNeighbours(id, dir);
+    if (n.err === 'nodom') {
+      setOrderNote({
+        text: 'Move up and Move down only work in the List layout.'
+      });
+      return;
+    }
+    if (n.err) return; // already top or bottom of its group
+    moveMyTaskTo(id, n.prev, n.next, n.nextId, n.unranked);
+  };
+  const myDrag = useRowDrag((id, o) => {
+    const from = document.querySelector('[data-drag-kind="mytask"][data-drag-id="' + id + '"]');
+    if (!from || !o.el || from.parentElement !== o.el.parentElement) return; // same group only
+    const rows = Array.from(o.el.parentElement.querySelectorAll(':scope > [data-drag-kind="mytask"]')).map(el => el.getAttribute('data-drag-id')).filter(x => x !== id);
+    const i = rows.indexOf(o.id);
+    const prevId = o.before ? rows[i - 1] : rows[i];
+    const nextId = o.before ? rows[i] : rows[i + 1];
+    const byId = x => (data.tasks || []).find(t => t.id === x);
+    const prev = prevId ? byId(prevId) : null,
+      next = nextId ? byId(nextId) : null;
+    const unranked = !!prevId && (!prev || prev.my_rank == null) || !!nextId && (!next || next.my_rank == null);
+    moveMyTaskTo(id, prev ? prev.my_rank : null, next ? next.my_rank : null, nextId, unranked);
+  }, {
+    sameParent: true,
+    onReject: () => setOrderNote({
+      text: 'A task can only move inside its own group.'
+    })
+  });
+  // Pressing a dim grip switches to Manual rather than doing nothing —
+  // otherwise the handle is a control that visibly ignores you. Safe to
+  // flip: every task already has a rank, so nothing is written.
+  const myGrip = (t, isChild) => dragGrip(myDrag, 'mytask', t.id, {
+    color: sub,
+    spacer: isChild || dragOff,
+    dim: !manualOn,
+    onPromote: () => {
+      setThenBy('manual');
+      setOrderNote({
+        text: 'Sorted manually. Drag the handle to rearrange.'
+      });
+    },
+    onArrow: d => moveMyTaskBy(t.id, d)
+  });
   const [labelColors, setLabelColors] = useState({});
   const [vis, setVis] = useState(false);
   const wide = useWide(700); // tablet/desktop → two-pane master-detail
@@ -14295,6 +15199,15 @@ function TasksScreen({
   // Confirmation after a group assign — the tasks it makes belong to other
   // people, so without this the screen just goes back to an unchanged list.
   const [bulkNote, setBulkNote] = useState(null);
+  // Reorder feedback. Deliberately NOT routeNotice: that one gates the URL
+  // writer so a dead deep link isn't overwritten, and a toast has no
+  // business freezing the address bar. { text, bad } — clears itself.
+  const [orderNote, setOrderNote] = useState(null);
+  useEffect(() => {
+    if (!orderNote) return;
+    const t = setTimeout(() => setOrderNote(null), 6000);
+    return () => clearTimeout(t);
+  }, [orderNote]);
   // True while a #task/<id> is being looked up — freezes the URL writer so
   // the pasted link survives long enough to be read (or reported dead).
   const [routePending, setRoutePending] = useState(false);
@@ -14377,6 +15290,9 @@ function TasksScreen({
     setLoading(false);
     return enriched;
   }
+  // The focus listener above is registered once, so it calls through this
+  // rather than capturing the first render's reload.
+  reloadRef.current = reload;
   // A thread was attached from the mailbox — refresh just the link map (cheap)
   // instead of a full reload, so the mailbox's "Linked to X" state updates
   // immediately without re-fetching every task.
@@ -14910,6 +15826,7 @@ function TasksScreen({
       return new Date(a.due_at) - new Date(b.due_at);
     };
     const byThen = (a, b) => {
+      if (thenBy === 'manual') return rankCmp('my_rank')(a, b);
       if (thenBy === 'priority') return (PRI[a.priority] ?? 1) - (PRI[b.priority] ?? 1);
       if (thenBy === 'title') return (a.title || '').localeCompare(b.title || '');
       if (thenBy === 'created') return new Date(b.created_at || 0) - new Date(a.created_at || 0); // newest first
@@ -15016,6 +15933,8 @@ function TasksScreen({
       maxWidth: '100%'
     }
   }, /*#__PURE__*/React.createElement("option", {
+    value: "manual"
+  }, "\u21B3 Manual (drag)"), /*#__PURE__*/React.createElement("option", {
     value: "due"
   }, "\u21B3 Due date"), /*#__PURE__*/React.createElement("option", {
     value: "priority"
@@ -15053,7 +15972,7 @@ function TasksScreen({
       fontSize: 14
     }
   }), "New");
-  const routeNoticeBar = (routeNotice || bulkNote) && /*#__PURE__*/React.createElement(React.Fragment, null, routeNotice && /*#__PURE__*/React.createElement("div", {
+  const routeNoticeBar = (routeNotice || bulkNote || orderNote) && /*#__PURE__*/React.createElement(React.Fragment, null, routeNotice && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',
@@ -15119,7 +16038,31 @@ function TasksScreen({
       cursor: 'pointer',
       flexShrink: 0
     }
-  })));
+  })), orderNote && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      margin: '0 0 10px',
+      padding: '9px 12px',
+      borderRadius: 6,
+      border: `1px solid ${bord}`,
+      fontSize: '0.78rem',
+      fontFamily: C.fontSans,
+      background: orderNote.bad ? dark ? 'rgba(155,28,28,.14)' : '#FBF0F0' : dark ? 'rgba(201,164,90,.14)' : '#F3EBDA',
+      color: orderNote.bad ? dark ? '#F08A8A' : '#9B1C1C' : dark ? '#C9A45A' : '#AD832F'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: 'ti ' + (orderNote.bad ? 'ti-alert-circle' : 'ti-arrows-sort'),
+    style: {
+      fontSize: 15,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1
+    }
+  }, orderNote.text)));
   const listInner = compact => /*#__PURE__*/React.createElement("div", {
     style: {
       padding: compact ? '10px 10px 24px' : '12px 14px 24px'
@@ -15246,7 +16189,7 @@ function TasksScreen({
     kanban: 'Board',
     timeline: 'Timeline'
   };
-  const SORT_OPTS = [['created', 'Date created'], ['due', 'Due date'], ['priority', 'Priority'], ['title', 'Alphabetical']];
+  const SORT_OPTS = [['manual', 'Manual (drag)'], ['created', 'Date created'], ['due', 'Due date'], ['priority', 'Priority'], ['title', 'Alphabetical']];
   // Priority isn't in this list — it's a fixed column, always shown (see deskRow
   // and its header row), not opt-in via the column picker.
   const COLUMN_DEFS = [{
@@ -16065,16 +17008,21 @@ function TasksScreen({
   }))));
 
   // Mobile/narrow row
-  const taskRowNew = t => {
+  const taskRowNew = (t, isChild) => {
     const myLabels = myLabelsFor(t.id);
     const late = t.due_at && t.status !== 'done' && new Date(t.due_at) < startOfToday;
-    return /*#__PURE__*/React.createElement("div", {
+    const drg = !isChild && !dragOff;
+    return /*#__PURE__*/React.createElement("div", _extends({
       key: t.id,
       onClick: () => {
         setCurrent(t);
         setView('detail');
       },
-      onContextMenu: e => openCtx(e, t),
+      onContextMenu: e => openCtx(e, t)
+    }, drg ? {
+      'data-drag-kind': 'mytask',
+      'data-drag-id': t.id
+    } : {}, {
       style: {
         display: 'flex',
         alignItems: 'flex-start',
@@ -16086,9 +17034,14 @@ function TasksScreen({
         borderRadius: 12,
         marginBottom: 8,
         cursor: 'pointer',
-        opacity: t.status === 'done' ? 0.72 : 1
+        ...dragRowStyle(myDrag, drg ? t.id : null, gold, `1px solid ${bord}`),
+        opacity: t.status === 'done' ? 0.72 : myDrag.drag && myDrag.drag.id === t.id ? 0.4 : 1
       }
-    }, /*#__PURE__*/React.createElement("div", {
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 3
+      }
+    }, myGrip(t, isChild)), /*#__PURE__*/React.createElement("div", {
       style: {
         marginTop: 1
       }
@@ -16164,26 +17117,31 @@ function TasksScreen({
   };
 
   // Desktop table row — respects the column picker
-  const deskRow = t => {
+  const deskRow = (t, isChild) => {
     const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
     const myLabels = myLabelsFor(t.id);
     const late = t.due_at && t.status !== 'done' && new Date(t.due_at) < startOfToday;
-    return /*#__PURE__*/React.createElement("div", {
+    const drg = !isChild && !dragOff;
+    return /*#__PURE__*/React.createElement("div", _extends({
       key: t.id,
       onClick: () => {
         setCurrent(t);
         setView('detail');
       },
-      onContextMenu: e => openCtx(e, t),
+      onContextMenu: e => openCtx(e, t)
+    }, drg ? {
+      'data-drag-kind': 'mytask',
+      'data-drag-id': t.id
+    } : {}, {
       style: {
         display: 'flex',
         alignItems: 'center',
         padding: '11px 12px',
-        borderBottom: `1px solid ${bord}`,
         gap: 12,
-        cursor: 'pointer'
+        cursor: 'pointer',
+        ...dragRowStyle(myDrag, drg ? t.id : null, gold, `1px solid ${bord}`)
       }
-    }, doneCheck(t, 17), milestoneFlag(t, 14), /*#__PURE__*/React.createElement("div", {
+    }), myGrip(t, isChild), doneCheck(t, 17), milestoneFlag(t, 14), /*#__PURE__*/React.createElement("div", {
       style: {
         flex: 1,
         minWidth: 0,
@@ -16310,6 +17268,7 @@ function TasksScreen({
       return new Date(a.due_at) - new Date(b.due_at);
     };
     const byThen = (a, b) => {
+      if (thenBy === 'manual') return rankCmp('my_rank')(a, b);
       if (thenBy === 'priority') return (PRI[a.priority] ?? 1) - (PRI[b.priority] ?? 1);
       if (thenBy === 'title') return (a.title || '').localeCompare(b.title || '');
       if (thenBy === 'created') return new Date(b.created_at || 0) - new Date(a.created_at || 0);
@@ -16317,6 +17276,17 @@ function TasksScreen({
     };
     const active = filteredTasks.filter(t => t.status !== 'done');
     const completed = filteredTasks.filter(t => t.status === 'done').sort(byThen);
+    // Under Label and Assignee one task is drawn in two or three groups, so
+    // a single position can't mean two places. Say so instead of silently
+    // dropping the handles.
+    const dragOffNote = dragOff ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.68rem',
+        color: sub,
+        fontFamily: C.fontSans,
+        padding: '0 12px 10px'
+      }
+    }, sortBy === 'due' ? 'Dragging is off while grouped by Due date — the list is in date order, so there is nowhere for a hand-set position to sit.' : 'Dragging is off while grouped by ' + (sortBy === 'label' ? 'Label' : 'Assignee') + ' — a task can appear in more than one group at a time.') : null;
     let body;
     if (sortBy === 'none') {
       body = /*#__PURE__*/React.createElement("div", null, active.slice().sort(byThen).map(rowFn));
@@ -16399,7 +17369,7 @@ function TasksScreen({
         }, groupHead(col.color, col.label + ' · ' + items.length), items.map(rowFn));
       });
     }
-    return /*#__PURE__*/React.createElement(React.Fragment, null, body, /*#__PURE__*/React.createElement("div", {
+    return /*#__PURE__*/React.createElement(React.Fragment, null, dragOffNote, body, /*#__PURE__*/React.createElement("div", {
       style: {
         marginTop: completed.length ? 16 : 0
       }
@@ -17049,7 +18019,7 @@ function TasksScreen({
       display: 'flex',
       flexDirection: 'column'
     }
-  }, (routeNotice || bulkNote) && /*#__PURE__*/React.createElement("div", {
+  }, (routeNotice || bulkNote || orderNote) && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '10px 14px 0'
     }
@@ -17096,7 +18066,61 @@ function TasksScreen({
       padding: 5,
       minWidth: 180
     }
-  }, /*#__PURE__*/React.createElement("button", {
+  }, !dragOff && viewMode === 'list' && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      moveMyTaskBy(ctxMenu.task.id, -1);
+      setCtxMenu(null);
+    },
+    style: {
+      width: '100%',
+      textAlign: 'left',
+      padding: '8px 10px',
+      background: 'none',
+      border: 'none',
+      borderRadius: 6,
+      color: ink,
+      fontSize: '0.82rem',
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-up",
+    style: {
+      color: gold,
+      fontSize: 14,
+      flexShrink: 0
+    }
+  }), "Move up"), !dragOff && viewMode === 'list' && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      moveMyTaskBy(ctxMenu.task.id, 1);
+      setCtxMenu(null);
+    },
+    style: {
+      width: '100%',
+      textAlign: 'left',
+      padding: '8px 10px',
+      background: 'none',
+      border: 'none',
+      borderRadius: 6,
+      color: ink,
+      fontSize: '0.82rem',
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-down",
+    style: {
+      color: gold,
+      fontSize: 14,
+      flexShrink: 0
+    }
+  }), "Move down"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       toggleMilestone(ctxMenu.task);
       setCtxMenu(null);

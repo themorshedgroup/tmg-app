@@ -23327,7 +23327,7 @@ function parsePath() {
 // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
 // /tasks app. The top-bar icons open it in an iframe popout inside the content
 // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-const TASKS_POPOUT_VERSION = '20260908a'; // bump when tasks.html changes to bust the iframe/standalone-link cache
+const TASKS_POPOUT_VERSION = '20260910a'; // bump when tasks.html changes to bust the iframe/standalone-link cache
 function TaskFramePopover({
   which,
   zoneH,

@@ -43,13 +43,15 @@ const ROUTE_LIST = {
   tasks: 'my',
   ctc: 'ctc',
   projects: 'projects',
-  rocks: 'rocks'
+  rocks: 'rocks',
+  accountability: 'accountability'
 };
 const ROUTE_LIST_SEG = {
   my: 'tasks',
   ctc: 'ctc',
   projects: 'projects',
-  rocks: 'rocks'
+  rocks: 'rocks',
+  accountability: 'accountability'
 };
 const ROUTE_DTABS = ['overview', 'list', 'board', 'timeline'];
 const ROUTE_ID_RE = /^[0-9a-f-]{36}$/i;
@@ -13525,6 +13527,415 @@ function TaskMailbox({
     }), t.title))));
   })));
 }
+
+// ── Accountability ─────────────────────────────────────────────────────
+// Who was given what in a given week, and what they finished in it. TMG
+// weeks start on Monday, so "this week" means Mon–Sun (e.g. Sep 7–13).
+//
+// The counting happens in the accountability_weeks() RPC rather than here:
+// there are ~2,900 tasks and pulling them into the browser to tally them
+// is what made My Tasks slow in the first place.
+//
+// Two of the four numbers are historical fact, read off timestamps, and
+// two are "as of right now":
+//   Assigned / Completed   when someone was put on it, when it was finished
+//   Still open / Overdue   its state today — the app keeps no record of
+//                          what a task's status was on a past Friday, and
+//                          guessing would be worse than saying so.
+function AccountabilitySurface({
+  dark,
+  team,
+  titleNode
+}) {
+  const bord = dark ? '#152545' : '#E4DFD4',
+    ink = dark ? '#fff' : '#001A4A';
+  const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B',
+    gold = dark ? '#C9A45A' : '#AD832F';
+  const red = '#C0392B',
+    green = '#0F6E56';
+  const J = C.fontSans;
+  const WEEKS = 8;
+  const [rows, setRows] = useState(null); // RPC result, null = loading
+  const [err, setErr] = useState(null);
+  const [offset, setOffset] = useState(0); // 0 = this week, 1 = last week…
+  const [openId, setOpenId] = useState(null); // person expanded inline
+  const [openTasks, setOpenTasks] = useState(null);
+  const p2 = n => String(n).padStart(2, '0');
+  const isoD = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+  const mondayOf = d => {
+    const x = new Date(d);
+    const off = (x.getDay() + 6) % 7;
+    x.setDate(x.getDate() - off);
+    x.setHours(0, 0, 0, 0);
+    return x;
+  };
+  const addDays = (d, n) => {
+    const x = new Date(d);
+    x.setDate(x.getDate() + n);
+    return x;
+  };
+  const weekStart = addDays(mondayOf(new Date()), -offset * 7);
+  const weekEnd = addDays(weekStart, 6);
+  const weekKey = isoD(weekStart);
+  const weekLabel = weekStart.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric'
+  }) + ' – ' + (weekStart.getMonth() === weekEnd.getMonth() ? weekEnd.getDate() : weekEnd.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric'
+  }));
+  useEffect(() => {
+    const c = window.SupabaseAuth && window.SupabaseAuth._client;
+    if (!c) {
+      setRows([]);
+      return;
+    }
+    c.rpc('accountability_weeks', {
+      week_count: WEEKS
+    }).then(({
+      data,
+      error
+    }) => {
+      if (error) {
+        setErr(error.message);
+        setRows([]);
+        return;
+      }
+      setRows(data || []);
+    });
+  }, []);
+
+  // Close the drill-down when the week changes — leaving one person's
+  // previous week open under a new header reads as this week's work.
+  useEffect(() => {
+    setOpenId(null);
+    setOpenTasks(null);
+  }, [offset]);
+  const statFor = uid => (rows || []).find(r => r.user_id === uid && String(r.week_start).slice(0, 10) === weekKey) || {
+    assigned: 0,
+    completed: 0,
+    still_open: 0,
+    overdue: 0
+  };
+
+  // Same rule as group assign: a login with no access tags isn't a person.
+  const people = (team || []).filter(m => (!m.status || m.status === 'active') && (m.access || []).length);
+  async function togglePerson(uid) {
+    if (openId === uid) {
+      setOpenId(null);
+      setOpenTasks(null);
+      return;
+    }
+    setOpenId(uid);
+    setOpenTasks(null);
+    const c = window.SupabaseAuth && window.SupabaseAuth._client;
+    if (!c) return;
+    const {
+      data: tp
+    } = await c.from('task_people').select('task_id').eq('user_id', uid).eq('role', 'assignee').gte('assigned_at', weekKey).lt('assigned_at', isoD(addDays(weekStart, 7)));
+    const ids = [...new Set((tp || []).map(r => r.task_id))];
+    if (!ids.length) {
+      setOpenTasks([]);
+      return;
+    }
+    const {
+      data: ts
+    } = await c.from('tasks').select('id,title,status,due_at,completed_at,context').in('id', ids);
+    setOpenTasks(ts || []);
+  }
+  const th = {
+    fontSize: 10.5,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+    fontWeight: 500,
+    color: sub,
+    fontFamily: J
+  };
+  const numCell = {
+    width: 74,
+    flexShrink: 0,
+    textAlign: 'right',
+    fontFamily: J,
+    fontSize: 14
+  };
+  const navBtn = (icon, on) => /*#__PURE__*/React.createElement("i", {
+    className: `ti ti-${icon}`,
+    onClick: on,
+    style: {
+      fontSize: 16,
+      color: gold,
+      cursor: 'pointer',
+      padding: '2px 4px'
+    }
+  });
+  const totals = people.reduce((a, m) => {
+    const s = statFor(m.id);
+    return {
+      assigned: a.assigned + s.assigned,
+      completed: a.completed + s.completed,
+      still_open: a.still_open + s.still_open,
+      overdue: a.overdue + s.overdue
+    };
+  }, {
+    assigned: 0,
+    completed: 0,
+    still_open: 0,
+    overdue: 0
+  });
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '14px 20px 0',
+      flexShrink: 0
+    }
+  }, titleNode ? titleNode() : null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginTop: 10,
+      flexWrap: 'wrap'
+    }
+  }, navBtn('chevron-left', () => setOffset(o => Math.min(WEEKS - 1, o + 1))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 14,
+      fontWeight: 600,
+      color: ink,
+      minWidth: 108,
+      textAlign: 'center'
+    }
+  }, weekLabel), navBtn('chevron-right', () => setOffset(o => Math.max(0, o - 1))), offset !== 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOffset(0),
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      color: gold,
+      background: 'none',
+      border: `1px solid ${bord}`,
+      borderRadius: 14,
+      padding: '3px 10px',
+      cursor: 'pointer'
+    }
+  }, "This week"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 11.5,
+      color: sub,
+      marginLeft: 4
+    }
+  }, "Monday to Sunday"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '14px 20px 28px'
+    }
+  }, err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 12.5,
+      color: red,
+      marginBottom: 12
+    }
+  }, err), rows === null ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 13,
+      color: sub,
+      padding: 12
+    }
+  }, "Loading\u2026") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      padding: '0 10px 8px',
+      borderBottom: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      flex: 1
+    }
+  }, "Person"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "Assigned"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "Completed"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "Still open"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "Overdue")), people.map(m => {
+    const s = statFor(m.id);
+    const on = openId === m.id;
+    const quiet = !s.assigned && !s.completed && !s.still_open;
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: m.id
+    }, /*#__PURE__*/React.createElement("div", {
+      onClick: () => togglePerson(m.id),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '11px 10px',
+        borderBottom: `1px solid ${bord}`,
+        cursor: 'pointer',
+        background: on ? dark ? 'rgba(201,164,90,.08)' : '#F7F4EE' : 'transparent'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        fontFamily: J,
+        fontSize: 14,
+        color: quiet ? sub : ink,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, m.name), /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...numCell,
+        color: ink
+      }
+    }, s.assigned || '—'), /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...numCell,
+        color: s.completed ? green : sub
+      }
+    }, s.completed || '—'), /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...numCell,
+        color: ink
+      }
+    }, s.still_open || '—'), /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...numCell,
+        color: s.overdue ? red : sub
+      }
+    }, s.overdue || '—')), on && /*#__PURE__*/React.createElement("div", {
+      style: {
+        padding: '8px 10px 12px 22px',
+        borderBottom: `1px solid ${bord}`
+      }
+    }, openTasks === null ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 12.5,
+        color: sub
+      }
+    }, "Loading\u2026") : !openTasks.length ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 12.5,
+        color: sub
+      }
+    }, "Nothing was assigned to ", m.name, " that week.") : openTasks.map(t => /*#__PURE__*/React.createElement("div", {
+      key: t.id,
+      style: {
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 10,
+        padding: '4px 0'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 13,
+        color: t.status === 'done' ? sub : ink,
+        flex: 1,
+        minWidth: 0,
+        textDecoration: t.status === 'done' ? 'line-through' : 'none'
+      }
+    }, t.title), t.context && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 11,
+        color: sub,
+        flexShrink: 0
+      }
+    }, t.context), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 11.5,
+        color: t.status === 'done' ? green : sub,
+        flexShrink: 0,
+        width: 96,
+        textAlign: 'right'
+      }
+    }, t.status === 'done' ? t.completed_at ? 'Done ' + new Date(t.completed_at).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric'
+    }) : 'Done' : t.due_at ? 'Due ' + new Date(t.due_at).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric'
+    }) : 'No date')))));
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      padding: '11px 10px'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontFamily: J,
+      fontSize: 13,
+      fontWeight: 600,
+      color: ink
+    }
+  }, "Team"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      fontWeight: 600,
+      color: ink
+    }
+  }, totals.assigned), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      fontWeight: 600,
+      color: totals.completed ? green : sub
+    }
+  }, totals.completed), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      fontWeight: 600,
+      color: ink
+    }
+  }, totals.still_open), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      fontWeight: 600,
+      color: totals.overdue ? red : sub
+    }
+  }, totals.overdue)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 11.5,
+      color: sub,
+      lineHeight: 1.6,
+      marginTop: 14
+    }
+  }, "A task is credited to the week it was ", /*#__PURE__*/React.createElement("b", null, "completed"), ", whenever it was handed out. Still open and Overdue are today's picture, not that week's."))));
+}
 function TasksScreen({
   dark,
   user,
@@ -15133,12 +15544,13 @@ function TasksScreen({
   // it to — not from this switcher; surfaceLabel/surfaceKind below still cover
   // 'ctc' because the #ctc permalink (opened from More) routes through this
   // same surface state.
-  const SURFACE_OPTS = [['my', 'My Tasks'], ['projects', 'Projects'], ['rocks', 'Rocks']];
+  const SURFACE_OPTS = [['my', 'My Tasks'], ['accountability', 'Accountability'], ['projects', 'Projects'], ['rocks', 'Rocks']];
   const surfaceLabel = {
     my: 'My Tasks',
     ctc: 'CTC Files',
     projects: 'Projects',
-    rocks: 'Rocks'
+    rocks: 'Rocks',
+    accountability: 'Accountability'
   };
   const surfaceKind = {
     ctc: 'ctc_file',
@@ -15371,7 +15783,7 @@ function TasksScreen({
       background: dark ? '#08132A' : '#FCFBF8',
       overflowY: 'auto'
     }
-  }, sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Tasks', true), sbRow('my', 'My Tasks', data.tasks.length))), sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Company'), sbRow('rocks', 'Rocks', rockNavItems.length), rockNavItems.map(sbItemRow), sbAddRow('New rock', () => {
+  }, sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Tasks', true), sbRow('my', 'My Tasks', data.tasks.length), sbRow('accountability', 'Accountability', groupMembers(team, 'all').length))), sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Company'), sbRow('rocks', 'Rocks', rockNavItems.length), rockNavItems.map(sbItemRow), sbAddRow('New rock', () => {
     setSurface('rocks');
     setOpenItemId('new');
   }))), sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Projects'), sbRow('projects', 'All projects', projNavItems.length), projNavItems.map(sbItemRow), sbAddRow('New project', () => {
@@ -15757,8 +16169,7 @@ function TasksScreen({
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     onClick: e => e.stopPropagation(),
     style: containerStyle
-  }, embed && surface !== 'my' ?
-  /*#__PURE__*/
+  }, embed && surface !== 'my' ? (
   /* A non-My-Tasks surface inside an iframe — i.e. More -> CTC
      Files, which embeds this page at #ctc. Nothing embedded ever
      needed a non-My-Tasks surface until that moved out of Tasks
@@ -15774,7 +16185,12 @@ function TasksScreen({
      so ProjectsSurface's own list pane is what lets you browse.
      plainSurfaceTitle, not the narrow dropdown: that tab is one
      surface, with no switching to My Tasks/Projects/Rocks. */
-  React.createElement(ProjectsSurface, {
+  surface === 'accountability' ? /*#__PURE__*/React.createElement(AccountabilitySurface, {
+    key: "acct",
+    dark: dark,
+    team: team,
+    titleNode: plainSurfaceTitle
+  }) : /*#__PURE__*/React.createElement(ProjectsSurface, {
     key: surface,
     kind: surfaceKind[surface] || 'project',
     dark: dark,
@@ -15786,7 +16202,7 @@ function TasksScreen({
     openCtcTab: openCtcTab,
     onCtcTabConsumed: () => setOpenCtcTab(null),
     onChanged: refreshNav
-  }) : embed ? ( /* ══════ EMBEDDED POPOUT — unchanged, out of scope for the My Tasks redesign ══════ */
+  })) : embed ? ( /* ══════ EMBEDDED POPOUT — unchanged, out of scope for the My Tasks redesign ══════ */
   wide ? /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -15979,13 +16395,17 @@ function TasksScreen({
       flexDirection: 'column',
       minHeight: 0
     }
-  }, surface !== 'my' ?
-  /*#__PURE__*/
+  }, surface !== 'my' ? (
   /* key={surface}: a Projects <-> Rocks switch REMOUNTS the
      surface (fresh rows/loading), so a sidebar click or deep
      link to the other kind opens the record instead of the
      previous kind's stale list consuming the id (audit C1/C11). */
-  React.createElement(ProjectsSurface, {
+  surface === 'accountability' ? /*#__PURE__*/React.createElement(AccountabilitySurface, {
+    key: "acct",
+    dark: dark,
+    team: team,
+    titleNode: plainSurfaceTitle
+  }) : /*#__PURE__*/React.createElement(ProjectsSurface, {
     key: surface,
     kind: surfaceKind[surface] || 'project',
     dark: dark,
@@ -15998,7 +16418,7 @@ function TasksScreen({
     openCtcTab: openCtcTab,
     onCtcTabConsumed: () => setOpenCtcTab(null),
     onChanged: refreshNav
-  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  })) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '26px 34px 0',
       flexShrink: 0
@@ -16206,7 +16626,12 @@ function TasksScreen({
     },
     onClose: () => setMailboxOpen(false)
   })))) : ( /* ── Mobile: single column, no sidebar — title dropdown switches surfaces ── */
-  surface !== 'my' ? /*#__PURE__*/React.createElement(ProjectsSurface, {
+  surface !== 'my' ? surface === 'accountability' ? /*#__PURE__*/React.createElement(AccountabilitySurface, {
+    key: "acct",
+    dark: dark,
+    team: team,
+    titleNode: surfaceTitle
+  }) : /*#__PURE__*/React.createElement(ProjectsSurface, {
     key: surface,
     kind: surfaceKind[surface] || 'project',
     dark: dark,

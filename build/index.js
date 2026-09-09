@@ -14816,7 +14816,6 @@ function CallsTab({
   }, [team, buckets, overdue]);
   const mine = list => agent ? (list || []).filter(t => ownerOf(t) === agent) : list || [];
   const shown = buckets ? mine(buckets[day] || []) : null;
-  const overdueShown = overdue ? mine(overdue.list || []).length : 0;
   const shownKey = shown ? shown.map(t => t.Who_Id && t.Who_Id.id || '').join(',') : '';
   useEffect(() => {
     if (!shownKey) return;
@@ -15082,7 +15081,6 @@ function CallsTab({
       return next;
     });
   }
-  const bannerBg = dark ? '#0A1E44' : '#001A4A';
   const headTitle = dark ? '#FFFFFF' : '#001A4A';
   const addBg = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
   const addCol = dark ? '#C9A45A' : '#AD832F';
@@ -15164,7 +15162,6 @@ function CallsTab({
     EO: 3,
     Other: 4
   };
-  const todayCount = buckets ? mine(buckets.today || []).length : null;
 
   // One call row, shared by the flat list and the per-agent groups.
   // Layout: name + tags (tier, spouse) on the first line, phone + email on
@@ -15419,7 +15416,7 @@ function CallsTab({
         }
       }),
       disabled: !cid,
-      title: cid ? 'Log other activity for this contact' : 'This task has no contact attached, so there is nothing to log against',
+      title: cid ? 'Log other KPIs for this contact' : 'This task has no contact attached, so there is nothing to log against',
       style: {
         ...ctrl,
         background: addBg,
@@ -15616,23 +15613,7 @@ function CallsTab({
       display: 'flex',
       flexDirection: 'column'
     }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: bannerBg,
-      padding: '9px 16px',
-      textAlign: 'center',
-      flexShrink: 0
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontFamily: J,
-      fontSize: 10,
-      fontWeight: 600,
-      letterSpacing: '0.14em',
-      textTransform: 'uppercase',
-      color: '#fff'
-    }
-  }, buckets === null ? 'Loading calls…' : todayCount + ' today' + (overdueShown ? '  ·  ' + overdueShown + (overdue && overdue.capped ? '+' : '') + ' overdue' : '') + (team ? '  ·  ' + (agent || 'All agents') : ''))), (team || myOwner) && /*#__PURE__*/React.createElement("div", {
+  }, (team || myOwner) && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       background: dark ? '#040C1C' : '#FCFBF8',
@@ -15649,11 +15630,11 @@ function CallsTab({
         textAlign: 'center',
         cursor: 'pointer',
         fontFamily: J,
-        fontSize: 9,
-        letterSpacing: '0.16em',
-        fontWeight: 500,
+        fontSize: 12,
+        letterSpacing: '0.14em',
+        fontWeight: 600,
         textTransform: 'uppercase',
-        padding: '9px 4px 8px',
+        padding: '11px 4px 10px',
         color: on ? dark ? '#C9A45A' : '#001A4A' : dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9',
         borderBottom: `2px solid ${on ? dark ? '#C9A45A' : '#AD832F' : 'transparent'}`,
         marginBottom: -1
@@ -16557,6 +16538,16 @@ function AddKpiSheet({
     }
   }, busy ? 'Saving…' : 'Log ' + (total || '') + ' KPI' + (total === 1 ? '' : 's'))))));
 }
+
+// Same 24h-cache read resolveTaskTypes() does, but synchronous — used to
+// seed state on mount so a warm cache never shows a "Loading…" flash.
+function readCachedTaskTypes() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TASK_TYPES_KEY) || 'null');
+    if (raw && raw.api && Array.isArray(raw.options) && raw.options.length && Date.now() - raw.at < 86400000) return raw;
+  } catch (e) {}
+  return null;
+}
 function LogActivitySheet({
   dark,
   task,
@@ -16568,7 +16559,7 @@ function LogActivitySheet({
   onClose
 }) {
   const J = "'Jost', sans-serif";
-  const [meta, setMeta] = useState(null); // { api, options } | null while loading
+  const [meta, setMeta] = useState(readCachedTaskTypes); // seeded from cache — null only on a genuine cold fetch
   const [loadErr, setLoadErr] = useState('');
   const [sel, setSel] = useState({}); // type -> count
   const [busy, setBusy] = useState(false);
@@ -16835,7 +16826,7 @@ function LogActivitySheet({
         color: redCol,
         flexShrink: 0
       }
-    }, "how many?")), /*#__PURE__*/React.createElement("input", {
+    }, "how many?")), a.requireCount && /*#__PURE__*/React.createElement("input", {
       type: "number",
       inputMode: "numeric",
       min: "1",

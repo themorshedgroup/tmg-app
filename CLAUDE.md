@@ -13,7 +13,7 @@ compiled `build/<page>.js`. Editing the HTML's markup, styles or inline
 |---|---|
 | `src/index.jsx` | the old inline `<script type="text/babel">` in `index.html` |
 | `src/tasks.jsx` | `tasks.html` |
-| `src/crm.jsx`, `src/crm-tasks.jsx`, `src/chat.jsx`, `src/timeoff.jsx`, `src/sffu.jsx` | their HTML files |
+| `src/crm.jsx`, `src/crm-tasks.jsx`, `src/timeoff.jsx`, `src/sffu.jsx` | their HTML files |
 
 Why: the browser used to translate ~1.65MB of JSX on *every* page load —
 about 2.3 seconds of dead time on `index.html` before anything appeared.

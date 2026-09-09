@@ -1254,10 +1254,6 @@ const ACCESS_APPS = [{
   label: 'AI Chat',
   icon: 'ti-sparkles'
 }, {
-  id: 'teamchat',
-  label: 'Team Chat',
-  icon: 'ti-message'
-}, {
   id: 'calls',
   label: 'Calls',
   icon: 'ti-phone'
@@ -1296,7 +1292,6 @@ const ACCESS_ROLES = [{
 // but is now editable per-tool like Sales Agent / Transaction Coordinator.
 const DEFAULT_ACCESS = {
   chat: ['operations', 'agent', 'tc'],
-  teamchat: ['operations', 'agent', 'tc'],
   calls: ['operations', 'agent'],
   kpis: ['operations', 'agent'],
   deals: ['operations', 'agent'],
@@ -18154,17 +18149,6 @@ function TasksScreen({
 
 // ─── Placeholder (not-yet-built tabs) ────────────────────────────
 
-// ─── Chat (Team Chat) Tab — preview mockup ───────────────────────
-const TCHAT_PHOTOS = {
-  tarek: 'https://themorshedgroup.com/wp-content/uploads/2023/01/tarek-morshed-headshot.jpg',
-  symon: 'https://themorshedgroup.com/wp-content/uploads/2025/01/Hidenori-Symon-Yongco-headshot.jpg',
-  brad: 'https://themorshedgroup.com/wp-content/uploads/2023/01/Brad-Baker-headshot-1.jpg',
-  brett: 'https://themorshedgroup.com/wp-content/uploads/2025/09/Brett-Silverman-headshot.jpg',
-  kyle: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Kyle-Baird-headshot.jpg',
-  alex: 'https://themorshedgroup.com/wp-content/uploads/2025/04/Alexandra-Machado-headshot.jpg',
-  luciana: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Luciana-Pilco-headshot.jpg'
-};
-
 // ─── Calls Tab — preview mockup ──────────────────────────────────
 
 // ─── KPIs Tab — preview mockup ───────────────────────────────────
@@ -18174,10 +18158,6 @@ const TABS = [{
   id: 'chat',
   label: 'AI',
   icon: 'ti-sparkles'
-}, {
-  id: 'teamchat',
-  label: 'Chat',
-  icon: 'ti-message'
 }, {
   id: 'calls',
   label: 'Calls',

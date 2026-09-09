@@ -28,7 +28,6 @@ export const PAGES = {
   "index.html": "index",
   "crm.html": "crm",
   "crm-tasks.html": "crm-tasks",
-  "chat.html": "chat",
   "timeoff.html": "timeoff",
   "tasks.html": "tasks",
   "sffu/index.html": "sffu",

@@ -569,7 +569,6 @@
     // Editable in Admin → Tab Access, persisted in app_access (see app-access.sql).
     const ACCESS_APPS = [
       { id: 'chat',      label: 'AI Chat',           icon: 'ti-sparkles' },
-      { id: 'teamchat',  label: 'Team Chat',         icon: 'ti-message' },
       { id: 'calls',     label: 'Calls',             icon: 'ti-phone' },
       { id: 'kpis',      label: 'KPIs',              icon: 'ti-chart-bar' },
       { id: 'deals',     label: 'Deals',             icon: 'ti-currency-dollar' },
@@ -585,7 +584,7 @@
     // Operations defaults to ON for every tool (preserving its old all-access),
     // but is now editable per-tool like Sales Agent / Transaction Coordinator.
     const DEFAULT_ACCESS = {
-      chat: ['operations', 'agent', 'tc'], teamchat: ['operations', 'agent', 'tc'],
+      chat: ['operations', 'agent', 'tc'],
       calls: ['operations', 'agent'], kpis: ['operations', 'agent'], deals: ['operations', 'agent'],
       drives: ['operations', 'agent', 'tc'], directory: ['operations', 'agent', 'tc'], sffu: ['operations', 'tc'],
     };
@@ -4508,278 +4507,6 @@ Rules:
       );
     }
 
-    // ─── Chat (Team Chat) Tab — preview mockup ───────────────────────
-    const TCHAT_PHOTOS = {
-      tarek:   'https://themorshedgroup.com/wp-content/uploads/2023/01/tarek-morshed-headshot.jpg',
-      symon:   'https://themorshedgroup.com/wp-content/uploads/2025/01/Hidenori-Symon-Yongco-headshot.jpg',
-      brad:    'https://themorshedgroup.com/wp-content/uploads/2023/01/Brad-Baker-headshot-1.jpg',
-      brett:   'https://themorshedgroup.com/wp-content/uploads/2025/09/Brett-Silverman-headshot.jpg',
-      kyle:    'https://themorshedgroup.com/wp-content/uploads/2026/02/Kyle-Baird-headshot.jpg',
-      alex:    'https://themorshedgroup.com/wp-content/uploads/2025/04/Alexandra-Machado-headshot.jpg',
-      luciana: 'https://themorshedgroup.com/wp-content/uploads/2026/02/Luciana-Pilco-headshot.jpg',
-    };
-
-    function ChatTab({ dark }) {
-      const J = "'Jost', sans-serif";
-      const bg          = dark ? '#000D26' : '#FCFBF8';
-      const bannerBg    = dark ? '#7F1D1D' : '#9B1C1C';
-      const headTitle   = dark ? '#FFFFFF' : '#001A4A';
-      const composeBg   = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
-      const composeCol  = dark ? '#C9A45A' : '#AD832F';
-      const searchBg    = dark ? '#0A1730' : '#F5F2EE';
-      const searchCol   = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
-      const pinnedBord  = dark ? '#0D1E3A' : '#F0EBE3';
-      const pinnedLabel = dark ? '#C9A45A' : '#AD832F';
-      const pinnedName  = dark ? 'rgba(255,255,255,0.6)' : '#001A4A';
-      const rowBord     = dark ? '#0D1E3A' : '#F5F2EE';
-      const threadName  = dark ? '#FFFFFF' : '#001A4A';
-      const previewCol  = dark ? 'rgba(255,255,255,0.35)' : '#888888';
-      const timeCol     = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
-
-      const seg = (t, key) => <span key={key} style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.16em', fontWeight: 500, color: '#fff', textTransform: 'uppercase' }}>{t}</span>;
-      const sep = (key) => <span key={key} style={{ fontFamily: J, fontSize: 9, color: 'rgba(255,255,255,0.45)' }}>·</span>;
-
-      const PinnedContact = ({ photo, name, online, unread, onClick }) => (
-        <div onClick={onClick} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-          <div style={{ position: 'relative', width: 44, height: 44 }}>
-            <img src={photo} alt={name} style={{ width: 44, height: 44, borderRadius: '50%', objectFit: 'cover', display: 'block' }} />
-            {online && <div style={{ position: 'absolute', bottom: 0, right: 0, width: 10, height: 10, borderRadius: '50%', background: '#3DAF7E', border: `2px solid ${bg}` }} />}
-            {unread > 0 && <div style={{ position: 'absolute', top: -2, right: -2, minWidth: 16, height: 16, borderRadius: 8, background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px' }}>{unread}</div>}
-          </div>
-          <div style={{ fontFamily: J, fontSize: 8, fontWeight: 500, letterSpacing: '0.06em', color: pinnedName }}>{name}</div>
-        </div>
-      );
-
-      const Single = ({ photo }) => (
-        <img src={photo} style={{ width: 36, height: 36, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, display: 'block' }} />
-      );
-      const Group = ({ a, b }) => (
-        <div style={{ position: 'relative', width: 36, height: 36, flexShrink: 0 }}>
-          <img src={a} style={{ position: 'absolute', top: 0, left: 0, width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${bg}` }} />
-          <img src={b} style={{ position: 'absolute', bottom: 0, right: 0, width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${bg}` }} />
-        </div>
-      );
-      const Emoji = ({ e }) => (
-        <div style={{ width: 36, height: 36, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', fontSize: 18 }}>{e}</div>
-      );
-
-      // Thread-view tokens
-      const tvBarBg     = dark ? '#070F1E' : '#FFFFFF';
-      const tvBarBord   = dark ? '#0D1E3A' : '#F0EBE3';
-      const tvMsgBg     = dark ? '#070F1E' : '#FCFBF8';
-      const tvBackCol   = dark ? 'rgba(255,255,255,0.3)' : 'rgba(0,26,74,0.4)';
-      const tvActionCol = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
-      const tvDivLine   = dark ? '#0D1E3A' : '#E4DFD4';
-      const tvDivText   = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
-      const tvTimeCol   = dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9';
-      const theirBg     = dark ? '#0A1E44' : '#FFFFFF';
-      const theirCol    = dark ? '#FFFFFF' : '#001A4A';
-      const theirBord   = dark ? 'none' : '1px solid #E4DFD4';
-      const mineBg      = dark ? '#AD832F' : '#001A4A';
-      const reactBg     = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
-      const reactCol    = dark ? '#C9A45A' : '#AD832F';
-      const senderGold  = dark ? '#C9A45A' : '#AD832F';
-      const senderMuted = dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B';
-      const inBarBg     = dark ? '#070F1E' : '#F5F0E8';
-      const inBarBord   = dark ? '#0D1E3A' : '#E0D8CC';
-      const inFieldBg   = dark ? '#0A1730' : '#FFFFFF';
-      const inFieldBord = dark ? '#152545' : '#E0D8CC';
-      const inPlaceCol  = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
-      const sendBg      = dark ? '#AD832F' : '#001A4A';
-
-      const [shown, setShown] = useState(null);
-      const [open, setOpen] = useState(false);
-      const openThread = (t) => { if (t) { setShown(t); setOpen(true); } };
-      const back = () => setOpen(false);
-
-      const SENDERS = {
-        tarek: { name: 'Tarek', photo: TCHAT_PHOTOS.tarek },
-        brad:  { name: 'Brad',  photo: TCHAT_PHOTOS.brad },
-        brett: { name: 'Brett', photo: TCHAT_PHOTOS.brett },
-        kyle:  { name: 'Kyle',  photo: TCHAT_PHOTOS.kyle },
-        me:    { name: 'You',   photo: TCHAT_PHOTOS.symon },
-      };
-      const VIEW = {
-        t2: { status: 'Online', date: 'Today', messages: [
-          { from: 'tarek', text: 'Can you pull the Forest Hill offer summary before the 3pm call?', time: '9:41 AM' },
-          { from: 'me',    text: "On it — I'll have it in the shared drive by 2:30.", time: '9:43 AM' },
-          { from: 'tarek', text: "Perfect. Also — what's the status on the Jinx Ave feedback follow-up?", time: '9:44 AM' },
-          { from: 'me',    text: 'SFFU triggered the follow-up 2hrs post-showing. 3 of 5 buyers have responded. The team is handling the rest.', time: '9:46 AM' },
-          { from: 'tarek', text: "Good. Let's debrief after the call.", time: '9:48 AM', reaction: { emoji: '👍', count: 1 } },
-        ] },
-        t1: { members: 'Tarek, Brad, Brett, Kyle', date: 'Today', messages: [
-          { from: 'tarek', text: "New showing booked on Jinx Ave — 2pm tomorrow. Let's make sure the prep is solid.", time: '10:02 AM' },
-          { from: 'brad',  text: "On it — I'll confirm the property access and lockbox code.", time: '10:14 AM' },
-          { from: 'me',    text: "SFFU will auto-trigger the feedback form 2hrs after the showing ends. I'll monitor response rate.", time: '10:17 AM' },
-          { from: 'brad',  text: 'FYI — Westlake closing docs are signed and in. Commission hits end of week.', time: '10:22 AM', reaction: { emoji: '🎉', count: 4 } },
-          { from: 'brett', text: 'Commercial comp deck for Thursday is updated — shared in Drive.', time: '10:31 AM' },
-        ] },
-        t5: { date: 'Yesterday', messages: [
-          { from: 'brett', text: 'Sent the commercial comp report over — let me know if you need anything adjusted before the client meeting.', time: 'Yesterday' },
-          { from: 'me',    text: "Got it, looks solid. I'll flag anything before EOD.", time: 'Yesterday' },
-        ] },
-      };
-
-      const threads = [
-        { id: 'c1', kind: 'channel', emoji: '📣', name: 'Announcements', preview: 'Tarek: Q3 kickoff is set for July 8 — details inside', time: '9:15a', unread: 0 },
-        { id: 'c2', kind: 'channel', emoji: '🏅', name: 'Great Shares', preview: 'Brett: Closed the Mueller condo! 🎉', time: 'Yest', unread: 0 },
-        { id: 'c3', kind: 'channel', emoji: '😂', name: 'Memes', preview: 'Brad: when the buyer ghosts after 3 showings 💀', time: 'Mon', unread: 0 },
-        { id: 't1', kind: 'group', a: TCHAT_PHOTOS.tarek, b: TCHAT_PHOTOS.brad, name: 'TMG Agents', preview: 'Brad: New showing on Jinx Ave just booked...', time: '10:02a', unread: 1 },
-        { id: 't2', kind: 'dm', photo: TCHAT_PHOTOS.tarek, name: 'Tarek', preview: "Let's sync on the Forest Hill offer at 3...", time: '9:48a', unread: 0 },
-        { id: 't3', kind: 'dm', photo: TCHAT_PHOTOS.brad, name: 'Brad', preview: 'Westlake closing docs are signed and in...', time: '8:30a', unread: 2 },
-        { id: 't5', kind: 'dm', photo: TCHAT_PHOTOS.brett, name: 'Brett', preview: 'Sent the commercial comp report over...', time: 'Yest', unread: 0 },
-        { id: 't6', kind: 'group', a: TCHAT_PHOTOS.alex, b: TCHAT_PHOTOS.luciana, name: 'Ops & Admin', preview: 'Luciana: Screening shortlist is ready...', time: 'Mon', unread: 0 },
-        { id: 't7', kind: 'dm', photo: TCHAT_PHOTOS.alex, name: 'Alexa', preview: '3 files cleared to close this week...', time: 'Mon', unread: 0 },
-        { id: 't8', kind: 'dm', photo: TCHAT_PHOTOS.kyle, name: 'Kyle', preview: 'Following up on the Forest Hill listing...', time: 'Sun', unread: 0 },
-        { id: 't9', kind: 'dm', photo: TCHAT_PHOTOS.luciana, name: 'Luciana', preview: "Calendar's updated for next week's listings...", time: 'Sun', unread: 0 },
-      ];
-      const byId = (id) => threads.find(x => x.id === id);
-      const listAvatar = (t) => t.kind === 'channel' ? <Emoji e={t.emoji} /> : t.kind === 'group' ? <Group a={t.a} b={t.b} /> : <Single photo={t.photo} />;
-
-      const headerAvatar = (t, view) => {
-        if (t.kind === 'group') return (
-          <div style={{ position: 'relative', width: 32, height: 32, flexShrink: 0 }}>
-            <img src={t.a} style={{ position: 'absolute', top: 0, left: 0, width: 20, height: 20, borderRadius: '50%', objectFit: 'cover', border: `1.5px solid ${tvBarBg}` }} />
-            <img src={t.b} style={{ position: 'absolute', bottom: 0, right: 0, width: 20, height: 20, borderRadius: '50%', objectFit: 'cover', border: `1.5px solid ${tvBarBg}` }} />
-          </div>
-        );
-        if (t.kind === 'channel') return (
-          <div style={{ width: 32, height: 32, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: dark ? '#0A1730' : '#F5F2EE', fontSize: 16 }}>{t.emoji}</div>
-        );
-        return (
-          <div style={{ position: 'relative', width: 32, height: 32, flexShrink: 0 }}>
-            <img src={t.photo} style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', display: 'block' }} />
-            {view && view.status === 'Online' && <div style={{ position: 'absolute', bottom: 0, right: 0, width: 8, height: 8, borderRadius: '50%', background: '#3DAF7E', border: `1.5px solid ${tvBarBg}` }} />}
-          </div>
-        );
-      };
-      const statusLine = (t, view) => {
-        if (t.kind === 'dm' && view && view.status === 'Online') return <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.1em', color: '#3DAF7E', marginTop: 1 }}>● Online</div>;
-        if (t.kind !== 'dm' && view && view.members) return <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.1em', color: senderMuted, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{view.members}</div>;
-        return null;
-      };
-
-      return (
-        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-          {/* Coming Soon banner (always visible) */}
-          <div style={{ background: bannerBg, padding: '9px 16px', textAlign: 'center', flexShrink: 0 }}>
-            <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: '#fff' }}>Coming Soon · Team Chat · Q3 2026</span>
-          </div>
-
-          <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-            {/* ── List layer ── */}
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: bg }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px 8px', flexShrink: 0 }}>
-                <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Chats</div>
-                <button style={{ width: 28, height: 28, borderRadius: '50%', border: 'none', cursor: 'pointer', background: composeBg, color: composeCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <i className="ti ti-edit" style={{ fontSize: 15 }} />
-                </button>
-              </div>
-              <div style={{ margin: '0 14px 10px', background: searchBg, borderRadius: 10, padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
-                <i className="ti ti-search" style={{ fontSize: 14, color: searchCol }} />
-                <span style={{ fontFamily: J, fontSize: 10, color: searchCol }}>Search</span>
-              </div>
-              <div style={{ padding: '0 14px 10px', borderBottom: `1px solid ${pinnedBord}`, flexShrink: 0 }}>
-                <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.18em', fontWeight: 500, color: pinnedLabel, marginBottom: 8 }}>PINNED</div>
-                <div style={{ display: 'flex', gap: 14 }}>
-                  <PinnedContact photo={TCHAT_PHOTOS.tarek} name="Tarek" online unread={3} onClick={() => openThread(byId('t2'))} />
-                  <PinnedContact photo={TCHAT_PHOTOS.brett} name="Brett" onClick={() => openThread(byId('t5'))} />
-                  <PinnedContact photo={TCHAT_PHOTOS.alex} name="Alexa" onClick={() => openThread(byId('t7'))} />
-                </div>
-              </div>
-              <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-                {threads.map((t, i) => (
-                  <div key={t.id} onClick={() => openThread(t)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', cursor: 'pointer', borderBottom: i === threads.length - 1 ? 'none' : `1px solid ${rowBord}` }}>
-                    {listAvatar(t)}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: threadName, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.name}</div>
-                      <div style={{ fontFamily: J, fontSize: 9, color: previewCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 2 }}>{t.preview}</div>
-                    </div>
-                    <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                      <div style={{ fontFamily: J, fontSize: 8, color: timeCol }}>{t.time}</div>
-                      {t.unread > 0 && <div style={{ minWidth: 16, height: 16, borderRadius: 8, background: '#AD832F', color: '#fff', fontFamily: J, fontSize: 8, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px' }}>{t.unread}</div>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* ── Thread-view layer (slides in from right) ── */}
-            <div style={{
-              position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', background: tvMsgBg,
-              transform: open ? 'translateX(0)' : 'translateX(100%)', transition: 'transform 220ms ease',
-              boxShadow: open && !dark ? '-10px 0 28px rgba(0,0,0,0.12)' : 'none',
-              pointerEvents: open ? 'auto' : 'none',
-            }}>
-              {shown && (() => {
-                const view = VIEW[shown.id];
-                const msgs = (view && view.messages) || [];
-                const isGroup = shown.kind !== 'dm';
-                const lastTheir = [...msgs].reverse().find(m => m.from !== 'me');
-                return (
-                  <React.Fragment>
-                    {/* Thread top bar */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 14px', borderBottom: `1px solid ${tvBarBord}`, background: tvBarBg, flexShrink: 0 }}>
-                      <button onClick={back} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: tvBackCol, display: 'flex', alignItems: 'center', flexShrink: 0 }}>
-                        <i className="ti ti-chevron-left" style={{ fontSize: 16 }} />
-                      </button>
-                      {headerAvatar(shown, view)}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: dark ? '#fff' : '#001A4A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{shown.name}</div>
-                        {statusLine(shown, view)}
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 9, color: tvActionCol, flexShrink: 0 }}>
-                        <i className="ti ti-phone" style={{ fontSize: 15 }} />
-                        <i className={`ti ${isGroup ? 'ti-info-circle' : 'ti-video'}`} style={{ fontSize: 15 }} />
-                      </div>
-                    </div>
-                    {/* Message area */}
-                    <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 10, background: tvMsgBg }}>
-                      {msgs.length > 0 && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <div style={{ flex: 1, height: 1, background: tvDivLine }} />
-                          <span style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.12em', textTransform: 'uppercase', color: tvDivText }}>{view.date}</span>
-                          <div style={{ flex: 1, height: 1, background: tvDivLine }} />
-                        </div>
-                      )}
-                      {msgs.map((m, i) => {
-                        const mine = m.from === 'me';
-                        const prev = msgs[i - 1];
-                        const showSender = isGroup && !mine && (!prev || prev.from !== m.from);
-                        const s = SENDERS[m.from] || SENDERS.me;
-                        const recent = lastTheir && m.from === lastTheir.from;
-                        return (
-                          <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                            {showSender && <div style={{ fontFamily: J, fontSize: 7, letterSpacing: '0.1em', fontWeight: 600, marginBottom: 2, marginLeft: 28, color: recent ? senderGold : senderMuted }}>{s.name}</div>}
-                            <div style={{ display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'flex-end', gap: 6 }}>
-                              <img src={mine ? SENDERS.me.photo : s.photo} style={{ width: 22, height: 22, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, display: 'block' }} />
-                              <div style={{ maxWidth: '78%', padding: '7px 9px', fontFamily: J, fontSize: 9, lineHeight: 1.45, borderRadius: mine ? '12px 12px 3px 12px' : '12px 12px 12px 3px', background: mine ? mineBg : theirBg, color: mine ? '#fff' : theirCol, border: mine ? 'none' : theirBord }}>{m.text}</div>
-                            </div>
-                            <div style={{ fontFamily: J, fontSize: 7, color: tvTimeCol, textAlign: mine ? 'right' : 'left', marginLeft: mine ? 0 : 28, marginRight: mine ? 28 : 0 }}>{m.time}</div>
-                            {m.reaction && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, alignSelf: 'flex-start', marginLeft: 28, marginTop: 2, padding: '2px 6px', borderRadius: 10, fontFamily: J, fontSize: 8, background: reactBg, color: reactCol }}>{m.reaction.emoji} {m.reaction.count}</div>}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {/* Chat input */}
-                    <div style={{ flexShrink: 0, borderTop: `1px solid ${inBarBord}`, background: inBarBg, padding: '8px 12px 10px', display: 'flex', alignItems: 'center', gap: 7 }}>
-                      <div style={{ flex: 1, borderRadius: 20, height: 34, padding: '0 10px', display: 'flex', alignItems: 'center', gap: 6, background: inFieldBg, border: `1px solid ${inFieldBord}` }}>
-                        <span style={{ flex: 1, fontFamily: J, fontSize: 9, color: inPlaceCol, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Message {shown.name}...</span>
-                        <i className="ti ti-paperclip" style={{ fontSize: 14, color: inPlaceCol, flexShrink: 0 }} />
-                      </div>
-                      <button style={{ width: 30, height: 30, borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0, background: sendBg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <i className="ti ti-arrow-up" style={{ fontSize: 13 }} />
-                      </button>
-                    </div>
-                  </React.Fragment>
-                );
-              })()}
-            </div>
-          </div>
-        </div>
-      );
-    }
-
     // ─── Calls Tab — live Zoho touch-call list ───────────────────────
     //  Real data, not a mockup: this agent's Call tasks for the previous
     //  workday / today / next workday, pulled from the same zoho-crm edge
@@ -7754,7 +7481,6 @@ Rules:
     // ─── Bottom Nav ──────────────────────────────────────────────────
     const TABS = [
       { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
-      { id: 'teamchat', label: 'Chat',  icon: 'ti-message'         },
       { id: 'calls',    label: 'Calls', icon: 'ti-phone'           },
       { id: 'kpis',     label: 'KPIs',  icon: 'ti-chart-bar'       },
       { id: 'deals',    label: 'Deals', icon: 'ti-currency-dollar' },
@@ -8029,7 +7755,7 @@ Rules:
             borderRadius: 40, padding: 4, width: '100%',
           }}>
             {navTabs.map(({ id, label, icon, img }) => {
-              const coreNavIds = ['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'];
+              const coreNavIds = ['chat', 'calls', 'kpis', 'deals', 'more'];
               const isActive = active === id || (active === 'more' && !coreNavIds.includes(id) && id !== 'more' && activeMoreView === id);
               const activeColor = dark ? '#FFFFFF' : '#001A4A';
               const inactiveColor = dark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.28)';
@@ -9775,7 +9501,6 @@ Rules:
                 </div>
               );
             })()}
-            {activeTab === 'teamchat' && <ChatTab dark={dark} />}
             {activeTab === 'calls' && <CallsTab dark={dark} ownerName={myName} ownerEmail={(profile && profile.email) || null} isAdmin={isAdmin} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'deals' && <DealsTab />}
@@ -9791,7 +9516,7 @@ Rules:
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'timeoff' ? <TimeOffFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}
-            {!['chat', 'teamchat', 'calls', 'kpis', 'deals', 'more'].includes(activeTab) && (
+            {!['chat', 'calls', 'kpis', 'deals', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>
@@ -9817,7 +9542,7 @@ Rules:
               setMoreMenuOpen(false);
               const item = allItemMap[t];
               if (item && item.href) { window.location.href = item.href; return; }
-              const coreNavIds = ['chat', 'teamchat', 'calls', 'kpis', 'deals'];
+              const coreNavIds = ['chat', 'calls', 'kpis', 'deals'];
               if (coreNavIds.includes(t)) { setActiveTab(t); }
               else { setMoreView(t); setActiveTab('more'); }
             }}

@@ -3418,6 +3418,46 @@ const ZOHO_SYNCABLE_KINDS = ['ctc_file', 'project'];
 // rep types and the combined value that exist on live deals but not in
 // the picklist definition (confirmed against the CRM on 2026-09-08).
 const DEAL_TYPES = ['Residential Buyer', 'Residential Seller', 'Commercial Buyer', 'Commercial Seller', 'Commercial Tenant Rep', 'Commercial Landlord Rep', 'Both Residential Buyer & Seller'];
+
+// ── Assign one task to a whole group ──
+// Operations hands the same piece of work to everyone at once, and each
+// person gets their OWN task — not one shared task with eight names on it.
+// That matters for the weekly accountability tally: a copy per person means
+// a completion date per person. Membership comes from profiles.access,
+// which is the same array the rest of the app gates on.
+const TEAM_GROUPS = [{
+  id: 'all',
+  label: 'Everyone at TMG',
+  match: () => true
+}, {
+  id: 'agent',
+  label: 'Sales agents',
+  match: m => (m.access || []).includes('agent')
+},
+// Operations is deliberately "everyone who isn't a sales agent" rather
+// than access.includes('operations'): the access array was never
+// reliably tagged for non-agents (some carry 'tc', some 'admin', some
+// nothing), and this way Sales agents + Operations always adds up to
+// Everyone with nobody falling through the gap.
+{
+  id: 'operations',
+  label: 'Operations',
+  match: m => !(m.access || []).includes('agent')
+}];
+// A profile with no status at all is treated as active — status was added
+// late and the older rows never got backfilled, so requiring it would
+// quietly shrink every group.
+const groupMembers = (team, groupId) => {
+  const g = TEAM_GROUPS.find(x => x.id === groupId);
+  if (!g) return [];
+  return (team || []).filter(m => (!m.status || m.status === 'active') && g.match(m));
+};
+// Only admins/operations may fan a task out to other people's lists.
+const canBulkAssign = (team, user) => {
+  const me = (team || []).find(m => m.id === (user && user.id));
+  const a = me && me.access || [];
+  return a.includes('admin') || a.includes('operations');
+};
 const TaskDB = {
   client() {
     return window.SupabaseAuth?._client || null;
@@ -3902,6 +3942,32 @@ const TaskDB = {
     await this.addActivity(task.id, 'system', 'Recurring task completed — next instance created', user);
     await this.addActivity(data.id, 'system', 'Created from a recurring task', user);
     return data;
+  },
+  // One task per person rather than one task with N assignees, so each
+  // person owns their own due date, status and completion date — which is
+  // what the weekly accountability tally counts. Serial on purpose: a
+  // ten-person group firing ten create-chains at once is how you get
+  // half-written task_people rows. A person who fails is reported, not
+  // silently dropped.
+  async createForEach(userIds, fields, otherRoles, user) {
+    const made = [],
+      failed = [];
+    for (const uid of userIds || []) {
+      try {
+        const t = await this.create(fields, {
+          ...(otherRoles || {}),
+          assignee: [uid]
+        }, user);
+        if (t) made.push(t);else failed.push(uid);
+      } catch (e) {
+        console.error('[TaskDB] createForEach:', e && e.message || e);
+        failed.push(uid);
+      }
+    }
+    return {
+      made,
+      failed
+    };
   },
   // My Tasks lists only what's assigned to you, so a task created with
   // nobody on it and no file to sit under is invisible everywhere the
@@ -6098,6 +6164,11 @@ function TaskForm({
   const _initDecDate = _decd ? _decd.getFullYear() + '-' + _p2(_decd.getMonth() + 1) + '-' + _p2(_decd.getDate()) : '';
   const _initDecHM = _decd ? _p2(_decd.getHours()) + ':' + _p2(_decd.getMinutes()) : '';
   const [title, setTitle] = useState(t.title || '');
+  // Group assign is a create-time-only choice — "give this to everyone"
+  // has no meaning when you're editing one person's existing copy.
+  const canBulk = !t.id && canBulkAssign(team, user);
+  const [bulkGroup, setBulkGroup] = useState('');
+  const bulkPeople = bulkGroup ? groupMembers(team, bulkGroup) : [];
   const [dueDate, setDueDate] = useState(_initDate);
   const [dueTime, setDueTime] = useState(_initHM && _initHM !== '00:00' ? _initHM : '09:00');
   const [hasTime, setHasTime] = useState(!!(_initHM && _initHM !== '00:00'));
@@ -6323,6 +6394,7 @@ function TaskForm({
         assigners,
         working_url: workingUrl.trim(),
         email_link: emailLink.trim(),
+        bulkGroup: canBulk ? bulkGroup : '',
         description,
         context,
         labels: myLabels,
@@ -6580,7 +6652,42 @@ function TaskForm({
       marginTop: 8,
       fontFamily: C.fontSans
     }
-  }, "When marked Completed, the next one is created automatically \u2014 due date moved forward, only the checked fields carried over."))), field('Assignees', /*#__PURE__*/React.createElement(PeopleDropdown, {
+  }, "When marked Completed, the next one is created automatically \u2014 due date moved forward, only the checked fields carried over."))), canBulk && field('Give this to a whole group', /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 6
+    }
+  }, TEAM_GROUPS.map(g => {
+    const n = groupMembers(team, g.id).length;
+    const on = bulkGroup === g.id;
+    // A group nobody is in can't be picked — better to see
+    // "Operations (0)" greyed out than to save and get nothing.
+    return /*#__PURE__*/React.createElement("button", {
+      key: g.id,
+      type: "button",
+      disabled: !n,
+      onClick: () => setBulkGroup(on ? '' : g.id),
+      style: {
+        padding: '6px 11px',
+        borderRadius: 14,
+        border: `1px solid ${on ? C.navy : bord}`,
+        background: on ? C.navy : dark ? '#06101F' : '#fff',
+        color: on ? '#fff' : n ? sub : dark ? 'rgba(255,255,255,0.25)' : '#C3C0B8',
+        fontSize: '0.72rem',
+        cursor: n ? 'pointer' : 'not-allowed',
+        fontFamily: C.fontSans
+      }
+    }, on ? '✓ ' : '', g.label, " (", n, ")");
+  })), !!bulkGroup && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      color: sub,
+      lineHeight: 1.5,
+      marginTop: 8,
+      fontFamily: C.fontSans
+    }
+  }, "Creates ", /*#__PURE__*/React.createElement("b", null, bulkPeople.length, " separate tasks"), " \u2014 one each for ", bulkPeople.map(m => m.name).join(', '), ". Everyone completes their own copy."))), !bulkGroup && field('Assignees', /*#__PURE__*/React.createElement(PeopleDropdown, {
     dark: dark,
     team: team,
     arr: assignees,
@@ -9987,7 +10094,12 @@ function ProjectsSurface({
       if (!known) known = await TaskDB.loadPeopleFor(openTask.id); // the pre-fetch failed — one more try before skipping
       if (known) await TaskDB.setPeople(openTask.id, people);
       taskId = openTask.id;
-    } else {
+    }
+    // No group-assign branch here on purpose: inside a container this form
+    // only ever opens on an EXISTING task (new ones come from quick-add),
+    // so it could never fire. To hand a whole group a task in a Project or
+    // CTC file, use New in My Tasks and set that file in the Project field.
+    else {
       const created = await TaskDB.create(fields, people, user);
       taskId = created && created.id;
     }
@@ -13490,6 +13602,9 @@ function TasksScreen({
   // A #task/<id> that resolves to nothing — say so instead of silently
   // showing the list (audit C7). Cleared when the user navigates.
   const [routeNotice, setRouteNotice] = useState(null);
+  // Confirmation after a group assign — the tasks it makes belong to other
+  // people, so without this the screen just goes back to an unchanged list.
+  const [bulkNote, setBulkNote] = useState(null);
   // True while a #task/<id> is being looked up — freezes the URL writer so
   // the pasted link survives long enough to be read (or reported dead).
   const [routePending, setRoutePending] = useState(false);
@@ -13559,9 +13674,13 @@ function TasksScreen({
       tasks: d.tasks.map(t => enrich(t, d.projById))
     }; // _projectName for the source chip (My Tasks list/kanban/mobile rows)
     setData(enriched);
+    // access/status ride along so "Sales agents" / "Operations" can be
+    // resolved without a second round trip (see TEAM_GROUPS).
     setTeam((tm || []).map(p => ({
       id: p.id,
-      name: ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || 'User'
+      name: ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || 'User',
+      access: Array.isArray(p.access) ? p.access : [],
+      status: p.status || null
     })));
     setLinksByTask(links || {});
     firstLoad.current = false;
@@ -13778,6 +13897,23 @@ function TasksScreen({
       if (known === undefined) known = await TaskDB.loadPeopleFor(current.id);
       if (known) await TaskDB.setPeople(current.id, people);
       taskId = current.id;
+    } else if (form.bulkGroup) {
+      // Group assign: one task each. Nothing lands in MY list unless I'm in
+      // the group, so say out loud what was created and for whom.
+      const members = groupMembers(team, form.bulkGroup);
+      const {
+        made,
+        failed
+      } = await TaskDB.createForEach(members.map(m => m.id), fields, {
+        assigner: form.assigners,
+        decision_maker: form.decisionMakers || []
+      }, user);
+      for (const t of made) {
+        await TaskDB.setLabels(t.id, user && user.id, form.labels || []);
+        await TaskDB.setDecisionOptions(t.id, form.decisionOptions || []);
+      }
+      const gLabel = (TEAM_GROUPS.find(g => g.id === form.bulkGroup) || {}).label || 'the group';
+      setBulkNote(failed.length ? 'Created ' + made.length + ' of ' + members.length + ' tasks for ' + gLabel + '. ' + failed.length + ' failed — try those people again.' : 'Created ' + made.length + ' tasks — one for each person in ' + gLabel + '.');
     } else {
       // New task from My Tasks with nobody named — it's yours, or it would
       // disappear from this list the moment it saved.
@@ -14189,6 +14325,7 @@ function TasksScreen({
   }, "\u21B3 Recently added"));
   const newBtn = /*#__PURE__*/React.createElement("button", {
     onClick: () => {
+      setBulkNote(null);
       setCurrent(null);
       setView('form');
     },
@@ -14215,7 +14352,7 @@ function TasksScreen({
       fontSize: 14
     }
   }), "New");
-  const routeNoticeBar = routeNotice && /*#__PURE__*/React.createElement("div", {
+  const routeNoticeBar = (routeNotice || bulkNote) && /*#__PURE__*/React.createElement(React.Fragment, null, routeNotice && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',
@@ -14248,7 +14385,40 @@ function TasksScreen({
       cursor: 'pointer',
       flexShrink: 0
     }
-  }));
+  })), bulkNote && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      margin: '0 0 10px',
+      padding: '9px 12px',
+      borderRadius: 6,
+      border: `1px solid ${bord}`,
+      background: dark ? 'rgba(15,110,86,.16)' : '#EDF6F2',
+      color: dark ? '#7FD3B6' : '#0F6E56',
+      fontSize: '0.78rem',
+      fontFamily: C.fontSans
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-circle-check",
+    style: {
+      fontSize: 15,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1
+    }
+  }, bulkNote), /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x",
+    onClick: () => setBulkNote(null),
+    "aria-label": "Dismiss",
+    style: {
+      fontSize: 14,
+      cursor: 'pointer',
+      flexShrink: 0
+    }
+  })));
   const listInner = compact => /*#__PURE__*/React.createElement("div", {
     style: {
       padding: compact ? '10px 10px 24px' : '12px 14px 24px'
@@ -16163,7 +16333,7 @@ function TasksScreen({
       display: 'flex',
       flexDirection: 'column'
     }
-  }, routeNotice && /*#__PURE__*/React.createElement("div", {
+  }, (routeNotice || bulkNote) && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '10px 14px 0'
     }

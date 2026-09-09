@@ -1261,6 +1261,36 @@ Rules:
     // the picklist definition (confirmed against the CRM on 2026-09-08).
     const DEAL_TYPES = ['Residential Buyer', 'Residential Seller', 'Commercial Buyer', 'Commercial Seller', 'Commercial Tenant Rep', 'Commercial Landlord Rep', 'Both Residential Buyer & Seller'];
 
+    // ── Assign one task to a whole group ──
+    // Operations hands the same piece of work to everyone at once, and each
+    // person gets their OWN task — not one shared task with eight names on it.
+    // That matters for the weekly accountability tally: a copy per person means
+    // a completion date per person. Membership comes from profiles.access,
+    // which is the same array the rest of the app gates on.
+    const TEAM_GROUPS = [
+      { id: 'all',        label: 'Everyone at TMG', match: () => true },
+      { id: 'agent',      label: 'Sales agents',    match: (m) => (m.access || []).includes('agent') },
+      // Operations is deliberately "everyone who isn't a sales agent" rather
+      // than access.includes('operations'): the access array was never
+      // reliably tagged for non-agents (some carry 'tc', some 'admin', some
+      // nothing), and this way Sales agents + Operations always adds up to
+      // Everyone with nobody falling through the gap.
+      { id: 'operations', label: 'Operations',      match: (m) => !(m.access || []).includes('agent') },
+    ];
+    // A profile with no status at all is treated as active — status was added
+    // late and the older rows never got backfilled, so requiring it would
+    // quietly shrink every group.
+    const groupMembers = (team, groupId) => {
+      const g = TEAM_GROUPS.find(x => x.id === groupId); if (!g) return [];
+      return (team || []).filter(m => (!m.status || m.status === 'active') && g.match(m));
+    };
+    // Only admins/operations may fan a task out to other people's lists.
+    const canBulkAssign = (team, user) => {
+      const me = (team || []).find(m => m.id === (user && user.id));
+      const a = (me && me.access) || [];
+      return a.includes('admin') || a.includes('operations');
+    };
+
     const TaskDB = {
       client() { return window.SupabaseAuth?._client || null; },
 
@@ -1536,6 +1566,23 @@ Rules:
         await this.addActivity(task.id, 'system', 'Recurring task completed — next instance created', user);
         await this.addActivity(data.id, 'system', 'Created from a recurring task', user);
         return data;
+      },
+
+      // One task per person rather than one task with N assignees, so each
+      // person owns their own due date, status and completion date — which is
+      // what the weekly accountability tally counts. Serial on purpose: a
+      // ten-person group firing ten create-chains at once is how you get
+      // half-written task_people rows. A person who fails is reported, not
+      // silently dropped.
+      async createForEach(userIds, fields, otherRoles, user) {
+        const made = [], failed = [];
+        for (const uid of (userIds || [])) {
+          try {
+            const t = await this.create(fields, { ...(otherRoles || {}), assignee: [uid] }, user);
+            if (t) made.push(t); else failed.push(uid);
+          } catch (e) { console.error('[TaskDB] createForEach:', (e && e.message) || e); failed.push(uid); }
+        }
+        return { made, failed };
       },
 
       // My Tasks lists only what's assigned to you, so a task created with
@@ -2582,6 +2629,11 @@ Rules:
       const _initDecDate = _decd ? (_decd.getFullYear() + '-' + _p2(_decd.getMonth() + 1) + '-' + _p2(_decd.getDate())) : '';
       const _initDecHM = _decd ? (_p2(_decd.getHours()) + ':' + _p2(_decd.getMinutes())) : '';
       const [title, setTitle] = useState(t.title || '');
+      // Group assign is a create-time-only choice — "give this to everyone"
+      // has no meaning when you're editing one person's existing copy.
+      const canBulk = !t.id && canBulkAssign(team, user);
+      const [bulkGroup, setBulkGroup] = useState('');
+      const bulkPeople = bulkGroup ? groupMembers(team, bulkGroup) : [];
       const [dueDate, setDueDate] = useState(_initDate);
       const [dueTime, setDueTime] = useState(_initHM && _initHM !== '00:00' ? _initHM : '09:00');
       const [hasTime, setHasTime] = useState(!!(_initHM && _initHM !== '00:00'));
@@ -2683,6 +2735,7 @@ Rules:
             recurCopy: repeats ? recurCopy : null,
             project, priority, status,
             assignees, assigners, working_url: workingUrl.trim(), email_link: emailLink.trim(),
+            bulkGroup: canBulk ? bulkGroup : '',
             description, context, labels: myLabels,
             decisionMakers, decisionQuestion: decisionQuestion.trim(), decisionDue, decisionHasTime,
             decisionOptions: decisionOptions.filter(o => (o.body || '').trim()),
@@ -2749,7 +2802,21 @@ Rules:
             </div>}
           </div>
           {/* People */}
-          {field('Assignees', <PeopleDropdown dark={dark} team={team} arr={assignees} set={setAssignees} placeholder="Select assignees…" />)}
+          {canBulk && field('Give this to a whole group', (
+            <div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {TEAM_GROUPS.map(g => {
+                  const n = groupMembers(team, g.id).length;
+                  const on = bulkGroup === g.id;
+                  // A group nobody is in can't be picked — better to see
+                  // "Operations (0)" greyed out than to save and get nothing.
+                  return <button key={g.id} type="button" disabled={!n} onClick={() => setBulkGroup(on ? '' : g.id)} style={{ padding: '6px 11px', borderRadius: 14, border: `1px solid ${on ? C.navy : bord}`, background: on ? C.navy : (dark ? '#06101F' : '#fff'), color: on ? '#fff' : (n ? sub : (dark ? 'rgba(255,255,255,0.25)' : '#C3C0B8')), fontSize: '0.72rem', cursor: n ? 'pointer' : 'not-allowed', fontFamily: C.fontSans }}>{on ? '✓ ' : ''}{g.label} ({n})</button>;
+                })}
+              </div>
+              {!!bulkGroup && <div style={{ fontSize: '0.68rem', color: sub, lineHeight: 1.5, marginTop: 8, fontFamily: C.fontSans }}>Creates <b>{bulkPeople.length} separate tasks</b> — one each for {bulkPeople.map(m => m.name).join(', ')}. Everyone completes their own copy.</div>}
+            </div>
+          ))}
+          {!bulkGroup && field('Assignees', <PeopleDropdown dark={dark} team={team} arr={assignees} set={setAssignees} placeholder="Select assignees…" />)}
           {field('Assigned by', <PeopleDropdown dark={dark} team={team} arr={assigners} set={setAssigners} placeholder="Select who assigned this…" />)}
           {/* Status + Priority side by side */}
           <div style={{ display: 'flex', gap: 10 }}>
@@ -3926,6 +3993,10 @@ Rules:
           if (known) await TaskDB.setPeople(openTask.id, people);
           taskId = openTask.id;
         }
+        // No group-assign branch here on purpose: inside a container this form
+        // only ever opens on an EXISTING task (new ones come from quick-add),
+        // so it could never fire. To hand a whole group a task in a Project or
+        // CTC file, use New in My Tasks and set that file in the Project field.
         else { const created = await TaskDB.create(fields, people, user); taskId = created && created.id; }
         if (taskId) { await TaskDB.setLabels(taskId, user && user.id, form.labels || []); await TaskDB.setDecisionOptions(taskId, form.decisionOptions || []); }
         setTaskEditing(false);
@@ -4998,6 +5069,9 @@ Rules:
       // A #task/<id> that resolves to nothing — say so instead of silently
       // showing the list (audit C7). Cleared when the user navigates.
       const [routeNotice, setRouteNotice] = useState(null);
+      // Confirmation after a group assign — the tasks it makes belong to other
+      // people, so without this the screen just goes back to an unchanged list.
+      const [bulkNote, setBulkNote] = useState(null);
       // True while a #task/<id> is being looked up — freezes the URL writer so
       // the pasted link survives long enough to be read (or reported dead).
       const [routePending, setRoutePending] = useState(false);
@@ -5037,7 +5111,9 @@ Rules:
         const [d, tm, links] = await Promise.all([TaskDB.loadAll(user && user.id), ProfileDB.loadAll(), TaskEmailDB.loadAllByTask()]);
         const enriched = { ...d, tasks: d.tasks.map(t => enrich(t, d.projById)) };   // _projectName for the source chip (My Tasks list/kanban/mobile rows)
         setData(enriched);
-        setTeam((tm || []).map(p => ({ id: p.id, name: ((((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User') })));
+        // access/status ride along so "Sales agents" / "Operations" can be
+        // resolved without a second round trip (see TEAM_GROUPS).
+        setTeam((tm || []).map(p => ({ id: p.id, name: ((((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || 'User'), access: Array.isArray(p.access) ? p.access : [], status: p.status || null })));
         setLinksByTask(links || {});
         firstLoad.current = false;
         setLoading(false);
@@ -5181,6 +5257,17 @@ Rules:
           if (known) await TaskDB.setPeople(current.id, people);
           taskId = current.id;
         }
+        else if (form.bulkGroup) {
+          // Group assign: one task each. Nothing lands in MY list unless I'm in
+          // the group, so say out loud what was created and for whom.
+          const members = groupMembers(team, form.bulkGroup);
+          const { made, failed } = await TaskDB.createForEach(members.map(m => m.id), fields, { assigner: form.assigners, decision_maker: form.decisionMakers || [] }, user);
+          for (const t of made) { await TaskDB.setLabels(t.id, user && user.id, form.labels || []); await TaskDB.setDecisionOptions(t.id, form.decisionOptions || []); }
+          const gLabel = (TEAM_GROUPS.find(g => g.id === form.bulkGroup) || {}).label || 'the group';
+          setBulkNote(failed.length
+            ? 'Created ' + made.length + ' of ' + members.length + ' tasks for ' + gLabel + '. ' + failed.length + ' failed — try those people again.'
+            : 'Created ' + made.length + ' tasks — one for each person in ' + gLabel + '.');
+        }
         else {
           // New task from My Tasks with nobody named — it's yours, or it would
           // disappear from this list the moment it saved.
@@ -5298,13 +5385,20 @@ Rules:
       const labelsBtn = <i className="ti ti-tag" onClick={() => setView('labels')} title="Manage labels" style={{ fontSize: 16, cursor: 'pointer', color: gold, flexShrink: 0 }} />;
       const sortSelect = <select value={sortBy} onChange={e => setSortBy(e.target.value)} title="Group tasks by" style={{ fontFamily: C.fontSans, fontSize: '0.66rem', fontWeight: 600, color: gold, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 4px 4px 7px', cursor: 'pointer', outline: 'none', maxWidth: '100%' }}><option value="status">Status</option><option value="due">Due date</option><option value="label">Label</option></select>;
       const thenBySelect = <select value={thenBy} onChange={e => setThenBy(e.target.value)} title="Then sort within each group" style={{ fontFamily: C.fontSans, fontSize: '0.66rem', fontWeight: 600, color: gold, background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 8, padding: '4px 4px 4px 7px', cursor: 'pointer', outline: 'none', maxWidth: '100%' }}><option value="due">↳ Due date</option><option value="priority">↳ Priority</option><option value="title">↳ Title</option><option value="created">↳ Recently added</option></select>;
-      const newBtn = <button onClick={() => { setCurrent(null); setView('form'); }} aria-label="New task" style={{ display: 'flex', alignItems: 'center', gap: 6, background: C.navy, color: '#fff', border: 'none', borderRadius: 22, padding: '8px 16px', fontSize: 13, fontWeight: 500, letterSpacing: '0.02em', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />New</button>;
-      const routeNoticeBar = routeNotice && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 10px', padding: '9px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? 'rgba(155,28,28,.14)' : '#FBF0F0', color: dark ? '#F08A8A' : '#9B1C1C', fontSize: '0.78rem', fontFamily: C.fontSans }}>
-          <i className="ti ti-alert-circle" style={{ fontSize: 15, flexShrink: 0 }} />
-          <span style={{ flex: 1 }}>{routeNotice}</span>
-          <i className="ti ti-x" onClick={() => setRouteNotice(null)} aria-label="Dismiss" style={{ fontSize: 14, cursor: 'pointer', flexShrink: 0 }} />
-        </div>
+      const newBtn = <button onClick={() => { setBulkNote(null); setCurrent(null); setView('form'); }} aria-label="New task" style={{ display: 'flex', alignItems: 'center', gap: 6, background: C.navy, color: '#fff', border: 'none', borderRadius: 22, padding: '8px 16px', fontSize: 13, fontWeight: 500, letterSpacing: '0.02em', cursor: 'pointer', fontFamily: C.fontSans, flexShrink: 0 }}><i className="ti ti-plus" style={{ fontSize: 14 }} />New</button>;
+      const routeNoticeBar = (routeNotice || bulkNote) && (
+        <React.Fragment>
+          {routeNotice && <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 10px', padding: '9px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? 'rgba(155,28,28,.14)' : '#FBF0F0', color: dark ? '#F08A8A' : '#9B1C1C', fontSize: '0.78rem', fontFamily: C.fontSans }}>
+            <i className="ti ti-alert-circle" style={{ fontSize: 15, flexShrink: 0 }} />
+            <span style={{ flex: 1 }}>{routeNotice}</span>
+            <i className="ti ti-x" onClick={() => setRouteNotice(null)} aria-label="Dismiss" style={{ fontSize: 14, cursor: 'pointer', flexShrink: 0 }} />
+          </div>}
+          {bulkNote && <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 10px', padding: '9px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? 'rgba(15,110,86,.16)' : '#EDF6F2', color: dark ? '#7FD3B6' : '#0F6E56', fontSize: '0.78rem', fontFamily: C.fontSans }}>
+            <i className="ti ti-circle-check" style={{ fontSize: 15, flexShrink: 0 }} />
+            <span style={{ flex: 1 }}>{bulkNote}</span>
+            <i className="ti ti-x" onClick={() => setBulkNote(null)} aria-label="Dismiss" style={{ fontSize: 14, cursor: 'pointer', flexShrink: 0 }} />
+          </div>}
+        </React.Fragment>
       );
       const listInner = (compact) => (
         <div style={{ padding: compact ? '10px 10px 24px' : '12px 14px 24px' }}>
@@ -5923,7 +6017,7 @@ Rules:
                       </div>
                     </div>
                     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', display: 'flex', flexDirection: 'column' }}>
-                      {routeNotice && <div style={{ padding: '10px 14px 0' }}>{routeNoticeBar}</div>}
+                      {(routeNotice || bulkNote) && <div style={{ padding: '10px 14px 0' }}>{routeNoticeBar}</div>}
                       {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
                         : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
                         : <div style={{ padding: '10px 14px 24px' }}>{renderGroupedList(taskRowNew)}{quickAddRow}</div>}

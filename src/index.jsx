@@ -6568,7 +6568,6 @@ Rules:
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState(false);
       const [monthsLoaded, setMonthsLoaded] = useState(CAPACITY_MONTHS_STEP);
-      const [showProjected, setShowProjected] = useState(true);
       const [openDay, setOpenDay] = useState(null);   // 'YYYY-MM-DD' | null
 
       const headTitle = dark ? '#FFFFFF' : '#001A4A';
@@ -6667,8 +6666,8 @@ Rules:
       }, [visible]);
 
       const projection = useMemo(
-        () => showProjected ? projectCallCadence(visible, endIso, todayIso) : { byOwner: {}, unprojected: 0 },
-        [visible, endIso, todayIso, showProjected]);
+        () => projectCallCadence(visible, endIso, todayIso),
+        [visible, endIso, todayIso]);
 
       const monthTotals = useMemo(() => {
         const keys = new Set(months.map(monthKeyOf));
@@ -6704,7 +6703,7 @@ Rules:
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px 6px', flexShrink: 0 }}>
             {team
               ? <AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={pickable} />
-              : <div style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Your calls{mine ? ' — ' + mine : ''}</div>}
+              : <div style={{ flex: 1 }} />}
             <button onClick={() => !busy && load(true)} disabled={busy} title="Refresh from Zoho" style={{ ...navBtn, opacity: busy ? 0.5 : 1 }}>
               <i className="ti ti-refresh" style={{ fontSize: 12 }} />
             </button>
@@ -6718,11 +6717,6 @@ Rules:
             )}
             {!err && calls !== null && (
               <React.Fragment>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 9, fontFamily: J, fontSize: 8, color: mutedCol, cursor: 'pointer', userSelect: 'none' }}>
-                  <input type="checkbox" checked={showProjected} onChange={e => setShowProjected(e.target.checked)} style={{ accentColor: dark ? '#C9A45A' : '#001A4A', cursor: 'pointer', width: 12, height: 12 }} />
-                  <span style={{ width: 14, height: 14, background: capHatch(dark), border: `1px solid ${bord}`, borderRadius: 3, display: 'inline-block', flexShrink: 0 }} />
-                  Show where each contact's next touch lands
-                </label>
                 {capped && (
                   <div style={{ fontFamily: J, fontSize: 8, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>
                     Zoho stops paging open tasks at 2,000 records, so the months below may be missing calls. /crm-tasks hits the same ceiling.
@@ -6761,17 +6755,14 @@ Rules:
                       const mk = monthKeyOf(m);
                       const mm = m.getMonth(), yy = m.getFullYear();
                       return (
-                        <div key={mk} style={{ marginBottom: 14 }}>
-                          <div style={{ fontFamily: J, fontSize: 10, fontWeight: 700, color: headTitle, marginBottom: 5 }}>{CAL_MON[mm]} {yy}</div>
-                          {/* Boxes are a fixed 23px (60% smaller than the old fluid
-                              1fr columns), so the grid is narrower than its 420px
-                              wrapper — center it instead of letting it stretch. */}
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 23px)', gap: 2, marginBottom: 3, justifyContent: 'center' }}>
+                        <div key={mk} style={{ marginBottom: 18 }}>
+                          <div style={{ fontFamily: J, fontSize: 10, fontWeight: 700, color: headTitle, marginBottom: 6 }}>{CAL_MON[mm]} {yy}</div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3, marginBottom: 4 }}>
                             {CAL_DOW.map((d, i) => (
-                              <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: 7, fontWeight: 700, color: (i === 5 || i === 6) ? redCol : mutedCol }}>{d}</div>
+                              <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: 8, fontWeight: 700, color: (i === 5 || i === 6) ? redCol : mutedCol }}>{d}</div>
                             ))}
                           </div>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 23px)', gap: 2, justifyContent: 'center' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
                             {cellsFor(m).map((d, i) => {
                               if (d === null) return <div key={'b' + i} />;
                               const iso = mk + '-' + String(d).padStart(2, '0');
@@ -6788,15 +6779,15 @@ Rules:
                               const openable = n || p;
                               return (
                                 <div key={iso} onClick={() => openable && setOpenDay(iso)} style={{
-                                  position: 'relative', aspectRatio: '1 / 1', borderRadius: 4,
+                                  position: 'relative', aspectRatio: '1 / 1', minHeight: 34, borderRadius: 7,
                                   border: `1px solid ${iso === todayIso ? (dark ? '#C9A45A' : '#001A4A') : bord}`,
                                   background: bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                                   cursor: openable ? 'pointer' : 'default',
                                 }}>
-                                  <div style={{ position: 'absolute', top: 1, left: 2, fontFamily: J, fontSize: 5.5, fontWeight: 600, color: off ? redCol : mutedCol }}>{d}</div>
-                                  {n ? <span style={{ fontFamily: J, fontSize: 9, fontWeight: 700, color: tone.fg, lineHeight: 1 }}>{n}</span> : null}
-                                  {p ? <span style={{ fontFamily: J, fontSize: 5.5, fontWeight: 700, color: headTitle, opacity: 0.45, lineHeight: 1.3 }}>{n ? '+' : ''}{p}</span> : null}
-                                  {off && <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, color: redCol, opacity: 0.42, pointerEvents: 'none' }}>✕</span>}
+                                  <div style={{ position: 'absolute', top: 2, left: 4, fontFamily: J, fontSize: 7, fontWeight: 600, color: off ? redCol : mutedCol }}>{d}</div>
+                                  {n ? <span style={{ fontFamily: J, fontSize: 12, fontWeight: 700, color: tone.fg, lineHeight: 1 }}>{n}</span> : null}
+                                  {p ? <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, color: headTitle, opacity: 0.45, lineHeight: 1.4 }}>{n ? '+' : ''}{p}</span> : null}
+                                  {off && <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, fontWeight: 800, color: redCol, opacity: 0.42, pointerEvents: 'none' }}>✕</span>}
                                 </div>
                               );
                             })}

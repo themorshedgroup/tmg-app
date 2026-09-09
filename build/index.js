@@ -17013,7 +17013,6 @@ function CapacityView({
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [monthsLoaded, setMonthsLoaded] = useState(CAPACITY_MONTHS_STEP);
-  const [showProjected, setShowProjected] = useState(true);
   const [openDay, setOpenDay] = useState(null); // 'YYYY-MM-DD' | null
 
   const headTitle = dark ? '#FFFFFF' : '#001A4A';
@@ -17132,10 +17131,7 @@ function CapacityView({
     });
     return out;
   }, [visible]);
-  const projection = useMemo(() => showProjected ? projectCallCadence(visible, endIso, todayIso) : {
-    byOwner: {},
-    unprojected: 0
-  }, [visible, endIso, todayIso, showProjected]);
+  const projection = useMemo(() => projectCallCadence(visible, endIso, todayIso), [visible, endIso, todayIso]);
   const monthTotals = useMemo(() => {
     const keys = new Set(months.map(monthKeyOf));
     const inMonth = iso => iso && keys.has(iso.slice(0, 7));
@@ -17204,17 +17200,9 @@ function CapacityView({
     agents: pickable
   }) : /*#__PURE__*/React.createElement("div", {
     style: {
-      flex: 1,
-      minWidth: 0,
-      fontFamily: J,
-      fontSize: 10,
-      fontWeight: 600,
-      color: headTitle,
-      whiteSpace: 'nowrap',
-      overflow: 'hidden',
-      textOverflow: 'ellipsis'
+      flex: 1
     }
-  }, "Your calls", mine ? ' — ' + mine : ''), /*#__PURE__*/React.createElement("button", {
+  }), /*#__PURE__*/React.createElement("button", {
     onClick: () => !busy && load(true),
     disabled: busy,
     title: "Refresh from Zoho",
@@ -17249,39 +17237,7 @@ function CapacityView({
       fontSize: 9,
       color: mutedCol
     }
-  }, "Loading the team's open calls\u2026", progress ? ' ' + progress.toLocaleString() + ' so far' : ''), !err && calls !== null && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      marginBottom: 9,
-      fontFamily: J,
-      fontSize: 8,
-      color: mutedCol,
-      cursor: 'pointer',
-      userSelect: 'none'
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "checkbox",
-    checked: showProjected,
-    onChange: e => setShowProjected(e.target.checked),
-    style: {
-      accentColor: dark ? '#C9A45A' : '#001A4A',
-      cursor: 'pointer',
-      width: 12,
-      height: 12
-    }
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      width: 14,
-      height: 14,
-      background: capHatch(dark),
-      border: `1px solid ${bord}`,
-      borderRadius: 3,
-      display: 'inline-block',
-      flexShrink: 0
-    }
-  }), "Show where each contact's next touch lands"), capped && /*#__PURE__*/React.createElement("div", {
+  }, "Loading the team's open calls\u2026", progress ? ' ' + progress.toLocaleString() + ' so far' : ''), !err && calls !== null && /*#__PURE__*/React.createElement(React.Fragment, null, capped && /*#__PURE__*/React.createElement("div", {
     style: {
       fontFamily: J,
       fontSize: 8,
@@ -17394,7 +17350,7 @@ function CapacityView({
     return /*#__PURE__*/React.createElement("div", {
       key: mk,
       style: {
-        marginBottom: 14
+        marginBottom: 18
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -17402,31 +17358,29 @@ function CapacityView({
         fontSize: 10,
         fontWeight: 700,
         color: headTitle,
-        marginBottom: 5
+        marginBottom: 6
       }
     }, CAL_MON[mm], " ", yy), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'grid',
-        gridTemplateColumns: 'repeat(7, 23px)',
-        gap: 2,
-        marginBottom: 3,
-        justifyContent: 'center'
+        gridTemplateColumns: 'repeat(7, 1fr)',
+        gap: 3,
+        marginBottom: 4
       }
     }, CAL_DOW.map((d, i) => /*#__PURE__*/React.createElement("div", {
       key: i,
       style: {
         textAlign: 'center',
         fontFamily: J,
-        fontSize: 7,
+        fontSize: 8,
         fontWeight: 700,
         color: i === 5 || i === 6 ? redCol : mutedCol
       }
     }, d))), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'grid',
-        gridTemplateColumns: 'repeat(7, 23px)',
-        gap: 2,
-        justifyContent: 'center'
+        gridTemplateColumns: 'repeat(7, 1fr)',
+        gap: 3
       }
     }, cellsFor(m).map((d, i) => {
       if (d === null) return /*#__PURE__*/React.createElement("div", {
@@ -17450,7 +17404,8 @@ function CapacityView({
         style: {
           position: 'relative',
           aspectRatio: '1 / 1',
-          borderRadius: 4,
+          minHeight: 34,
+          borderRadius: 7,
           border: `1px solid ${iso === todayIso ? dark ? '#C9A45A' : '#001A4A' : bord}`,
           background: bg,
           display: 'flex',
@@ -17462,17 +17417,17 @@ function CapacityView({
       }, /*#__PURE__*/React.createElement("div", {
         style: {
           position: 'absolute',
-          top: 1,
-          left: 2,
+          top: 2,
+          left: 4,
           fontFamily: J,
-          fontSize: 5.5,
+          fontSize: 7,
           fontWeight: 600,
           color: off ? redCol : mutedCol
         }
       }, d), n ? /*#__PURE__*/React.createElement("span", {
         style: {
           fontFamily: J,
-          fontSize: 9,
+          fontSize: 12,
           fontWeight: 700,
           color: tone.fg,
           lineHeight: 1
@@ -17480,11 +17435,11 @@ function CapacityView({
       }, n) : null, p ? /*#__PURE__*/React.createElement("span", {
         style: {
           fontFamily: J,
-          fontSize: 5.5,
+          fontSize: 7,
           fontWeight: 700,
           color: headTitle,
           opacity: 0.45,
-          lineHeight: 1.3
+          lineHeight: 1.4
         }
       }, n ? '+' : '', p) : null, off && /*#__PURE__*/React.createElement("span", {
         style: {
@@ -17493,7 +17448,7 @@ function CapacityView({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          fontSize: 11,
+          fontSize: 17,
           fontWeight: 800,
           color: redCol,
           opacity: 0.42,

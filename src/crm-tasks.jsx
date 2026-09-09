@@ -664,6 +664,17 @@
     // the Enter-KPI contact form writes, kept in one place so the two agree.
     const CONTACT_CLASS_FIELD = 'Client_Classification';
     const CADENCE_TIERS = ['A', 'B', 'C'];
+    // People who have left TMG. Their Zoho records still name them as owner —
+    // Cassie alone still owns 491 contacts, 489 of them classified with no call
+    // — so Cadence Health listed her as an agent carrying a 489-call backlog
+    // nobody was ever going to work.
+    //
+    // This hides the PERSON, never their data: not one record is touched, and
+    // the filter below only drops a former agent who holds no open calls. The
+    // moment one actually has a call assigned, they reappear with its count,
+    // because that is real work somebody has to deal with.
+    const FORMER_AGENTS = ['cassandra clemons'];
+    function isFormerAgent(name) { return FORMER_AGENTS.includes(String(name || '').trim().toLowerCase()); }
     function parseTouchClass(subject) { const m = /(?:^|\b)([ABC])\s*touch/i.exec(subject || ''); return m ? m[1].toUpperCase() : null; }
     function dateOnly(s) { const m = /^(\d{4}-\d{2}-\d{2})/.exec(s || ''); return m ? m[1] : null; }
     function addDaysISO(iso, days) { const base = dateOnly(iso); if (!base) return null; const p = base.split('-').map(Number); const d = new Date(Date.UTC(p[0], p[1] - 1, p[2])); if (isNaN(d)) return null; d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); }
@@ -1848,7 +1859,10 @@
           if (o) counts[o] = (counts[o] || 0) + 1;
         });
         missingAll.forEach(m => { if (m.owner && m.owner !== '—' && !(m.owner in counts)) counts[m.owner] = 0; });
-        return Object.keys(counts).map(name => ({ name, count: counts[name] })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+        return Object.keys(counts)
+          .map(name => ({ name, count: counts[name] }))
+          .filter(o => o.count > 0 || !isFormerAgent(o.name))
+          .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
       }, [tasks, colMap, missingAll]);
       const [owner, setOwner] = useState('');
       useEffect(() => {

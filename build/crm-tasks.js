@@ -947,6 +947,40 @@ function devContactPhones() {
   });
   return map;
 }
+// Dev mirror of the sweep above: reuses the phone fixture and derives each
+// contact's tier from their own call subject, plus three classified
+// contacts with NO call at all so Step 2 has something to find locally.
+function devContactIndex() {
+  const phones = devContactPhones();
+  const meta = {};
+  DEV_TASKS.forEach(t => {
+    const id = t.Who_Id && t.Who_Id.id;
+    if (!id || meta[id]) return;
+    meta[id] = {
+      name: t.Who_Id && t.Who_Id.name || id,
+      owner: t.Owner && t.Owner.name || '',
+      ownerId: t.Owner && t.Owner.id || 'dev-u-1',
+      cls: parseTouchClass(t.Subject) || 'B'
+    };
+  });
+  ['dev-miss-1', 'dev-miss-2', 'dev-miss-3'].forEach((id, i) => {
+    meta[id] = {
+      name: 'Missing Cadence ' + (i + 1),
+      owner: 'Tarek Morshed',
+      ownerId: 'dev-u-tarek',
+      cls: ['A', 'B', 'C'][i]
+    };
+    phones[id] = i !== 2; // one of the three is unreachable, so the skip path is exercised
+  });
+  const out = {};
+  Object.keys(meta).forEach(id => {
+    out[id] = {
+      phone: phones[id] !== false,
+      ...meta[id]
+    };
+  });
+  return out;
+}
 // The real pairing source: each contact's own Spouse lookup field (found
 // by label, same as the app's other spouse tools — spouse_links resolves
 // it live). Batched at 60 (the edge action's own cap); dev uses the mock
@@ -1006,15 +1040,19 @@ async function fetchSpouseLinksFor(keys) {
 // would read as "these contacts have no number", and the only thing this
 // feeds is a DELETE list — so a failed read must produce nothing to delete,
 // never a shorter list of survivors.
-let CONTACT_PHONES = null; // contact id -> true when they have their own number
+// ONE sweep, two consumers: whether a contact has a number of their own
+// (the unreachable-call check) and their classification + owner (the
+// missing-cadence check). Both need the whole Contacts module, and paging
+// it twice doubled an already slow read — so it is fetched once and shared.
+let CONTACT_INDEX = null; // contact id -> { phone, cls, owner, ownerId, name }
 function clearContactPhonesCache() {
-  CONTACT_PHONES = null;
+  CONTACT_INDEX = null;
 }
-async function fetchContactPhones() {
-  if (CONTACT_PHONES) return CONTACT_PHONES;
+async function fetchContactIndex() {
+  if (CONTACT_INDEX) return CONTACT_INDEX;
   if (isDev()) {
-    CONTACT_PHONES = devContactPhones();
-    return CONTACT_PHONES;
+    CONTACT_INDEX = devContactIndex();
+    return CONTACT_INDEX;
   }
   const has = v => !!(v && String(v).trim());
   const map = {};
@@ -1026,7 +1064,7 @@ async function fetchContactPhones() {
     const args = {
       action: 'list_tasks',
       module: 'Contacts',
-      fields: ['Phone', 'Mobile', 'Other_Phone'],
+      fields: ['Phone', 'Mobile', 'Other_Phone', 'Full_Name', 'Owner', CONTACT_CLASS_FIELD],
       per_page: 200
     };
     if (token) args.page_token = token;else args.page = page;
@@ -1036,15 +1074,33 @@ async function fetchContactPhones() {
     } = await callZoho(args);
     if (!ok) return null;
     (data.tasks || []).forEach(c => {
-      map[c.id] = has(c.Phone) || has(c.Mobile) || has(c.Other_Phone);
+      map[c.id] = {
+        phone: has(c.Phone) || has(c.Mobile) || has(c.Other_Phone),
+        cls: c[CONTACT_CLASS_FIELD] || null,
+        owner: c.Owner && c.Owner.name || '',
+        ownerId: c.Owner && c.Owner.id || null,
+        name: c.Full_Name || ''
+      };
     });
     more = !!(data.info && data.info.more_records);
     token = data.info && data.info.next_page_token || null;
     if (more && !token && page >= 10) break;
     page++;
   }
-  CONTACT_PHONES = map;
+  CONTACT_INDEX = map;
   return map;
+}
+// Unchanged contract, now derived: null on ANY failure, never a partial
+// map. A half-read sweep would read as “these contacts have no number”,
+// and the only thing this feeds is a DELETE list.
+async function fetchContactPhones() {
+  const idx = await fetchContactIndex();
+  if (!idx) return null;
+  const out = {};
+  Object.keys(idx).forEach(id => {
+    out[id] = idx[id].phone;
+  });
+  return out;
 }
 
 // Cadence math (duplicate resolution, no-baseline detection, spouse
@@ -1697,6 +1753,10 @@ const CALL_INTERVALS = {
     C: 90
   }
 };
+// The Contacts picklist that decides a contact's call interval. Same field
+// the Enter-KPI contact form writes, kept in one place so the two agree.
+const CONTACT_CLASS_FIELD = 'Client_Classification';
+const CADENCE_TIERS = ['A', 'B', 'C'];
 function parseTouchClass(subject) {
   const m = /(?:^|\b)([ABC])\s*touch/i.exec(subject || '');
   return m ? m[1].toUpperCase() : null;
@@ -3189,15 +3249,169 @@ function findNoPhoneCalls({
   })).sort((a, b) => a.contact.localeCompare(b.contact) || String(a.due).localeCompare(String(b.due)));
 }
 
+// ─── Missing cadence calls ──────────────────────────────────────────
+// A contact with a client classification (A/B/C) is IN the cadence by
+// definition — the tier is exactly what sets their call interval. If they
+// have no open call at all, they have silently dropped out of it and
+// nothing will put them back: Zoho only writes the next touch when the
+// previous one is COMPLETED, so a call that was deleted, or a contact
+// classified after their last call, leaves no successor behind.
+//
+// `contacts` is the full index from fetchContactIndex. A null index (the
+// sweep failed) yields an EMPTY list, never a full one — this feeds a
+// CREATE list, and a half-read sweep would invent second calls for people
+// who already have one.
+function findMissingCadenceCalls({
+  tasks,
+  colMap,
+  contacts,
+  owner
+}) {
+  if (!contacts) return [];
+  const withOpenCall = new Set();
+  (tasks || []).forEach(t => {
+    if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
+    const cid = t.Who_Id?.id;
+    if (cid) withOpenCall.add(cid);
+  });
+  return Object.keys(contacts).filter(id => CADENCE_TIERS.includes(contacts[id].cls) && !withOpenCall.has(id)).filter(id => !owner || contacts[id].owner === owner).map(id => ({
+    cid: id,
+    name: contacts[id].name || id,
+    cls: contacts[id].cls,
+    owner: contacts[id].owner || '—',
+    ownerId: contacts[id].ownerId,
+    phone: contacts[id].phone
+  })).sort((a, b) => CADENCE_TIERS.indexOf(a.cls) - CADENCE_TIERS.indexOf(b.cls) || a.name.localeCompare(b.name));
+}
+
+// Who among them can actually be rung — the SAME reachability rule Step 1
+// deletes by (a number of their own, or a spouse with one), so the two
+// steps can't contradict each other by seeding a call Step 1 would turn
+// around and delete. Only contacts with no number of their own need the
+// spouse lookup, so it stays small. An unresolved lookup counts as
+// reachable, matching Step 1's "unknown means leave it alone".
+function splitReachable(missing, spouseLinks, phones) {
+  const reach = [],
+    unreachable = [];
+  (missing || []).forEach(m => {
+    if (m.phone) {
+      reach.push(m);
+      return;
+    }
+    if (!spouseLinks || !(m.cid in spouseLinks)) {
+      reach.push(m);
+      return;
+    }
+    const sp = spouseLinks[m.cid];
+    if (sp && sp.id && phones && phones[sp.id]) reach.push(m);else unreachable.push(m);
+  });
+  return {
+    reach,
+    unreachable
+  };
+}
+
+// Seeds the missing calls onto real workable days rather than dumping them
+// all on today: the same per-day cap, the same weekend/holiday skip and the
+// same A-before-B-before-C ordering the backlog packer uses, counting the
+// agent's existing calls AND projected cadence as load so a re-seed can't
+// quietly push a day past capacity.
+//
+// Each contact's target is their own cadence date wherever one can be
+// computed (last completed call + their tier's interval); a contact with no
+// completed call anywhere has no cadence to resume, so they start at
+// `start` and queue by tier like everyone else.
+function packMissingCalls({
+  tasks,
+  colMap,
+  missing,
+  owner,
+  perDay,
+  start,
+  extraCompleted,
+  projLoad
+}) {
+  const load = {};
+  (tasks || []).forEach(t => {
+    if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap) || !t.Due_Date) return;
+    if (owner && t.Owner?.name !== owner) return;
+    const iso = String(t.Due_Date).slice(0, 10);
+    load[iso] = (load[iso] || 0) + 1;
+  });
+  const projByIso = {};
+  if (projLoad) Object.keys(projLoad).forEach(k => {
+    const i = k.indexOf('|');
+    if (i < 0) return;
+    if (owner && k.slice(0, i) !== owner) return;
+    const iso = k.slice(i + 1);
+    projByIso[iso] = (projByIso[iso] || 0) + projLoad[k];
+  });
+  const baseline = lastCompletedByContact(tasks, colMap);
+  const bucketOf = name => /tarek/i.test(name || '') ? 'tarek' : 'other';
+  const floor = isoOf(nextWorkday(parseISO(start) || new Date()));
+  const withTarget = (missing || []).map(m => {
+    const last = baseline[m.cid] || extraCompleted && extraCompleted[m.cid] || null;
+    const lastDate = last ? dateOnly(last.Closed_Time || last.Due_Date) : null;
+    const want = lastDate ? cadenceDate(lastDate, (CALL_INTERVALS[bucketOf(m.owner)] || CALL_INTERVALS.other)[m.cls]) : null;
+    // A cadence date already in the past is not a reason to backdate a
+    // brand-new task — it just means this contact is due as soon as
+    // there's room, which is what the floor already says.
+    return {
+      ...m,
+      last_call: lastDate,
+      target: want && want > floor ? want : floor
+    };
+  });
+  const ordered = withTarget.slice().sort((a, b) => String(a.target).localeCompare(String(b.target)) || CADENCE_TIERS.indexOf(a.cls) - CADENCE_TIERS.indexOf(b.cls) || a.name.localeCompare(b.name));
+  const byDate = {};
+  let placed = 0;
+  ordered.forEach(m => {
+    let day = nextWorkday(parseISO(m.target) || new Date());
+    let guard = 0;
+    while (guard++ < 900) {
+      const iso = isoOf(day);
+      const used = (load[iso] || 0) + (projByIso[iso] || 0) + (byDate[iso] || []).length;
+      if (used < perDay) {
+        (byDate[iso] = byDate[iso] || []).push({
+          ...m,
+          due_date: iso
+        });
+        placed++;
+        return;
+      }
+      day = nextWorkday(new Date(day.setDate(day.getDate() + 1)));
+    }
+  });
+  const days = Object.keys(byDate).sort().map(iso => ({
+    date: iso,
+    contacts: byDate[iso],
+    booked: load[iso] || 0,
+    proj: projByIso[iso] || 0,
+    projected: (load[iso] || 0) + (projByIso[iso] || 0) + byDate[iso].length
+  }));
+  return {
+    days,
+    total: (missing || []).length,
+    placed,
+    neverCalled: withTarget.filter(m => !m.last_call).length
+  };
+}
+
 // Couples whose single surviving Not-Started call has drifted apart —
 // uses the higher-touch-wins target rule (resolveCoupleTarget) to decide
 // the shared date. Only pairs contacts with exactly one open call each —
 // a contact still showing 2+ belongs to the duplicate list above, not here.
+// `owner`, when given, restricts the run to couples where BOTH partners'
+// calls belong to that agent. A couple split across two agents cannot be
+// aligned from one agent's clean slate — moving the partner's date would
+// write into a calendar this run has not been cleared to touch — so those
+// are counted and reported rather than silently dropped.
 function spouseAlignmentIssues({
   tasks,
   colMap,
   spouseLinks,
-  extraCompleted
+  extraCompleted,
+  owner
 }) {
   const oneCallByContact = {},
     countByContact = {};
@@ -3229,6 +3443,7 @@ function spouseAlignmentIssues({
   }
   const seen = new Set(),
     out = [];
+  let crossOwner = 0;
   Object.keys(oneCallByContact).forEach(cid => {
     if (countByContact[cid] !== 1) return;
     const t = oneCallByContact[cid];
@@ -3242,12 +3457,17 @@ function spouseAlignmentIssues({
     const A = partnerInfo(cid, t.Who_Id?.name || cid);
     const B = partnerInfo(partnerId, partnerTask.Who_Id?.name || partnerId);
     if (A.due && B.due && A.due === B.due) return; // already aligned
+    if (owner && !(A.owner === owner && B.owner === owner)) {
+      crossOwner++;
+      return;
+    }
     out.push({
       a: A,
       b: B,
       target_date: resolveCoupleTarget(A, B)
     });
   });
+  out.crossOwner = crossOwner;
   return out;
 }
 
@@ -3268,15 +3488,21 @@ function packSpouseAlignment({
   spouseLinks,
   perDay,
   start,
-  extraCompleted
+  extraCompleted,
+  owner
 }) {
   const pairs = spouseAlignmentIssues({
     tasks,
     colMap,
     spouseLinks,
-    extraCompleted
+    extraCompleted,
+    owner
   });
-  if (!pairs.length) return [];
+  const crossOwner = pairs.crossOwner || 0;
+  if (!pairs.length) return {
+    pairs: [],
+    crossOwner
+  };
   const load = {};
   (tasks || []).forEach(t => {
     if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap) || !t.Due_Date) return;
@@ -3316,18 +3542,29 @@ function packSpouseAlignment({
     return p; // guard exhausted (extreme backlog) — keep its unpacked date rather than drop it
   });
   // Display/apply in date order, not original-mismatch order.
-  return placed.sort((a, b) => String(a.target_date || '').localeCompare(String(b.target_date || '')));
+  return {
+    pairs: placed.sort((a, b) => String(a.target_date || '').localeCompare(String(b.target_date || ''))),
+    crossOwner
+  };
 }
 
-// One popout, three tabs, in order — Duplicates → Backlog → Spouse
-// alignment. Each step depends on the one before it being clean, so a
-// later tab shows a "do this first" gate (with a one-click jump back)
+// One popout, four tabs, in order — Duplicates → Missing calls → Backlog
+// → Spouse alignment. Each step depends on the one before it being clean,
+// so a later tab shows a "do this first" gate (with a one-click jump back)
 // instead of pretending to be independent.
+//
+// Steps 2-4 are scoped to ONE AGENT and the gate chain is evaluated for
+// that agent alone: an agent whose own list is already clean can be taken
+// straight through to spouse alignment while somebody else's backlog is
+// still a mess. (Step 1 stays org-wide — removing a duplicate is safe and
+// cheap whoever owns it, and leaving one behind would corrupt every later
+// step's contact-to-call arithmetic.)
 function CadenceHealth({
   tasks,
   colMap,
   onDeleteIds,
   onSetDates,
+  onCreateCalls,
   onClose
 }) {
   const [tab, setTab] = useState('dupes');
@@ -3430,15 +3667,17 @@ function CadenceHealth({
   // has no number of their own, and only THOSE contacts then get a spouse
   // lookup — a contact whose spouse has a line is reachable (the Calls tab
   // dials it) and is deliberately left alone.
-  const [phones, setPhones] = useState(null);
+  // The same sweep also carries each contact's classification and owner,
+  // which is all Step 2 needs — so it is fetched once, here, and shared.
+  const [contactIdx, setContactIdx] = useState(null);
   const [phonesLoading, setPhonesLoading] = useState(true);
   const [phonesFailed, setPhonesFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setPhonesLoading(true);
-    fetchContactPhones().then(m => {
+    fetchContactIndex().then(m => {
       if (cancelled) return;
-      setPhones(m);
+      setContactIdx(m);
       setPhonesFailed(!m);
       setPhonesLoading(false);
     });
@@ -3446,6 +3685,14 @@ function CadenceHealth({
       cancelled = true;
     };
   }, []);
+  const phones = useMemo(() => {
+    if (!contactIdx) return null;
+    const out = {};
+    Object.keys(contactIdx).forEach(id => {
+      out[id] = contactIdx[id].phone;
+    });
+    return out;
+  }, [contactIdx]);
   const noPhoneCandidates = useMemo(() => {
     if (!phones) return [];
     const out = new Set();
@@ -3488,7 +3735,6 @@ function CadenceHealth({
     spouseLinks: noPhoneLinks
   }) : [], [noPhoneReady, tasks, colMap, phones, noPhoneLinks]);
   const removeAll = fixable.flatMap(g => g.removeIds).concat(unclassified.map(u => u.id)).concat(noPhone.map(n => n.id));
-  const dupesClear = fixable.length === 0; // needs-review cases don't block — can't be fixed from here
   const dupesBusyLoading = dupeLinksLoading || completedLoading;
   async function applyDupes() {
     setBusy(true);
@@ -3503,7 +3749,7 @@ function CadenceHealth({
     });
   }
 
-  // ── Step 2: Backlog (overdue + no-cadence, one combined pack) ────
+  // ── Scheduling controls, shared by Steps 2-4 ─────────────────────
   const [cutoff, setCutoff] = useState(() => todayISO());
   const [start, setStart] = useState(() => todayISO());
   const [perDay, setPerDay] = useState(5);
@@ -3519,17 +3765,156 @@ function CadenceHealth({
   // compares greater). Nothing downstream can act on those phantom
   // dates, but there's no reason to compute them — fall back to today.
   () => countProjected ? projectedLoadMap(tasks, colMap, addDaysISO(start, 730) || addDaysISO(todayISO(), 730)) : null, [tasks, colMap, start, countProjected]);
-  const owners = useMemo(() => scopeOwners({
+
+  // ── Step 2: classified contacts with no call at all ──────────────
+  const missingAll = useMemo(() => findMissingCadenceCalls({
     tasks,
     colMap,
-    cutoff,
-    perDay,
-    projLoad
-  }), [tasks, colMap, cutoff, perDay, projLoad]);
+    contacts: contactIdx
+  }), [tasks, colMap, contactIdx]);
+  const missingByOwner = useMemo(() => {
+    const m = {};
+    missingAll.forEach(x => {
+      m[x.owner] = (m[x.owner] || 0) + 1;
+    });
+    return m;
+  }, [missingAll]);
+
+  // ── Agent scope, shared by Steps 2-4 ─────────────────────────────
+  // Every agent with calls to work, NOT only the ones who still have a
+  // backlog. Building this list from the backlog scope alone meant an
+  // agent who was already clean disappeared from the picker entirely and
+  // could never be taken through the later steps at all.
+  const allOwners = useMemo(() => {
+    const counts = {};
+    (tasks || []).forEach(t => {
+      if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap)) return;
+      const o = t.Owner?.name;
+      if (o) counts[o] = (counts[o] || 0) + 1;
+    });
+    Object.keys(missingByOwner).forEach(o => {
+      if (o && o !== '—' && !(o in counts)) counts[o] = 0;
+    });
+    return Object.keys(counts).map(name => ({
+      name,
+      count: counts[name]
+    })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [tasks, colMap, missingByOwner]);
   const [owner, setOwner] = useState('');
   useEffect(() => {
-    if (owners.length && !owners.some(o => o.name === owner)) setOwner(owners[0].name);
-  }, [owners]);
+    if (allOwners.length && !allOwners.some(o => o.name === owner)) setOwner(allOwners[0].name);
+  }, [allOwners]);
+  const missingMine = useMemo(() => missingAll.filter(m => m.owner === owner), [missingAll, owner]);
+  const missingMineKey = missingMine.map(m => m.cid).join('|');
+  // Only the ones with no number of their own need a spouse lookup — the
+  // rest are reachable on their own line and never reach that branch.
+  const missingNoPhoneKey = missingMine.filter(m => !m.phone).map(m => m.cid).join('|');
+  const [missingLinks, setMissingLinks] = useState({});
+  const [missingLinksLoading, setMissingLinksLoading] = useState(false);
+  useEffect(() => {
+    if (tab !== 'missing') return; // a ~2,000-contact index is cheap; these per-contact lookups are not
+    let cancelled = false;
+    const ids = missingNoPhoneKey ? missingNoPhoneKey.split('|') : [];
+    if (!ids.length) {
+      setMissingLinks({});
+      setMissingLinksLoading(false);
+      return;
+    }
+    setMissingLinksLoading(true);
+    fetchSpouseLinksFor(ids).then(links => {
+      if (!cancelled) {
+        setMissingLinks(links);
+        setMissingLinksLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [missingNoPhoneKey, tab]);
+  // Their last completed call is what dates the new one — same blind spot
+  // as everywhere else here (the default view hides completed tasks), so
+  // it takes the same scoped live lookup, and only for the agent on screen.
+  const [missingExtra, setMissingExtra] = useState({});
+  const [missingCompletedLoading, setMissingCompletedLoading] = useState(false);
+  useEffect(() => {
+    if (tab !== 'missing') return;
+    let cancelled = false;
+    const ids = missingMineKey ? missingMineKey.split('|') : [];
+    if (!ids.length) {
+      setMissingExtra({});
+      setMissingCompletedLoading(false);
+      return;
+    }
+    setMissingCompletedLoading(true);
+    fetchLastCompletedFor(ids).then(map => {
+      if (!cancelled) {
+        setMissingExtra(map);
+        setMissingCompletedLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [missingMineKey, tab]);
+  const missingSplit = useMemo(() => splitReachable(missingMine, missingLinks, phones), [missingMine, missingLinks, phones]);
+  const missingPlan = useMemo(() => packMissingCalls({
+    tasks,
+    colMap,
+    missing: missingSplit.reach,
+    owner,
+    perDay,
+    start,
+    extraCompleted: missingExtra,
+    projLoad
+  }), [tasks, colMap, missingSplit, owner, perDay, start, missingExtra, projLoad]);
+  const missingByTier = useMemo(() => {
+    const m = {
+      A: 0,
+      B: 0,
+      C: 0
+    };
+    missingSplit.reach.forEach(x => {
+      m[x.cls] = (m[x.cls] || 0) + 1;
+    });
+    return m;
+  }, [missingSplit]);
+  const missingBusyLoading = phonesLoading || missingLinksLoading || missingCompletedLoading;
+  async function applyMissing() {
+    setBusy(true);
+    const items = missingPlan.days.flatMap(d => d.contacts.map(c => ({
+      cid: c.cid,
+      name: c.name,
+      cls: c.cls,
+      owner: c.owner,
+      ownerId: c.ownerId,
+      due_date: d.date
+    })));
+    const res = await onCreateCalls(items);
+    setBusy(false);
+    setDone(res && res.ok ? {
+      ok: true,
+      n: res.count || items.length
+    } : {
+      ok: false,
+      error: res && res.error || 'Some calls could not be created.'
+    });
+  }
+
+  // ── Gate chain, evaluated for the SELECTED agent ─────────────────
+  // The chain is unchanged — each step still needs the one before it to be
+  // clean — but it is now asked per agent instead of org-wide, so one
+  // agent's untouched pile no longer freezes everybody else's later steps.
+  // Duplicates are a CORRECTNESS gate — the same contact would be packed
+  // twice under two different reasons — so that one can't be waved past.
+  // Missing calls are a sequencing preference: the backlog plan isn't
+  // wrong without them, just incomplete, so that gate can be skipped
+  // deliberately rather than trapping anyone who only came to reschedule.
+  const [skipMissingGate, setSkipMissingGate] = useState(false);
+  const dupesClearFor = o => !fixable.some(g => g.owner === o);
+  const missingClearFor = o => !missingAll.some(m => m.owner === o);
+  const backlogGate = !dupesClearFor(owner) ? 'dupes' : !missingClearFor(owner) && !skipMissingGate ? 'missing' : null;
+
+  // ── Step 3: Backlog (overdue + no-cadence, one combined pack) ────
   const backlogCandidateKeys = useMemo(() => inScopeCalls({
     tasks,
     colMap,
@@ -3541,7 +3926,7 @@ function CadenceHealth({
   const [backlogLinks, setBacklogLinks] = useState({});
   const [backlogLinksLoading, setBacklogLinksLoading] = useState(false);
   useEffect(() => {
-    if (!dupesClear) return; // don't bother fetching until Step 1 is clean
+    if (backlogGate) return; // don't bother fetching until Steps 1-2 are clean for this agent
     let cancelled = false;
     setBacklogLinksLoading(true);
     fetchSpouseLinksFor(backlogCandidateKeys).then(links => {
@@ -3553,7 +3938,7 @@ function CadenceHealth({
     return () => {
       cancelled = true;
     };
-  }, [backlogCandidateKeys.join('|'), dupesClear]);
+  }, [backlogCandidateKeys.join('|'), backlogGate]);
   // "No baseline" here means "no completed call in the LOCALLY loaded
   // tasks" — which is always empty by default (completed hidden). A
   // contact that actually HAS history somewhere Zoho, just not loaded,
@@ -3569,7 +3954,7 @@ function CadenceHealth({
   const [backlogExtraCompleted, setBacklogExtraCompleted] = useState({});
   const [backlogCompletedLoading, setBacklogCompletedLoading] = useState(false);
   useEffect(() => {
-    if (!dupesClear) return;
+    if (backlogGate) return;
     let cancelled = false;
     if (!backlogNeedsLookup.length) {
       setBacklogExtraCompleted({});
@@ -3586,7 +3971,7 @@ function CadenceHealth({
     return () => {
       cancelled = true;
     };
-  }, [backlogNeedsLookup.join('|'), dupesClear]);
+  }, [backlogNeedsLookup.join('|'), backlogGate]);
   const plan = useMemo(() => packOverdue({
     tasks,
     colMap,
@@ -3610,7 +3995,11 @@ function CadenceHealth({
     perDay,
     projLoad
   }), [tasks, colMap, perDay, projLoad]);
-  const backlogClear = backlogOwnersAll.length === 0;
+  const backlogClearFor = o => !backlogOwnersAll.some(x => x.name === o);
+  const alignGate = backlogGate || (!backlogClearFor(owner) ? 'backlog' : null);
+  // Agents who could be aligned right now — shown on the gate card so the
+  // answer to "who CAN I do?" doesn't require clicking through the picker.
+  const alignReadyOwners = allOwners.filter(o => dupesClearFor(o.name) && missingClearFor(o.name) && backlogClearFor(o.name));
   async function applyBacklog() {
     setBusy(true);
     const items = plan.days.flatMap(d => d.tasks.map(t => ({
@@ -3628,17 +4017,22 @@ function CadenceHealth({
     });
   }
 
-  // ── Step 3: Spouse alignment (future-drift only) ─────────────────
-  const alignGate = !dupesClear ? 'dupes' : !backlogClear ? 'backlog' : null;
+  // ── Step 4: Spouse alignment (future-drift only) ─────────────────
+  // Scoped to the selected agent's own contacts, which also keeps the
+  // per-contact spouse and history lookups to that agent's list rather
+  // than the whole org's.
   const singleCallKeys = useMemo(() => {
-    const counts = {};
+    const counts = {},
+      ownerOf = {};
     (tasks || []).forEach(t => {
       if ((t.Status || '') !== 'Not Started' || !isCallTask(t, colMap) || isUnclassifiedTask(t)) return;
       const cid = t.Who_Id?.id || t.Who_Id?.name;
-      if (cid) counts[cid] = (counts[cid] || 0) + 1;
+      if (!cid) return;
+      counts[cid] = (counts[cid] || 0) + 1;
+      ownerOf[cid] = t.Owner?.name || '';
     });
-    return Object.keys(counts).filter(k => counts[k] === 1);
-  }, [tasks, colMap]);
+    return Object.keys(counts).filter(k => counts[k] === 1 && (!owner || ownerOf[k] === owner));
+  }, [tasks, colMap, owner]);
   const [alignLinks, setAlignLinks] = useState({});
   const [alignLinksLoading, setAlignLinksLoading] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -3696,14 +4090,19 @@ function CadenceHealth({
     clearLastCompletedCache();
     setRefreshNonce(n => n + 1);
   }
-  const aligns = useMemo(() => alignGate ? [] : packSpouseAlignment({
+  const alignRes = useMemo(() => alignGate ? {
+    pairs: [],
+    crossOwner: 0
+  } : packSpouseAlignment({
     tasks,
     colMap,
     spouseLinks: alignLinks,
     perDay: 5,
     start: todayISO(),
-    extraCompleted: alignExtraCompleted
-  }), [tasks, colMap, alignLinks, alignGate, alignExtraCompleted]);
+    extraCompleted: alignExtraCompleted,
+    owner
+  }), [tasks, colMap, alignLinks, alignGate, alignExtraCompleted, owner]);
+  const aligns = alignRes.pairs;
   const alignBusyLoading = alignLinksLoading || alignCompletedLoading;
   const alignDays = useMemo(() => new Set(aligns.map(p => p.target_date)).size, [aligns]);
   async function applyAligns() {
@@ -3855,7 +4254,39 @@ function CadenceHealth({
       borderRadius: 9,
       overflow: 'hidden'
     }
-  }, tabBtn('dupes', tab === 'dupes', false, `1 · Duplicate calls (${dupes.length + unclassified.length + noPhone.length})`), tabBtn('backlog', tab === 'backlog', !dupesClear, `2 · Backlog${dupesClear ? ' (' + plan.total + ')' : ''}`), tabBtn('align', tab === 'align', !!alignGate, `3 · Spouse alignment${alignGate ? '' : ' (' + aligns.length + ')'}`)), tab === 'align' && !alignGate && /*#__PURE__*/React.createElement("button", {
+  }, tabBtn('dupes', tab === 'dupes', false, `1 · Duplicate calls (${dupes.length + unclassified.length + noPhone.length})`), tabBtn('missing', tab === 'missing', !dupesClearFor(owner), `2 · Missing calls${dupesClearFor(owner) ? ' (' + missingMine.length + ')' : ''}`), tabBtn('backlog', tab === 'backlog', !!backlogGate, `3 · Backlog${backlogGate ? '' : ' (' + plan.total + ')'}`), tabBtn('align', tab === 'align', !!alignGate, `4 · Spouse alignment${alignGate ? '' : ' (' + aligns.length + ')'}`)), tab !== 'dupes' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.68rem',
+      fontWeight: 700,
+      letterSpacing: '.08em',
+      textTransform: 'uppercase',
+      color: C.textMuted
+    }
+  }, "Agent"), /*#__PURE__*/React.createElement("select", {
+    value: owner,
+    onChange: e => {
+      setOwner(e.target.value);
+      setDone(null);
+      setSkipMissingGate(false);
+    },
+    style: {
+      ...fld,
+      cursor: 'pointer',
+      maxWidth: 220,
+      padding: '6px 9px'
+    }
+  }, allOwners.length === 0 && /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "No agents with calls"), allOwners.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o.name,
+    value: o.name
+  }, o.name, " (", o.count, " open)")))), tab === 'align' && !alignGate && /*#__PURE__*/React.createElement("button", {
     onClick: recheckSpousePairings,
     disabled: alignBusyLoading,
     title: "Spouse pairings + call history are cached after the first check \u2014 use this to re-check against Zoho now",
@@ -4207,7 +4638,224 @@ function CadenceHealth({
       color: C.textSecondary,
       marginTop: 2
     }
-  }, g.reason))))), tab === 'backlog' && !dupesClear && /*#__PURE__*/React.createElement("div", {
+  }, g.reason))))), tab === 'missing' && !dupesClearFor(owner) && /*#__PURE__*/React.createElement("div", {
+    style: gateCard
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.86rem',
+      fontWeight: 600,
+      color: C.navy,
+      marginBottom: 4
+    }
+  }, "Resolve ", owner || 'this agent', "\u2019s duplicate calls first"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: C.textSecondary,
+      lineHeight: 1.5,
+      marginBottom: 10
+    }
+  }, "A contact with two open calls would be counted as covered here, so any list built now would be missing people. Step 1 is org-wide \u2014 clearing it clears it for every agent."), /*#__PURE__*/React.createElement("button", {
+    onClick: () => switchTab('dupes'),
+    style: {
+      ...iconBtnStatic,
+      color: '#fff',
+      background: C.navy,
+      borderColor: C.navy,
+      fontWeight: 600
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-left",
+    style: {
+      fontSize: 15
+    }
+  }), " Back to Step 1")), tab === 'missing' && dupesClearFor(owner) && /*#__PURE__*/React.createElement(React.Fragment, null, phonesFailed && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      borderColor: C.amber,
+      color: C.amber,
+      fontSize: '0.78rem'
+    }
+  }, "Couldn\u2019t read the contact list from Zoho, so nothing can be checked here this session. Reopen to retry."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: C.textMuted,
+      marginBottom: 10,
+      lineHeight: 1.5
+    }
+  }, owner || '—', " \xB7 ", missingSplit.reach.length, " classified contact", missingSplit.reach.length === 1 ? '' : 's', " with no open call at all", ' (', [missingByTier.A ? missingByTier.A + ' A' : '', missingByTier.B ? missingByTier.B + ' B' : '', missingByTier.C ? missingByTier.C + ' C' : ''].filter(Boolean).join(', ') || 'none', ')', ' · ', missingPlan.days.length, " business day", missingPlan.days.length === 1 ? '' : 's', missingPlan.neverCalled ? ' · ' + missingPlan.neverCalled + ' never called before' : '', missingPlan.placed < missingSplit.reach.length ? ' · ⚠ only ' + missingPlan.placed + ' could be placed — raise Per day' : ''), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 14,
+      flexWrap: 'wrap',
+      alignItems: 'flex-end',
+      paddingBottom: 14,
+      marginBottom: 14,
+      borderBottom: '1px solid ' + C.border
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: lbl
+  }, "Start placing"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: start,
+    onChange: e => setStart(e.target.value),
+    style: fld
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    style: lbl
+  }, "Per day"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "1",
+    max: "20",
+    value: perDay,
+    onChange: e => setPerDay(Math.max(1, +e.target.value || 1)),
+    style: {
+      ...fld,
+      width: 70
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      color: C.textMuted,
+      lineHeight: 1.45,
+      flex: '1 1 240px'
+    }
+  }, "A client classification IS the cadence \u2014 the A/B/C tier is what sets the call interval. A classified contact with no open call has dropped out of it silently, and nothing will put them back: Zoho only writes the next touch when the previous one is completed. Each new call is dated from that contact\u2019s own last completed call plus their tier\u2019s interval; anyone never called before starts as soon as there\u2019s room. Same per-day cap, weekend/holiday skip and A-before-C ordering as the backlog, and the agent\u2019s existing and projected calls count as load.")), missingBusyLoading && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 40,
+      textAlign: 'center'
+    }
+  }, /*#__PURE__*/React.createElement(Spinner, {
+    size: 20
+  })), !missingBusyLoading && missingSplit.unreachable.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.68rem',
+      fontWeight: 700,
+      letterSpacing: '.08em',
+      textTransform: 'uppercase',
+      color: C.textMuted,
+      marginBottom: 2
+    }
+  }, "No phone number \u2014 skipped (", missingSplit.unreachable.length, ")"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      marginBottom: 6,
+      lineHeight: 1.5
+    }
+  }, "Neither they nor their spouse has a number on file, so a new call couldn\u2019t be made anyway \u2014 Step 1 deletes calls for exactly these people. Add a number in Zoho and reopen to include them."), missingSplit.unreachable.map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.cid,
+    style: {
+      ...card,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: tierPill(m.cls, false)
+  }, m.cls), /*#__PURE__*/React.createElement(ZohoLink, {
+    module: "Contacts",
+    id: m.cid,
+    style: {
+      fontSize: '0.82rem',
+      fontWeight: 600,
+      color: C.textPrimary,
+      flex: 1
+    }
+  }, m.name), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.68rem',
+      color: C.textMuted,
+      flexShrink: 0
+    }
+  }, "no number")))), !missingBusyLoading && missingPlan.days.length === 0 && missingSplit.unreachable.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 40,
+      textAlign: 'center',
+      color: C.textMuted,
+      fontSize: '0.86rem'
+    }
+  }, "Every classified contact of ", owner || 'this agent', " already has an open call."), !missingBusyLoading && missingPlan.days.map(d => {
+    const cs = capacityCellStyle(d.projected);
+    return /*#__PURE__*/React.createElement("div", {
+      key: d.date,
+      style: {
+        marginBottom: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        marginBottom: 5
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: C.fontSans,
+        fontSize: '0.78rem',
+        fontWeight: 700,
+        color: C.navy
+      }
+    }, fmtDate(d.date)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.66rem',
+        fontWeight: 700,
+        borderRadius: 20,
+        padding: '1px 8px',
+        background: cs.background || C.surfaceAlt,
+        color: cs.background ? cs.color : C.textMuted
+      }
+    }, d.projected, " that day"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.68rem',
+        color: C.textMuted
+      }
+    }, "(", [d.contacts.length + ' new', d.booked ? d.booked + ' booked' : '', d.proj ? d.proj + ' projected' : ''].filter(Boolean).join(' · '), ")")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'grid',
+        gap: 4
+      }
+    }, d.contacts.map(c => /*#__PURE__*/React.createElement("div", {
+      key: c.cid,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '6px 10px',
+        border: '1px solid ' + C.border,
+        borderRadius: 7,
+        background: C.surface
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: tierPill(c.cls, false)
+    }, c.cls), /*#__PURE__*/React.createElement(ZohoLink, {
+      module: "Contacts",
+      id: c.cid,
+      style: {
+        fontSize: '0.79rem',
+        flex: 1,
+        minWidth: 0,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }
+    }, c.name), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.72rem',
+        color: C.textMuted,
+        flexShrink: 0
+      }
+    }, c.cls, " Touch Call"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.68rem',
+        color: c.last_call ? C.textMuted : C.amber,
+        fontWeight: c.last_call ? 400 : 600,
+        flexShrink: 0
+      }
+    }, c.last_call ? 'last called ' + fmtDate(c.last_call) : 'never called')))));
+  })), tab === 'backlog' && backlogGate === 'dupes' && /*#__PURE__*/React.createElement("div", {
     style: gateCard
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -4223,7 +4871,7 @@ function CadenceHealth({
       lineHeight: 1.5,
       marginBottom: 10
     }
-  }, "Some contacts still have more than one open call. Packing the backlog before that's cleaned up risks packing the same contact twice under two different reasons."), /*#__PURE__*/React.createElement("button", {
+  }, "Some of ", owner || 'this agent', "\u2019s contacts still have more than one open call. Packing the backlog before that's cleaned up risks packing the same contact twice under two different reasons."), /*#__PURE__*/React.createElement("button", {
     onClick: () => switchTab('dupes'),
     style: {
       ...iconBtnStatic,
@@ -4237,7 +4885,65 @@ function CadenceHealth({
     style: {
       fontSize: 15
     }
-  }), " Back to Step 1")), tab === 'backlog' && dupesClear && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }), " Back to Step 1")), tab === 'backlog' && backlogGate === 'missing' && /*#__PURE__*/React.createElement("div", {
+    style: gateCard
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.86rem',
+      fontWeight: 600,
+      color: C.navy,
+      marginBottom: 4
+    }
+  }, "Seed ", owner || 'this agent', "\u2019s missing calls first"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: C.textSecondary,
+      lineHeight: 1.5,
+      marginBottom: 10
+    }
+  }, missingByOwner[owner] || 0, " classified contact", (missingByOwner[owner] || 0) === 1 ? '' : 's', " have no open call at all. Packing the backlog now would fill days that those calls still have to go on, and the plan would be wrong the moment they're created."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.76rem',
+      color: C.textMuted,
+      lineHeight: 1.5,
+      marginBottom: 10
+    }
+  }, "Contacts with no phone number can\u2019t be seeded at all \u2014 if Step 2 says every remaining one is skipped for that reason, this gate will never clear on its own. Skip it."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => switchTab('missing'),
+    style: {
+      ...iconBtnStatic,
+      color: '#fff',
+      background: C.navy,
+      borderColor: C.navy,
+      fontWeight: 600
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-left",
+    style: {
+      fontSize: 15
+    }
+  }), " Back to Step 2"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSkipMissingGate(true),
+    style: {
+      ...iconBtnStatic,
+      color: C.navy
+    }
+  }, "Skip \u2014 pack the backlog anyway"))), tab === 'backlog' && !backlogGate && /*#__PURE__*/React.createElement(React.Fragment, null, skipMissingGate && !missingClearFor(owner) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      borderColor: C.amber + '66',
+      background: C.amber + '0d',
+      fontSize: '0.76rem',
+      color: C.textSecondary,
+      lineHeight: 1.5
+    }
+  }, "Step 2 skipped \u2014 ", missingByOwner[owner] || 0, " of ", owner || 'this agent', "\u2019s classified contacts still have no call at all, and the days below don\u2019t leave room for them."), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: '0.78rem',
       color: C.textMuted,
@@ -4254,21 +4960,6 @@ function CadenceHealth({
       borderBottom: '1px solid ' + C.border
     }
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-    style: lbl
-  }, "Agent"), /*#__PURE__*/React.createElement("select", {
-    value: owner,
-    onChange: e => setOwner(e.target.value),
-    style: {
-      ...fld,
-      cursor: 'pointer',
-      maxWidth: 200
-    }
-  }, owners.length === 0 && /*#__PURE__*/React.createElement("option", {
-    value: ""
-  }, "No calls need a new date"), owners.map(o => /*#__PURE__*/React.createElement("option", {
-    key: o.name,
-    value: o.name
-  }, o.name, " (", o.count, ")")))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
     style: lbl
   }, "Treat as overdue on/before"), /*#__PURE__*/React.createElement("input", {
     type: "date",
@@ -4455,7 +5146,7 @@ function CadenceHealth({
         }
       }, "was on a weekend/holiday"));
     })));
-  })), tab === 'align' && alignGate === 'dupes' && /*#__PURE__*/React.createElement("div", {
+  })), tab === 'align' && !!alignGate && /*#__PURE__*/React.createElement("div", {
     style: gateCard
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -4464,15 +5155,22 @@ function CadenceHealth({
       color: C.navy,
       marginBottom: 4
     }
-  }, "Resolve duplicate calls first"), /*#__PURE__*/React.createElement("div", {
+  }, alignGate === 'dupes' ? `Resolve ${owner || 'this agent'}’s duplicate calls first` : alignGate === 'missing' ? `Seed ${owner || 'this agent'}’s missing calls first` : `Clear ${owner || 'this agent'}’s backlog first`), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: '0.78rem',
       color: C.textSecondary,
       lineHeight: 1.5,
       marginBottom: 10
     }
-  }, "A contact with two open calls can't be checked for date alignment yet."), /*#__PURE__*/React.createElement("button", {
-    onClick: () => switchTab('dupes'),
+  }, alignGate === 'dupes' ? 'A contact with two open calls can’t be checked for date alignment yet.' : alignGate === 'missing' ? `${missingByOwner[owner] || 0} of their classified contacts have no open call at all — a couple can’t be aligned while one partner has nothing to align to. If Step 2 says the rest are skipped for having no phone number, use its Skip on Step 3.` : `They still have ${(backlogOwnersAll.find(o => o.name === owner) || {}).count || 0} overdue or no-cadence call${((backlogOwnersAll.find(o => o.name === owner) || {}).count || 0) === 1 ? '' : 's'}. Aligning a couple now would just get undone when that backlog is packed.`), alignReadyOwners.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.76rem',
+      color: C.textSecondary,
+      lineHeight: 1.5,
+      marginBottom: 10
+    }
+  }, "Ready to align now: ", alignReadyOwners.map(o => o.name).join(', '), " \u2014 switch agent above to do ", alignReadyOwners.length === 1 ? 'them' : 'one of them', " without waiting for the rest."), /*#__PURE__*/React.createElement("button", {
+    onClick: () => switchTab(alignGate),
     style: {
       ...iconBtnStatic,
       color: '#fff',
@@ -4485,37 +5183,7 @@ function CadenceHealth({
     style: {
       fontSize: 15
     }
-  }), " Back to Step 1")), tab === 'align' && alignGate === 'backlog' && /*#__PURE__*/React.createElement("div", {
-    style: gateCard
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: '0.86rem',
-      fontWeight: 600,
-      color: C.navy,
-      marginBottom: 4
-    }
-  }, "Clear the backlog first"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: '0.78rem',
-      color: C.textSecondary,
-      lineHeight: 1.5,
-      marginBottom: 10
-    }
-  }, backlogOwnersAll.length, " agent", backlogOwnersAll.length === 1 ? '' : 's', " still ", backlogOwnersAll.length === 1 ? 'has' : 'have', " overdue or no-cadence calls: ", backlogOwnersAll.map(o => `${o.name} (${o.count})`).join(', '), ". Reschedule those first \u2014 aligning a couple now could just get undone when that backlog gets packed."), /*#__PURE__*/React.createElement("button", {
-    onClick: () => switchTab('backlog'),
-    style: {
-      ...iconBtnStatic,
-      color: '#fff',
-      background: C.navy,
-      borderColor: C.navy,
-      fontWeight: 600
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-arrow-left",
-    style: {
-      fontSize: 15
-    }
-  }), " Back to Step 2")), tab === 'align' && !alignGate && /*#__PURE__*/React.createElement(React.Fragment, null, alignBusyLoading && /*#__PURE__*/React.createElement("div", {
+  }), " Back to Step ", alignGate === 'dupes' ? '1' : alignGate === 'missing' ? '2' : '3')), tab === 'align' && !alignGate && /*#__PURE__*/React.createElement(React.Fragment, null, alignBusyLoading && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 40,
       textAlign: 'center',
@@ -4531,7 +5199,16 @@ function CadenceHealth({
       color: C.textMuted,
       fontSize: '0.86rem'
     }
-  }, "No spouse pairs with mismatched due dates."), aligns.map((p, i) => /*#__PURE__*/React.createElement("div", {
+  }, "No spouse pairs with mismatched due dates for ", owner || 'this agent', "."), !alignBusyLoading && alignRes.crossOwner > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      borderColor: C.amber + '66',
+      background: C.amber + '0d',
+      fontSize: '0.76rem',
+      color: C.textSecondary,
+      lineHeight: 1.5
+    }
+  }, alignRes.crossOwner, " couple", alignRes.crossOwner === 1 ? '' : 's', " skipped \u2014 the partner\u2019s call belongs to another agent, whose backlog this run hasn\u2019t been cleared against. Do that agent too, then come back."), aligns.map((p, i) => /*#__PURE__*/React.createElement("div", {
     key: i,
     style: card
   }, /*#__PURE__*/React.createElement("div", {
@@ -4620,7 +5297,7 @@ function CadenceHealth({
       fontSize: '0.76rem',
       color: done ? done.ok ? C.green : C.red : C.textMuted
     }
-  }, done ? done.ok ? `✓ Done — ${done.n} tasks ${tab === 'dupes' ? 'deleted' : 'updated'} in Zoho.` : done.error : tab === 'dupes' ? `${removeAll.length} call${removeAll.length === 1 ? '' : 's'} to remove${[unclassified.length ? unclassified.length + ' unclassified' : '', noPhone.length ? noPhone.length + ' no phone' : ''].filter(Boolean).length ? ' (' + [unclassified.length ? unclassified.length + ' unclassified' : '', noPhone.length ? noPhone.length + ' no phone' : ''].filter(Boolean).join(', ') + ')' : ''}${review.length ? ' · ' + review.length + ' need review' : ''}` : tab === 'backlog' ? !dupesClear ? 'Blocked until duplicate calls are resolved.' : backlogBusyLoading ? backlogCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…' : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available` : alignGate === 'dupes' ? 'Blocked until duplicate calls are resolved.' : alignGate === 'backlog' ? 'Blocked until the overdue/no-cadence backlog is cleared.' : alignBusyLoading ? alignCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…' : `${aligns.length} couple${aligns.length === 1 ? '' : 's'} to align across ${alignDays} business day${alignDays === 1 ? '' : 's'} · ≤5 calls/day per agent`), /*#__PURE__*/React.createElement("div", {
+  }, done ? done.ok ? `✓ Done — ${done.n} ${tab === 'missing' ? 'calls created' : tab === 'dupes' ? 'tasks deleted' : 'tasks updated'} in Zoho.` : done.error : tab === 'dupes' ? `${removeAll.length} call${removeAll.length === 1 ? '' : 's'} to remove${[unclassified.length ? unclassified.length + ' unclassified' : '', noPhone.length ? noPhone.length + ' no phone' : ''].filter(Boolean).length ? ' (' + [unclassified.length ? unclassified.length + ' unclassified' : '', noPhone.length ? noPhone.length + ' no phone' : ''].filter(Boolean).join(', ') + ')' : ''}${review.length ? ' · ' + review.length + ' need review' : ''}` : tab === 'missing' ? !dupesClearFor(owner) ? 'Blocked until duplicate calls are resolved.' : missingBusyLoading ? missingCompletedLoading ? 'Checking call history…' : phonesLoading ? 'Reading contacts…' : 'Checking spouse numbers…' : `${missingPlan.placed} call${missingPlan.placed === 1 ? '' : 's'} to create for ${owner || '—'}${missingSplit.unreachable.length ? ' · ' + missingSplit.unreachable.length + ' skipped (no number)' : ''}` : tab === 'backlog' ? backlogGate ? backlogGate === 'dupes' ? 'Blocked until duplicate calls are resolved.' : 'Blocked until the missing calls are seeded.' : backlogBusyLoading ? backlogCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…' : `${plan.placed} of ${plan.total} placed · ${plan.eoTotal} EO available` : alignGate === 'dupes' ? 'Blocked until duplicate calls are resolved.' : alignGate === 'missing' ? 'Blocked until the missing calls are seeded.' : alignGate === 'backlog' ? `Blocked until ${owner || 'this agent'}’s backlog is cleared.` : alignBusyLoading ? alignCompletedLoading ? 'Checking call history…' : 'Checking spouse pairings…' : `${aligns.length} couple${aligns.length === 1 ? '' : 's'} to align across ${alignDays} business day${alignDays === 1 ? '' : 's'} · ≤5 calls/day per agent`), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 10
@@ -4642,16 +5319,27 @@ function CadenceHealth({
       fontWeight: 600,
       opacity: busy || !removeAll.length || done && done.ok ? .5 : 1
     }
-  }, busy ? 'Deleting…' : `Delete ${removeAll.length} call${removeAll.length === 1 ? '' : 's'}`), tab === 'backlog' && /*#__PURE__*/React.createElement("button", {
-    onClick: applyBacklog,
-    disabled: !dupesClear || busy || backlogBusyLoading || !plan.days.length || done && done.ok,
+  }, busy ? 'Deleting…' : `Delete ${removeAll.length} call${removeAll.length === 1 ? '' : 's'}`), tab === 'missing' && /*#__PURE__*/React.createElement("button", {
+    onClick: applyMissing,
+    disabled: !dupesClearFor(owner) || busy || missingBusyLoading || !missingPlan.placed || done && done.ok,
     style: {
       ...iconBtnStatic,
       color: '#fff',
       background: C.navy,
       borderColor: C.navy,
       fontWeight: 600,
-      opacity: !dupesClear || busy || backlogBusyLoading || !plan.days.length || done && done.ok ? .5 : 1
+      opacity: !dupesClearFor(owner) || busy || missingBusyLoading || !missingPlan.placed || done && done.ok ? .5 : 1
+    }
+  }, busy ? 'Creating…' : `Create ${missingPlan.placed} call${missingPlan.placed === 1 ? '' : 's'}`), tab === 'backlog' && /*#__PURE__*/React.createElement("button", {
+    onClick: applyBacklog,
+    disabled: !!backlogGate || busy || backlogBusyLoading || !plan.days.length || done && done.ok,
+    style: {
+      ...iconBtnStatic,
+      color: '#fff',
+      background: C.navy,
+      borderColor: C.navy,
+      fontWeight: 600,
+      opacity: !!backlogGate || busy || backlogBusyLoading || !plan.days.length || done && done.ok ? .5 : 1
     }
   }, busy ? 'Applying…' : `Apply ${plan.placed} date${plan.placed === 1 ? '' : 's'}`), tab === 'align' && /*#__PURE__*/React.createElement("button", {
     onClick: applyAligns,
@@ -4934,8 +5622,9 @@ function App({
       errN
     };
   }
-  // Cadence Health's two write paths — delete the resolved duplicates, or
-  // set each call to its own new date (a shared date wouldn't work here).
+  // Cadence Health's three write paths — delete the resolved duplicates,
+  // set each call to its own new date (a shared date wouldn't work here),
+  // or seed a first call for a classified contact who has none.
   async function bulkDeleteTasks(ids) {
     if (!ids.length) return {
       ok: false,
@@ -4980,6 +5669,91 @@ function App({
       ok: errN === 0,
       count: okN,
       error: errN ? `${errN} failed` : undefined
+    };
+  }
+
+  // Owner is set explicitly to the CONTACT's own owner, so a seeded call
+  // lands on that agent's calendar rather than on whoever happens to be
+  // signed in — the edge function only fills an owner in when the record
+  // arrives without one.
+  async function bulkCreateCalls(items) {
+    const clean = Array.isArray(items) ? items.filter(it => it && it.cid && it.due_date && it.cls && it.name) : [];
+    if (!clean.length) return {
+      ok: false,
+      error: 'No calls specified.'
+    };
+    // Which shape this org's Tasks module takes for the Who_Id lookup —
+    // { id } or a bare id string — has never been settled; the Enter-KPI
+    // writer probes it the same way. Object first, and if Zoho REFUSES the
+    // very first create, retry that one as a bare string and use whichever
+    // shape stuck for the rest. Only a refusal is retried: callZoho throws
+    // on a dropped connection, where the row may well have landed and a
+    // retry would duplicate it.
+    let whoShape = 'object';
+    const build = it => {
+      // "<Tier> Touch Call: <Name>" is the house subject format — the tier
+      // letter in the subject is the ONLY place a call's class is recorded,
+      // so every cadence reader here parses it back out of this string.
+      const record = {
+        Subject: `${it.cls} Touch Call: ${it.name}`,
+        Status: 'Not Started',
+        Due_Date: it.due_date,
+        Who_Id: whoShape === 'object' ? {
+          id: it.cid
+        } : it.cid
+      };
+      if (colMap.type) record[colMap.type] = 'Call';
+      if (it.ownerId) record.Owner = {
+        id: it.ownerId
+      };
+      return record;
+    };
+    const post = it => writeTask({
+      mode: 'create',
+      record: build(it),
+      patch: {
+        ...build(it),
+        Owner: {
+          id: it.ownerId,
+          name: it.owner
+        },
+        Who_Id: {
+          id: it.cid,
+          name: it.name
+        }
+      },
+      skipReload: true
+    });
+    let okN = 0,
+      errN = 0,
+      firstError = null;
+    try {
+      let first = await post(clean[0]);
+      if (!first.ok) {
+        whoShape = 'string';
+        first = await post(clean[0]);
+      }
+      if (first.ok) okN++;else {
+        errN++;
+        firstError = first.error;
+      }
+      const rest = clean.slice(1);
+      if (rest.length) {
+        const r = await runBatched(rest, post);
+        okN += r.okN;
+        errN += r.errN;
+      } else if (okN && !isDev()) await load(true);
+    } catch (e) {
+      return {
+        ok: false,
+        count: okN,
+        error: 'Lost connection after ' + okN + ' of ' + clean.length + ' — reopen to see what landed.'
+      };
+    }
+    return {
+      ok: errN === 0,
+      count: okN,
+      error: errN ? errN + ' failed' + (firstError ? ' — ' + firstError : '') : undefined
     };
   }
   function clickSort(key) {
@@ -5195,7 +5969,7 @@ function App({
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowCadenceHealth(true),
-    title: "Duplicates \u2192 backlog \u2192 spouse alignment, in order",
+    title: "Duplicates \u2192 missing calls \u2192 backlog \u2192 spouse alignment, in order",
     style: {
       ...iconBtn,
       color: C.navy,
@@ -5460,6 +6234,7 @@ function App({
     colMap: colMap,
     onDeleteIds: bulkDeleteTasks,
     onSetDates: bulkSetDueDates,
+    onCreateCalls: bulkCreateCalls,
     onClose: () => setShowCadenceHealth(false)
   }), showCapacity && tasks && /*#__PURE__*/React.createElement(CapacityGrid, {
     tasks: tasks,

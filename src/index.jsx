@@ -6049,7 +6049,77 @@ Rules:
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState('');
 
+      // Same choice AI chat's "Enter KPI" opens with — but this sheet keeps its
+      // own agent-crediting (ownerName/ownerEmail below), which the chat flow
+      // deliberately does not offer (there it is always the logged-in user).
+      const [mode, setMode] = useState(null);        // null (choice) | 'form' | 'notes'
+      const [noteMsgs, setNoteMsgs] = useState([]);   // {role, content}[] with the AI, mirrors chat's note flow
+      const [noteInput, setNoteInput] = useState('');
+      const [noteBusy, setNoteBusy] = useState(false);
+      const [noteErr, setNoteErr] = useState('');
+      const [notePayload, setNotePayload] = useState(null); // set once the AI has a complete KPI payload
+      const [noteSubmitErr, setNoteSubmitErr] = useState('');
+
       useEffect(() => { resolveTaskTypes().then(setMeta).catch(e => setErr((e && e.message) || String(e))); }, []);
+
+      // Same prompt and ACTION-block parsing as the chat tab's "paste your
+      // notes" path (see KPI_NOTE_INSTRUCTION) — kept self-contained here so
+      // the credited agent is this sheet's ownerName, never the logged-in user.
+      async function sendNote() {
+        const text = noteInput.trim();
+        if (!text || noteBusy) return;
+        const next = [...noteMsgs, { role: 'user', content: text }];
+        setNoteMsgs(next); setNoteInput(''); setNoteBusy(true); setNoteErr('');
+        try {
+          let opts = [];
+          try { opts = await fetchOtherKpiOptions(); } catch (e) {}
+          const sys = KPI_NOTE_INSTRUCTION.replace('{{OTHER_KPI_OPTIONS}}',
+            opts.length ? opts.map(o => '- ' + o).join('\n') : '(could not load the list from Zoho — do NOT output any "others"; mention them in your reply instead)')
+            + '\n\nToday is ' + kpiTodayStr() + '.';
+          const reply = await callAI(next, sys, 'kpi');
+          let display = reply;
+          const mm = reply.match(/ACTION:\s*(\{[\s\S]*\})\s*$/);
+          if (mm) {
+            display = reply.slice(0, mm.index).trim();
+            try {
+              const parsed = JSON.parse(mm[1]);
+              if (parsed && String(parsed.type).toUpperCase() === 'KPI' && parsed.payload) {
+                setNoteMsgs([...next, { role: 'assistant', content: display || 'Got it — review below.' }]);
+                setNotePayload({ ...parsed.payload, owner: ownerName, owner_email: ownerEmail || null });
+                return;
+              }
+            } catch (e) { /* keep the stripped conversational text */ }
+          }
+          setNoteMsgs([...next, { role: 'assistant', content: display || reply }]);
+        } catch (e) {
+          setNoteErr((e && e.message) || String(e));
+        } finally { setNoteBusy(false); }
+      }
+
+      // Mirrors the chat tab's submitKpi funnel (writeCallKpisAsTasks +
+      // withoutCallKpis + createAgentKpi) but keeps notePayload.owner as this
+      // sheet's agent instead of overwriting it with the logged-in user.
+      async function submitNotesKpi(resolvedPersons) {
+        const payload = { ...notePayload, persons: resolvedPersons };
+        setBusy(true); setNoteSubmitErr('');
+        try {
+          const callRes = await writeCallKpisAsTasks(payload);
+          const rest = withoutCallKpis(payload);
+          const needsRecord = (rest.persons || []).length > 0
+            || (rest.others || []).length > 0
+            || (rest.ctc_hours !== null && rest.ctc_hours !== undefined && rest.ctc_hours !== '');
+          if (needsRecord) await createAgentKpi(rest);
+          const done = [];
+          if (callRes.made) done.push({ count: callRes.made, subject: callRes.made === 1 ? 'call' : 'calls' });
+          (rest.persons || []).forEach(p => (p.kpis || []).forEach(k =>
+            done.push({ count: k === 'Hotzone Action/s' ? (p.hotzone_count || 1) : 1, subject: k })));
+          onDone(resolvedPersons.map(p => p.name).join(', '), done);
+          onClose();
+        } catch (e) {
+          setNoteSubmitErr((e && e.message) || String(e));
+          throw e; // KpiSummary's own confirm() catches this to reset its spinner
+        } finally { setBusy(false); }
+      }
 
       async function runSearch() {
         const term = q.trim();
@@ -6200,7 +6270,50 @@ Rules:
               <button onClick={onClose} disabled={busy} style={{ background: 'none', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.4 : 1, color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 15 }} /></button>
             </div>
 
-            {!contact && (
+            {mode === null && (
+              <div>
+                <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 10, lineHeight: 1.5 }}>Would you like to fill out a form, or paste your notes?</div>
+                <button onClick={() => setMode('form')} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '11px 13px', borderRadius: 10, border: 'none', cursor: 'pointer', background: goBg, color: '#fff', fontFamily: J, fontSize: 10, fontWeight: 600, marginBottom: 8 }}>
+                  <i className="ti ti-forms" style={{ fontSize: 15 }} /> Fill out a form
+                </button>
+                <button onClick={() => setMode('notes')} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '11px 13px', borderRadius: 10, border: `1px solid ${bord}`, cursor: 'pointer', background: 'none', color: headTitle, fontFamily: J, fontSize: 10, fontWeight: 600 }}>
+                  <i className="ti ti-notes" style={{ fontSize: 15 }} /> Paste your notes
+                </button>
+              </div>
+            )}
+
+            {mode === 'notes' && !notePayload && (
+              <div>
+                <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 10, lineHeight: 1.5 }}>
+                  Paste a note like <i>6/18 // Sam Smith lunch call // John Doe hotzone 3</i> — this becomes a KPI entry for <b style={{ color: headTitle }}>{ownerName}</b>.
+                </div>
+                {noteMsgs.map((m, i) => (
+                  <div key={i} style={{ marginBottom: 8, textAlign: m.role === 'user' ? 'right' : 'left' }}>
+                    <span style={{ display: 'inline-block', maxWidth: '85%', padding: '7px 10px', borderRadius: 10, fontFamily: J, fontSize: 9, lineHeight: 1.5, textAlign: 'left', background: m.role === 'user' ? goBg : fieldBg, color: m.role === 'user' ? '#fff' : headTitle }}>{m.content}</span>
+                  </div>
+                ))}
+                {noteErr && <div style={{ fontFamily: J, fontSize: 9, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>{noteErr}</div>}
+                <textarea value={noteInput} onChange={e => setNoteInput(e.target.value)} disabled={noteBusy}
+                  placeholder="Paste or type your note…" rows={3} autoFocus
+                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendNote(); } }}
+                  style={{ width: '100%', resize: 'none', background: fieldBg, border: `1px solid ${bord}`, borderRadius: 10, padding: '9px 11px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button onClick={onClose} disabled={noteBusy} style={{ ...btn, background: fieldBg, color: mutedCol, border: `1px solid ${bord}` }}>Cancel</button>
+                  <button onClick={sendNote} disabled={noteBusy || !noteInput.trim()} style={{ ...btn, background: goBg, color: '#fff', opacity: (noteBusy || !noteInput.trim()) ? 0.5 : 1 }}>
+                    {noteBusy ? 'Thinking…' : 'Send'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {mode === 'notes' && notePayload && (
+              <div>
+                {noteSubmitErr && <div style={{ fontFamily: J, fontSize: 9, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>{noteSubmitErr}</div>}
+                <KpiSummary dark={dark} payload={notePayload} onBack={() => setNotePayload(null)} onConfirm={submitNotesKpi} />
+              </div>
+            )}
+
+            {mode === 'form' && !contact && (
               <React.Fragment>
                 <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
                   <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') runSearch(); }}
@@ -6256,7 +6369,7 @@ Rules:
               </React.Fragment>
             )}
 
-            {contact && (
+            {mode === 'form' && contact && (
               <React.Fragment>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>

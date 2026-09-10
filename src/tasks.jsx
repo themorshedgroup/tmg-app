@@ -4109,24 +4109,35 @@ Rules:
         if (onOpenIdConsumed) onOpenIdConsumed();
       }, [openId, rows, loading]);
 
-      // Reload this container's data and re-select both `current` and (if given)
-      // the task being viewed, so edits/status-changes reflect immediately.
-      // `reopen` — only re-open the task drawer when the caller had it open.
-      // Ticking a List checkbox or dragging a Board card used to pop the task
-      // open every time (audit C12).
+      // Re-hydrate JUST the open container and re-select both `current` and
+      // (if given) the task being viewed, so edits/status-changes/deletes
+      // reflect immediately. `reopen` — only re-open the task drawer when the
+      // caller had it open (audit C12).
+      // Used to go through reload() first — a full re-list of every file of
+      // this kind, just to throw away everything but the one row we already
+      // had. That's what made a single delete/status-change flash the whole
+      // list to "Loading…" and, worse, briefly hand `current` an un-hydrated
+      // row (_tasks: []), which flashed "Loading tasks…" over the WHOLE open
+      // file and reset its scroll position — for a change to one task.
+      // hydrate() only needs current.id, works on a hydrated OR un-hydrated
+      // row, and never exposes an in-between un-hydrated state since we only
+      // setCurrent once it's fully back. The file-list's own summary row is
+      // patched in place from the same response — no second fetch for that.
       async function refreshContainer(focusTaskId, reopen) {
-        const fresh = await reload();
-        const proj0 = current && fresh.find(x => x.id === current.id);
-        if (proj0) {
-          // reload() returns un-hydrated rows; hydrate here so the task we're
-          // about to re-open is actually in _tasks.
-          const proj = await ProjectDB.hydrate(proj0);
-          setCurrent(proj);
-          // A subtask has no project_id, so it isn't in _tasks — fall back to
-          // the bare id and let openTaskFull re-read it, instead of closing the
-          // pane and dumping the user back to the file's Overview.
-          if (reopen && focusTaskId) openTaskFull(proj._tasks.find(x => x.id === focusTaskId) || { id: focusTaskId });
-        }
+        if (!current) return;
+        const proj = await ProjectDB.hydrate(current);
+        if (!proj) return;
+        setCurrent(proj);
+        setRows(rs => rs.map(r => r.id === proj.id ? { ...r,
+          _milestones: proj._milestones, _doneMs: proj._doneMs, _totalMs: proj._totalMs, _nextMs: proj._nextMs,
+          _progress: proj._progress, _taskCount: proj._taskCount, _doneCount: proj._doneCount,
+          _stuck: proj._stuck, _overdue: proj._overdue, _anyDates: proj._anyDates,
+        } : r));
+        // A subtask has no project_id, so it isn't in _tasks — fall back to
+        // the bare id and let openTaskFull re-read it, instead of closing the
+        // pane and dumping the user back to the file's Overview.
+        if (reopen && focusTaskId) openTaskFull(proj._tasks.find(x => x.id === focusTaskId) || { id: focusTaskId });
+        if (onChanged) onChanged();
       }
       // loadFull carries only the columns the list/board/timeline draw, so a
       // task being OPENED has to be re-read in full — TaskDetail and TaskForm
@@ -4744,7 +4755,15 @@ Rules:
               ? (openTask._people === undefined
                 ? <div style={{ padding: 20, color: sub }}>Loading…</div>
                 : <TaskForm dark={dark} task={openTask} team={team} user={user} onSave={onTaskSave} onCancel={() => setTaskEditing(false)} />)
-              : <TaskDetail dark={dark} task={openTask} people={openTask._people || []} team={team} user={user} allTasks={(current && current._tasks) || []} onEdit={() => setTaskEditing(true)} onDelete={async () => { const fresh = await reload(); const proj = current && fresh.find(x => x.id === current.id); setCurrent(proj || null); setOpenTask(null); setTaskEditing(false); }} onStatus={(s) => onTaskStatus(openTask, s)} onOpenSubtask={(child) => openTaskFull(child)} onSubtaskAdded={() => refreshContainer(null, false)} />}
+              : <TaskDetail dark={dark} task={openTask} people={openTask._people || []} team={team} user={user} allTasks={(current && current._tasks) || []} onEdit={() => setTaskEditing(true)} onDelete={() => {
+                // The delete already happened server-side (TaskDetail only calls
+                // this on success) — drop the row from what's on screen right
+                // now instead of re-fetching the file to find out it's gone.
+                const id = openTask && openTask.id;
+                setCurrent(p => (p && p._tasks) ? { ...p, _tasks: p._tasks.filter(t => t.id !== id), _milestones: p._milestones.filter(m => m.id !== id) } : p);
+                setOpenTask(null); setTaskEditing(false);
+                refreshContainer();   // background reconcile for the stats (count, progress, etc.)
+              }} onStatus={(s) => onTaskStatus(openTask, s)} onOpenSubtask={(child) => openTaskFull(child)} onSubtaskAdded={() => refreshContainer(null, false)} />}
           </div>
         </React.Fragment>
       );
@@ -6320,7 +6339,15 @@ Rules:
           // read has been tried, rather than waiting forever on a failed one.
           ? <div style={{ padding: 20, color: sub }}>Loading…</div>
           : <TaskForm dark={dark} task={current ? withMeta(current) : null} team={team} user={user} onSave={handleSave} onCancel={() => setView(current ? 'detail' : 'list')} />)
-          : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={peopleFor(current.id) || []} team={team} user={user} allTasks={data.tasks} onEdit={() => setView('form')} onDelete={async () => { await reload(); setView('list'); setCurrent(null); }} onStatus={(s) => changeStatus(current, s)} onOpenSubtask={(child) => { setCurrent(child); setView('detail'); }} onSubtaskAdded={() => reload()}
+          : view === 'detail' && current ? <TaskDetail dark={dark} task={withMeta(current)} people={peopleFor(current.id) || []} team={team} user={user} allTasks={data.tasks} onEdit={() => setView('form')} onDelete={() => {
+              // Same reasoning as ProjectsSurface's onDelete: the row is already
+              // gone server-side by the time this fires, so drop it from what's
+              // on screen now instead of re-fetching every task to find that out.
+              const id = current && current.id;
+              setData(d => ({ ...d, tasks: (d.tasks || []).filter(x => x.id !== id) }));
+              setView('list'); setCurrent(null);
+              reload();   // background reconcile
+            }} onStatus={(s) => changeStatus(current, s)} onOpenSubtask={(child) => { setCurrent(child); setView('detail'); }} onSubtaskAdded={() => reload()}
               emailLinks={linksByTask[current.id] || []} onEmailChanged={onEmailAttached} initialTab={emailTabFocus ? 'email' : undefined} onTabSettled={() => setEmailTabFocus(null)} />
           : view === 'labels' ? <LabelManager dark={dark} user={user} onClose={() => setView('list')} onSaved={async () => { await reload(); setView('list'); }} />
           : null

@@ -4694,6 +4694,49 @@ Rules:
       } catch (e) { /* quota — just skip caching this round */ }
     }
 
+    // ─── Call list preferences ───────────────────────────────────────
+    //  Which shape the list is in (3-Day or Week), which of the three day
+    //  segments is picked, and which weekday inside the week. All three are
+    //  remembered per device: an agent who works the week view should not be
+    //  put back on 3-Day/Today every time the tab is reopened.
+    const CALL_VIEW_KEY    = 'tmg-calllist-view';
+    const CALL_DAYSEG_KEY  = 'tmg-calllist-day';
+    const CALL_WEEKDAY_KEY = 'tmg-calllist-weekday';
+    const callPrefGet = (k, fallback) => { try { return localStorage.getItem(k) || fallback; } catch (e) { return fallback; } };
+    const callPrefSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+
+    // Monday of the week `d` falls in — Monday-first is the hard rule for
+    // every calendar surface in this app, so the week strip starts here and
+    // the weekend lands on the right-hand end where it reads as the weekend.
+    function cMondayOf(d) {
+      const x = new Date(d); x.setHours(0, 0, 0, 0);
+      x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+      return x;
+    }
+    const CAL_DOW_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const CAL_DOW_FULL = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    const CAL_MON_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    // 'YYYY-MM-DD' -> local Date, without the UTC shift a bare `new Date(iso)`
+    // would apply (which lands on the previous day west of Greenwich).
+    const cFromIso = (iso) => new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)));
+
+    // The week list is ONE range query, not seven day queries: Zoho's search
+    // criteria take greater_than/less_than on Due_Date. Cached on the same
+    // short lease the day list uses, for the same reason — this view's whole
+    // job is being current.
+    const CALL_WEEK_KEY = 'tmg-calls-week-v1';
+    function loadWeekCache(sig) {
+      try {
+        const c = JSON.parse(localStorage.getItem(CALL_WEEK_KEY) || 'null');
+        if (!c || c.sig !== sig || !c.at || (Date.now() - c.at) > CALL_DAY_TTL) return null;
+        return Array.isArray(c.list) ? c : null;
+      } catch (e) { return null; }
+    }
+    function saveWeekCache(sig, list, capped, at) {
+      try { localStorage.setItem(CALL_WEEK_KEY, JSON.stringify({ sig, at: at || Date.now(), capped: !!capped, list: (list || []).map(trimTask) })); }
+      catch (e) { /* quota — just skip caching this round */ }
+    }
+
     // A write does NOT invalidate everything equally, and treating it as if it
     // did is expensive: /crm-tasks's two caches hold ALL open tasks, so any
     // write makes them wrong and they never expire on their own — but the
@@ -5081,10 +5124,22 @@ Rules:
 
     function CallsTab({ dark, ownerName, ownerEmail, isAdmin }) {
       const J = "'Jost', sans-serif";
-      const [view, setView] = useState('list');       // 'list' | 'capacity' (admin only)
+      const [view, setView] = useState('list');       // 'list' | 'capacity' — a button now, not a tab
       const [agent, setAgent] = useState('');         // '' = all agents; otherwise an owner name
       const [collapsed, setCollapsed] = useState({}); // owner -> true, in the grouped "all agents" list
-      const [day, setDay] = useState('today');
+      // Shape of the list and the position inside it — all remembered per
+      // device (see CALL_VIEW_KEY above).
+      const [listView, setListView] = useState(() => (callPrefGet(CALL_VIEW_KEY, '3day') === 'week' ? 'week' : '3day'));
+      const [day, setDay] = useState(() => { const d = callPrefGet(CALL_DAYSEG_KEY, 'today'); return ['yesterday', 'today', 'tomorrow'].includes(d) ? d : 'today'; });
+      const [weekday, setWeekday] = useState('');     // 'YYYY-MM-DD' inside the shown week; '' until resolved
+      const [infoFor, setInfoFor] = useState(null);   // contact behind the (i) — the AI summary, stubbed for now
+      useEffect(() => { callPrefSet(CALL_VIEW_KEY, listView); }, [listView]);
+      useEffect(() => { callPrefSet(CALL_DAYSEG_KEY, day); }, [day]);
+      useEffect(() => { if (weekday) callPrefSet(CALL_WEEKDAY_KEY, weekday); }, [weekday]);
+      // Desktop gets a hairline table instead of stacked cards; same
+      // breakpoint the rest of the shell uses.
+      const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
+      useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
 
       const [buckets, setBuckets] = useState(null);   // { yesterday:[], today:[], tomorrow:[] } | null while loading
       const [overdue, setOverdue] = useState(null);   // { list, count, capped } | null
@@ -5101,6 +5156,10 @@ Rules:
       const [addKpi, setAddKpi] = useState(false);             // the standalone Add KPI sheet
       const [kpiToast, setKpiToast] = useState('');            // what the last standalone log wrote
       const [dataAt, setDataAt] = useState(0);                 // when the shown day data was FETCHED, not last touched
+      const [weekCalls, setWeekCalls] = useState(null);        // flat list for the shown week | null while loading
+      const [weekCapped, setWeekCapped] = useState(false);     // Zoho's 200-row page was full
+      const [weekErr, setWeekErr] = useState('');
+      const [weekAt, setWeekAt] = useState(0);                 // when the week was FETCHED, carried through patches
 
       // A phone PWA sits on this tab for days at a time, so "today" cannot be
       // frozen at mount — it would quietly come to mean yesterday, and this
@@ -5125,6 +5184,23 @@ Rules:
         const n = new Date(t); n.setDate(n.getDate() + 1);
         return { yesterday: cIso(cPrevWorkday(p)), today: cIso(t), tomorrow: cIso(cNextWorkday(n)) };
       }, [dayStamp]);
+
+      // Monday → Sunday around today. There is no week paging: the week view
+      // is "this week", and Capacity is where you go to look further out.
+      const weekDates = useMemo(() => {
+        const mon = cMondayOf(new Date());
+        return Array.from({ length: 7 }, (_, i) => { const d = new Date(mon); d.setDate(mon.getDate() + i); return cIso(d); });
+      }, [dayStamp]);
+
+      // Default to today when today is in the week, otherwise Monday — but a
+      // remembered weekday inside THIS week wins, so switching away and back
+      // keeps your place. A stored date from last week is silently dropped.
+      useEffect(() => {
+        if (weekday && weekDates.includes(weekday)) return;
+        const saved = callPrefGet(CALL_WEEKDAY_KEY, '');
+        setWeekday(weekDates.includes(saved) ? saved
+          : (weekDates.includes(dates.today) ? dates.today : weekDates[0]));
+      }, [weekDates, dates.today]);
 
       // An agent sees only their own calls. myName falls back to 'Me' when the
       // profile has no name — filtering on that would substring-match real
@@ -5211,6 +5287,66 @@ Rules:
       }
       useEffect(() => { load(); }, [myOwner, team, dates.today]);
 
+      // ── The week, in one query ──────────────────────────────────────
+      // Seven day queries would be seven round trips for a view most agents
+      // leave open all day. Zoho's search criteria take greater_than /
+      // less_than on Due_Date, and BOTH are exclusive — hence bounds a day
+      // outside the Monday–Sunday window. Loaded lazily: an agent who never
+      // opens Week never pays for it.
+      const weekSig = (team ? 'team' : 'me:' + myOwner) + '|' + weekDates[0];
+      async function loadWeek(force) {
+        if (!team && !myOwner) { setWeekCalls([]); return; }
+        if (!force && !callsIsDev()) {
+          const c = loadWeekCache(weekSig);
+          if (c) { setWeekCalls(c.list); setWeekCapped(!!c.capped); setWeekAt(c.at); setWeekErr(''); return; }
+        }
+        setWeekErr('');
+        if (callsIsDev()) {
+          await new Promise(r => setTimeout(r, 200));
+          const stamp = (list, o) => list.map(t => ({ ...t, id: t.id + '-w-' + o.split(' ')[0].toLowerCase(), Owner: { name: o, id: '5500000000009' + String(o.length) } }));
+          const out = [];
+          weekDates.forEach((iso, i) => {
+            const n = [4, 5, 3, 6, 2, 0, 0][i];
+            if (!n) return;
+            out.push.apply(out, team
+              ? stamp(devCalls(iso, n, i), 'Tarek Morshed').concat(stamp(devCalls(iso, Math.max(1, n - 2), i + 4), 'Kyle Baird'))
+              : stamp(devCalls(iso, n, i), myOwner || 'Me'));
+          });
+          setWeekCalls(out); setWeekCapped(false);
+          return;
+        }
+        try {
+          const typeField = await resolveTaskTypeField();
+          const after = cFromIso(weekDates[0]); after.setDate(after.getDate() - 1);
+          const before = cFromIso(weekDates[6]); before.setDate(before.getDate() + 1);
+          const q = (useType) => callZoho(Object.assign(
+            { action: 'search_tasks', per_page: 200, due_after: cIso(after), due_before: cIso(before) },
+            team ? {} : { owner: myOwner },
+            useType ? { type: 'Call', type_field: typeField } : {}
+          ));
+          let r = await q(true);
+          if (!r.ok) r = await q(false);
+          if (!r.ok) throw new Error((r.data && r.data.error) || 'Could not load this week.');
+          const rows = (r.data && r.data.tasks) || [];
+          const list = rows.filter(t => isCallTask(t, typeField));
+          const now = Date.now();
+          setWeekCalls(list);
+          setWeekCapped(rows.length >= 200);
+          setWeekAt(now);
+          saveWeekCache(weekSig, list, rows.length >= 200, now);
+        } catch (e) {
+          setWeekErr((e && e.message) || String(e));
+          setWeekCalls([]);
+        }
+      }
+      useEffect(() => { if (listView === 'week') loadWeek(false); }, [listView, weekSig]);
+      // Write-through, same as the day list: a ticked call has to survive into
+      // the cache, and `weekAt` rides along so patching never renews the lease.
+      useEffect(() => {
+        if (!weekCalls || !weekAt || callsIsDev()) return;
+        saveWeekCache(weekSig, weekCalls, weekCapped, weekAt);
+      }, [weekCalls, weekCapped, weekSig, weekAt]);
+
       // Write-through: a ticked call has to survive into the cache, or the next
       // visit inside the TTL would serve the pre-tick list straight back.
       // dataAt is passed along so patching never extends the cache's life.
@@ -5263,13 +5399,32 @@ Rules:
         const set = new Set();
         if (buckets) ['yesterday', 'today', 'tomorrow'].forEach(k => (buckets[k] || []).forEach(t => set.add(ownerOf(t))));
         if (overdue && overdue.list) overdue.list.forEach(t => set.add(ownerOf(t)));
+        (weekCalls || []).forEach(t => set.add(ownerOf(t)));
         return Array.from(set).sort();
-      }, [team, buckets, overdue]);
+      }, [team, buckets, overdue, weekCalls]);
 
       const mine = (list) => (agent ? (list || []).filter(t => ownerOf(t) === agent) : (list || []));
       const shown = buckets ? mine(buckets[day] || []) : null;
 
-      const shownKey = shown ? shown.map(t => (t.Who_Id && t.Who_Id.id) || '').join(',') : '';
+      // The week, bucketed by date. Every day in the strip gets a key even when
+      // it is empty, so the segmented control can show a 0 rather than a gap.
+      const weekShown = useMemo(() => {
+        const by = {};
+        weekDates.forEach(iso => { by[iso] = []; });
+        (weekCalls || []).forEach(t => {
+          const iso = (t.Due_Date || '').slice(0, 10);
+          if (by[iso] && (!agent || ownerOf(t) === agent)) by[iso].push(t);
+        });
+        return by;
+      }, [weekCalls, weekDates, agent]);
+
+      // Phone/email/spouse hydration follows whichever list is actually on
+      // screen — in Week that is the whole week, not one day, so scrolling
+      // through the days doesn't kick off a fresh lookup at each divider.
+      const hydrate = listView === 'week'
+        ? (weekCalls === null ? null : [].concat.apply([], weekDates.map(iso => weekShown[iso] || [])))
+        : shown;
+      const shownKey = hydrate ? hydrate.map(t => (t.Who_Id && t.Who_Id.id) || '').join(',') : '';
       useEffect(() => {
         if (!shownKey) return;
         const cache = contactsRef.current;
@@ -5415,6 +5570,10 @@ Rules:
           ['yesterday', 'today', 'tomorrow'].forEach(k => { n[k] = (b[k] || []).map(t => t.id === task.id ? { ...t, Status: status } : t); });
           return n;
         });
+        // The week list is a second copy of some of the same tasks, so a tick
+        // in one view has to land in the other or switching shape would show
+        // the call as untouched again.
+        setWeekCalls(w => (w ? w.map(t => t.id === task.id ? { ...t, Status: status } : t) : w));
         setOverdue(o => {
           if (!o) return o;
           const wasOverdue = (task.Due_Date || '').slice(0, 10) < dates.today;
@@ -5453,57 +5612,45 @@ Rules:
         });
       }
 
+      // Calls-tab surface tokens. The spec is written for light; every one has
+      // a dark counterpart so the tab still reads at night.
       const headTitle  = dark ? '#FFFFFF' : '#001A4A';
       const addBg      = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
       const addCol     = dark ? '#C9A45A' : '#AD832F';
       const navInBg    = dark ? '#0A1730' : '#F5F2EE';
       const navInCol   = dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9';
-      const navOnBg    = dark ? '#AD832F' : '#001A4A';
-      const rowBord    = dark ? '#0D1E3A' : '#F5F2EE';
-      const nameCol    = dark ? '#FFFFFF' : '#001A4A';
+      const rowBord    = dark ? '#0D1E3A' : '#F0EEE8';
+      const nameCol    = dark ? '#FFFFFF' : '#1A1A1A';
       const callBtnBg  = dark ? '#AD832F' : '#001A4A';
-      const coachBg    = dark ? '#040C1C' : '#FCFBF8';
-      const coachBord  = dark ? '#0D1E3A' : '#F0EBE3';
-      const coachLabel = dark ? '#C9A45A' : '#AD832F';
-      const mutedCol   = dark ? 'rgba(255,255,255,0.4)' : '#888888';
+      const mutedCol   = dark ? 'rgba(255,255,255,0.45)' : '#8E897C';
+      const faintCol   = dark ? 'rgba(255,255,255,0.28)' : '#BBB6AA';
+      const lineCol    = dark ? '#122A4E' : '#E7E3D9';
+      const trackBg    = dark ? '#0A1730' : '#F6F5F1';
+      const surfaceBg  = dark ? '#040C1C' : '#FFFFFF';
+      const creamBg    = dark ? 'rgba(173,131,47,0.15)' : '#F5EEDF';
+      const creamBd    = dark ? 'rgba(173,131,47,0.35)' : '#E8DBBE';
+      const creamTx    = dark ? '#C9A45A' : '#8C6A24';
+      const tealCol    = dark ? '#5DCAA5' : '#0F6E56';
+      const redCol     = dark ? '#F87171' : '#9B1C1C';
+      const bandBg     = dark ? '#08142B' : '#FBFAF7';
 
-      const initials = (n) => (n || '?').split(' ').map(p => p[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
-      const statusOf = (t) => {
-        const done = /completed/i.test(t.Status || '');
-        if (done) return 'completed';
-        const due = (t.Due_Date || '').slice(0, 10);
-        return (due && due < dates.today) ? 'missed' : 'pending';
+      // Pills on the control row: Capacity is the one filled control, Add KPIs
+      // stays outlined and gold-labelled so the two never read as the same
+      // button, and the view picker is a quiet grey.
+      const pill = {
+        display: 'inline-flex', alignItems: 'center', gap: 7, height: wide ? 40 : 38,
+        padding: '0 14px', borderRadius: 11, fontFamily: J, fontSize: wide ? 13.5 : 13,
+        fontWeight: 500, whiteSpace: 'nowrap', cursor: 'pointer', border: 'none',
       };
-      const toneOf = (g) => ({
-        A: { bg: dark ? '#0A1E44' : '#EEF2F8', col: dark ? '#C9A45A' : '#001A4A' },
-        B: { bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', col: dark ? '#C9A45A' : '#AD832F' },
-        C: { bg: dark ? '#0A1730' : '#F5F2EE', col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B' },
-      }[g] || { bg: dark ? '#0A1730' : '#F5F2EE', col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B' });
-      const badgeOf = (g) => ({
-        A: { bg: dark ? '#C9A45A' : '#001A4A', col: dark ? '#001A4A' : '#C9A45A' },
-        B: { bg: dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA', col: dark ? '#C9A45A' : '#AD832F' },
-        C: { bg: dark ? '#0A1730' : '#F5F2EE', col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B' },
-      }[g] || { bg: dark ? '#0A1730' : '#F5F2EE', col: dark ? 'rgba(255,255,255,0.4)' : '#6B6B6B' });
-      const statusInfo = (s) => ({
-        completed: { icon: 'ti-phone-check', col: dark ? '#5DCAA5' : '#0F6E56', num: mutedCol },
-        missed:    { icon: 'ti-phone-x',     col: dark ? '#F87171' : '#9B1C1C', num: dark ? '#F87171' : '#9B1C1C' },
-        pending:   { icon: 'ti-phone',       col: dark ? 'rgba(255,255,255,0.25)' : '#B4B2A9', num: mutedCol },
-      }[s]);
+      // Three 36px circles per row. Only the dial button is filled.
+      const ctrl = { width: 36, height: 36, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', padding: 0, cursor: 'pointer', background: 'none' };
 
-      // Deterministic brief off the real list — highest tier first, EO last,
-      // matching the priority order the CRM cadence packer uses.
-      const RANK = { A: 0, B: 1, C: 2, EO: 3, Other: 4 };
-
-      // One call row, shared by the flat list and the per-agent groups.
-      // Layout: name + tags (tier, spouse) on the first line, phone + email on
-      // the second, then the log ribbon. Controls on the right are done / log /
-      // dial — the tier moved OFF the right edge, since it describes the person,
-      // not the button next to it.
-      const callRow = (t, last) => {
+      // Everything a row needs to draw itself, worked out once so the phone
+      // card and the desktop table row can share it.
+      const rowBits = (t) => {
         const grade = callTier(t.Subject);
         const cname = (t.Who_Id && t.Who_Id.name) || t.Subject || 'Unknown';
         const cid = t.Who_Id && t.Who_Id.id;
-        const av = toneOf(grade), bd = badgeOf(grade), st = statusInfo(statusOf(t));
         // `undefined` = not looked up yet, `null` = looked up and the contact
         // genuinely has nothing on file — they read differently.
         const info = (cid && contacts[cid]) || null;
@@ -5513,84 +5660,135 @@ Rules:
         const spouseLookupPending = !!(info && info.detail && !info.phone && info.spouse && info.spouse.id && !('spousePhone' in info));
         const looked = !cid || (!!(info && info.detail) && !spouseLookupPending);
         const phone = info && info.phone;
-        const email = info && info.email;
-        const spouse = info && info.spouse;
-        // No number of their own falls back to the spouse's line. Always
-        // labelled — whoever picks up is not the person on the task, and the
-        // agent needs to know that before the call connects.
         const spousePhone = info && info.spousePhone;
-        const dial = phone || spousePhone || null;
-        const viaSpouse = !phone && !!spousePhone;
-        const href = zohoContactUrl(cid);
-        const spouseHref = spouse && zohoContactUrl(spouse.id);
-        const done = /completed/i.test(t.Status || '');
-        const busyRow = !!rowBusy[t.id];
-        const mark = logged[t.id];
-        const problem = rowErr[t.id];
-        const ctrl = { width: 26, height: 26, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', padding: 0, cursor: 'pointer' };
-        return (
-          <div key={t.id} style={{ padding: '8px 14px', borderBottom: last ? 'none' : `1px solid ${rowBord}`, opacity: busyRow ? 0.55 : 1 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: av.bg, color: av.col, fontFamily: J, fontSize: 11, fontWeight: 600 }}>{initials(cname)}</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                {/* Name + contact tags. Wraps rather than truncating the tags
-                    away, so the tier is never the thing that gets cut off. */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
-                  {href
-                    ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, textDecoration: done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cname}</a>
-                    : <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: nameCol, textDecoration: done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cname}</span>}
-                  <span title={'Client classification: ' + (grade === 'Other' ? 'not classified' : grade)}
-                    style={{ fontFamily: J, fontSize: 8, fontWeight: 700, lineHeight: 1, padding: '3px 6px', borderRadius: 20, background: bd.bg, color: bd.col, flexShrink: 0 }}>
-                    {grade === 'Other' ? 'No class' : grade}
-                  </span>
-                  {spouse && spouse.name && (
-                    spouseHref
-                      ? <a href={spouseHref} target="_blank" rel="noopener noreferrer" title={'Spouse: ' + spouse.name} style={{ fontFamily: J, fontSize: 8, fontWeight: 600, lineHeight: 1, padding: '3px 6px', borderRadius: 20, background: navInBg, color: mutedCol, textDecoration: 'none', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3, maxWidth: 140, overflow: 'hidden', whiteSpace: 'nowrap' }}><i className="ti ti-heart" style={{ fontSize: 9 }} />{spouse.name}</a>
-                      : <span title={'Spouse: ' + spouse.name} style={{ fontFamily: J, fontSize: 8, fontWeight: 600, lineHeight: 1, padding: '3px 6px', borderRadius: 20, background: navInBg, color: mutedCol, flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3 }}><i className="ti ti-heart" style={{ fontSize: 9 }} />{spouse.name}</span>
-                  )}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 3, minWidth: 0 }}>
-                  <i className={`ti ${st.icon}`} style={{ fontSize: 11, color: st.col, flexShrink: 0 }} />
-                  <span style={{ fontFamily: J, fontSize: 8, color: st.num, flexShrink: 0 }}>{dial ? formatPhone(dial) : (looked ? 'No number' : '…')}</span>
-                  {viaSpouse && (
-                    <span title={'This is ' + ((spouse && spouse.name) || 'their spouse') + "'s number — " + cname + ' has none on file'}
-                      style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: addCol, background: addBg, borderRadius: 20, padding: '1px 6px', flexShrink: 0 }}>
-                      spouse&rsquo;s line
-                    </span>
-                  )}
-                  {email && <a href={'mailto:' + email} style={{ fontFamily: J, fontSize: 8, color: mutedCol, textDecoration: 'none', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {email}</a>}
-                  {team && !agent && <span style={{ fontFamily: J, fontSize: 8, color: mutedCol, flexShrink: 0 }}>· {ownerOf(t)}</span>}
-                </div>
-              </div>
-              <button onClick={() => toggleDone(t)} disabled={busyRow}
-                title={done ? 'Mark as not started again' : 'Mark this call completed in Zoho'}
-                style={{ ...ctrl, background: done ? (dark ? 'rgba(93,202,165,0.22)' : '#E2F3E8') : navInBg, color: done ? (dark ? '#5DCAA5' : '#0F6E56') : navInCol, cursor: busyRow ? 'default' : 'pointer' }}>
-                <i className={`ti ti-${busyRow ? 'loader-2' : 'check'}`} style={{ fontSize: 14 }} />
-              </button>
-              <button onClick={() => cid && setSheet({ task: t, contact: { id: cid, name: cname } })} disabled={!cid}
-                title={cid ? 'Log other KPIs for this contact' : 'This task has no contact attached, so there is nothing to log against'}
-                style={{ ...ctrl, background: addBg, color: addCol, opacity: cid ? 1 : 0.4, cursor: cid ? 'pointer' : 'default' }}>
-                <i className="ti ti-plus" style={{ fontSize: 14 }} />
-              </button>
-              {dial
-                ? <a href={'tel:' + String(dial).replace(/[^\d+]/g, '')} title={viaSpouse ? 'Call ' + ((spouse && spouse.name) || 'their spouse') + " — " + cname + ' has no number on file' : 'Call'} style={{ ...ctrl, background: callBtnBg, color: '#fff', textDecoration: 'none' }}>
-                    <i className="ti ti-phone" style={{ fontSize: 12 }} />
-                  </a>
-                : <div style={{ ...ctrl, background: navInBg, color: navInCol, cursor: 'default' }}>
-                    <i className="ti ti-phone-off" style={{ fontSize: 12 }} />
-                  </div>}
+        return {
+          grade, cname, cid,
+          email: info && info.email,
+          spouse: info && info.spouse,
+          // No number of their own falls back to the spouse's line. Always
+          // labelled — whoever picks up is not the person on the task, and the
+          // agent needs to know that before the call connects.
+          dial: phone || spousePhone || null,
+          viaSpouse: !phone && !!spousePhone,
+          phoneText: (phone || spousePhone) ? formatPhone(phone || spousePhone) : (looked ? 'No number' : '…'),
+          href: zohoContactUrl(cid),
+          done: /completed/i.test(t.Status || ''),
+          busyRow: !!rowBusy[t.id],
+          mark: logged[t.id],
+          problem: rowErr[t.id],
+        };
+      };
+
+      // The three round row actions: check (mark called) · log (other KPIs) ·
+      // call. Identical on both breakpoints.
+      const rowActions = (t, b) => (
+        <React.Fragment>
+          <button onClick={() => toggleDone(t)} disabled={b.busyRow}
+            title={b.done ? 'Mark as not started again' : 'Mark this call completed in Zoho'}
+            style={{ ...ctrl, border: b.done ? 'none' : `1px solid ${lineCol}`, color: b.done ? tealCol : mutedCol, cursor: b.busyRow ? 'default' : 'pointer' }}>
+            <i className={`ti ti-${b.busyRow ? 'loader-2' : 'check'}`} style={{ fontSize: b.done ? 19 : 16 }} />
+          </button>
+          <button onClick={() => b.cid && setSheet({ task: t, contact: { id: b.cid, name: b.cname } })} disabled={!b.cid}
+            title={b.cid ? 'Log other KPIs for this contact' : 'This task has no contact attached, so there is nothing to log against'}
+            style={{ ...ctrl, border: `1px solid ${lineCol}`, color: addCol, opacity: b.cid ? 1 : 0.4, cursor: b.cid ? 'pointer' : 'default' }}>
+            <i className="ti ti-plus" style={{ fontSize: 16 }} />
+          </button>
+          {b.dial
+            ? <a href={'tel:' + String(b.dial).replace(/[^\d+]/g, '')} title={b.viaSpouse ? 'Call ' + ((b.spouse && b.spouse.name) || 'their spouse') + ' — ' + b.cname + ' has no number on file' : 'Call'} style={{ ...ctrl, background: callBtnBg, color: '#fff', textDecoration: 'none' }}>
+                <i className="ti ti-phone" style={{ fontSize: 16 }} />
+              </a>
+            : <div title={'No number on file for ' + b.cname} style={{ ...ctrl, border: `1px solid ${lineCol}`, color: faintCol, cursor: 'default' }}>
+                <i className="ti ti-phone-off" style={{ fontSize: 16 }} />
+              </div>}
+        </React.Fragment>
+      );
+
+      // Name · tier badge · spouse · info. The badge is the client
+      // classification; the (i) opens the contact summary (stubbed).
+      const nameCluster = (t, b, size) => (
+        <React.Fragment>
+          {b.href
+            ? <a href={b.href} target="_blank" rel="noopener noreferrer" style={{ fontFamily: J, fontSize: size, fontWeight: 600, letterSpacing: '-0.01em', color: nameCol, textDecoration: b.done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.cname}</a>
+            : <span style={{ fontFamily: J, fontSize: size, fontWeight: 600, letterSpacing: '-0.01em', color: nameCol, textDecoration: b.done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.cname}</span>}
+          <span title={'Client classification: ' + (b.grade === 'Other' ? 'not classified' : b.grade)}
+            style={{ fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.04em', lineHeight: 1.4, padding: '2px 6px', borderRadius: 5, background: creamBg, color: creamTx, flexShrink: 0 }}>
+            {b.grade === 'Other' ? 'No class' : b.grade}
+          </span>
+          {b.spouse && b.spouse.name && (
+            <a href={zohoContactUrl(b.spouse.id) || undefined} target="_blank" rel="noopener noreferrer" title={'Spouse: ' + b.spouse.name}
+              style={{ fontFamily: J, fontSize: 10.5, color: mutedCol, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, maxWidth: 150, overflow: 'hidden', whiteSpace: 'nowrap' }}>
+              <i className="ti ti-heart-filled" style={{ fontSize: 10, color: dark ? '#C9A45A' : '#C9A45A' }} />{b.spouse.name}
+            </a>
+          )}
+          <button onClick={() => setInfoFor({ id: b.cid, name: b.cname })} title={'About ' + b.cname}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: faintCol, flexShrink: 0, display: 'inline-flex', alignItems: 'center' }}>
+            <i className="ti ti-info-circle" style={{ fontSize: 16 }} />
+          </button>
+        </React.Fragment>
+      );
+
+      // What was logged against this call, and anything that went wrong doing
+      // it. Both hang under the row on either breakpoint.
+      const rowFooter = (b) => (
+        <React.Fragment>
+          {b.mark && b.mark.items && b.mark.items.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginTop: 7, padding: '4px 8px', borderRadius: 7, background: b.done ? (dark ? 'rgba(93,202,165,0.12)' : '#F0F8F3') : trackBg }}>
+              <i className="ti ti-checks" style={{ fontSize: 12, color: tealCol }} />
+              {b.mark.items.map(it => (
+                <span key={it.type} style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, background: surfaceBg, border: `1px solid ${lineCol}`, borderRadius: 20, padding: '2px 7px' }}>{it.count} {it.type}</span>
+              ))}
             </div>
-            {mark && mark.items && mark.items.length > 0 && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginTop: 6, marginLeft: 44, padding: '4px 8px', borderRadius: 7, background: done ? (dark ? 'rgba(93,202,165,0.12)' : '#F0F8F3') : navInBg }}>
-                <i className="ti ti-checks" style={{ fontSize: 11, color: dark ? '#5DCAA5' : '#0F6E56' }} />
-                {mark.items.map(it => (
-                  <span key={it.type} style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: headTitle, background: dark ? '#0A1E44' : '#FFFFFF', border: `1px solid ${dark ? '#0D1E3A' : '#EDE7DC'}`, borderRadius: 20, padding: '2px 7px' }}>{it.count} {it.type}</span>
-                ))}
+          )}
+          {b.problem && <div style={{ marginTop: 6, fontFamily: J, fontSize: 11, color: redCol, lineHeight: 1.5 }}>{b.problem}</div>}
+        </React.Fragment>
+      );
+
+      // Mobile row — no avatar (there are no photos in Zoho), roomy
+      // iOS-contacts spacing, one hairline between rows.
+      const callRow = (t, last) => {
+        const b = rowBits(t);
+        return (
+          <div key={t.id} style={{ padding: '15px 0', borderBottom: last ? 'none' : `1px solid ${rowBord}`, opacity: b.busyRow ? 0.55 : 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                  {nameCluster(t, b, 16)}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, fontFamily: J, fontSize: 12.5, fontWeight: 300 }}>
+                  <span style={{ color: mutedCol, flexShrink: 0 }}>{b.phoneText}</span>
+                  {b.viaSpouse && (
+                    <span title={'This is ' + ((b.spouse && b.spouse.name) || 'their spouse') + "'s number — " + b.cname + ' has none on file'}
+                      style={{ fontSize: 10, fontWeight: 600, color: addCol, background: addBg, borderRadius: 20, padding: '1px 6px', flexShrink: 0 }}>spouse&rsquo;s line</span>
+                  )}
+                  {b.email && <a href={'mailto:' + b.email} style={{ color: faintCol, textDecoration: 'none', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {b.email}</a>}
+                  {team && !agent && <span style={{ color: faintCol, flexShrink: 0 }}>· {ownerOf(t)}</span>}
+                </div>
               </div>
-            )}
-            {problem && (
-              <div style={{ marginTop: 6, marginLeft: 44, fontFamily: J, fontSize: 8, color: dark ? '#F87171' : '#9B1C1C', lineHeight: 1.5 }}>{problem}</div>
-            )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>{rowActions(t, b)}</div>
+            </div>
+            {rowFooter(b)}
+          </div>
+        );
+      };
+
+      // Desktop row — the same data as a columned table: Contact · Phone ·
+      // Email · Actions, hairline dividers, no card shadows.
+      const deskRow = (t) => {
+        const b = rowBits(t);
+        return (
+          <div key={t.id} style={{ padding: '13px 26px', borderBottom: `1px solid ${rowBord}`, opacity: b.busyRow ? 0.55 : 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8 }}>{nameCluster(t, b, 14.5)}</div>
+              <div style={{ width: 150, flexShrink: 0, fontFamily: J, fontSize: 12.5, color: mutedCol, display: 'flex', alignItems: 'center', gap: 5 }}>
+                {b.phoneText}
+                {b.viaSpouse && <span title={'This is ' + ((b.spouse && b.spouse.name) || 'their spouse') + "'s number"} style={{ fontSize: 10, fontWeight: 600, color: addCol, background: addBg, borderRadius: 20, padding: '1px 6px' }}>sp.</span>}
+              </div>
+              <div style={{ width: 230, flexShrink: 0, fontFamily: J, fontSize: 12.5, color: faintCol, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {b.email ? <a href={'mailto:' + b.email} style={{ color: faintCol, textDecoration: 'none' }}>{b.email}</a> : ''}
+              </div>
+              <div style={{ width: 150, flexShrink: 0, display: 'flex', justifyContent: 'flex-end', gap: 9 }}>{rowActions(t, b)}</div>
+            </div>
+            {rowFooter(b)}
           </div>
         );
       };
@@ -5618,9 +5816,10 @@ Rules:
         return out;
       };
 
-      // With "All agents" picked, the day's calls are grouped under a tappable
-      // per-agent header — that's the drop-down-per-agent view, without having
-      // to switch the picker back and forth to see who is carrying what.
+      // With "All agents" picked, the 3-Day list groups under a tappable
+      // per-agent header — the drop-down-per-agent view, without switching the
+      // picker back and forth to see who is carrying what. Week groups by DATE
+      // instead, so there the owner rides along on the row itself.
       const groupedRows = () => {
         const by = {};
         (shown || []).forEach(t => { const o = ownerOf(t); (by[o] = by[o] || []).push(t); });
@@ -5629,96 +5828,191 @@ Rules:
           const list = by[o];
           const shut = !!collapsed[o];
           const od = overdue ? (overdue.list || []).filter(t => ownerOf(t) === o).length : 0;
+          const rows = shut ? [] : pairSpouses(list);
           return (
             <div key={o}>
               <div onClick={() => setCollapsed(c => ({ ...c, [o]: !shut }))}
-                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 14px', cursor: 'pointer', background: dark ? '#0A1730' : '#F9F7F4', borderBottom: `1px solid ${rowBord}`, position: 'sticky', top: 0, zIndex: 1 }}>
-                <i className={`ti ti-chevron-${shut ? 'right' : 'down'}`} style={{ fontSize: 12, color: mutedCol }} />
-                <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{o}</span>
-                {od > 0 && <span style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: dark ? '#F87171' : '#9B1C1C' }}>{od} overdue</span>}
-                <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: addCol, background: addBg, borderRadius: 20, padding: '2px 8px' }}>{list.length}</span>
+                style={{ display: 'flex', alignItems: 'center', gap: 9, padding: wide ? '12px 26px 9px' : '10px 20px 8px', cursor: 'pointer', background: bandBg, borderBottom: `1px solid ${rowBord}`, position: 'sticky', top: 0, zIndex: 1 }}>
+                <i className={`ti ti-chevron-${shut ? 'right' : 'down'}`} style={{ fontSize: 14, color: mutedCol }} />
+                <span style={{ fontFamily: J, fontSize: 12.5, fontWeight: 600, color: headTitle, flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{o}</span>
+                {od > 0 && <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: redCol }}>{od} overdue</span>}
+                <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: addCol, background: creamBg, borderRadius: 9, padding: '2px 8px' }}>{list.length}</span>
               </div>
-              {!shut && (() => { const rows = pairSpouses(list); return rows.map((t, i) => callRow(t, i === rows.length - 1)); })()}
+              {!shut && (wide ? rows.map(t => deskRow(t)) : <div style={{ padding: '0 20px' }}>{rows.map((t, i) => callRow(t, i === rows.length - 1))}</div>)}
             </div>
           );
         });
       };
 
-      // Agent picker — drives the call list, and Capacity builds the same
-      // control off its own (wider) owner list.
-      const agentPicker = <AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={agents} />;
+      // Tapping a day in the week strip scrolls that day's divider to the top
+      // of the list rather than re-filtering it — the week reads as one
+      // continuous list, and the strip is a way to move through it.
+      const scrollRef = useRef(null);
+      const dayRefs = useRef({});
+      const gotoDay = (iso) => {
+        setWeekday(iso);
+        const el = dayRefs.current[iso], sc = scrollRef.current;
+        if (el && sc) sc.scrollTo({ top: Math.max(0, el.offsetTop), behavior: 'smooth' });
+      };
+
+      const capacityOpenable = !!(team || myOwner);
+      const listBusy = listView === 'week' ? weekCalls === null : buckets === null;
+      const listErr = listView === 'week' ? weekErr : err;
+      const refreshing = listView === 'week' ? false : busy;
+      const refreshAll = () => { if (listView === 'week') loadWeek(true); else if (!busy) load(true); };
+
+      // The rows themselves, for whichever shape is picked.
+      const listBody = () => {
+        if (listView === 'week') {
+          const blocks = weekDates.map((iso, i) => {
+            const rows = pairSpouses(weekShown[iso] || []);
+            if (!rows.length) return null;
+            const d = cFromIso(iso);
+            return (
+              <div key={iso} ref={el => { dayRefs.current[iso] = el; }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: wide ? '12px 26px 9px' : '15px 20px 7px', background: wide ? bandBg : surfaceBg, position: wide ? 'static' : 'sticky', top: 0, zIndex: 1 }}>
+                  <span style={{ fontFamily: J, fontSize: 12.5, fontWeight: 600, color: headTitle }}>{CAL_DOW_SHORT[i]}</span>
+                  <span style={{ fontFamily: J, fontSize: 12.5, color: mutedCol }}>{CAL_MON_SHORT[d.getMonth()]} {d.getDate()}</span>
+                  <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: addCol, background: creamBg, borderRadius: 9, padding: '2px 8px' }}>{rows.length}</span>
+                  <span style={{ flex: 1, height: 1, background: rowBord }} />
+                </div>
+                {wide ? rows.map(t => deskRow(t)) : <div style={{ padding: '0 20px' }}>{rows.map((t, j) => callRow(t, j === rows.length - 1))}</div>}
+              </div>
+            );
+          }).filter(Boolean);
+          if (!blocks.length) return <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol }}>No calls scheduled this week{agent ? ' for ' + agent : ''}.</div>;
+          return blocks;
+        }
+        if (team && !agent) return groupedRows();
+        const rows = pairSpouses(shown);
+        if (!rows.length) return <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol }}>No calls scheduled for {day}{agent ? ' — ' + agent : ''}.</div>;
+        return wide ? rows.map(t => deskRow(t)) : <div style={{ padding: '0 20px' }}>{rows.map((t, i) => callRow(t, i === rows.length - 1))}</div>;
+      };
 
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-          {/* Capacity is for everyone — an agent just gets their own month, with
-              no picker and no route to anyone else's board (see CapacityView).
-              Without a resolvable name there is nothing to scope it to, so the
-              tabs stay hidden and the call list explains why. */}
-          {(team || myOwner) && (
-            <div style={{ display: 'flex', background: dark ? '#040C1C' : '#FCFBF8', borderBottom: `1px solid ${coachBord}`, flexShrink: 0 }}>
-              {[['list', 'Call List'], ['capacity', 'Capacity']].map(([id, label]) => {
-                const on = view === id;
-                return (
-                  <div key={id} onClick={() => setView(id)} style={{
-                    flex: 1, textAlign: 'center', cursor: 'pointer',
-                    fontFamily: J, fontSize: 12, letterSpacing: '0.14em', fontWeight: 600, textTransform: 'uppercase',
-                    padding: '11px 4px 10px',
-                    color: on ? (dark ? '#C9A45A' : '#001A4A') : (dark ? 'rgba(255,255,255,0.3)' : '#B4B2A9'),
-                    borderBottom: `2px solid ${on ? (dark ? '#C9A45A' : '#AD832F') : 'transparent'}`,
-                    marginBottom: -1,
-                  }}>{label}</div>
-                );
-              })}
-            </div>
-          )}
-
-          {(team || myOwner) && view === 'capacity' ? (
-            <CapacityView dark={dark} agent={agent} setAgent={setAgent} agents={agents} team={team} me={myOwner} meId={myOwnerId} />
+          {/* Capacity is a VIEW now, not a tab — opened by the button on the
+              control row, and it brings its own back control. It is for
+              everyone: an agent just gets their own month, with no picker and
+              no route to anyone else's board (see CapacityView). */}
+          {capacityOpenable && view === 'capacity' ? (
+            <CapacityView dark={dark} agent={agent} setAgent={setAgent} agents={agents} team={team} me={myOwner} meId={myOwnerId} wide={wide} onBack={() => setView('list')} />
           ) : (
           <React.Fragment>
-          {/* Header */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '9px 14px 7px', gap: 10, flexShrink: 0 }}>
-            {team
-              ? agentPicker
-              : <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle }}>Call List</div>}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
-              <button onClick={() => logOwnerId && setAddKpi(true)} disabled={!logOwnerId}
-                title={logOwnerId ? 'Log a KPI for any contact, on or off this list' : 'Pick a single agent first — a KPI has to be credited to somebody'}
-                style={{ height: 24, borderRadius: 20, border: 'none', cursor: logOwnerId ? 'pointer' : 'default', opacity: logOwnerId ? 1 : 0.45, background: addBg, color: addCol, display: 'flex', alignItems: 'center', gap: 4, padding: '0 10px', fontFamily: J, fontSize: 9, fontWeight: 600 }}>
-                <i className="ti ti-plus" style={{ fontSize: 12 }} /> Add KPI
-              </button>
-              <button onClick={() => !busy && load(true)} disabled={busy} title="Refresh from Zoho" style={{ width: 24, height: 24, borderRadius: '50%', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1, background: addBg, color: addCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                <i className="ti ti-refresh" style={{ fontSize: 12 }} />
-              </button>
+          {/* Control row — replaces the old page title and tab strip. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: wide ? '18px 26px 14px' : '16px 20px 12px', flexShrink: 0, borderBottom: wide ? `1px solid ${rowBord}` : 'none', flexWrap: 'wrap' }}>
+            <button onClick={() => capacityOpenable && setView('capacity')} disabled={!capacityOpenable}
+              title="See the month ahead — how many calls land on each day"
+              style={{ ...pill, background: callBtnBg, color: '#fff', opacity: capacityOpenable ? 1 : 0.45, cursor: capacityOpenable ? 'pointer' : 'default' }}>
+              <i className="ti ti-calendar" style={{ fontSize: 16 }} />Capacity<span style={{ marginLeft: 2, opacity: 0.7 }}>&rsaquo;</span>
+            </button>
+            {/* Deliberately always labelled: this adds a KPI, the row "+" logs
+                an activity for one person. Same icon, different jobs. */}
+            <button onClick={() => logOwnerId && setAddKpi(true)} disabled={!logOwnerId}
+              title={logOwnerId ? 'Log a KPI for any contact, on or off this list' : 'Pick a single agent first — a KPI has to be credited to somebody'}
+              style={{ ...pill, background: surfaceBg, border: `1px solid ${lineCol}`, color: addCol, fontWeight: 600, opacity: logOwnerId ? 1 : 0.45, cursor: logOwnerId ? 'pointer' : 'default' }}>
+              <i className="ti ti-plus" style={{ fontSize: 16 }} /> Add KPIs
+            </button>
+            <div style={{ flex: 1, minWidth: 8 }} />
+            <div style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+              <select value={listView} onChange={e => setListView(e.target.value)} title="How much of the calendar to show"
+                style={{ ...pill, background: trackBg, color: nameCol, fontWeight: 600, paddingRight: 30, appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none' }}>
+                <option value="3day">3-Day</option>
+                <option value="week">Week</option>
+              </select>
+              <span style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: faintCol, fontSize: 9 }}>▼</span>
             </div>
+            <button onClick={refreshAll} disabled={refreshing} title="Refresh from Zoho"
+              style={{ width: 34, height: 34, borderRadius: '50%', border: 'none', cursor: refreshing ? 'default' : 'pointer', opacity: refreshing ? 0.5 : 1, background: trackBg, color: mutedCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <i className="ti ti-refresh" style={{ fontSize: 15 }} />
+            </button>
           </div>
-          {kpiToast && (
-            <div style={{ margin: '0 14px 8px', padding: '7px 9px', borderRadius: 8, background: addBg, color: addCol, fontFamily: J, fontSize: 8, lineHeight: 1.5 }}>{kpiToast}</div>
+          {/* Admins pick whose calls these are. Its own row, so the control row
+              above keeps the same shape it has for an agent. */}
+          {team && (
+            <div style={{ display: 'flex', padding: wide ? '0 26px 12px' : '0 20px 10px', flexShrink: 0 }}>
+              <AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={agents} />
+            </div>
           )}
-          {/* Day nav */}
-          <div style={{ margin: '0 14px 10px', borderRadius: 10, overflow: 'hidden', display: 'flex', flexShrink: 0 }}>
-            {['yesterday', 'today', 'tomorrow'].map(d => {
-              const on = day === d;
-              const n = buckets ? mine(buckets[d] || []).length : null;
-              return (
-                <button key={d} onClick={() => setDay(d)} style={{
-                  flex: 1, padding: '6px 4px', textAlign: 'center', border: 'none', cursor: 'pointer',
-                  fontFamily: J, fontSize: 8, letterSpacing: '0.14em', fontWeight: 500, textTransform: 'uppercase',
-                  background: on ? navOnBg : navInBg, color: on ? '#fff' : navInCol, borderRadius: on ? 8 : 0,
-                }}>{d}{n === null ? '' : ' ' + n}</button>
-              );
-            })}
+          {kpiToast && (
+            <div style={{ margin: wide ? '0 26px 10px' : '0 20px 8px', padding: '9px 11px', borderRadius: 10, background: creamBg, color: creamTx, fontFamily: J, fontSize: 11.5, lineHeight: 1.5 }}>{kpiToast}</div>
+          )}
+          {/* Segmented control — one component, both shapes. */}
+          <div style={{ margin: wide ? '0 26px 12px' : '0 20px 8px', display: 'flex', background: trackBg, borderRadius: 11, padding: 3, gap: 2, height: wide ? 40 : 44, flexShrink: 0 }}>
+            {listView === '3day'
+              ? ['yesterday', 'today', 'tomorrow'].map(d => {
+                  const on = day === d;
+                  const n = buckets ? mine(buckets[d] || []).length : null;
+                  return (
+                    <div key={d} onClick={() => setDay(d)} style={{
+                      flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 9, cursor: 'pointer',
+                      fontFamily: J, fontSize: wide ? 13 : 12.5, fontWeight: on ? 600 : 500,
+                      color: on ? headTitle : mutedCol, background: on ? surfaceBg : 'transparent',
+                      boxShadow: on ? '0 1px 3px rgba(0,0,0,0.09)' : 'none',
+                    }}>
+                      {d.charAt(0).toUpperCase() + d.slice(1)}
+                      {n !== null && <span style={{ fontSize: 11, marginLeft: 5, color: on ? addCol : faintCol }}>{n}</span>}
+                    </div>
+                  );
+                })
+              : weekDates.map((iso, i) => {
+                  const on = weekday === iso;
+                  const d = cFromIso(iso);
+                  const off = i >= 5;
+                  const n = (weekShown[iso] || []).length;
+                  return (
+                    <div key={iso} onClick={() => gotoDay(iso)} title={CAL_DOW_SHORT[i] + ' — ' + n + ' call' + (n === 1 ? '' : 's')} style={{
+                      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: 9, cursor: 'pointer',
+                      background: on ? surfaceBg : 'transparent', boxShadow: on ? '0 1px 3px rgba(0,0,0,0.09)' : 'none',
+                      opacity: (off && !on) ? 0.55 : 1,
+                    }}>
+                      <span style={{ fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.03em', lineHeight: 1, color: on ? addCol : faintCol }}>{CAL_DOW[i]}</span>
+                      <span style={{ fontFamily: J, fontSize: 14, fontWeight: 600, lineHeight: 1.15, color: on ? headTitle : mutedCol }}>{d.getDate()}</span>
+                    </div>
+                  );
+                })}
           </div>
+          {/* Desktop table header — the columns the rows line up against. */}
+          {wide && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '10px 26px', fontFamily: J, fontSize: 9, letterSpacing: '0.16em', textTransform: 'uppercase', color: faintCol, fontWeight: 600, borderBottom: `1px solid ${rowBord}`, flexShrink: 0 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>Contact</div>
+              <div style={{ width: 150, flexShrink: 0 }}>Phone</div>
+              <div style={{ width: 230, flexShrink: 0 }}>Email</div>
+              <div style={{ width: 150, flexShrink: 0, textAlign: 'right' }}>Actions</div>
+            </div>
+          )}
           {/* Call list */}
-          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
-            {err && <div style={{ padding: '14px', fontFamily: J, fontSize: 9, color: dark ? '#F87171' : '#9B1C1C' }}>{err}</div>}
-            {!err && buckets === null && <div style={{ padding: '20px 14px', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>Loading…</div>}
-            {!err && buckets !== null && !team && !myOwner && <div style={{ padding: '20px 14px', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>Add your first and last name in your profile to see your calls.</div>}
-            {!err && buckets !== null && (team || myOwner) && shown.length === 0 && <div style={{ padding: '20px 14px', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>No calls scheduled for {day}{agent ? ' — ' + agent : ''}.</div>}
-            {!err && clipped[day] && <div style={{ padding: '7px 14px', fontFamily: J, fontSize: 8, color: dark ? '#F87171' : '#9B1C1C' }}>Zoho returned a full page for this day — the list may be incomplete. Check /crm-tasks for the full view.</div>}
-            {!err && buckets !== null && (team && !agent ? groupedRows() : (() => { const rows = pairSpouses(shown); return rows.map((t, i) => callRow(t, i === rows.length - 1)); })())}
+          <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', position: 'relative' }}>
+            {listErr && <div style={{ padding: '18px 20px', fontFamily: J, fontSize: 12.5, color: redCol, lineHeight: 1.5 }}>{listErr}</div>}
+            {!listErr && listBusy && <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol }}>Loading…</div>}
+            {!listErr && !listBusy && !team && !myOwner && <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol, lineHeight: 1.6 }}>Add your first and last name in your profile to see your calls.</div>}
+            {!listErr && (listView === 'week' ? weekCapped : clipped[day]) && (
+              <div style={{ padding: '9px 20px', fontFamily: J, fontSize: 11, color: redCol, lineHeight: 1.5 }}>Zoho returned a full page, so this list may be incomplete. Check /crm-tasks for the full view.</div>
+            )}
+            {!listErr && !listBusy && (team || myOwner) && listBody()}
           </div>
           </React.Fragment>
+          )}
+          {/* The (i) beside a name. The summary itself is not built yet, so it
+              says so plainly rather than showing an empty card. */}
+          {infoFor && (
+            <div onClick={() => setInfoFor(null)} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(10,20,45,0.42)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+              <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: '20px 20px calc(26px + env(safe-area-inset-bottom))' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <div style={{ fontFamily: J, fontSize: 17, fontWeight: 600, color: headTitle }}>{infoFor.name}</div>
+                  <button onClick={() => setInfoFor(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: faintCol, padding: 0 }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
+                </div>
+                <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, lineHeight: 1.55, marginBottom: 14 }}>
+                  The summary of this contact isn&rsquo;t built yet. It will read the household, the deal history and the recent email thread, and put the last thing that happened here in a paragraph.
+                </div>
+                {zohoContactUrl(infoFor.id) && (
+                  <a href={zohoContactUrl(infoFor.id)} target="_blank" rel="noopener noreferrer"
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, borderRadius: 12, padding: '15px 16px', border: `1px solid ${lineCol}`, color: headTitle, textDecoration: 'none', fontFamily: J, fontSize: 14, fontWeight: 600 }}>
+                    <i className="ti ti-external-link" style={{ fontSize: 19, color: mutedCol }} /> Open in Zoho
+                  </a>
+                )}
+              </div>
+            </div>
           )}
           {addKpi && (
             <AddKpiSheet
@@ -5726,10 +6020,13 @@ Rules:
               ownerId={logOwnerId}
               ownerName={logOwnerName}
               ownerEmail={ownerEmail}
-              dateIso={dates[day] || cIso(new Date())}
+              dateIso={(listView === 'week' ? weekday : dates[day]) || cIso(new Date())}
               onDone={(name, items) => {
                 setKpiToast('Logged for ' + name + ': ' + items.map(i => i.count + ' × ' + (i.subject || i.type)).join(', '));
-                load(true);   // the new rows are real tasks, so the list and counts have to catch up
+                // The new rows are real tasks, so both shapes of the list have
+                // to catch up — whichever one is on screen.
+                load(true);
+                if (listView === 'week') loadWeek(true);
               }}
               onClose={() => setAddKpi(false)}
             />
@@ -5999,21 +6296,21 @@ Rules:
       const btn = { flex: 1, padding: '10px 0', borderRadius: 10, border: 'none', fontFamily: J, fontSize: 10, fontWeight: 600, cursor: 'pointer' };
 
       return (
-        <div onClick={() => { if (!busy) onClose(); }} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,13,38,0.35)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '16px 16px calc(18px + env(safe-area-inset-bottom))', maxHeight: '88vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
-              <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: headTitle }}>Add KPI</div>
-              <button onClick={onClose} disabled={busy} style={{ background: 'none', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.4 : 1, color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 15 }} /></button>
+        <div onClick={() => { if (!busy) onClose(); }} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(10,20,45,0.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderRadius: 18, padding: '20px 20px 24px', maxHeight: '84vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 4 }}>
+              <div style={{ fontFamily: J, fontSize: 17, fontWeight: 600, color: headTitle }}>Add KPIs</div>
+              <button onClick={onClose} disabled={busy} style={{ background: 'none', border: 'none', padding: 0, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.4 : 1, color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
             </div>
 
             {mode === null && (
               <div>
-                <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 10, lineHeight: 1.5 }}>Would you like to fill out a form, or paste your notes?</div>
-                <button onClick={() => setMode('form')} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '11px 13px', borderRadius: 10, border: 'none', cursor: 'pointer', background: goBg, color: '#fff', fontFamily: J, fontSize: 10, fontWeight: 600, marginBottom: 8 }}>
-                  <i className="ti ti-forms" style={{ fontSize: 15 }} /> Fill out a form
+                <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, marginBottom: 16, lineHeight: 1.55 }}>Would you like to fill out a form, or paste your notes?</div>
+                <button onClick={() => setMode('form')} style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '15px 16px', borderRadius: 12, border: 'none', cursor: 'pointer', background: goBg, color: '#fff', fontFamily: J, fontSize: 14, fontWeight: 600, marginBottom: 10 }}>
+                  <i className="ti ti-forms" style={{ fontSize: 19 }} /> Fill out a form
                 </button>
-                <button onClick={() => setMode('notes')} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '11px 13px', borderRadius: 10, border: `1px solid ${bord}`, cursor: 'pointer', background: 'none', color: headTitle, fontFamily: J, fontSize: 10, fontWeight: 600 }}>
-                  <i className="ti ti-notes" style={{ fontSize: 15 }} /> Paste your notes
+                <button onClick={() => setMode('notes')} style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '15px 16px', borderRadius: 12, border: `1px solid ${bord}`, cursor: 'pointer', background: 'none', color: headTitle, fontFamily: J, fontSize: 14, fontWeight: 600 }}>
+                  <i className="ti ti-notes" style={{ fontSize: 19, color: mutedCol }} /> Paste your notes
                 </button>
               </div>
             )}
@@ -6271,16 +6568,18 @@ Rules:
 
       return (
         <div onClick={() => { if (!busy) onClose(); }} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(0,13,38,0.35)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: '16px 16px calc(18px + env(safe-area-inset-bottom))', maxHeight: '82vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 2 }}>
-              <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: headTitle }}>Log activity</div>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: panelBg, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: '20px 20px calc(26px + env(safe-area-inset-bottom))', maxHeight: '82vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 4 }}>
+              <div style={{ fontFamily: J, fontSize: 17, fontWeight: 600, color: headTitle }}>Log activity</div>
               {/* Dismissal is blocked while a write is in flight — the same
                   guard Cancel has. Unmounting mid-write used to throw the
                   result away, success or failure. */}
-              <button onClick={onClose} disabled={busy} style={{ background: 'none', border: 'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.4 : 1, color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 15 }} /></button>
+              <button onClick={onClose} disabled={busy} style={{ background: 'none', border: 'none', padding: 0, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.4 : 1, color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
             </div>
-            <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 12, lineHeight: 1.5 }}>
-              For <b style={{ color: headTitle }}>{contact.name}</b> — each one becomes its own task in Zoho, dated {cIso(new Date())} and already marked complete.
+            {/* The date shown is the one that will actually be stamped on the
+                tasks — the call's own due date, which is not always today. */}
+            <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, marginBottom: 16, lineHeight: 1.55 }}>
+              For <b style={{ color: headTitle, fontWeight: 500 }}>{contact.name}</b>. Each one becomes its own task in Zoho, dated {dateIso || cIso(new Date())}, and already marked complete.
             </div>
 
             {loadErr && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5, marginBottom: 10 }}>Couldn't load the activity list from Zoho, so nothing can be logged right now: {loadErr}</div>}
@@ -6288,16 +6587,18 @@ Rules:
             {!loadErr && meta && offered.length === 0 && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>Zoho's Task Type list has none of Notes, Hotzone Action, Pop-by or Lunch on it, so there's nothing to log here.</div>}
 
             {!loadErr && meta && offered.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {offered.map(a => {
                   const on = sel[a.type] !== undefined;
                   const needs = on && a.requireCount && !(Number(sel[a.type]) > 0);
                   return (
-                    <div key={a.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 11px', border: `1px solid ${needs ? redCol : on ? addCol : bord}`, borderRadius: 10, background: on ? addBg : fieldBg }}>
-                      <div onClick={() => toggle(a)} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                        <i className={`ti ti-${on ? 'square-check' : 'square'}`} style={{ fontSize: 16, color: on ? addCol : mutedCol, flexShrink: 0 }} />
-                        <span style={{ fontFamily: J, fontSize: 10, fontWeight: on ? 600 : 500, color: headTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.type}</span>
-                        {needs && <span style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: redCol, flexShrink: 0 }}>how many?</span>}
+                    <div key={a.key} style={{ display: 'flex', alignItems: 'center', gap: 13, padding: '15px 16px', border: `1px solid ${needs ? redCol : on ? goBg : bord}`, borderRadius: 12, background: 'none' }}>
+                      <div onClick={() => toggle(a)} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 13, cursor: 'pointer' }}>
+                        <span style={{ width: 19, height: 19, borderRadius: 5, flexShrink: 0, display: 'grid', placeItems: 'center', border: `1.5px solid ${on ? goBg : bord}`, background: on ? goBg : 'transparent' }}>
+                          {on && <i className="ti ti-check" style={{ fontSize: 12, color: dark ? '#001A4A' : '#fff' }} />}
+                        </span>
+                        <span style={{ fontFamily: J, fontSize: 14, fontWeight: 500, color: headTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.type}</span>
+                        {needs && <span style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: redCol, flexShrink: 0 }}>how many?</span>}
                       </div>
                       {/* Only Hotzone Action ever takes a count — Notes, Pop-by
                           and Lunch are one task per tap, no number to enter. */}
@@ -6305,7 +6606,7 @@ Rules:
                         <input type="number" inputMode="numeric" min="1" max={LOG_MAX_TASKS}
                           value={on ? sel[a.type] : ''} disabled={!on} placeholder={needs ? '?' : ''}
                           onChange={e => setCount(a, e.target.value)}
-                          style={{ width: 52, textAlign: 'center', fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, background: on ? (dark ? '#040C1C' : '#FFFFFF') : 'transparent', border: `1px solid ${needs ? redCol : on ? bord : 'transparent'}`, borderRadius: 8, padding: '6px 4px', flexShrink: 0 }} />
+                          style={{ width: 56, textAlign: 'center', fontFamily: J, fontSize: 13, fontWeight: 600, color: headTitle, background: on ? fieldBg : 'transparent', border: `1px solid ${needs ? redCol : on ? bord : 'transparent'}`, borderRadius: 8, padding: '7px 4px', flexShrink: 0 }} />
                       )}
                     </div>
                   );
@@ -6338,10 +6639,12 @@ Rules:
             {overCap && <div style={{ marginTop: 8, fontFamily: J, fontSize: 8, color: redCol, lineHeight: 1.5 }}>That's {total} tasks in one go. Keep it to {LOG_MAX_TASKS} or fewer.</div>}
             {err && <div style={{ marginTop: 8, fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>{err}</div>}
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-              <button onClick={onClose} disabled={busy} style={{ ...btn, background: fieldBg, color: headTitle, border: `1px solid ${bord}` }}>Cancel</button>
+            {/* Add stays visibly greyed rather than merely faded until at
+                least one box is ticked, so the sheet says what it wants. */}
+            <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+              <button onClick={onClose} disabled={busy} style={{ ...btn, padding: '14px 0', borderRadius: 12, fontSize: 13, background: 'none', color: headTitle, border: `1px solid ${bord}` }}>Cancel</button>
               <button onClick={submit} disabled={busy || !canAdd}
-                style={{ ...btn, background: goBg, color: '#fff', opacity: (busy || !canAdd) ? 0.45 : 1, cursor: (busy || !canAdd) ? 'default' : 'pointer' }}>
+                style={{ ...btn, padding: '14px 0', borderRadius: 12, fontSize: 13, background: (busy || !canAdd) ? '#AEB4C4' : goBg, color: '#fff', cursor: (busy || !canAdd) ? 'default' : 'pointer' }}>
                 {busy ? 'Adding…' : ('Add' + (total ? ' ' + total : ''))}
               </button>
             </div>
@@ -6379,7 +6682,7 @@ Rules:
           || '';
     }
 
-    function CapacityView({ dark, agent, setAgent, agents, team, me, meId }) {
+    function CapacityView({ dark, agent, setAgent, agents, team, me, meId, wide, onBack }) {
       const J = "'Jost', sans-serif";
       const [calls, setCalls] = useState(null);       // trimmed org-wide open calls | null while loading
       const [capped, setCapped] = useState(false);
@@ -6519,16 +6822,19 @@ Rules:
 
       return (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          {/* Agent + month controls */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px 6px', flexShrink: 0 }}>
-            {team
-              ? <AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={pickable} />
-              : <div style={{ flex: 1 }} />}
-            <button onClick={() => !busy && load(true)} disabled={busy} title="Refresh from Zoho" style={{ ...navBtn, opacity: busy ? 0.5 : 1 }}>
-              <i className="ti ti-refresh" style={{ fontSize: 12 }} />
+          {/* Back to the call list, and refresh. Capacity is a view reached by
+              a button, so it carries its own way out. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: wide ? '18px 26px 14px' : '16px 20px 12px', flexShrink: 0, borderBottom: wide ? `1px solid ${bord}` : 'none' }}>
+            <button onClick={onBack} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: J, fontSize: wide ? 14 : 13, fontWeight: 500, color: headTitle }}>
+              <i className="ti ti-chevron-left" style={{ fontSize: 16, color: addCol }} />Capacity
+            </button>
+            <div style={{ flex: 1 }} />
+            {team && <div style={{ maxWidth: 200, display: 'flex' }}><AgentPicker dark={dark} agent={agent} setAgent={setAgent} agents={pickable} /></div>}
+            <button onClick={() => !busy && load(true)} disabled={busy} title="Refresh from Zoho" style={{ ...navBtn, width: 34, height: 34, opacity: busy ? 0.5 : 1 }}>
+              <i className="ti ti-refresh" style={{ fontSize: 15 }} />
             </button>
           </div>
-          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '0 14px 14px' }}>
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: wide ? '18px 26px 22px' : '10px 14px 14px' }}>
             {err && <div style={{ padding: '14px 0', fontFamily: J, fontSize: 9, color: redCol }}>{err}</div>}
             {!err && calls === null && (
               <div style={{ padding: '28px 0', textAlign: 'center', fontFamily: J, fontSize: 9, color: mutedCol }}>
@@ -6570,16 +6876,17 @@ Rules:
                      as one continuous view. Capped in width so the day cells
                      stay square-ish on a wide screen instead of stretching into
                      billboards. */
-                  <div style={{ maxWidth: 420, margin: '0 auto' }}>
+                  <div style={{ maxWidth: wide ? 1000 : 420, margin: '0 auto' }}>
+                    <div style={wide ? { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', columnGap: 40 } : null}>
                     {months.map(m => {
                       const mk = monthKeyOf(m);
                       const mm = m.getMonth(), yy = m.getFullYear();
                       return (
-                        <div key={mk} style={{ marginBottom: 18 }}>
-                          <div style={{ fontFamily: J, fontSize: 10, fontWeight: 700, color: headTitle, marginBottom: 6 }}>{CAL_MON[mm]} {yy}</div>
+                        <div key={mk} style={{ marginBottom: wide ? 24 : 18 }}>
+                          <div style={{ fontFamily: J, fontSize: wide ? 15 : 12, fontWeight: 600, color: headTitle, marginBottom: wide ? 12 : 6 }}>{CAL_MON[mm]} {yy}</div>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3, marginBottom: 4 }}>
                             {CAL_DOW.map((d, i) => (
-                              <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: 8, fontWeight: 700, color: (i === 5 || i === 6) ? redCol : mutedCol }}>{d}</div>
+                              <div key={i} style={{ textAlign: 'center', fontFamily: J, fontSize: 9, letterSpacing: '0.06em', fontWeight: 600, color: (i === 5 || i === 6) ? redCol : mutedCol, opacity: (i === 5 || i === 6) ? 0.7 : 1 }}>{d}</div>
                             ))}
                           </div>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
@@ -6599,14 +6906,14 @@ Rules:
                               const openable = n || p;
                               return (
                                 <div key={iso} onClick={() => openable && setOpenDay(iso)} style={{
-                                  position: 'relative', aspectRatio: '1 / 1', minHeight: 34, borderRadius: 7,
+                                  position: 'relative', aspectRatio: wide ? '1.15 / 1' : '1 / 1', minHeight: wide ? 44 : 34, borderRadius: wide ? 9 : 7,
                                   border: `1px solid ${iso === todayIso ? (dark ? '#C9A45A' : '#001A4A') : bord}`,
                                   background: bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                                   cursor: openable ? 'pointer' : 'default',
                                 }}>
-                                  <div style={{ position: 'absolute', top: 2, left: 4, fontFamily: J, fontSize: 7, fontWeight: 600, color: off ? redCol : mutedCol }}>{d}</div>
-                                  {n ? <span style={{ fontFamily: J, fontSize: 12, fontWeight: 700, color: tone.fg, lineHeight: 1 }}>{n}</span> : null}
-                                  {p ? <span style={{ fontFamily: J, fontSize: 7, fontWeight: 700, color: headTitle, opacity: 0.45, lineHeight: 1.4 }}>{n ? '+' : ''}{p}</span> : null}
+                                  <div style={{ position: 'absolute', top: wide ? 5 : 3, left: wide ? 7 : 5, fontFamily: J, fontSize: wide ? 9.5 : 9, fontWeight: 600, color: off ? redCol : mutedCol }}>{d}</div>
+                                  {n ? <span style={{ fontFamily: J, fontSize: wide ? 17 : 15, fontWeight: 600, color: tone.fg, lineHeight: 1 }}>{n}</span> : null}
+                                  {p ? <span style={{ fontFamily: J, fontSize: 8, fontWeight: 600, color: headTitle, opacity: 0.45, lineHeight: 1.4 }}>{n ? '+' : ''}{p}</span> : null}
                                   {off && <span style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, fontWeight: 800, color: redCol, opacity: 0.42, pointerEvents: 'none' }}>✕</span>}
                                 </div>
                               );
@@ -6615,17 +6922,19 @@ Rules:
                         </div>
                       );
                     })}
-                    {/* One line: color coding first, then what the numbers mean,
-                        then the hatch shading, then the weekend/holiday mark. */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 6, marginBottom: 10, fontFamily: J, fontSize: 7, color: mutedCol, overflowX: 'auto' }}>
+                    </div>
+                    {/* One line: colour coding first, then what the numbers
+                        mean, then the hatch shading, then the weekend/holiday
+                        mark. Centred under both months on a wide screen. */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: wide ? 'center' : 'flex-start', gap: wide ? 16 : 10, marginTop: 6, marginBottom: 12, fontFamily: J, fontSize: wide ? 10.5 : 10, color: mutedCol, overflowX: 'auto' }}>
                       {[['1–4', 1], ['5–7', 5], ['8+', 8]].map(([lab, n]) => {
                         const t = capTone(n, dark);
-                        return <span key={lab} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: t.bg, border: `1px solid ${bord}`, display: 'inline-block', flexShrink: 0 }} />{lab}</span>;
+                        return <span key={lab} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}><span style={{ width: 12, height: 12, borderRadius: 3, background: t.bg, border: `1px solid ${bord}`, display: 'inline-block', flexShrink: 0 }} />{lab}</span>;
                       })}
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: capHatch(dark), border: `1px solid ${bord}`, display: 'inline-block', flexShrink: 0 }} />projected</span>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0 }}><span style={{ color: redCol, fontWeight: 800 }}>✕</span>weekend/holiday</span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}><span style={{ width: 12, height: 12, borderRadius: 3, background: capHatch(dark), border: `1px solid ${bord}`, display: 'inline-block', flexShrink: 0 }} />projected</span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}><span style={{ color: redCol, fontWeight: 800 }}>✕</span>weekend/holiday</span>
                     </div>
-                    <button onClick={() => setMonthsLoaded(n => n + CAPACITY_MONTHS_STEP)} style={{ display: 'block', margin: '0 auto', padding: '7px 16px', borderRadius: 20, border: 'none', cursor: 'pointer', background: addBg, color: addCol, fontFamily: J, fontSize: 9, fontWeight: 700 }}>
+                    <button onClick={() => setMonthsLoaded(n => n + CAPACITY_MONTHS_STEP)} style={{ display: 'block', margin: '0 auto', padding: '9px 18px', borderRadius: 20, border: `1px solid ${dark ? 'rgba(173,131,47,0.35)' : '#E8DBBE'}`, cursor: 'pointer', background: dark ? 'rgba(173,131,47,0.15)' : '#F5EEDF', color: dark ? '#C9A45A' : '#8C6A24', fontFamily: J, fontSize: 11, letterSpacing: '0.06em', fontWeight: 600 }}>
                       Load {CAPACITY_MONTHS_STEP} more months
                     </button>
                   </div>
@@ -6634,7 +6943,7 @@ Rules:
                     org-wide total at them would be both wrong and confusing. */}
                 {cachedAt && (() => {
                   const n = team ? (calls || []).length : (calls || []).filter(c => c.owner === who).length;
-                  return <div style={{ marginTop: 12, fontFamily: J, fontSize: 8, color: mutedCol, textAlign: 'center' }}>{team ? 'Team calls' : 'Your calls'} loaded {callAgo(cachedAt)}{calls ? ' · ' + n.toLocaleString() + ' open' : ''}</div>;
+                  return <div style={{ marginTop: 12, fontFamily: J, fontSize: 10.5, fontWeight: 300, color: dark ? 'rgba(255,255,255,0.3)' : '#BBB6AA', textAlign: 'center' }}>{team ? 'Team calls' : 'Your calls'} loaded {callAgo(cachedAt)}{calls ? ' · ' + n.toLocaleString() + ' open' : ''}</div>;
                 })()}
               </React.Fragment>
             )}
@@ -6648,8 +6957,8 @@ Rules:
                   <div style={{ fontFamily: J, fontSize: 12, fontWeight: 600, color: headTitle }}>{who}</div>
                   <button onClick={() => setOpenDay(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: mutedCol }}><i className="ti ti-x" style={{ fontSize: 15 }} /></button>
                 </div>
-                <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 10 }}>
-                  {CAL_MON[Number(openDay.slice(5, 7)) - 1]} {Number(openDay.slice(8))} — {openList.length} booked{openProj.length ? ' · ' + openProj.length + ' projected' : ''}
+                <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, marginBottom: 12 }}>
+                  {CAL_DOW_FULL[(cFromIso(openDay).getDay() + 6) % 7]}, {CAL_MON[Number(openDay.slice(5, 7)) - 1]} {Number(openDay.slice(8))} · {openList.length} booked{openProj.length ? ' · ' + openProj.length + ' projected' : ''}
                 </div>
                 {Object.keys(openTally).length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 11 }}>

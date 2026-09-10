@@ -2399,7 +2399,7 @@ Rules:
     const fmtUsd = (n) => '$' + (Number(n) || 0).toFixed(2);
 
     // Friendly names for the feature tags written to usage_log by each surface.
-    const FEATURE_LABEL = { ai_chat: 'AI Chat', christies_events: "Christie's Crawler", kpi: 'KPI Entry', add_todo: 'Add To-Do', intake_form: 'Intake Forms', tasks: 'Tasks', crm_tasks: 'CRM Tasks', voice_transcribe: 'Voice Transcribe', chat_title: 'Chat Titles', 'image-generation': 'AI Images', other: 'Other / untagged' };
+    const FEATURE_LABEL = { ai_chat: 'AI Chat', christies_events: "Christie's Crawler", kpi: 'KPI Entry', add_todo: 'Add To-Do', intake_form: 'Intake Forms', tasks: 'Tasks', crm_tasks: 'CRM Tasks', voice_transcribe: 'Voice Transcribe', chat_title: 'Chat Titles', 'image-generation': 'AI Images', contact_summary: 'Contact Summary', other: 'Other / untagged' };
     const featLabel = (f) => FEATURE_LABEL[f] || (f || 'Other');
     const MONTHLY_CAP_USD = 20; // per-person estimated-spend cap (calendar month). Warn-only: over = flagged red, never blocked.
 
@@ -4633,6 +4633,156 @@ Rules:
       return api;
     }
 
+    // ─── The prospect-form field on Contacts ─────────────────────────
+    //  Which Zoho field records how a prospect came in ("prospect form type").
+    //  Its api-name is org-specific and nobody wrote it down, so it is
+    //  DISCOVERED from Zoho's own field list rather than guessed — the same way
+    //  the Task Type field and the spouse lookup already are. A guessed api
+    //  name would be a second heuristic mislabelling a record, which is the
+    //  exact bug this whole change exists to fix.
+    //
+    //  Deliberately strict: a label must mention a prospect AND a form (or say
+    //  "prospect type" outright), and exactly ONE field may match. Two
+    //  candidates means the org has something we don't understand, and the
+    //  honest answer there is to show no chip at all.
+    const CONTACT_FIELDS_KEY = 'tmg-contact-fields-v1';
+    const PROSPECT_LABEL = /(prospect.*(form|type))|((form|type).*prospect)/i;
+    function pickProspectField(fields) {
+      const hits = (fields || []).filter(f => f && f.api_name && PROSPECT_LABEL.test(f.field_label || ''));
+      return hits.length === 1 ? { api: hits[0].api_name, label: hits[0].field_label || 'Prospect form' } : null;
+    }
+    // Three answers, not two: the field (cache a week — schemas barely move),
+    // a definite "this org has no such field" (cache an hour, so creating it in
+    // Zoho shows up the same morning), and a FAILED READ, which caches nothing
+    // at all. Caching a failure as "no such field" is how a single bad moment
+    // becomes permanent.
+    async function resolveProspectField() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(CONTACT_FIELDS_KEY) || 'null');
+        if (raw && raw.at) {
+          const age = Date.now() - raw.at;
+          if (raw.field && age < 7 * 86400000) return raw.field;
+          if (!raw.field && age < 3600000) return null;
+        }
+      } catch (e) {}
+      if (callsIsDev()) {
+        const field = { api: 'Prospect_Form_Type', label: 'Prospect Form Type' };
+        try { localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify({ field, at: Date.now() })); } catch (e) {}
+        return field;
+      }
+      let data;
+      try {
+        const r = await callZoho({ action: 'get_fields', module: 'Contacts' });
+        if (!r.ok || !r.data || !Array.isArray(r.data.fields)) return null;   // caches nothing
+        data = r.data;
+      } catch (e) { return null; }                                            // caches nothing
+      const field = pickProspectField(data.fields);
+      try { localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify({ field, at: Date.now() })); } catch (e) {}
+      return field;
+    }
+    // ─── Contact brief (the (i) on a call row) ───────────────────────
+    //  Generated on press, from the contact record, their open deals, their
+    //  call history and a live Gmail search of the OWNING AGENT's mailbox and
+    //  that agent's transaction coordinator's. NOTHING is stored: no table, no
+    //  column, no localStorage.
+    //
+    //  This Map is the one exception, and it is not storage — it lives in the
+    //  page, dies on reload, never touches disk, and nothing can read it back.
+    //  Without it, closing the sheet by tapping the backdrop and reopening it
+    //  bills a second AI call for an answer the agent just saw.
+    const BRIEF_MEMO = new Map();
+    async function fetchContactBrief(contactId) {
+      if (BRIEF_MEMO.has(contactId)) return BRIEF_MEMO.get(contactId);
+      if (callsIsDev()) {
+        // One fixture per state the server can actually return, keyed off the
+        // last digit of the dev contact id, so every branch of the sheet is
+        // reachable in the preview without a Supabase session. A real failure
+        // that nobody has ever seen rendered is a failure that ships broken.
+        await new Promise(r => setTimeout(r, 550));   // so the loading state is visible
+        const k = Number(String(contactId).slice(-1)) || 0;
+        const good = (over) => Object.assign({
+          brief: 'Under contract on 1903 Frazier Ave, closing 2026-10-02. The last emails were the lender chasing an updated pre-approval letter and a reply confirming Friday works for the walkthrough. Last spoken to on 2026-09-03.',
+          classification: 'B', contact_email_on_file: true, deals_read: true, tasks_read: true, threads_read: 4,
+          mailboxes: [
+            { role: 'agent', name: 'Brad Baker', state: 'searched', threads: 3 },
+            { role: 'tc', name: 'Alexandra Reyes', state: 'searched', threads: 1 },
+          ],
+          generated_at: new Date().toISOString(),
+        }, over || {});
+        const fail = (code, ownerName) => { const e = new Error(code); e.code = code; e.ownerName = ownerName || null; throw e; };
+        let out;
+        if (k === 1) out = good({ mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'searched', threads: 3 }, { role: 'tc', name: 'Alexandra Reyes', state: 'not_connected', threads: 0 }] });
+        else if (k === 2) out = good({ brief: '', threads_read: 0, contact_email_on_file: false, mailboxes: [] });
+        else if (k === 3) fail('contact_not_found');
+        else if (k === 4) fail('owner_unresolved', 'Cassandra Clemons');
+        else if (k === 5) fail('not_permitted');
+        else if (k === 6) fail('rate_limited');
+        else if (k === 7) fail('zoho_unavailable');
+        else if (k === 8) out = good({ deals_read: false, tasks_read: false, threads_read: 0, mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'not_scoped', threads: 0 }, { role: 'tc', name: '', state: 'no_tc_assigned', threads: 0 }] });
+        else if (k === 9) fail('ai_unavailable');
+        else out = good();
+        BRIEF_MEMO.set(contactId, out);
+        return out;
+      }
+      const { ok, status, data } = await callCalendar({ action: 'contact_brief', contact_id: String(contactId) });
+      if (!ok) {
+        const e = new Error((data && data.error) || 'brief_failed');
+        e.code = (data && data.error) || String(status);
+        e.ownerName = (data && data.owner_name) || null;
+        throw e;   // deliberately NOT memoised — a failure must be retryable
+      }
+      BRIEF_MEMO.set(contactId, data);
+      return data;
+    }
+    // What a skipped mailbox means, in words an agent can act on. "Couldn't
+    // search just now" would be wrong for most of these — they don't resolve
+    // by waiting.
+    const BRIEF_MAILBOX_NOTE = {
+      not_connected: (n) => n + ' hasn’t connected Google, so their mail wasn’t searched.',
+      not_scoped: (n) => n + ' needs to press Reconnect in Settings once — their Google connection predates mail access.',
+      not_enabled: (n) => n + '’s mailbox is switched off for summaries.',
+      not_active: (n) => n + ' is no longer active, so their mail wasn’t searched.',
+      no_tc_assigned: () => 'No transaction coordinator is assigned to this agent, so only their own mail was searched.',
+      search_failed: (n) => 'Couldn’t search ' + n + '’s mail this time.',
+      unknown: () => 'One mailbox couldn’t be identified.',
+    };
+    // Everything the brief could NOT see, in one list. Silence about a skipped
+    // source reads as "there is nothing there", and an agent acting on that is
+    // worse off than one who got no brief at all.
+    function briefGaps(d) {
+      const out = [];
+      if (!d) return out;
+      if (!d.contact_email_on_file) out.push('No email address on this contact, so no mail was searched.');
+      (d.mailboxes || []).forEach(m => {
+        if (m.state === 'searched') return;
+        const f = BRIEF_MAILBOX_NOTE[m.state];
+        if (f) out.push(f(m.name || 'That teammate'));
+      });
+      if (d.deals_read === false) out.push('Zoho didn’t return this contact’s deals.');
+      if (d.tasks_read === false) out.push('Zoho didn’t return this contact’s call history.');
+      return out;
+    }
+    const BRIEF_ERROR_NOTE = {
+      owner_unresolved: 'This contact is owned by somebody who isn’t linked to a TMG account — often an agent who has left. There is no mailbox to read.',
+      not_permitted: 'This contact belongs to another agent. Only that agent, their transaction coordinator and admins can open a summary for it.',
+      contact_not_found: 'Zoho no longer has this contact.',
+      bad_contact_id: 'This task has no contact attached, so there is nothing to summarise.',
+      rate_limited: 'That’s a lot of summaries in one hour. Try again shortly.',
+      zoho_unavailable: 'Zoho didn’t answer. Try again.',
+      ai_unavailable: 'The summary service didn’t answer. Try again.',
+    };
+
+    // Zoho hands a picklist back as a string, a multi-select as an array and a
+    // lookup as an object. Printing any of those straight into a chip is how
+    // "[object Object]" reaches a customer-facing screen.
+    function prospectText(v) {
+      if (v == null || v === '') return null;
+      if (Array.isArray(v)) return v.map(prospectText).filter(Boolean).join(', ') || null;
+      if (typeof v === 'object') return v.name || v.display_value || null;
+      const s = String(v).trim();
+      return (!s || /^-?\s*none\s*-?$/i.test(s)) ? null : s;
+    }
+
     // localhost has no Zoho connection, so the preview runs off a fixture that
     // has the same shape a real search_tasks response returns.
     const callsIsDev = () => window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
@@ -5202,7 +5352,34 @@ Rules:
       const [listView, setListView] = useState(() => (callPrefGet(CALL_VIEW_KEY, '3day') === 'week' ? 'week' : '3day'));
       const [day, setDay] = useState(() => { const d = callPrefGet(CALL_DAYSEG_KEY, 'today'); return ['yesterday', 'today', 'tomorrow'].includes(d) ? d : 'today'; });
       const [weekday, setWeekday] = useState('');     // 'YYYY-MM-DD' inside the shown week; '' until resolved
-      const [infoFor, setInfoFor] = useState(null);   // contact behind the (i) — the AI summary, stubbed for now
+      const [infoFor, setInfoFor] = useState(null);   // contact behind the (i) — { id, name } while its brief loads
+      // Which Zoho field holds the prospect form type, discovered once per
+      // device. `null` means either "not asked yet" or "this org has no such
+      // field" — resolveProspectField tells those apart internally, and either
+      // way the second chip simply doesn't render.
+      const [pfield, setPfield] = useState(null);
+      useEffect(() => { let dead = false; resolveProspectField().then(f => { if (!dead) setPfield(f); }); return () => { dead = true; }; }, []);
+      // The brief behind the (i). `null` until a sheet is open.
+      //   { id, state: 'loading' | 'ready' | 'error', data, code, ownerName }
+      const [brief, setBrief] = useState(null);
+      // Every load stamps a ticket. A reply whose ticket has been superseded —
+      // sheet closed, different contact opened, Retry pressed — is dropped, so a
+      // slow first answer can never overwrite a fast second one.
+      const briefGen = useRef(0);
+      const loadBrief = (id, force) => {
+        const gen = ++briefGen.current;
+        if (force) BRIEF_MEMO.delete(id);
+        setBrief({ id, state: 'loading' });
+        fetchContactBrief(id).then(data => {
+          if (briefGen.current !== gen) return;
+          setBrief({ id, state: 'ready', data });
+        }).catch(e => {
+          if (briefGen.current !== gen) return;
+          setBrief({ id, state: 'error', code: (e && e.code) || 'brief_failed', ownerName: (e && e.ownerName) || null });
+        });
+      };
+      const openInfo = (b) => { setInfoFor({ id: b.cid, name: b.cname }); loadBrief(b.cid, false); };
+      const closeInfo = () => { briefGen.current++; setInfoFor(null); setBrief(null); };
       useEffect(() => { callPrefSet(CALL_VIEW_KEY, listView); }, [listView]);
       useEffect(() => { callPrefSet(CALL_DAYSEG_KEY, day); }, [day]);
       useEffect(() => { if (weekday) callPrefSet(CALL_WEEKDAY_KEY, weekday); }, [weekday]);
@@ -5514,7 +5691,17 @@ Rules:
         const stale = (c, key, at) => !c[key] && (!c[at] || (Date.now() - c[at]) > NEG_TTL);
         const needDetail = ids.filter(id => {
           const c = cache[id];
-          return !c || !c.detail || stale(c, 'phone', 'at');
+          if (!c || !c.detail || stale(c, 'phone', 'at')) return true;
+          // Two fields added after this cache shipped, so every device already
+          // holds entries that predate them. Same key-presence rule as `spouse`
+          // above: a MISSING key means never asked, a stored null means asked
+          // and there genuinely isn't one.
+          if (!('cls' in c)) return true;
+          // Only chase the prospect field once it is actually known. Asking
+          // while `pfield` is still resolving would stamp `pform: null` beside
+          // `detail: true` and never look again — the permanent-null trap.
+          if (pfield && pfield.api && !('pform' in c)) return true;
+          return false;
         });
         const needSpouse = ids.filter(id => {
           const c = cache[id];
@@ -5557,6 +5744,11 @@ Rules:
             email: i % 4 === 3 ? null : 'contact' + i + '@example.com',
             spouse: (i % 3 === 0 || i % 5 === 4) ? { id: '55000000000009' + String(100 + i), name: 'Pat Example' } : null,
             spousePhone: i % 5 === 4 ? String(5129000000 + i * 11) : null,
+            // The record's own classification, and one contact in six with none
+            // on file — that is the case the subject-derived fallback exists
+            // for, and it has to be visible in the preview.
+            cls: i % 6 === 5 ? null : ['A', 'B', 'C'][i % 3],
+            pform: i % 4 === 0 ? null : ['Buyer form', 'Seller form', 'Open house'][i % 3],
           }; });
           merge(out);
           return;
@@ -5592,13 +5784,32 @@ Rules:
               try {
                 // phone AND email off the same call — email was already being
                 // fetched here and thrown away.
-                const r = await callZoho({ action: 'get_contact', id });
+                const r = await callZoho(Object.assign(
+                  { action: 'get_contact', id },
+                  (pfield && pfield.api) ? { extra_fields: [pfield.api] } : {}
+                ));
                 // `found === false` means Zoho was reached but the record was
                 // not — caching that as "they have no number" is a lie that
                 // never expires, so it is left unstamped and retried later.
                 if (!r.ok || !r.data || r.data.found === false) return [id, null];
                 const c = r.data.contact || null;
-                return [id, { detail: true, at: Date.now(), phone: (c && c.phone) || null, email: (c && c.email) || null }];
+                const v = {
+                  detail: true, at: Date.now(),
+                  phone: (c && c.phone) || null,
+                  email: (c && c.email) || null,
+                  // The contact's own A/B/C, which is what the chip should have
+                  // been showing all along. Always stamped once the record is
+                  // read, so an absent key still means "never asked".
+                  cls: (c && c.classification) || null,
+                };
+                // Only stamp `pform` when the field was actually asked for AND
+                // the ask survived. `extra_failed` means the server had to drop
+                // it to save the phone number — recording that as "no prospect
+                // form on file" would be a permanent lie.
+                if (pfield && pfield.api && c && !c.extra_failed) {
+                  v.pform = prospectText(c.extra ? c.extra[pfield.api] : null);
+                }
+                return [id, v];
               } catch (e) { return [id, null]; }   // a failure caches NOTHING, so it is retried
             }));
             if (dead) return;
@@ -5625,7 +5836,10 @@ Rules:
           }
         })();
         return () => { dead = true; };
-      }, [shownKey]);
+        // `pfield` is a dependency on purpose: it resolves asynchronously, so
+        // the first run of this effect usually happens before it is known.
+        // Without it here, nobody would ever go back and ask for that field.
+      }, [shownKey, pfield]);
 
       // ── Writes ────────────────────────────────────────────────────
       // The day queries carry no status filter, so a completed call correctly
@@ -5718,7 +5932,10 @@ Rules:
       // Everything a row needs to draw itself, worked out once so the phone
       // card and the desktop table row can share it.
       const rowBits = (t) => {
-        const grade = callTier(t.Subject);
+        // The tier the SUBJECT claims. Kept only as a labelled fallback now —
+        // it is a guess, and it was wrong whenever a real subject didn't happen
+        // to read "<letter> Touch Call".
+        const subjectGrade = callTier(t.Subject);
         const cname = (t.Who_Id && t.Who_Id.name) || t.Subject || 'Unknown';
         const cid = t.Who_Id && t.Who_Id.id;
         // `undefined` = not looked up yet, `null` = looked up and the contact
@@ -5731,8 +5948,24 @@ Rules:
         const looked = !cid || (!!(info && info.detail) && !spouseLookupPending);
         const phone = info && info.phone;
         const spousePhone = info && info.spousePhone;
+        // The classification the CONTACT RECORD carries, which is the real
+        // answer. Three states, and they must not collapse: the record's value,
+        // "read the record, there is none on file", and "haven't read it yet".
+        const clsKnown = !!(info && ('cls' in info));
+        const grade = clsKnown ? (info.cls || null) : null;
         return {
-          grade, cname, cid,
+          grade, clsKnown, subjectGrade,
+          // Shown under the fallback chip so a wrong letter is at least
+          // traceable to where it came from.
+          gradeFromSubject: (!clsKnown && subjectGrade !== 'Other' && subjectGrade !== 'EO') ? subjectGrade : null,
+          // EO is not a client classification — it is a kind of call. Before
+          // this change it happened to ride in on the same chip, so once the
+          // chip started reading the record every EO call would have silently
+          // become "No class" and information would have vanished off his
+          // screen. It gets its own marker instead.
+          eo: subjectGrade === 'EO',
+          pform: (info && ('pform' in info)) ? info.pform : null,
+          cname, cid,
           email: info && info.email,
           spouse: info && info.spouse,
           // No number of their own falls back to the spouse's line. Always
@@ -5773,24 +6006,42 @@ Rules:
         </React.Fragment>
       );
 
-      // Name · tier badge · spouse · info. The badge is the client
-      // classification; the (i) opens the contact summary (stubbed).
+      // A chip, in the two shapes this row uses.
+      const chip = (text, title, muted) => (
+        <span title={title}
+          style={{ fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.04em', lineHeight: 1.4, padding: '2px 6px', borderRadius: 5, flexShrink: 0,
+            background: muted ? trackBg : creamBg, color: muted ? mutedCol : creamTx,
+            border: muted ? `1px solid ${lineCol}` : 'none' }}>{text}</span>
+      );
+
+      // Name · classification · prospect form · spouse · info.
+      //
+      // The classification comes from the CONTACT RECORD now. It used to be
+      // regex-read off the task's subject, which meant a contact classified A
+      // in Zoho showed "No class" unless the subject happened to say "A Touch
+      // Call" — a wrong answer stated confidently. The subject is still used,
+      // but only while the record is loading and only labelled as a guess.
       const nameCluster = (t, b, size) => (
         <React.Fragment>
           {b.href
             ? <a href={b.href} target="_blank" rel="noopener noreferrer" style={{ fontFamily: J, fontSize: size, fontWeight: 600, letterSpacing: '-0.01em', color: nameCol, textDecoration: b.done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.cname}</a>
             : <span style={{ fontFamily: J, fontSize: size, fontWeight: 600, letterSpacing: '-0.01em', color: nameCol, textDecoration: b.done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.cname}</span>}
-          <span title={'Client classification: ' + (b.grade === 'Other' ? 'not classified' : b.grade)}
-            style={{ fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.04em', lineHeight: 1.4, padding: '2px 6px', borderRadius: 5, background: creamBg, color: creamTx, flexShrink: 0 }}>
-            {b.grade === 'Other' ? 'No class' : b.grade}
-          </span>
+          {b.clsKnown
+            ? (b.grade
+                ? chip(b.grade, 'Client classification ' + b.grade + ', from the contact record in Zoho', false)
+                : chip('No class', 'This contact has no client classification set in Zoho', true))
+            : (b.gradeFromSubject
+                ? chip(b.gradeFromSubject + '?', 'Read off the task subject while the contact record loads — it may not match the record', true)
+                : chip('…', 'Reading this contact’s classification from Zoho', true))}
+          {b.eo && chip('EO', 'This task is an EO touch call — a kind of call, not a client classification', true)}
+          {b.pform && chip(b.pform, (pfield && pfield.label ? pfield.label : 'Prospect form') + ': ' + b.pform, true)}
           {b.spouse && b.spouse.name && (
             <a href={zohoContactUrl(b.spouse.id) || undefined} target="_blank" rel="noopener noreferrer" title={'Spouse: ' + b.spouse.name}
               style={{ fontFamily: J, fontSize: 10.5, color: mutedCol, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, maxWidth: 150, overflow: 'hidden', whiteSpace: 'nowrap' }}>
               <i className="ti ti-heart-filled" style={{ fontSize: 10, color: dark ? '#C9A45A' : '#C9A45A' }} />{b.spouse.name}
             </a>
           )}
-          <button onClick={() => setInfoFor({ id: b.cid, name: b.cname })} title={'About ' + b.cname}
+          <button onClick={() => openInfo(b)} title={'About ' + b.cname}
             style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: faintCol, flexShrink: 0, display: 'inline-flex', alignItems: 'center' }}>
             <i className="ti ti-info-circle" style={{ fontSize: 16 }} />
           </button>
@@ -6063,18 +6314,60 @@ Rules:
           </div>
           </React.Fragment>
           )}
-          {/* The (i) beside a name. The summary itself is not built yet, so it
-              says so plainly rather than showing an empty card. */}
+          {/* The (i) beside a name. Generated on press from the contact record,
+              its deals, its call history and a live search of the OWNING
+              AGENT's mail and their TC's. Nothing here is stored. */}
           {infoFor && (
-            <div onClick={() => setInfoFor(null)} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(10,20,45,0.42)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+            <div onClick={closeInfo} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(10,20,45,0.42)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
               <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: '20px 20px calc(26px + env(safe-area-inset-bottom))' }}>
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 4 }}>
                   <div style={{ fontFamily: J, fontSize: 17, fontWeight: 600, color: headTitle }}>{infoFor.name}</div>
-                  <button onClick={() => setInfoFor(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: faintCol, padding: 0 }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
+                  <button onClick={closeInfo} style={{ background: 'none', border: 'none', cursor: 'pointer', color: faintCol, padding: 0 }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
                 </div>
-                <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, lineHeight: 1.55, marginBottom: 14 }}>
-                  The summary of this contact isn&rsquo;t built yet. It will read the household, the deal history and the recent email thread, and put the last thing that happened here in a paragraph.
-                </div>
+
+                {(!brief || brief.id !== infoFor.id || brief.state === 'loading') && (
+                  <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, lineHeight: 1.55, margin: '10px 0 16px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <i className="ti ti-loader-2" style={{ fontSize: 14, animation: 'tmg-spin 0.8s linear infinite', display: 'inline-block' }} /> Reading Zoho and recent email…
+                  </div>
+                )}
+
+                {brief && brief.id === infoFor.id && brief.state === 'ready' && (
+                  <React.Fragment>
+                    <div style={{ fontFamily: J, fontSize: 13.5, fontWeight: 300, color: headTitle, lineHeight: 1.6, margin: '10px 0 12px' }}>
+                      {brief.data.brief || 'Nothing recent on file.'}
+                    </div>
+                    {/* What was and wasn't read. A brief that quietly skipped a
+                        mailbox reads as "there's nothing there", which is a
+                        different and much more expensive mistake. */}
+                    {briefGaps(brief.data).length > 0 && (
+                      <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 300, color: mutedCol, lineHeight: 1.55, marginBottom: 14, paddingLeft: 10, borderLeft: `2px solid ${lineCol}` }}>
+                        {briefGaps(brief.data).map((g, i) => <div key={i}>{g}</div>)}
+                      </div>
+                    )}
+                    <div style={{ fontFamily: J, fontSize: 10, color: faintCol, marginBottom: 14 }}>
+                      {brief.data.threads_read
+                        ? 'Written just now from Zoho and ' + brief.data.threads_read + ' recent email ' + (brief.data.threads_read === 1 ? 'thread' : 'threads') + '. Not saved anywhere.'
+                        : 'Written just now from Zoho. No email threads were read. Not saved anywhere.'}
+                    </div>
+                  </React.Fragment>
+                )}
+
+                {brief && brief.id === infoFor.id && brief.state === 'error' && (
+                  <React.Fragment>
+                    <div style={{ fontFamily: J, fontSize: 12.5, fontWeight: 300, color: brief.code === 'not_permitted' ? mutedCol : redCol, lineHeight: 1.55, margin: '10px 0 12px' }}>
+                      {brief.code === 'owner_unresolved'
+                        ? (brief.ownerName ? brief.ownerName + ' owns this contact in Zoho but has no TMG account — usually somebody who has left. There is no mailbox to read.' : BRIEF_ERROR_NOTE.owner_unresolved)
+                        : (BRIEF_ERROR_NOTE[brief.code] || 'The summary couldn’t be written this time.')}
+                    </div>
+                    {!['not_permitted', 'owner_unresolved', 'bad_contact_id', 'contact_not_found'].includes(brief.code) && (
+                      <button onClick={() => loadBrief(infoFor.id, true)}
+                        style={{ background: 'none', border: `1px solid ${lineCol}`, borderRadius: 10, padding: '9px 14px', marginBottom: 14, cursor: 'pointer', fontFamily: J, fontSize: 12.5, fontWeight: 600, color: headTitle }}>
+                        Try again
+                      </button>
+                    )}
+                  </React.Fragment>
+                )}
+
                 {zohoContactUrl(infoFor.id) && (
                   <a href={zohoContactUrl(infoFor.id)} target="_blank" rel="noopener noreferrer"
                     style={{ display: 'flex', alignItems: 'center', gap: 8, borderRadius: 12, padding: '15px 16px', border: `1px solid ${lineCol}`, color: headTitle, textDecoration: 'none', fontFamily: J, fontSize: 14, fontWeight: 600 }}>
@@ -7030,10 +7323,16 @@ Rules:
                 <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, marginBottom: 12 }}>
                   {CAL_DOW_FULL[(cFromIso(openDay).getDay() + 6) % 7]}, {CAL_MON[Number(openDay.slice(5, 7)) - 1]} {Number(openDay.slice(8))} · {openList.length} booked{openProj.length ? ' · ' + openProj.length + ' projected' : ''}
                 </div>
+                {/* These letters are read off the TASK SUBJECT, not the contact
+                    record — this grid never loads contact records, and doing so
+                    would mean a Zoho call per name on every cell tap. The Calls
+                    list reads the record, so the two can legitimately disagree
+                    for the same person. Both chips say where their letter came
+                    from so a disagreement reads as a known limit, not a bug. */}
                 {Object.keys(openTally).length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 11 }}>
                     {Object.keys(openTally).sort().map(t => (
-                      <span key={t} style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: addCol, background: addBg, borderRadius: 20, padding: '2px 9px' }}>{t}: {openTally[t]}</span>
+                      <span key={t} title={'Counted from the task subject, not the contact record'} style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: addCol, background: addBg, borderRadius: 20, padding: '2px 9px' }}>{t}: {openTally[t]}</span>
                     ))}
                   </div>
                 )}
@@ -7046,7 +7345,7 @@ Rules:
                         {href
                           ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, textDecoration: 'none', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</a>
                           : <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>}
-                        <span style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: addCol, background: addBg, borderRadius: 20, padding: '2px 8px', flexShrink: 0 }}>{callTier(c.Subject)}</span>
+                        <span title={'From the task subject, not the contact record — the Calls list shows the record’s own classification'} style={{ fontFamily: J, fontSize: 8, fontWeight: 700, color: addCol, background: addBg, borderRadius: 20, padding: '2px 8px', flexShrink: 0 }}>{callTier(c.Subject)}</span>
                       </div>
                     );
                   })}

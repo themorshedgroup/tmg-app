@@ -1277,7 +1277,20 @@ Deno.serve(async (req) => {
       // Other_Phone matters: the Cadence Health "unreachable" sweep counts it as
       // a number, so leaving it out here made the two disagree — a contact with
       // only an Other_Phone looked numberless to the call row.
-      const fields = "First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Other_Phone,Mailing_City,Mailing_State,Lead_Source,Created_Time";
+      //
+      // Client_Classification is the contact's REAL A/B/C tier. The call row
+      // used to regex it off the task subject, so a contact classified A in
+      // Zoho read "No class" whenever the subject didn't literally say
+      // "A Touch Call". Owner rides along because the contact summary has to
+      // resolve the owning agent FROM THE RECORD, never from the caller.
+      const baseFields = "First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Other_Phone," +
+        "Mailing_City,Mailing_State,Lead_Source,Created_Time,Client_Classification,Owner";
+      // Extra api-names the caller discovered live off settings/fields (today
+      // only the prospect-form field). Sanitised the way spouse_field is, and
+      // capped so a caller can't build an unbounded URL.
+      const extra: string[] = (Array.isArray(body.extra_fields) ? body.extra_fields : [])
+        .map((f: any) => String(f).replace(/[^A-Za-z0-9_]/g, ""))
+        .filter(Boolean).slice(0, 5);
 
       let id = (body.id || "").toString().trim();
       if (!id && body.name) {
@@ -1289,19 +1302,132 @@ Deno.serve(async (req) => {
       }
       if (!id) return json({ contact: null, found: false }, 200);
 
-      const r = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Contacts/${id}?fields=${encodeURIComponent(fields)}`, {});
+      // Zoho rejects the WHOLE record GET with 400 INVALID_QUERY_PARAM if any
+      // single name in ?fields= is wrong for the module. The extras are
+      // discovered by matching a field LABEL, so a bad guess there would take
+      // the phone number, the email and the spouse fallback down with it — the
+      // Calls tab's primary data — for every contact on the list. So the extras
+      // are asked for once, and a 400 retries WITHOUT them rather than failing.
+      const getWith = (list: string) =>
+        zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Contacts/${id}?fields=${encodeURIComponent(list)}`, {});
+
+      let extraFailed = false;
+      let r = await getWith(extra.length ? baseFields + "," + extra.join(",") : baseFields);
+      if (!r.ok && r.status === 400 && extra.length) {
+        extraFailed = true;
+        r = await getWith(baseFields);
+      }
       if (r.status === 204) return json({ contact: null, found: false }, 200);
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return json({ error: d?.message || "Zoho contact error" }, r.status);
       const c = d?.data?.[0];
       if (!c) return json({ contact: null, found: false }, 200);
+      const cls = String(c.Client_Classification ?? "").trim();
       return json({ found: true, contact: {
         id: c.id,
         full_name: c.Full_Name || `${c.First_Name || ""} ${c.Last_Name || ""}`.trim(),
         email: c.Email || null, phone: c.Phone || c.Mobile || c.Other_Phone || null,
         city: c.Mailing_City || null, state: c.Mailing_State || null,
         lead_source: c.Lead_Source || null, created: c.Created_Time || null,
+        // Returned RAW, deliberately not gated to /^[ABC]$/. That gate is right
+        // where this file BUILDS a task subject and must not emit garbage into
+        // one; re-applying it here would rebuild the very bug being fixed —
+        // a real Zoho value rendered as "No class".
+        classification: (cls && !/^-?\s*none\s*-?$/i.test(cls)) ? cls : null,
+        owner: c.Owner ? { id: c.Owner.id || null, name: c.Owner.name || null } : null,
+        // Only present when extras were asked for, so today's callers keep a
+        // byte-identical shape. `extra_failed` says the ask was DROPPED — which
+        // must never be cached as "this contact has no value for that field".
+        ...(extra.length ? {
+          extra: extraFailed ? null : Object.fromEntries(extra.map(k => [k, (c as any)[k] ?? null])),
+          extra_failed: extraFailed,
+        } : {}),
       } }, 200);
+    }
+
+    // ── Everything the contact summary needs, in one round trip [read-only] ──
+    //  The (i) on a call row opens a short brief. Gathering it as three separate
+    //  browser round trips would be three chances to half-fail; this returns the
+    //  contact, their spouse, their open deals and their recent call history
+    //  together, and says explicitly which parts it could not read rather than
+    //  returning a confident empty list.
+    //
+    //  Read-only and deliberately narrow: no Description (it runs to pages and
+    //  is the shape of the $20 incident), no email bodies, nothing written.
+    if (action === "contact_facts") {
+      const cid = String(body.contact_id || "").trim();
+      if (!/^\d+$/.test(cid)) return json({ error: "bad_contact_id" }, 400);
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      const CF_DEALS = 5;   // open deals are rare; 5 is already generous
+      const CF_TASKS = 12;  // enough to find the last completed touch
+
+      const contactFields = "First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Other_Phone," +
+        "Mailing_City,Mailing_State,Lead_Source,Created_Time,Client_Classification,Owner";
+
+      const cr = await zohoFetch(sb, conn, accessToken,
+        `https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(contactFields)}`, {});
+      if (cr.status === 204) return json({ found: false }, 200);
+      if (!cr.ok) return json({ error: "zoho_unavailable", retryable: true }, 502);
+      const cd = await cr.json().catch(() => ({}));
+      const c = cd?.data?.[0];
+      if (!c) return json({ found: false }, 200);
+
+      // Deals and tasks are best-effort: a contact with neither is completely
+      // normal, and a related list this connection cannot read must not sink
+      // the whole brief. `deals_read` / `tasks_read` say which happened.
+      const related = async (list: string, fields: string, per: number) => {
+        try {
+          const rr = await zohoFetch(sb, conn, accessToken,
+            `https://${apiDomain}/crm/v6/Contacts/${cid}/${list}?fields=${encodeURIComponent(fields)}&per_page=${per}`, {});
+          if (rr.status === 204) return { ok: true, rows: [] as any[] };
+          if (!rr.ok) return { ok: false, rows: [] as any[] };
+          const rd = await rr.json().catch(() => ({}));
+          return { ok: true, rows: (rd.data || []) as any[] };
+        } catch { return { ok: false, rows: [] as any[] }; }
+      };
+
+      const [dealsRes, tasksRes] = await Promise.all([
+        related("Deals", "Deal_Name,Stage,Amount,Closing_Date,Type,Owner", CF_DEALS),
+        related("Tasks", "Subject,Status,Due_Date,Closed_Time", CF_TASKS),
+      ]);
+
+      const clsRaw = String(c.Client_Classification ?? "").trim();
+      // Newest first. Zoho returns the related list in its own order, and the
+      // brief only cares about the most recent touches.
+      const stamp = (t: any) => String(t.Closed_Time || t.Due_Date || "");
+      const tasks = tasksRes.rows.slice()
+        .sort((a: any, b: any) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : 0))
+        .slice(0, CF_TASKS);
+      return json({
+        found: true,
+        contact: {
+          id: c.id,
+          full_name: c.Full_Name || `${c.First_Name || ""} ${c.Last_Name || ""}`.trim(),
+          email: c.Email || null,
+          city: c.Mailing_City || null, state: c.Mailing_State || null,
+          lead_source: c.Lead_Source || null, created: c.Created_Time || null,
+          classification: (clsRaw && !/^-?\s*none\s*-?$/i.test(clsRaw)) ? clsRaw : null,
+          owner: c.Owner ? { id: c.Owner.id || null, name: c.Owner.name || null } : null,
+        },
+        deals: dealsRes.rows.map((d: any) => ({
+          name: d.Deal_Name || null,
+          stage: d.Stage || null,
+          amount: d.Amount ?? null,
+          closing_date: d.Closing_Date || null,
+          type: d.Type || null,
+        })),
+        deals_read: dealsRes.ok,
+        tasks: tasks.map((t: any) => ({
+          subject: t.Subject || null,
+          status: t.Status || null,
+          due: t.Due_Date || null,
+          closed: t.Closed_Time || null,
+        })),
+        tasks_read: tasksRes.ok,
+      }, 200);
     }
 
     // ── Resolve each contact's spouse (lookup) [read-only] ─────────

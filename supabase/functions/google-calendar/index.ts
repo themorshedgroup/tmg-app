@@ -44,6 +44,21 @@
 //             → one thread's messages in full: {id, from, to, date, subject,
 //               bodyText} per message, oldest first — for the task drawer's
 //               Email tab reader.
+//
+//   ── Contact summary (the (i) on a Calls-tab row) ──
+//   { action: 'contact_brief', contact_id }
+//             → a few sentences to read before dialling. Returns PROSE ONLY.
+//
+//   ⚠ AUTH NOTE — read before touching this action. Every OTHER action in this
+//   file reads the CALLER'S OWN mailbox through callerAccessToken() below, which
+//   is why authorizeCaller()'s "any active profile" gate is sufficient for them.
+//   `contact_brief` is the exception: it reads the OWNING AGENT's mailbox and
+//   that agent's assigned TC's. So it carries its own predicate (the caller is
+//   that agent, OR is that agent's assigned TC, OR holds admin/operations), a
+//   per-person consent switch (public.brief_mailboxes), an hourly ceiling, and
+//   an access log. Do NOT relax it to match the rest of the file, do NOT let any
+//   client value name a mailbox or a Gmail query, and never return a subject,
+//   snippet, address or thread id from it.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -227,6 +242,120 @@ function gmailBodyText(payload: any): string {
 function gmailPermalink(threadId: string): string {
   return "https://mail.google.com/mail/u/0/#all/" + threadId;
 }
+
+// ── Contact summary: caps ────────────────────────────────────────────────
+// Every one of these is a ceiling on somebody else's mail and somebody's money,
+// so they live together where they can be read at a glance.
+//
+// SNIPPETS, NOT BODIES. gmail_thread above returns every message untruncated,
+// and six of those at ctc-emails' 6000-char cap would be ~36,000 characters —
+// against ai-chat's hard 48,000-char ceiling, which rejects with a 413 whose
+// text tells the user to go and use Gemini. Shown to an agent who tapped (i),
+// that is nonsense. Gmail's own snippet already carries the subject, the
+// sender, the date and the opening line, which is what "what just happened"
+// actually needs.
+const CB_THREADS_PER_MAILBOX = 3;      // ≤3 per mailbox, so ≤6 threads a tap
+const CB_SNIPPET_CHARS = 260;          // Gmail's snippet, clipped
+const CB_MAX_CONTEXT_CHARS = 12000;    // hard slice before the model sees it
+const CB_MAX_TOKENS = 260;             // a real brief is ~90; this is a ceiling
+const CB_READS_PER_HOUR = 60;          // per viewer. Stops a scripted sweep.
+
+// Mint a Google access token for an ARBITRARY user id.
+//
+// This is the ONLY arbitrary-user path in this file and it exists solely for
+// contact_brief. Every other action must keep using callerAccessToken above —
+// if you find yourself reaching for this one somewhere else, the authorization
+// question has not been answered yet.
+async function userAccessToken(sb: any, userId: string): Promise<string> {
+  const { data: row, error } = await sb
+    .from("google_tokens").select("refresh_token").eq("user_id", userId).maybeSingle();
+  if (error) throw new Error("token_read_failed");
+  if (!row?.refresh_token) throw new Error("needs_connect");
+  try {
+    return await googleAccessToken(row.refresh_token);
+  } catch (_e) {
+    throw new Error("needs_connect");
+  }
+}
+
+const cbName = (p: any) =>
+  [p?.first_name, p?.last_name].filter(Boolean).join(" ").trim() || p?.email || "a teammate";
+
+// One mailbox's worth of context. Returns the threads it could read plus the
+// reason it could not, which the sheet shows verbatim — a brief that quietly
+// skipped half its sources is worse than one that says it did.
+async function cbSearchMailbox(sb: any, person: any, role: string, contactEmail: string) {
+  const out = { role, name: cbName(person), state: "searched", threads: 0, lines: [] as string[] };
+  if (!person) { out.state = role === "tc" ? "no_tc_assigned" : "unknown"; return out; }
+  if (person.status !== "active") { out.state = "not_active"; return out; }
+
+  const { data: sw } = await sb.from("brief_mailboxes")
+    .select("enabled").eq("user_id", person.id).maybeSingle();
+  if (!sw || sw.enabled !== true) { out.state = "not_enabled"; return out; }
+
+  let token: string;
+  try { token = await userAccessToken(sb, person.id); }
+  catch (_e) { out.state = "not_connected"; return out; }
+
+  const e = contactEmail.replace(/[()"\\]/g, "");
+  const q = `(from:${e} OR to:${e}) newer_than:365d -in:chats -in:drafts -in:spam -in:trash`;
+  const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/threads");
+  listUrl.searchParams.set("maxResults", String(CB_THREADS_PER_MAILBOX));
+  listUrl.searchParams.set("q", q);
+
+  const lr = await fetch(listUrl.toString(), { headers: { Authorization: "Bearer " + token } });
+  if (!lr.ok) {
+    // 403 here is overwhelmingly "insufficient authentication scopes": this
+    // person connected Google BEFORE gmail.readonly was added, so their refresh
+    // token mints fine and only the Gmail call fails. That needs a Reconnect,
+    // not a retry, and saying "couldn't search just now" would leave them
+    // waiting forever for something that resolves itself never.
+    out.state = lr.status === 403 ? "not_scoped" : "search_failed";
+    return out;
+  }
+  const ld = await lr.json().catch(() => ({}));
+  const ids: string[] = (ld.threads || []).map((t: any) => t.id).filter(Boolean).slice(0, CB_THREADS_PER_MAILBOX);
+
+  const metas = await Promise.all(ids.map(async (id) => {
+    const u = new URL("https://gmail.googleapis.com/gmail/v1/users/me/threads/" + encodeURIComponent(id));
+    u.searchParams.set("format", "metadata");   // NEVER "full" in this action
+    u.searchParams.append("metadataHeaders", "From");
+    u.searchParams.append("metadataHeaders", "Subject");
+    u.searchParams.append("metadataHeaders", "Date");
+    const tr = await fetch(u.toString(), { headers: { Authorization: "Bearer " + token } });
+    if (!tr.ok) return null;
+    const td = await tr.json().catch(() => null);
+    const msgs = td?.messages || [];
+    const last = msgs[msgs.length - 1];
+    if (!last) return null;
+    const h = last.payload?.headers || [];
+    const snip = String(last.snippet || td?.snippet || "").replace(/\s+/g, " ").slice(0, CB_SNIPPET_CHARS);
+    return `- [${out.name}'s mailbox] ${gmailHeader(h, "Date")} | ${gmailHeader(h, "Subject") || "(no subject)"} | from ${gmailHeader(h, "From")} | ${msgs.length} message(s) | ${snip}`;
+  }));
+  out.lines = metas.filter(Boolean) as string[];
+  out.threads = out.lines.length;
+  return out;
+}
+
+const CONTACT_BRIEF_SYSTEM = [
+  "You write a one-glance brief an estate agent reads in the five seconds before they dial.",
+  "",
+  "OUTPUT: two to four short sentences of plain prose. No headings, no bullets, no preamble,",
+  "no sign-off, no greeting. Never address the agent as 'you should'. Under 70 words.",
+  "",
+  "SAY, in this order, only what the data supports:",
+  "1. Where this relationship stands right now — an open deal and its stage if there is one.",
+  "2. What the recent emails were actually about, in the plainest words available.",
+  "3. When they were last spoken to, and by whom if that is stated.",
+  "",
+  "RULES:",
+  "- Never invent a name, a number, a date, a price or an event you were not given.",
+  "- If the data is thin, write one short sentence and stop. A short honest brief beats a padded one.",
+  "- Do not repeat the contact's own name back more than once.",
+  "- Do not mention email addresses, thread subjects verbatim, or whose mailbox anything came from.",
+  "- Do not give advice, do not suggest what to say on the call, and do not editorialise.",
+  "- If there is genuinely nothing to report, say exactly: Nothing recent on file.",
+].join("\n");
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
@@ -639,6 +768,177 @@ Deno.serve(async (req) => {
       });
       const subject = messages.length ? messages[0].subject : "";
       return json({ thread: { id: d.id, subject, permalink: gmailPermalink(d.id), messages } }, 200);
+    }
+
+    // ── Contact summary for one call row. See the AUTH NOTE at the top. ──
+    if (action === "contact_brief") {
+      const contactId = String(body.contact_id || "").trim();
+      if (!/^\d+$/.test(contactId)) return json({ error: "bad_contact_id" }, 400);
+      // contact_id is the ONLY input. Nothing else on the body is read, ever —
+      // if the client could name a mailbox or supply a Gmail query, the client
+      // would be the authorization boundary.
+
+      // (1) The caller, with their roles. authorizeCaller above only selected
+      //     `status`, which is all the other actions need.
+      const { data: me } = await sb.from("profiles")
+        .select("id, status, access, assigned_tc").eq("id", auth.userId).single();
+      if (!me || me.status !== "active") return json({ error: "Account is not active." }, 403);
+      const roles: string[] = Array.isArray(me.access)
+        ? me.access.map((r: any) => String(r).toLowerCase())
+        : String(me.access || "").toLowerCase().split(/[,\s]+/).filter(Boolean);
+      const isAdmin = roles.some((r) => r === "admin" || r === "operations");
+
+      // (2) An hourly ceiling per viewer. Without one, a single session can walk
+      //     every contact the firm owns and come away with a readable digest of
+      //     two colleagues' recent mail — plus the AI bill and the Zoho credits.
+      const since = new Date(Date.now() - 3600000).toISOString();
+      const { count: recent } = await sb.from("contact_brief_reads")
+        .select("id", { count: "exact", head: true })
+        .eq("viewer_id", auth.userId).gte("created_at", since);
+      if ((recent || 0) >= CB_READS_PER_HOUR) {
+        return json({ error: "rate_limited", retry_after_minutes: 60 }, 429);
+      }
+
+      // (3) The contact, its owner, its deals and its call history — one call.
+      //     The caller's own bearer is forwarded so zoho-crm re-checks them too.
+      const zr = await fetch(Deno.env.get("SUPABASE_URL") + "/functions/v1/zoho-crm", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: req.headers.get("Authorization") || "",
+        },
+        body: JSON.stringify({ action: "contact_facts", contact_id: contactId }),
+      });
+      const zd = await zr.json().catch(() => ({}));
+      if (!zr.ok) return json({ error: "zoho_unavailable", retryable: true }, 502);
+      if (!zd.found || !zd.contact) return json({ error: "contact_not_found" }, 404);
+      const contact = zd.contact;
+
+      // (4) Zoho Owner id → TMG profile, by STORED ID only. Never by name: the
+      //     loose bidirectional substring match used to shade the capacity grid
+      //     is right there and wrong here — it would pick a mailbox. Migration
+      //     20260905100000_profiles_zoho_user_id.sql exists because name and
+      //     email matching mis-filed two people's records.
+      const ownerZid = contact.owner && contact.owner.id;
+      const { data: agent } = ownerZid
+        ? await sb.from("profiles")
+            .select("id, first_name, last_name, email, status, assigned_tc")
+            .eq("zoho_user_id", String(ownerZid)).maybeSingle()
+        : { data: null } as any;
+      if (!agent) {
+        // Hundreds of contacts in this org are still owned by people who have
+        // left. That is a different sentence from "not linked yet", and the
+        // client says so.
+        return json({
+          error: "owner_unresolved",
+          owner_name: (contact.owner && contact.owner.name) || null,
+        }, 409);
+      }
+
+      // (5) AUTHORIZATION. reports_to is deliberately not here: the Calls tab
+      //     only shows other people's rows to admins today, so a manager branch
+      //     would be dead code carrying live risk.
+      const permitted = me.id === agent.id || me.id === agent.assigned_tc || isAdmin;
+      if (!permitted) return json({ error: "not_permitted" }, 403);
+
+      const { data: tc } = agent.assigned_tc
+        ? await sb.from("profiles")
+            .select("id, first_name, last_name, email, status")
+            .eq("id", agent.assigned_tc).maybeSingle()
+        : { data: null } as any;
+
+      // (6) Search. No email on file means nothing to search — return without
+      //     spending a Gmail call or an AI call.
+      const mailboxes: any[] = [];
+      if (contact.email) {
+        // An agent who is somehow their own TC would otherwise be minted twice
+        // and read twice, and the model would see the same thread as two.
+        const targets: Array<[string, any]> = [["agent", agent]];
+        if (!tc || tc.id !== agent.id) targets.push(["tc", tc]);
+        for (const [role, person] of targets) {
+          mailboxes.push(await cbSearchMailbox(sb, person, role, contact.email));
+        }
+      }
+
+      const threadLines = mailboxes.flatMap((m) => m.lines || []);
+      const threadsRead = threadLines.length;
+
+      const money = (n: any) => (n == null ? "" : " $" + Number(n).toLocaleString("en-US"));
+      const deals = (zd.deals || []).map((d: any) =>
+        `- ${d.name || "(unnamed deal)"} | stage ${d.stage || "unknown"}${money(d.amount)}` +
+        `${d.closing_date ? " | closing " + d.closing_date : ""}${d.type ? " | " + d.type : ""}`);
+      const touches = (zd.tasks || []).slice(0, 8).map((t: any) =>
+        `- ${t.closed || t.due || "(no date)"} | ${t.status || "?"} | ${t.subject || ""}`);
+
+      let ctx = [
+        `TODAY: ${new Date().toISOString().slice(0, 10)}`,
+        `CONTACT: ${contact.full_name || "(unnamed)"}` +
+          `${contact.classification ? " | classification " + contact.classification : ""}` +
+          `${contact.city ? " | " + contact.city + (contact.state ? ", " + contact.state : "") : ""}` +
+          `${contact.lead_source ? " | source " + contact.lead_source : ""}` +
+          `${contact.created ? " | in the CRM since " + String(contact.created).slice(0, 10) : ""}`,
+        `OWNING AGENT: ${cbName(agent)}`,
+        "",
+        deals.length ? "DEALS:" : (zd.deals_read ? "DEALS: none open." : "DEALS: could not be read."),
+        ...deals,
+        "",
+        touches.length ? "CALL AND TASK HISTORY (newest first):" : (zd.tasks_read ? "CALL AND TASK HISTORY: none on record." : "CALL AND TASK HISTORY: could not be read."),
+        ...touches,
+        "",
+        threadLines.length ? "RECENT EMAIL (subject, sender, first line only):" : "RECENT EMAIL: none found.",
+        ...threadLines,
+      ].join("\n");
+      // Belt and braces. The caps above should already keep this near 6k, but a
+      // silent overrun would hit ai-chat's 413 and show the wrong error entirely.
+      if (ctx.length > CB_MAX_CONTEXT_CHARS) ctx = ctx.slice(0, CB_MAX_CONTEXT_CHARS);
+
+      // Nothing at all to summarise: don't pay a model to say so.
+      let brief = "";
+      if (deals.length || touches.length || threadLines.length) {
+        const ar = await fetch(Deno.env.get("SUPABASE_URL") + "/functions/v1/ai-chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: req.headers.get("Authorization") || "",
+          },
+          body: JSON.stringify({
+            messages: [{ role: "user", content: ctx }],
+            system: CONTACT_BRIEF_SYSTEM,
+            max_tokens: CB_MAX_TOKENS,
+            feature: "contact_summary",
+          }),
+        });
+        const ad = await ar.json().catch(() => ({}));
+        if (!ar.ok) return json({ error: "ai_unavailable", retryable: true }, 502);
+        brief = String(ad.text || "").trim();
+      }
+
+      // (7) The trail. Best-effort: a logging failure must not lose the answer
+      //     the viewer already paid for.
+      try {
+        await sb.from("contact_brief_reads").insert({
+          viewer_id: auth.userId,
+          contact_id: contactId,
+          agent_id: agent.id,
+          tc_id: tc ? tc.id : null,
+          mailboxes_read: mailboxes.filter((m) => m.state === "searched").map((m) => m.role),
+          threads_read: threadsRead,
+        });
+      } catch (_e) { /* the brief still stands */ }
+
+      // Prose and primitives only. No thread ids, message ids, permalinks,
+      // subjects, snippets or addresses — a viewer must not be handed
+      // identifiers for a mailbox they cannot open.
+      return json({
+        brief,
+        classification: contact.classification || null,
+        contact_email_on_file: !!contact.email,
+        deals_read: !!zd.deals_read,
+        tasks_read: !!zd.tasks_read,
+        threads_read: threadsRead,
+        mailboxes: mailboxes.map((m) => ({ role: m.role, name: m.name, state: m.state, threads: m.threads })),
+        generated_at: new Date().toISOString(),
+      }, 200);
     }
 
     return json({ error: "Unknown action." }, 400);

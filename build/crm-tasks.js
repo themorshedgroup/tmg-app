@@ -5378,7 +5378,17 @@ function App({
   const [drawer, setDrawer] = useState(null); // { mode:'create'|'edit', task? } | null
   const [showCapacity, setShowCapacity] = useState(false); // Call Capacity modal
   const [showCadenceHealth, setShowCadenceHealth] = useState(false); // Duplicates → Backlog → Spouse alignment
-
+  // Applying a step forces a reload (load(true)), which blanks `tasks` to
+  // null mid-fetch. Cadence Health used to be gated on `tasks &&`, so that
+  // blank moment unmounted it and remounted it once fresh data landed —
+  // silently resetting its tab and selected agent back to the defaults.
+  // Holding the last non-null snapshot keeps the modal instance (and its
+  // state) alive across that reload; it swaps to the fresh array once it
+  // arrives.
+  const lastTasksRef = useRef(null);
+  useEffect(() => {
+    if (tasks) lastTasksRef.current = tasks;
+  }, [tasks]);
   async function load(force) {
     // Serve from cache whenever one exists — reload/revisit shouldn't re-pay the
     // ~20s (open) or ~90s+ (full history) fetch cost. No auto-expiry: only the
@@ -6223,8 +6233,8 @@ function App({
         lineHeight: col.wrap ? 1.5 : 1.3
       }
     }, content);
-  })))))), showCadenceHealth && tasks && /*#__PURE__*/React.createElement(CadenceHealth, {
-    tasks: tasks,
+  })))))), showCadenceHealth && (tasks || lastTasksRef.current) && /*#__PURE__*/React.createElement(CadenceHealth, {
+    tasks: tasks || lastTasksRef.current,
     colMap: colMap,
     onDeleteIds: bulkDeleteTasks,
     onSetDates: bulkSetDueDates,

@@ -3819,8 +3819,56 @@ function CadenceHealth({
   // today's calls forward as well.
   const [cutoff, setCutoff] = useState(() => addDaysISO(todayISO(), -1));
   const [start, setStart] = useState(() => todayISO());
-  const [perDay, setPerDay] = useState(5);
-  const [eoPerWeek, setEoPerWeek] = useState(3);
+  // Permanent per-agent capacity, not a session default. Used to be
+  // useState(5)/useState(3) — same number for whoever was selected,
+  // forgotten on reload, retyped every time Symon switched agents. Now
+  // it's stored in agent_cadence_settings keyed by owner name and
+  // loaded whenever the selected agent changes; the raw setters below
+  // are load-only, the wrapped setPerDay/setEoPerWeek (used by the
+  // number inputs) also persist the change.
+  const [perDay, setPerDayRaw] = useState(5);
+  const [eoPerWeek, setEoPerWeekRaw] = useState(3);
+  useEffect(() => {
+    let cancelled = false;
+    if (!owner) return;
+    const client = window.SupabaseAuth?._client;
+    if (!client) return;
+    client.from('agent_cadence_settings').select('per_day,eo_per_week').eq('owner_name', owner).maybeSingle().then(({
+      data
+    }) => {
+      if (cancelled) return;
+      setPerDayRaw(data?.per_day ?? 5);
+      setEoPerWeekRaw(data?.eo_per_week ?? 3);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [owner]);
+  function saveCadenceSetting(patch) {
+    const client = window.SupabaseAuth?._client;
+    if (!client || !owner) return;
+    client.from('agent_cadence_settings').upsert({
+      owner_name: owner,
+      updated_at: new Date().toISOString(),
+      ...patch
+    }).then(({
+      error
+    }) => {
+      if (error) console.error('agent_cadence_settings save failed', error);
+    });
+  }
+  function setPerDay(v) {
+    setPerDayRaw(v);
+    saveCadenceSetting({
+      per_day: v
+    });
+  }
+  function setEoPerWeek(v) {
+    setEoPerWeekRaw(v);
+    saveCadenceSetting({
+      eo_per_week: v
+    });
+  }
   // Days the cadence is already heading for are treated as occupied, so the
   // backlog doesn't get stacked onto them — otherwise this just moves the
   // pile-up into the future instead of clearing it. Two years of runway
@@ -4753,7 +4801,8 @@ function CadenceHealth({
     onChange: e => setStart(e.target.value),
     style: fld
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-    style: lbl
+    style: lbl,
+    title: 'Saved permanently for ' + (owner || 'this agent')
   }, "Per day"), /*#__PURE__*/React.createElement("input", {
     type: "number",
     min: "1",
@@ -4924,7 +4973,8 @@ function CadenceHealth({
     onChange: e => setStart(e.target.value),
     style: fld
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-    style: lbl
+    style: lbl,
+    title: 'Saved permanently for ' + (owner || 'this agent')
   }, "Per day"), /*#__PURE__*/React.createElement("input", {
     type: "number",
     min: "1",
@@ -4936,7 +4986,8 @@ function CadenceHealth({
       width: 70
     }
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-    style: lbl
+    style: lbl,
+    title: 'Saved permanently for ' + (owner || 'this agent')
   }, "EO / week"), /*#__PURE__*/React.createElement("input", {
     type: "number",
     min: "0",

@@ -1975,8 +1975,37 @@
       // today's calls forward as well.
       const [cutoff, setCutoff] = useState(() => addDaysISO(todayISO(), -1));
       const [start, setStart] = useState(() => todayISO());
-      const [perDay, setPerDay] = useState(5);
-      const [eoPerWeek, setEoPerWeek] = useState(3);
+      // Permanent per-agent capacity, not a session default. Used to be
+      // useState(5)/useState(3) — same number for whoever was selected,
+      // forgotten on reload, retyped every time Symon switched agents. Now
+      // it's stored in agent_cadence_settings keyed by owner name and
+      // loaded whenever the selected agent changes; the raw setters below
+      // are load-only, the wrapped setPerDay/setEoPerWeek (used by the
+      // number inputs) also persist the change.
+      const [perDay, setPerDayRaw] = useState(5);
+      const [eoPerWeek, setEoPerWeekRaw] = useState(3);
+      useEffect(() => {
+        let cancelled = false;
+        if (!owner) return;
+        const client = window.SupabaseAuth?._client;
+        if (!client) return;
+        client.from('agent_cadence_settings').select('per_day,eo_per_week').eq('owner_name', owner).maybeSingle()
+          .then(({ data }) => {
+            if (cancelled) return;
+            setPerDayRaw(data?.per_day ?? 5);
+            setEoPerWeekRaw(data?.eo_per_week ?? 3);
+          });
+        return () => { cancelled = true; };
+      }, [owner]);
+      function saveCadenceSetting(patch) {
+        const client = window.SupabaseAuth?._client;
+        if (!client || !owner) return;
+        client.from('agent_cadence_settings')
+          .upsert({ owner_name: owner, updated_at: new Date().toISOString(), ...patch })
+          .then(({ error }) => { if (error) console.error('agent_cadence_settings save failed', error); });
+      }
+      function setPerDay(v) { setPerDayRaw(v); saveCadenceSetting({ per_day: v }); }
+      function setEoPerWeek(v) { setEoPerWeekRaw(v); saveCadenceSetting({ eo_per_week: v }); }
       // Days the cadence is already heading for are treated as occupied, so the
       // backlog doesn't get stacked onto them — otherwise this just moves the
       // pile-up into the future instead of clearing it. Two years of runway
@@ -2351,7 +2380,7 @@
                   </div>
                   <div style={{ display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end', paddingBottom:14, marginBottom:14, borderBottom:'1px solid '+C.border }}>
                     <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
-                    <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
+                    <div><label style={lbl} title={'Saved permanently for ' + (owner || 'this agent')}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
                     <div style={{ fontSize:'0.7rem', color:C.textMuted, lineHeight:1.45, flex:'1 1 240px' }}>
                       A client classification IS the cadence — the A/B/C tier is what sets the call interval. A classified contact with no open call has dropped out of it silently, and nothing will put them back: Zoho only writes the next touch when the previous one is completed. This runs after the backlog on purpose — overdue calls have the older claim on the next free days. Each new call is dated from that contact’s own last completed call plus their tier’s interval; anyone never called before starts as soon as there’s room. Same per-day cap, weekend/holiday skip and A-before-C ordering as the backlog, and the agent’s existing and projected calls count as load. Anyone with no reachable number is left out entirely.
                     </div>
@@ -2409,8 +2438,8 @@
                   <div style={{ display:'flex', gap:14, flexWrap:'wrap', alignItems:'flex-end', paddingBottom:14, marginBottom:14, borderBottom:'1px solid '+C.border }}>
                     <div><label style={lbl}>Treat as overdue on/before</label><input type="date" value={cutoff} onChange={e => setCutoff(e.target.value)} style={fld} /></div>
                     <div><label style={lbl}>Start placing</label><input type="date" value={start} onChange={e => setStart(e.target.value)} style={fld} /></div>
-                    <div><label style={lbl}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
-                    <div><label style={lbl}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
+                    <div><label style={lbl} title={'Saved permanently for ' + (owner || 'this agent')}>Per day</label><input type="number" min="1" max="20" value={perDay} onChange={e => setPerDay(Math.max(1, +e.target.value || 1))} style={{ ...fld, width:70 }} /></div>
+                    <div><label style={lbl} title={'Saved permanently for ' + (owner || 'this agent')}>EO / week</label><input type="number" min="0" max="10" value={eoPerWeek} onChange={e => setEoPerWeek(Math.max(0, +e.target.value || 0))} style={{ ...fld, width:70 }} /></div>
                     <label style={{ display:'inline-flex', alignItems:'center', gap:6, alignSelf:'flex-end', paddingBottom:8, fontSize:'0.74rem', color:C.textSecondary, cursor:'pointer', userSelect:'none' }}>
                       <input type="checkbox" checked={countProjected} onChange={e => setCountProjected(e.target.checked)} style={{ accentColor:C.navy, cursor:'pointer' }} />
                       Count projected cadence as load

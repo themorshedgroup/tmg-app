@@ -1541,6 +1541,18 @@ Rules:
             .eq('id', task.project_id).single();
           if (!proj || !ZOHO_SYNCABLE_KINDS.includes(proj.record_type) || !proj.zoho_sync_enabled || !proj.zoho_project_id) return;
 
+          // Zoho ownership (person_responsible) mirrors TMG's own assignee(s).
+          // Zoho only accepts its own Projects user ids — never emails — so
+          // the edge function resolves this list against a cached portal
+          // roster (2026-09-11 fix). No TMG assignee means Zoho ownership is
+          // left exactly as-is rather than cleared.
+          let assigneeEmails = [];
+          const { data: assignees } = await c.from('task_people').select('user_id').eq('task_id', task.id).eq('role', 'assignee');
+          if (assignees && assignees.length) {
+            const { data: profs } = await c.from('profiles').select('email').in('id', assignees.map(a => a.user_id));
+            assigneeEmails = (profs || []).map(p => p.email).filter(Boolean);
+          }
+
           if (!task.zoho_task_id) {
             if (!proj.zoho_tasklist_id) {
               await this.addActivity(task.id, 'system', 'Zoho Projects sync skipped — this CTC file has no default tasklist configured yet.', user);
@@ -1549,11 +1561,18 @@ Rules:
             const { ok, data } = await callZohoProjects({
               action: 'create_task', project_id: proj.zoho_project_id, tasklist_id: proj.zoho_tasklist_id,
               title: task.title, description: task.description || null, due_at: task.due_at || null, priority: task.priority,
+              assignee_emails: assigneeEmails,
             });
             if (!ok || !data?.task?.id) { await this.addActivity(task.id, 'system', 'Zoho Projects sync failed — will retry on next poll.', user); return; }
+            // Persist the tasklist Zoho actually filed this under — without
+            // this the task shows up under "Other tasks" in TMG's own
+            // grouping forever, since the poller only backfills these fields
+            // when something changes in Zoho after the fact (2026-09-11 fix).
             await c.from('tasks').update({
               zoho_task_id: data.task.id, zoho_last_synced_at: new Date().toISOString(),
               zoho_last_modified_time: data.task.last_modified_time || null,
+              zoho_tasklist_id: data.task.tasklist_id || null,
+              zoho_tasklist_name: data.task.tasklist_name || null,
             }).eq('id', task.id);
             return;
           }
@@ -1569,6 +1588,7 @@ Rules:
           if (changed('due_at')) { payload.due_at = task.due_at || null; any = true; }
           if (changed('priority')) { payload.priority = task.priority; any = true; }
           if (changed('status')) { payload.status = task.status; any = true; }
+          if (assigneeEmails.length) { payload.assignee_emails = assigneeEmails; any = true; }
           if (!any) return;
           const { ok, data } = await callZohoProjects(payload);
           if (!ok) { await this.addActivity(task.id, 'system', 'Zoho Projects sync failed — will retry on next poll.', user); return; }
@@ -1715,6 +1735,14 @@ Rules:
         (people.assigner || []).forEach(uid => rows.push({ task_id: taskId, user_id: uid, role: 'assigner' }));
         (people.decision_maker || []).forEach(uid => rows.push({ task_id: taskId, user_id: uid, role: 'decision_maker' }));
         if (rows.length) { const { error } = await c.from('task_people').insert(rows); if (error) console.error('[TaskDB] setPeople:', error.message); }
+        // Reassigning who owns a task affects Zoho ownership too — re-run the
+        // Zoho Projects sync so a change made only through this method (no
+        // other field edited) still reaches Zoho. Instant no-op for tasks
+        // with no linked Zoho file (2026-09-11 fix).
+        if ('assignee' in people) {
+          const { data: t } = await c.from('tasks').select('*').eq('id', taskId).single();
+          if (t) this.syncToZohoProjects(t, null, null);
+        }
       },
 
       // Per-user labels (each person keeps their own on a shared task).

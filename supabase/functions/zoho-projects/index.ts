@@ -23,7 +23,14 @@
 // breaking live CRM sync).
 //
 // Field scope is deliberately narrow (plan §2.1): only name/description/
-// dates/priority/status sync — nothing else is read or written here.
+// dates/priority/status sync. The one addition beyond that (2026-09-11,
+// Bug B fix — see plan: hidden-wiggling-lamport addendum) is task OWNERSHIP:
+// create_task/update_task now also accept assignee_emails and, when given,
+// resolve them to Zoho Projects user ids and set person_responsible. This
+// needed its own resolver (resolveZohoOwnerIds below) because Zoho Projects
+// user ids are a DIFFERENT id space from profiles.zoho_user_id (that column
+// is Zoho CRM's org — confirmed a different numeric namespace), and Zoho's
+// task API only accepts ids, never emails.
 //
 // Zoho Projects specifics vs. the CRM API (zoho-crm/index.ts):
 //   - Base domain is projectsapi.zoho.com, not www.zohoapis.com.
@@ -36,8 +43,9 @@
 //
 // POST actions:
 //   list_portals, list_projects, get_project, create_project, update_project,
-//   list_tasklists, create_tasklist, list_tasks, get_task, create_task,
-//   update_task, delete_task
+//   list_tasklists, create_tasklist, list_tasks, count_tasks_by_tasklist,
+//   get_task, create_task, update_task, delete_task, sync_now,
+//   backfill_zoho_links
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -67,6 +75,14 @@ async function authorizeCaller(req: Request) {
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!token)
     return { ok: false as const, status: 401, error: "Sign in required." };
+
+  // Server/ops caller: the service-role key itself (never present in browsers)
+  // acts as an admin identity — same pattern as zoho-crm's authorizeCaller,
+  // used for ops tooling like bulk task cleanup.
+  const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+  if (svcKey && token === svcKey) {
+    return { ok: true as const, userId: "service", sb, isService: true as const };
+  }
 
   const {
     data: { user },
@@ -199,6 +215,56 @@ async function loadConnection(sb: any) {
   if (error || !data?.refresh_token || !data?.portal_id)
     throw new Error("Zoho Projects connection not configured. Ask an admin to connect a portal first.");
   return data;
+}
+
+// ── Portal users cache — resolves TMG assignee emails to Zoho Projects user
+// ids for person_responsible. Cached on zoho_projects_connection (portal-
+// wide, not project-scoped) because GET /users/ is a real Zoho API call and
+// task creates/updates fire far more often than the portal roster changes.
+// Refreshed when the cache is missing, older than the TTL, or doesn't
+// contain an email we need right now — so a newly-added Zoho user resolves
+// on their very first task instead of waiting out the full TTL. A failed
+// refresh falls through to whatever cache already exists (possibly empty)
+// rather than blocking the task write — a missing owner is recoverable, a
+// lost task isn't. ──
+const PORTAL_USERS_TTL_MS = 30 * 60 * 1000;
+
+async function resolveZohoOwnerIds(
+  sb: any, conn: any, accessToken: string, portalBase: string, emails: string[]
+): Promise<{ ids: string[]; missing: string[] }> {
+  const wanted = emails.map((e) => (e || "").toLowerCase().trim()).filter(Boolean);
+  if (!wanted.length) return { ids: [], missing: [] };
+
+  let cache = (conn.portal_users_cache || {}) as Record<string, string>;
+  const cachedAt = conn.portal_users_cached_at ? Date.parse(conn.portal_users_cached_at) : 0;
+  const stale = !cachedAt || (Date.now() - cachedAt) > PORTAL_USERS_TTL_MS;
+  const missingFromCache = wanted.some((e) => !cache[e]);
+
+  if (stale || missingFromCache) {
+    const r = await zohoFetch(sb, conn, accessToken, `${portalBase}/users/`, {});
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) {
+      const users = d.users || d.userlist || [];
+      const fresh: Record<string, string> = {};
+      for (const u of users) {
+        const email = (u.email || "").toLowerCase().trim();
+        const id = u.id_string || (u.id != null ? String(u.id) : "");
+        if (email && id) fresh[email] = id;
+      }
+      cache = fresh;
+      conn.portal_users_cache = fresh;
+      conn.portal_users_cached_at = new Date().toISOString();
+      try {
+        await sb.from("zoho_projects_connection")
+          .update({ portal_users_cache: fresh, portal_users_cached_at: conn.portal_users_cached_at })
+          .eq("refresh_token", conn.refresh_token);
+      } catch (_) { /* cache write is best-effort */ }
+    }
+  }
+
+  const ids: string[] = [], missing: string[] = [];
+  for (const e of wanted) { const id = cache[e]; if (id) ids.push(id); else missing.push(e); }
+  return { ids, missing };
 }
 
 // ── Date conversion: TMG uses ISO timestamptz, Zoho Projects uses MM-DD-YYYY ──
@@ -400,11 +466,54 @@ Deno.serve(async (req) => {
       if (!projectId) return json({ error: "Missing project_id." }, 400);
       const u = new URL(`${portalBase}/projects/${projectId}/tasks/`);
       if (body.since) u.searchParams.set("last_modified_time", body.since);
+      if (body.index) u.searchParams.set("index", String(body.index));
+      if (body.range) u.searchParams.set("range", String(body.range));
       const r = await zohoFetch(sb, conn, accessToken, u.toString(), {});
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return json({ error: d?.error || "Zoho tasks list error", detail: d }, r.status);
       const tasks = (d.tasks || []).map(mapZohoTask);
       return json({ tasks }, 200);
+    }
+
+    // Ops-only: total live task count per tasklist, paging until Zoho returns
+    // fewer than the page size. Exists to verify bulk-delete results against
+    // Zoho directly rather than trusting a single capped page.
+    if (action === "count_tasks_by_tasklist") {
+      const projectId = (body.project_id || "").toString().trim();
+      if (!projectId) return json({ error: "Missing project_id." }, 400);
+      const counts: Record<string, { name: string; count: number }> = {};
+      let index = 1;
+      const range = 200;
+      for (let page = 0; page < 50; page++) {
+        const u = new URL(`${portalBase}/projects/${projectId}/tasks/`);
+        u.searchParams.set("index", String(index));
+        u.searchParams.set("range", String(range));
+        const r = await zohoFetch(sb, conn, accessToken, u.toString(), {});
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: d?.error || "Zoho tasks list error", detail: d, partial: counts }, r.status);
+        const tasks = (d.tasks || []).map(mapZohoTask);
+        for (const t of tasks) {
+          const tl = t.tasklist_id || "none";
+          if (!counts[tl]) counts[tl] = { name: t.tasklist_name || "?", count: 0 };
+          counts[tl].count++;
+        }
+        if (tasks.length < range) break;
+        index += range;
+      }
+      return json({ counts }, 200);
+    }
+
+    // Diagnostic/admin: raw portal user roster, bypassing the cache. Not used
+    // by the normal sync path (that goes through resolveZohoOwnerIds) — this
+    // exists to verify email matching against the real pilot portal by hand.
+    if (action === "list_users") {
+      const r = await zohoFetch(sb, conn, accessToken, `${portalBase}/users/`, {});
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: d?.error || "Zoho users list error", detail: d }, r.status);
+      const users = (d.users || d.userlist || []).map((u: any) => ({
+        id: u.id_string || String(u.id), name: u.name || null, email: u.email || null,
+      }));
+      return json({ users }, 200);
     }
 
     if (action === "get_task") {
@@ -430,6 +539,11 @@ Deno.serve(async (req) => {
       if (body.description) form.set("description", String(body.description));
       if (body.due_at) { const zd = isoToZohoDate(body.due_at); if (zd) form.set("end_date", zd); }
       if (body.priority) form.set("priority", tmgPriorityToZoho(body.priority));
+      const assigneeEmails: string[] = Array.isArray(body.assignee_emails) ? body.assignee_emails : [];
+      if (assigneeEmails.length) {
+        const { ids } = await resolveZohoOwnerIds(sb, conn, accessToken, portalBase, assigneeEmails);
+        if (ids.length) form.set("person_responsible", ids.join(","));
+      }
       const r = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${projectId}/tasks/`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -452,6 +566,11 @@ Deno.serve(async (req) => {
       if ("due_at" in body) { const zd = isoToZohoDate(body.due_at); if (zd) form.set("end_date", zd); }
       if (body.priority) form.set("priority", tmgPriorityToZoho(body.priority));
       if (body.status) form.set("status", tmgStatusToZoho(body.status));
+      const assigneeEmails: string[] = Array.isArray(body.assignee_emails) ? body.assignee_emails : [];
+      if (assigneeEmails.length) {
+        const { ids } = await resolveZohoOwnerIds(sb, conn, accessToken, portalBase, assigneeEmails);
+        if (ids.length) form.set("person_responsible", ids.join(","));
+      }
       if (![...form.keys()].length) return json({ error: "Nothing to update." }, 400);
       const r = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${projectId}/tasks/${taskId}/`, {
         method: "POST",
@@ -564,6 +683,51 @@ Deno.serve(async (req) => {
 
       await sb.from("projects").update({ zoho_last_synced_at: new Date().toISOString() }).eq("id", proj.id);
       return json({ ok: true, pulled, created, conflicts }, 200);
+    }
+
+    // Ops-only: one-time repair for tasks created BEFORE the 2026-09-11 fix
+    // (this file's own header dates the change) — those pushed to Zoho with
+    // no tasklist write-back and no owner. For every already-synced task in
+    // one local project: re-fetch it from Zoho for the real tasklist_id/name,
+    // then re-resolve and re-push person_responsible from TMG's own
+    // assignee(s). Safe to re-run — every write here is idempotent.
+    if (action === "backfill_zoho_links") {
+      const projectId = (body.project_id || "").toString().trim();
+      if (!projectId) return json({ error: "Missing project_id." }, 400);
+      const { data: proj } = await sb.from("projects").select("id,zoho_project_id").eq("id", projectId).single();
+      if (!proj || !proj.zoho_project_id) return json({ error: "Project isn't linked to Zoho." }, 400);
+
+      const { data: rows } = await sb.from("tasks").select("id,zoho_task_id")
+        .eq("project_id", projectId).not("zoho_task_id", "is", null);
+      let fixed = 0, failed = 0;
+      const detail: any[] = [];
+      for (const t of (rows || [])) {
+        const gr = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${proj.zoho_project_id}/tasks/${t.zoho_task_id}/`, {});
+        const gd = await gr.json().catch(() => ({}));
+        const zt = gr.ok ? (gd.tasks || [])[0] : null;
+        if (!zt) { failed++; detail.push({ task_id: t.id, error: gd?.error || "get_task failed" }); continue; }
+        const m = mapZohoTask(zt);
+        await sb.from("tasks").update({ zoho_tasklist_id: m.tasklist_id, zoho_tasklist_name: m.tasklist_name }).eq("id", t.id);
+
+        const { data: assignees } = await sb.from("task_people").select("user_id").eq("task_id", t.id).eq("role", "assignee");
+        let ownerSet = false;
+        if (assignees && assignees.length) {
+          const { data: profs } = await sb.from("profiles").select("email").in("id", assignees.map((a: any) => a.user_id));
+          const emails = (profs || []).map((p: any) => p.email).filter(Boolean);
+          if (emails.length) {
+            const { ids, missing } = await resolveZohoOwnerIds(sb, conn, accessToken, portalBase, emails);
+            if (ids.length) {
+              const form = new URLSearchParams({ person_responsible: ids.join(",") });
+              await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${proj.zoho_project_id}/tasks/${t.zoho_task_id}/`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+              ownerSet = true;
+            }
+            if (missing.length) detail.push({ task_id: t.id, unresolved_emails: missing });
+          }
+        }
+        fixed++;
+        detail.push({ task_id: t.id, tasklist_name: m.tasklist_name, owner_set: ownerSet });
+      }
+      return json({ ok: true, fixed, failed, total: (rows || []).length, detail }, 200);
     }
 
     return json({ error: "Unknown action." }, 400);

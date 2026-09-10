@@ -4379,6 +4379,76 @@ Rules:
     // Time Off lives in its own /timeoff.html; the More item embeds it in an iframe inside
     // the app frame (top bar + bottom nav stay). Bump TIMEOFF_VERSION when timeoff.html changes.
     const TIMEOFF_VERSION = '20260625d';
+    // Symon-only read history of the tmg-notify emails (meeting notices +
+    // EOD task digests) — "what went out and why", not the emails themselves.
+    // Reads tmg_meeting_notices/tmg_task_digests directly under RLS, same
+    // pattern as AdminUsage's direct c.from(...) reads. See
+    // supabase/migrations/20260910120000_tmg_notify_symon_only.sql for the
+    // policy that actually restricts these rows to Symon, not just any admin.
+    function EmailNotificationsTab({ dark, onBack }) {
+      const J = "'Jost', sans-serif";
+      const [rows, setRows] = useState(null); // null = loading
+
+      useEffect(() => {
+        const c = window.SupabaseAuth && window.SupabaseAuth._client;
+        if (!c) { setRows([]); return; }
+        Promise.all([
+          c.from('tmg_meeting_notices').select('*').order('notified_at', { ascending: false }).limit(100),
+          c.from('tmg_task_digests').select('*').order('sent_at', { ascending: false }).limit(100),
+        ]).then(([m, d]) => {
+          const fmt = (iso) => iso ? new Date(iso).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+          const meetings = (m.data || []).map(r => ({
+            kind: 'meeting', at: r.notified_at, title: 'New Operations Meeting',
+            detail: r.event_summary || '(no title)',
+            sub: [r.event_start ? fmt(r.event_start) : '', r.attendee_names ? 'with ' + r.attendee_names : ''].filter(Boolean).join(' · '),
+          }));
+          const digests = (d.data || []).map(r => ({
+            kind: 'digest', at: r.sent_at, title: 'Daily Digest',
+            detail: (r.tasks_count || 0) + ' task' + (r.tasks_count === 1 ? '' : 's') + ' completed',
+            sub: (r.people_count || 0) + ' team member' + (r.people_count === 1 ? '' : 's'),
+          }));
+          setRows(meetings.concat(digests).sort((a, b) => new Date(b.at) - new Date(a.at)));
+        }).catch(() => setRows([]));
+      }, []);
+
+      const headingC = dark ? '#fff' : '#001A4A';
+      const subC     = dark ? 'rgba(255,255,255,0.35)' : '#B4B2A9';
+      const cardBg   = dark ? '#0A1730' : '#fff';
+      const cardBord = dark ? '#152545' : '#EDE7DC';
+      const detailC  = dark ? '#fff' : '#001A4A';
+      const metaC    = dark ? 'rgba(255,255,255,0.4)' : '#8A8578';
+      const badgeBg  = (kind) => kind === 'meeting' ? (dark ? 'rgba(201,164,90,0.14)' : '#F3EBDA') : (dark ? 'rgba(26,115,232,0.14)' : '#E8F0FE');
+      const badgeFg  = (kind) => kind === 'meeting' ? (dark ? '#C9A45A' : '#AD832F') : (dark ? '#8AB4F8' : '#1A73E8');
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '12px 16px 8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button onClick={onBack} aria-label="Back to More menu" style={{ background: 'none', border: 'none', padding: 0, margin: 0, display: 'flex', alignItems: 'center', cursor: 'pointer', color: headingC }}>
+                <i className="ti ti-chevron-left" style={{ fontSize: 22 }} />
+              </button>
+              <span style={{ fontFamily: J, fontSize: 17, fontWeight: 600, letterSpacing: '0.02em', color: headingC }}>Email Notifications</span>
+            </div>
+            <div style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.04em', marginTop: 2, paddingLeft: 30, color: subC }}>What was sent, and why — visible only to you</div>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '4px 16px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {rows === null && <div style={{ fontFamily: J, fontSize: 12, color: subC, padding: '20px 4px' }}>Loading…</div>}
+            {rows !== null && rows.length === 0 && <div style={{ fontFamily: J, fontSize: 12, color: subC, padding: '20px 4px' }}>No notification emails have gone out yet.</div>}
+            {(rows || []).map((r, i) => (
+              <div key={i} style={{ border: `1px solid ${cardBord}`, background: cardBg, borderRadius: 12, padding: '12px 14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontFamily: J, fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: badgeFg(r.kind), background: badgeBg(r.kind), borderRadius: 6, padding: '2px 8px' }}>{r.title}</span>
+                  <span style={{ fontFamily: J, fontSize: 9, color: metaC, marginLeft: 'auto' }}>{r.at ? new Date(r.at).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : ''}</span>
+                </div>
+                <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: detailC }}>{r.detail}</div>
+                {r.sub && <div style={{ fontFamily: J, fontSize: 11, color: metaC, marginTop: 2 }}>{r.sub}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
     function TimeOffFrame({ dark, onBack }) {
       const ink = dark ? '#fff' : '#001A4A';
       const src = 'timeoff.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + TIMEOFF_VERSION;
@@ -8879,7 +8949,7 @@ Rules:
     // against on load, so a view missing from this list survives being opened
     // but silently falls back to AI Chat on refresh — ADD A NEW MORE SCREEN
     // HERE as well as to allMoreDefs, or reloading it dumps you on chat.
-    const ROUTE_MORE = ['guide', 'drives', 'directory', 'ctc', 'timeoff', 'expsurvey', 'healthgoals', 'sffu', 'admin', 'app-masterplan'];
+    const ROUTE_MORE = ['guide', 'drives', 'directory', 'ctc', 'timeoff', 'expsurvey', 'healthgoals', 'sffu', 'admin', 'app-masterplan', 'email-notifications'];
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
@@ -9142,6 +9212,12 @@ Rules:
       const [navConfig, setNavConfig] = useState(() => { try { return JSON.parse(localStorage.getItem('tmg-nav-config')) || null; } catch { return null; } });
       const saveNavConfig = (cfg) => { setNavConfig(cfg); localStorage.setItem('tmg-nav-config', JSON.stringify(cfg)); };
       const isAdmin = hasAdmin(profile && profile.access);
+      // Email Notifications tab is Symon-only, not "any admin" — deliberately
+      // narrower than isAdmin (matching the RLS on tmg_meeting_notices /
+      // tmg_task_digests, see supabase/migrations/20260910120000_tmg_notify_symon_only.sql).
+      const isSymon = ['symon@themorshedgroup.com', 'manager@themorshedgroup.com'].includes(
+        String((profile && profile.email) || '').toLowerCase()
+      );
       // Tasks lives in the main nav, not More (moved 2026-08-10) — kept as its own
       // item rather than a TABS entry since it needs TASKS_POPOUT_VERSION, which
       // isn't defined yet at TABS' top-level position in the file.
@@ -9171,7 +9247,8 @@ Rules:
         .concat([{ id: 'commercial-listings', label: 'Commercial Listings', icon: 'ti-building-skyscraper', href: 'commercial-listings/' }])
         .concat((!appSet || appSet.has('sffu')) ? [{ id: 'sffu', label: 'SFFU', img: 'sffu-icon.png' }] : [])
         .concat(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'ti-shield-lock' }] : [])
-        .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : []);
+        .concat(isAdmin ? [{ id: 'app-masterplan', label: 'App Masterplan', icon: 'ti-sitemap' }] : [])
+        .concat(isSymon ? [{ id: 'email-notifications', label: 'Email Notifications', icon: 'ti-mail' }] : []);
       // Catches the drift above before a user does: a More screen with no route
       // opens fine and then reloads onto AI Chat.
       allMoreDefs.forEach(m => {
@@ -9824,6 +9901,7 @@ Rules:
               : moreView === 'healthgoals' ? <HealthGoalsTab dark={dark} ownerName={myName} ownerEmail={(user && user.email) || ''} isAdmin={isAdmin} />
               : moreView === 'sffu' ? <SffuFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'timeoff' ? <TimeOffFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
+              : moreView === 'email-notifications' && isSymon ? <EmailNotificationsTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}
             {!['chat', 'calls', 'kpis', 'deals', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />

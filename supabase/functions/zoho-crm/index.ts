@@ -1788,7 +1788,16 @@ Deno.serve(async (req) => {
         return json({ error: friendly, zoho_error: raw }, 400);
       }
 
-      const newApiDomain = minted.api_domain || conn.api_domain || "www.zohoapis.com";
+      // Zoho hands api_domain back as a full URL ("https://www.zohoapis.com"),
+      // but this row stores a BARE HOST -- every call site in this file builds
+      // `https://${apiDomain}/crm/v6/...`. Storing Zoho's value verbatim would
+      // produce "https://https://www.zohoapis.com/..." in all ~25 of them, which
+      // is not a 4xx you could debug from a log: fetch rejects it as an invalid
+      // URL before a request is ever made. Strip the scheme and anything past
+      // the host, so what lands in the row is what the rest of the file expects.
+      const bareHost = (v: unknown) =>
+        String(v || "").trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+      const newApiDomain = bareHost(minted.api_domain) || bareHost(conn.api_domain) || "www.zohoapis.com";
       const at = String(minted.access_token || "");
 
       // 2/3 — what can the NEW grant actually do? Every probe is a read, and
@@ -1817,10 +1826,21 @@ Deno.serve(async (req) => {
         records: modules.ok, settings: settings.ok,
         users: users.ok, contact_emails: emails.ok,
       };
+      // A refusal must say WHICH probe failed and what Zoho actually said.
+      // The first version of this returned a bare "records or settings" and the
+      // real cause -- a malformed api_domain that made every probe unreachable
+      // -- was indistinguishable from a genuinely narrow grant.
+      const detail = {
+        records: modules, settings: settings, users: users, contact_emails: emails,
+        api_domain: newApiDomain,
+      };
       if (!modules.ok || !settings.ok) {
+        const unreachable = modules.code === "unreachable" || settings.code === "unreachable";
         return json({
-          error: "That grant can’t read Zoho records or module settings, so it was NOT installed — the old connection is untouched. Generate a new code with the full scope list.",
-          installed: false, grants,
+          error: unreachable
+            ? "The grant was accepted but this server could not reach Zoho to verify it, so nothing was installed — the old connection is untouched. This is a fault on our side, not with your code."
+            : "That grant can’t read Zoho records or module settings, so it was NOT installed — the old connection is untouched. Generate a new code with the full scope list.",
+          installed: false, grants, detail,
         }, 400);
       }
 
@@ -1837,7 +1857,7 @@ Deno.serve(async (req) => {
       }).eq("refresh_token", conn.refresh_token);
       if (upErr) return json({ error: "Zoho accepted the code but the new key couldn’t be saved: " + upErr.message, installed: false, grants }, 500);
 
-      return json({ ok: true, installed: true, grants, api_domain: newApiDomain }, 200);
+      return json({ ok: true, installed: true, grants, detail, api_domain: newApiDomain }, 200);
     }
 
     // ── Probe whether this connection may read a Contact's Emails [read-only] ──

@@ -3466,6 +3466,18 @@ Rules:
         </div>
       );
 
+      // Turn one probe's raw result into something readable. "unreachable" is
+      // OUR fault (a bad URL or a network failure), not a narrow grant -- say so,
+      // because the fix is completely different.
+      const probeNote = (r, key) => {
+        const d = r && r.detail && r.detail[key];
+        if (!d) return '';
+        if (d.code === 'unreachable') return 'could not be reached — our side, not your code';
+        if (d.code === 'OAUTH_SCOPE_MISMATCH') return 'this scope was not in the grant';
+        if (d.code) return String(d.code).toLowerCase().replace(/_/g, ' ');
+        return 'HTTP ' + d.http;
+      };
+
       const mono = { fontFamily: C.fontMono || 'ui-monospace, SFMono-Regular, Menlo, monospace' };
 
       return (
@@ -3506,6 +3518,17 @@ Rules:
             <div style={{ marginTop: 10, fontSize: '0.74rem', color: '#9B1C1C', lineHeight: 1.55 }}>
               {msg}
               <div style={{ color: C.textMuted, marginTop: 4 }}>The existing Zoho connection is unchanged and still working.</div>
+              {/* A refusal with no detail is a dead end that costs another
+                  10-minute code to investigate. Show exactly what each probe
+                  got back, so the next step is obvious instead of a guess. */}
+              {res && res.grants && (
+                <div style={{ marginTop: 9, paddingTop: 9, borderTop: '1px dashed ' + C.border }}>
+                  <Row label="Records" on={res.grants.records} note={probeNote(res, 'records')} />
+                  <Row label="Settings" on={res.grants.settings} note={probeNote(res, 'settings')} />
+                  <Row label="Contact emails" on={res.grants.contact_emails} note={probeNote(res, 'contact_emails')} />
+                  <Row label="Users" on={res.grants.users} note={probeNote(res, 'users')} />
+                </div>
+              )}
             </div>
           )}
           {phase === 'done' && res && res.grants && (

@@ -9249,6 +9249,18 @@ function ZohoReconnect() {
       color: C.textMuted
     }
   }, note));
+
+  // Turn one probe's raw result into something readable. "unreachable" is
+  // OUR fault (a bad URL or a network failure), not a narrow grant -- say so,
+  // because the fix is completely different.
+  const probeNote = (r, key) => {
+    const d = r && r.detail && r.detail[key];
+    if (!d) return '';
+    if (d.code === 'unreachable') return 'could not be reached — our side, not your code';
+    if (d.code === 'OAUTH_SCOPE_MISMATCH') return 'this scope was not in the grant';
+    if (d.code) return String(d.code).toLowerCase().replace(/_/g, ' ');
+    return 'HTTP ' + d.http;
+  };
   const mono = {
     fontFamily: C.fontMono || 'ui-monospace, SFMono-Regular, Menlo, monospace'
   };
@@ -9428,7 +9440,29 @@ function ZohoReconnect() {
       color: C.textMuted,
       marginTop: 4
     }
-  }, "The existing Zoho connection is unchanged and still working.")), phase === 'done' && res && res.grants && /*#__PURE__*/React.createElement("div", {
+  }, "The existing Zoho connection is unchanged and still working."), res && res.grants && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 9,
+      paddingTop: 9,
+      borderTop: '1px dashed ' + C.border
+    }
+  }, /*#__PURE__*/React.createElement(Row, {
+    label: "Records",
+    on: res.grants.records,
+    note: probeNote(res, 'records')
+  }), /*#__PURE__*/React.createElement(Row, {
+    label: "Settings",
+    on: res.grants.settings,
+    note: probeNote(res, 'settings')
+  }), /*#__PURE__*/React.createElement(Row, {
+    label: "Contact emails",
+    on: res.grants.contact_emails,
+    note: probeNote(res, 'contact_emails')
+  }), /*#__PURE__*/React.createElement(Row, {
+    label: "Users",
+    on: res.grants.users,
+    note: probeNote(res, 'users')
+  }))), phase === 'done' && res && res.grants && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 12,
       paddingTop: 11,

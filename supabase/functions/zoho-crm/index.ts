@@ -426,6 +426,19 @@ async function loadConnection(sb: any) {
   return data;
 }
 
+// Zoho returns a record's tags as [{ name, id, color_code }]. The app only
+// ever shows the name, so everything else is dropped here rather than being
+// carried across the wire and ignored on the other side. Absent, null and
+// "not an array" all collapse to [] — an empty list is the honest answer for
+// a record that was read and has no tags; a read that FAILED is reported as
+// null by the caller, never by this function.
+function zohoTagNames(tag: unknown): string[] {
+  if (!Array.isArray(tag)) return [];
+  return tag
+    .map((t: any) => (t && typeof t === "object" ? String(t.name ?? "").trim() : String(t ?? "").trim()))
+    .filter((n: string) => n.length > 0);
+}
+
 // ── Fuzzy name-matching helpers (for match_contacts) ──────────────────
 function lev(a: string, b: string): number {
   a = a.toLowerCase(); b = b.toLowerCase();
@@ -873,6 +886,82 @@ Deno.serve(async (req) => {
       return json({ deal: best, count: deals.length }, 200);
     }
 
+    // ── Plain record listing, read-only [CRM] ──
+    // Zoho's /search endpoint refuses Created_Time criteria on some modules
+    // ("Invalid query formed"), so anything date-scoped has to come off the
+    // plain records endpoint and be filtered here. Reads only.
+    if (action === "list_records") {
+      const moduleName = String(body.module || "Contacts").trim().replace(/[^A-Za-z0-9_]/g, "");
+      const fields = Array.isArray(body.fields)
+        ? body.fields.map((f: string) => String(f).replace(/[^A-Za-z0-9_]/g, "")).filter(Boolean).slice(0, 20)
+        : [];
+      const sortBy = String(body.sort_by || "Created_Time").replace(/[^A-Za-z0-9_]/g, "");
+      const sortOrder = String(body.sort_order || "desc") === "asc" ? "asc" : "desc";
+      const maxPages = Math.min(Number(body.max_pages) || 5, 40);
+      const stopBefore = typeof body.stop_before === "string" ? body.stop_before : null;
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+      const rows: any[] = [];
+      let page = 1, more = false;
+      while (page <= maxPages) {
+        const url = new URL(`https://${apiDomain}/crm/v6/${moduleName}`);
+        if (fields.length) url.searchParams.set("fields", fields.join(","));
+        url.searchParams.set("per_page", "200");
+        url.searchParams.set("page", String(page));
+        url.searchParams.set("sort_by", sortBy);
+        url.searchParams.set("sort_order", sortOrder);
+        const r = await zohoFetch(sb, conn, accessToken, url.toString(), {});
+        if (r.status === 204) break;
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: d?.message || `HTTP ${r.status}`, detail: d, rows }, 200);
+        const batch = d.data || [];
+        rows.push(...batch);
+        more = !!d?.info?.more_records;
+        // descending sort + a floor value: stop as soon as we are past it
+        if (stopBefore && batch.length && String(batch[batch.length - 1]?.[sortBy] || "") < stopBefore) { more = false; break; }
+        if (!more) break;
+        page++;
+      }
+      return json({ rows, count: rows.length, more_records: more }, 200);
+    }
+
+    // ── Criteria search, read-only [CRM] ──
+    // search_deals word-matches one record at a time, so "every deal where
+    // Stage = X" had no route. COQL needs a scope this connection lacks, but
+    // the module search endpoint takes the same filters under the plain
+    // modules.READ scope we already hold. Reads only.
+    if (action === "search_records") {
+      const moduleName = String(body.module || "Deals").trim().replace(/[^A-Za-z0-9_]/g, "");
+      const criteria = String(body.criteria || "").trim();
+      if (!criteria) return json({ error: "Missing criteria." }, 400);
+      const fields = Array.isArray(body.fields)
+        ? body.fields.map((f: string) => String(f).replace(/[^A-Za-z0-9_]/g, "")).filter(Boolean).slice(0, 20)
+        : [];
+      const maxPages = Math.min(Number(body.max_pages) || 5, 20);
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+      const rows: any[] = [];
+      let page = 1, more = false;
+      while (page <= maxPages) {
+        const url = new URL(`https://${apiDomain}/crm/v6/${moduleName}/search`);
+        url.searchParams.set("criteria", criteria);
+        url.searchParams.set("per_page", "200");
+        url.searchParams.set("page", String(page));
+        if (fields.length) url.searchParams.set("fields", fields.join(","));
+        const r = await zohoFetch(sb, conn, accessToken, url.toString(), {});
+        if (r.status === 204) break;
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: d?.message || `HTTP ${r.status}`, detail: d, rows }, 200);
+        rows.push(...(d.data || []));
+        more = !!d?.info?.more_records;
+        if (!more) break;
+        page++;
+      }
+      return json({ rows, count: rows.length, more_records: more }, 200);
+    }
+
     // ── List CRM modules (metadata only — no records touched) [CRM] ──
     if (action === "list_modules") {
       const conn = await loadConnection(sb);
@@ -1311,10 +1400,18 @@ Deno.serve(async (req) => {
       const getWith = (list: string) =>
         zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Contacts/${id}?fields=${encodeURIComponent(list)}`, {});
 
+      // Tags ride in the same risky group. "Tag" is a system field and should
+      // always be valid, but ?fields= is all-or-nothing, so it goes behind the
+      // retry rather than into baseFields where a wrong guess would take the
+      // phone number down with it for every contact on the list.
+      const risky = extra.concat(["Tag"]);
       let extraFailed = false;
-      let r = await getWith(extra.length ? baseFields + "," + extra.join(",") : baseFields);
-      if (!r.ok && r.status === 400 && extra.length) {
+      let r = await getWith(baseFields + "," + risky.join(","));
+      if (!r.ok && r.status === 400) {
         extraFailed = true;
+        // Drain the rejected response before dropping it — an unread body
+        // keeps its connection open.
+        try { await r.body?.cancel(); } catch { /* already drained */ }
         r = await getWith(baseFields);
       }
       if (r.status === 204) return json({ contact: null, found: false }, 200);
@@ -1329,6 +1426,11 @@ Deno.serve(async (req) => {
         email: c.Email || null, phone: c.Phone || c.Mobile || c.Other_Phone || null,
         city: c.Mailing_City || null, state: c.Mailing_State || null,
         lead_source: c.Lead_Source || null, created: c.Created_Time || null,
+        // null means NOT READ (the ask was dropped to save the phone number),
+        // [] means read and this contact genuinely has no tags. The call row
+        // shows chips for the second and nothing at all for the first —
+        // conflating them would print "no tags" over a failed lookup.
+        tags: extraFailed ? null : zohoTagNames(c.Tag),
         // Returned RAW, deliberately not gated to /^[ABC]$/. That gate is right
         // where this file BUILDS a task subject and must not emit garbage into
         // one; re-applying it here would rebuild the very bug being fixed —
@@ -1392,12 +1494,39 @@ Deno.serve(async (req) => {
       // The cost of doing this eagerly: a contact id that no longer exists
       // still spends two related-list calls. That path is rare, and the hourly
       // ceiling in google-calendar caps how often it can be provoked.
-      const [cr, dealsRes, tasksRes] = await Promise.all([
-        zohoFetch(sb, conn, accessToken,
-          `https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(contactFields)}`, {}),
+      // Task_Type is what the brief needs to say "a note on 21 June and a call
+      // on 21 June" rather than lumping every touch together. This org writes
+      // Task_Type directly when it logs a KPI (see the kpi action above), so it
+      // is asked for optimistically — and if some other org's api name differs,
+      // the related list is re-read WITHOUT it rather than losing the call
+      // history entirely to one bad field name.
+      const TASK_FIELDS = "Subject,Status,Due_Date,Closed_Time";
+      const tasksWithType = async () => {
+        const withType = await related("Tasks", TASK_FIELDS + ",Task_Type", CF_TASKS);
+        if (withType.ok) return { ...withType, typeRead: true };
+        return { ...(await related("Tasks", TASK_FIELDS, CF_TASKS)), typeRead: false };
+      };
+
+      // Tag goes behind its own 400 retry for the same reason it does in
+      // get_contact: ?fields= is all-or-nothing, and an unguarded bad name here
+      // would turn every brief into "Zoho didn't answer".
+      const contactGet = async () => {
+        const get = (f: string) => zohoFetch(sb, conn, accessToken,
+          `https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(f)}`, {});
+        const withTag = await get(contactFields + ",Tag");
+        if (withTag.status !== 400) return { res: withTag, tagsRead: true };
+        // The rejected response's body is never read on this path. Dropping a
+        // Response without draining it holds its connection open in Deno.
+        try { await withTag.body?.cancel(); } catch { /* already drained */ }
+        return { res: await get(contactFields), tagsRead: false };
+      };
+
+      const [contactRes, dealsRes, tasksRes] = await Promise.all([
+        contactGet(),
         related("Deals", "Deal_Name,Stage,Amount,Closing_Date,Type,Owner", CF_DEALS),
-        related("Tasks", "Subject,Status,Due_Date,Closed_Time", CF_TASKS),
+        tasksWithType(),
       ]);
+      const cr = contactRes.res;
       if (cr.status === 204) return json({ found: false }, 200);
       if (!cr.ok) return json({ error: "zoho_unavailable", retryable: true }, 502);
       const cd = await cr.json().catch(() => ({}));
@@ -1421,6 +1550,9 @@ Deno.serve(async (req) => {
           lead_source: c.Lead_Source || null, created: c.Created_Time || null,
           classification: (clsRaw && !/^-?\s*none\s*-?$/i.test(clsRaw)) ? clsRaw : null,
           owner: c.Owner ? { id: c.Owner.id || null, name: c.Owner.name || null } : null,
+          // null means the Tag ask was dropped to save the rest of the record;
+          // [] means it was read and this contact genuinely has no tags.
+          tags: contactRes.tagsRead ? zohoTagNames(c.Tag) : null,
         },
         deals: dealsRes.rows.map((d: any) => ({
           name: d.Deal_Name || null,
@@ -1435,8 +1567,14 @@ Deno.serve(async (req) => {
           status: t.Status || null,
           due: t.Due_Date || null,
           closed: t.Closed_Time || null,
+          // "Call", "Note", "Email"… The brief lists the newest touch of each
+          // type, so the type matters more here than the subject line.
+          type: t.Task_Type || null,
         })),
         tasks_read: tasksRes.ok,
+        // false means Task_Type was refused and every `type` above is null —
+        // the brief then says nothing rather than claiming there were no calls.
+        tasks_type_read: tasksRes.typeRead,
       }, 200);
     }
 

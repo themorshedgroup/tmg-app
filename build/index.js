@@ -13016,6 +13016,17 @@ async function briefRequest(contactId) {
       deals_read: true,
       tasks_read: true,
       threads_read: 4,
+      last_by_type: [{
+        type: 'Note',
+        date: '2026-06-21'
+      }, {
+        type: 'Call',
+        date: '2026-06-21'
+      }, {
+        type: 'Email',
+        date: '2026-03-14'
+      }],
+      tags: ['Sphere', 'Past Client', 'Newsletter'],
       mailboxes: [{
         role: 'agent',
         name: 'Brad Baker',
@@ -13052,11 +13063,15 @@ async function briefRequest(contactId) {
       brief: '',
       threads_read: 0,
       contact_email_on_file: false,
-      mailboxes: []
+      mailboxes: [],
+      last_by_type: [],
+      tags: []
     });else if (k === 3) fail('contact_not_found');else if (k === 4) fail('owner_unresolved', 'Cassandra Clemons');else if (k === 5) fail('not_permitted');else if (k === 6) fail('rate_limited');else if (k === 7) fail('zoho_unavailable');else if (k === 8) out = good({
       deals_read: false,
       tasks_read: false,
       threads_read: 0,
+      last_by_type: [],
+      tags: null,
       mailboxes: [{
         role: 'agent',
         name: 'Brad Baker',
@@ -13086,6 +13101,26 @@ async function briefRequest(contactId) {
     throw e; // the wrapper drops the entry — a failure must be retryable
   }
   return data;
+}
+// "2026-06-21" → "21 Jun" this year, "21 Jun 2025" otherwise. Parsed at
+// noon UTC on purpose: a bare yyyy-mm-dd is parsed as midnight UTC, which
+// in US timezones renders as the day before.
+function briefTouchDate(iso) {
+  const str = String(iso || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  try {
+    const d = new Date(str + 'T12:00:00Z');
+    const sameYear = d.getUTCFullYear() === new Date().getUTCFullYear();
+    return d.toLocaleDateString('en-US', Object.assign({
+      day: 'numeric',
+      month: 'short',
+      timeZone: 'UTC'
+    }, sameYear ? {} : {
+      year: 'numeric'
+    }));
+  } catch (e) {
+    return str;
+  }
 }
 // What a skipped mailbox means, in words an agent can act on. "Couldn't
 // search just now" would be wrong for most of these — they don't resolve
@@ -14491,6 +14526,10 @@ function CallsTab({
       // while `pfield` is still resolving would stamp `pform: null` beside
       // `detail: true` and never look again — the permanent-null trap.
       if (pfield && pfield.api && !('pform' in c)) return true;
+      // Tags shipped after this cache did, so the same key-presence rule
+      // applies: missing means never asked, a stored null means the server
+      // had to drop the ask, [] means read and there genuinely are none.
+      if (!('tags' in c)) return true;
       return false;
     });
     const needSpouse = ids.filter(id => {
@@ -14547,7 +14586,10 @@ function CallsTab({
           // on file — that is the case the subject-derived fallback exists
           // for, and it has to be visible in the preview.
           cls: i % 6 === 5 ? null : ['A', 'B', 'C'][i % 3],
-          pform: i % 4 === 0 ? null : ['Buyer form', 'Seller form', 'Open house'][i % 3]
+          pform: i % 4 === 0 ? null : ['Buyer form', 'Seller form', 'Open house'][i % 3],
+          // Every shape the row has to survive: none, one, and a contact
+          // carrying more tags than the row can comfortably hold.
+          tags: i % 4 === 1 ? [] : i % 4 === 2 ? ['Sphere'] : ['Sphere', 'Past Client', 'Newsletter', 'Luxury', 'Referral Source']
         };
       });
       merge(out);
@@ -14619,6 +14661,10 @@ function CallsTab({
             if (pfield && pfield.api && c && !c.extra_failed) {
               v.pform = prospectText(c.extra ? c.extra[pfield.api] : null);
             }
+            // Same discipline again. The server sends null when it had to
+            // drop the Tag ask to save the phone number, and an array when
+            // it read them — stamping null as "no tags" would be permanent.
+            if (c && Array.isArray(c.tags)) v.tags = c.tags;
             return [id, v];
           } catch (e) {
             return [id, null];
@@ -14863,6 +14909,11 @@ function CallsTab({
       // screen. It gets its own marker instead.
       eo: subjectGrade === 'EO',
       pform: info && 'pform' in info ? info.pform : null,
+      // Always an array so the row can map it without a guard. A dropped
+      // lookup and a genuinely untagged contact both draw nothing, which
+      // is the right answer for both — the row is not the place to explain
+      // that Zoho refused a field.
+      tags: info && Array.isArray(info.tags) ? info.tags : [],
       cname,
       cid,
       email: info && info.email,
@@ -14967,14 +15018,60 @@ function CallsTab({
     }
   }, text);
 
-  // Name · classification · prospect form · spouse · info.
+  // A Zoho contact tag. Pill-shaped on purpose: the square chips beside it
+  // are a fixed vocabulary this app assigns meaning to (A/B/C, EO, the
+  // prospect form), while a tag is free text somebody typed in Zoho. Same
+  // shape for both would invite reading a tag as a classification.
+  const tagChip = (name, i) => /*#__PURE__*/React.createElement("span", {
+    key: 'tag' + i,
+    title: 'Contact tag in Zoho: ' + name,
+    style: {
+      fontFamily: J,
+      fontSize: 9,
+      fontWeight: 600,
+      letterSpacing: '0.02em',
+      lineHeight: 1.4,
+      padding: '2px 7px',
+      borderRadius: 20,
+      flexShrink: 0,
+      maxWidth: 140,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      background: trackBg,
+      color: mutedCol,
+      border: `1px solid ${lineCol}`
+    }
+  }, name);
+
+  // Two lines now. Line one is the name and everything that classifies it —
+  // A/B/C, EO, the prospect form, then every contact tag on the record.
+  // Line two is the spouse.
   //
-  // The classification comes from the CONTACT RECORD now. It used to be
+  // The spouse used to sit inline after the chips, which on a contact with
+  // any tags at all pushed it past the fold or wrapped it under a tag,
+  // where it read as one. Underneath the name it reads as what it is: the
+  // other half of the couple.
+  //
+  // The classification comes from the CONTACT RECORD. It used to be
   // regex-read off the task's subject, which meant a contact classified A
   // in Zoho showed "No class" unless the subject happened to say "A Touch
   // Call" — a wrong answer stated confidently. The subject is still used,
   // but only while the record is loading and only labelled as a guess.
-  const nameCluster = (t, b, size) => /*#__PURE__*/React.createElement(React.Fragment, null, b.href ? /*#__PURE__*/React.createElement("a", {
+  const nameCluster = (t, b, size) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      flexWrap: 'wrap',
+      minWidth: 0
+    }
+  }, b.href ? /*#__PURE__*/React.createElement("a", {
     href: b.href,
     target: "_blank",
     rel: "noopener noreferrer",
@@ -15003,31 +15100,7 @@ function CallsTab({
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap'
     }
-  }, b.cname), b.clsKnown ? b.grade ? chip(b.grade, 'Client classification ' + b.grade + ', from the contact record in Zoho', false) : chip('No class', 'This contact has no client classification set in Zoho', true) : b.gradeFromSubject ? chip(b.gradeFromSubject + '?', 'Read off the task subject while the contact record loads — it may not match the record', true) : chip('…', 'Reading this contact’s classification from Zoho', true), b.eo && chip('EO', 'This task is an EO touch call — a kind of call, not a client classification', true), b.pform && chip(b.pform, (pfield && pfield.label ? pfield.label : 'Prospect form') + ': ' + b.pform, true), b.spouse && b.spouse.name && /*#__PURE__*/React.createElement("a", {
-    href: zohoContactUrl(b.spouse.id) || undefined,
-    target: "_blank",
-    rel: "noopener noreferrer",
-    title: 'Spouse: ' + b.spouse.name,
-    style: {
-      fontFamily: J,
-      fontSize: 10.5,
-      color: mutedCol,
-      textDecoration: 'none',
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 4,
-      flexShrink: 0,
-      maxWidth: 150,
-      overflow: 'hidden',
-      whiteSpace: 'nowrap'
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-heart-filled",
-    style: {
-      fontSize: 10,
-      color: dark ? '#C9A45A' : '#C9A45A'
-    }
-  }), b.spouse.name), /*#__PURE__*/React.createElement("button", {
+  }, b.cname), b.clsKnown ? b.grade ? chip(b.grade, 'Client classification ' + b.grade + ', from the contact record in Zoho', false) : chip('No class', 'This contact has no client classification set in Zoho', true) : b.gradeFromSubject ? chip(b.gradeFromSubject + '?', 'Read off the task subject while the contact record loads — it may not match the record', true) : chip('…', 'Reading this contact’s classification from Zoho', true), b.eo && chip('EO', 'This task is an EO touch call — a kind of call, not a client classification', true), b.pform && chip(b.pform, (pfield && pfield.label ? pfield.label : 'Prospect form') + ': ' + b.pform, true), b.tags.map(tagChip), /*#__PURE__*/React.createElement("button", {
     onClick: () => openInfo(b),
     title: 'AI summary of ' + b.cname,
     style: {
@@ -15052,7 +15125,33 @@ function CallsTab({
     style: {
       fontSize: 10
     }
-  })));
+  }))), b.spouse && b.spouse.name && /*#__PURE__*/React.createElement("a", {
+    href: zohoContactUrl(b.spouse.id) || undefined,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    title: 'Spouse: ' + b.spouse.name,
+    style: {
+      fontFamily: J,
+      fontSize: 10.5,
+      color: mutedCol,
+      textDecoration: 'none',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 4,
+      marginTop: 3,
+      maxWidth: '100%',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-heart-filled",
+    style: {
+      fontSize: 10,
+      color: '#C9A45A',
+      flexShrink: 0
+    }
+  }), b.spouse.name));
 
   // What was logged against this call, and anything that went wrong doing
   // it. Both hang under the row on either breakpoint.
@@ -15119,10 +15218,6 @@ function CallsTab({
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        flexWrap: 'wrap',
         marginBottom: 6
       }
     }, nameCluster(t, b, 16)), /*#__PURE__*/React.createElement("div", {
@@ -15856,14 +15951,47 @@ function CallsTab({
     }
   }, briefGaps(brief.data).map((g, i) => /*#__PURE__*/React.createElement("div", {
     key: i
-  }, g))), /*#__PURE__*/React.createElement("div", {
+  }, g))), (brief.data.last_by_type || []).length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
-      fontFamily: J,
-      fontSize: 10,
-      color: faintCol,
       marginBottom: 14
     }
-  }, brief.data.threads_read ? 'Written just now from Zoho and ' + brief.data.threads_read + ' recent email ' + (brief.data.threads_read === 1 ? 'thread' : 'threads') + '. Not saved anywhere.' : 'Written just now from Zoho. No email threads were read. Not saved anywhere.')), brief && brief.id === infoFor.id && brief.state === 'error' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 9.5,
+      fontWeight: 600,
+      letterSpacing: '0.06em',
+      textTransform: 'uppercase',
+      color: faintCol,
+      marginBottom: 6
+    }
+  }, "Last of each kind"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 6
+    }
+  }, brief.data.last_by_type.map((x, i) => /*#__PURE__*/React.createElement("span", {
+    key: i,
+    style: {
+      fontFamily: J,
+      fontSize: 11,
+      fontWeight: 300,
+      color: headTitle,
+      background: dark ? 'rgba(255,255,255,0.05)' : 'rgba(10,20,45,0.04)',
+      border: `1px solid ${lineCol}`,
+      borderRadius: 7,
+      padding: '4px 8px'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 600
+    }
+  }, x.type), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: mutedCol
+    }
+  }, ' · ' + briefTouchDate(x.date))))))), brief && brief.id === infoFor.id && brief.state === 'error' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontFamily: J,
       fontSize: 12.5,
@@ -15886,30 +16014,7 @@ function CallsTab({
       fontWeight: 600,
       color: headTitle
     }
-  }, "Try again")), zohoContactUrl(infoFor.id) && /*#__PURE__*/React.createElement("a", {
-    href: zohoContactUrl(infoFor.id),
-    target: "_blank",
-    rel: "noopener noreferrer",
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      borderRadius: 12,
-      padding: '15px 16px',
-      border: `1px solid ${lineCol}`,
-      color: headTitle,
-      textDecoration: 'none',
-      fontFamily: J,
-      fontSize: 14,
-      fontWeight: 600
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-external-link",
-    style: {
-      fontSize: 19,
-      color: mutedCol
-    }
-  }), " Open in Zoho"))), addKpi && /*#__PURE__*/React.createElement(AddKpiSheet, {
+  }, "Try again")))), addKpi && /*#__PURE__*/React.createElement(AddKpiSheet, {
     dark: dark,
     ownerId: logOwnerId,
     ownerName: logOwnerName,

@@ -298,7 +298,11 @@ async function cbSearchMailbox(sb: any, person: any, role: string, contactEmail:
   catch (_e) { out.state = "not_connected"; return out; }
 
   const e = contactEmail.replace(/[()"\\]/g, "");
-  const q = `(from:${e} OR to:${e}) newer_than:365d -in:chats -in:drafts -in:spam -in:trash`;
+  // cc: and bcc: are separate operators in Gmail — `to:` matches ONLY the To
+  // header. A newsletter goes out with the whole list in BCC, so the July
+  // newsletter was invisible here until bcc: was added. We are searching the
+  // SENDER's own mailbox, which is the one copy where the Bcc header survives.
+  const q = `(from:${e} OR to:${e} OR cc:${e} OR bcc:${e}) newer_than:365d -in:chats -in:drafts -in:spam -in:trash`;
   const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/threads");
   listUrl.searchParams.set("maxResults", String(CB_THREADS_PER_MAILBOX));
   listUrl.searchParams.set("q", q);
@@ -885,7 +889,33 @@ Deno.serve(async (req) => {
         `- ${d.name || "(unnamed deal)"} | stage ${d.stage || "unknown"}${money(d.amount)}` +
         `${d.closing_date ? " | closing " + d.closing_date : ""}${d.type ? " | " + d.type : ""}`);
       const touches = (zd.tasks || []).slice(0, 8).map((t: any) =>
-        `- ${t.closed || t.due || "(no date)"} | ${t.status || "?"} | ${t.subject || ""}`);
+        `- ${t.closed || t.due || "(no date)"} | ${t.status || "?"}` +
+        `${t.type ? " | " + t.type : ""} | ${t.subject || ""}`);
+
+      // The newest touch of each KIND — one "Call", one "Note", one "Email" —
+      // rather than the newest few touches, which on a busy contact are all the
+      // same kind and hide the fact that nobody has phoned since March.
+      //
+      // "Done" is deliberately strict: a task dated next Tuesday is a plan, not
+      // a touch, and printing it as the last call would be a lie the agent
+      // would carry into the conversation. Closed_Time OR a completed status OR
+      // a due date already in the past all count; anything else is skipped.
+      const today = new Date().toISOString().slice(0, 10);
+      const lastByType: Array<{ type: string; date: string }> = [];
+      if (zd.tasks_type_read) {
+        const seen = new Set<string>();
+        for (const t of (zd.tasks || [])) {
+          const type = String(t.type || "").trim();
+          if (!type || seen.has(type.toLowerCase())) continue;
+          const date = String(t.closed || t.due || "").slice(0, 10);
+          if (!date) continue;
+          const done = !!t.closed || /complet/i.test(String(t.status || "")) || date <= today;
+          if (!done) continue;
+          seen.add(type.toLowerCase());
+          lastByType.push({ type, date });
+        }
+        lastByType.sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
+      }
 
       let ctx = [
         `TODAY: ${new Date().toISOString().slice(0, 10)}`,
@@ -966,6 +996,12 @@ Deno.serve(async (req) => {
         contact_email_on_file: !!contact.email,
         deals_read: !!zd.deals_read,
         tasks_read: !!zd.tasks_read,
+        // Newest touch per kind. Empty when Zoho refused Task_Type as well as
+        // when there are genuinely no completed tasks — the sheet only prints a
+        // heading when there is at least one row, so both read the same way.
+        last_by_type: lastByType,
+        // null = the tag lookup was dropped, [] = read and there are none.
+        tags: Array.isArray(contact.tags) ? contact.tags : null,
         threads_read: threadsRead,
         mailboxes: mailboxes.map((m) => ({ role: m.role, name: m.name, state: m.state, threads: m.threads })),
         generated_at: new Date().toISOString(),

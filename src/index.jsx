@@ -3410,6 +3410,122 @@ Rules:
       );
     }
 
+    // ─── Zoho connection: re-grant the org's authorization ───────────
+    //  Zoho scopes cannot be added to an existing grant. Reading the Emails tab
+    //  on a contact needs ZohoCRM.modules.emails.READ, which is a SEPARATE
+    //  scope from the module ones this app has always used and is not covered
+    //  by ZohoCRM.modules.ALL — so the whole authorization has to be re-issued.
+    //
+    //  Zoho's Self Client console is the only place that code can come from and
+    //  it needs a Zoho login, so that half is unavoidably the admin's. This card
+    //  does everything on either side of it: hands them the exact scope line to
+    //  paste in, takes the 10-minute code back, and reports what the new grant
+    //  can actually do — verified against Zoho, not assumed.
+    const ZOHO_SCOPES = [
+      // Every record read and write the app already makes.
+      'ZohoCRM.modules.ALL',
+      // settings/modules + settings/fields — the schema explorer and the
+      // Task_Type resolver.
+      'ZohoCRM.settings.ALL',
+      // The one the Emails tab needs. The reason for this reconnect.
+      'ZohoCRM.modules.emails.READ',
+      // NOT new decoration: the KPI owner bug was traced to this scope being
+      // absent, and the workaround in zoho-crm (harvesting owner names off
+      // recent records) exists only because /users 401s today.
+      'ZohoCRM.users.READ',
+      // Lets a future query filter server-side instead of paging the whole
+      // module. Read-only, and the alternative is asking for another reconnect.
+      'ZohoCRM.coql.READ',
+    ].join(',');
+
+    function ZohoReconnect() {
+      const [code, setCode] = useState('');
+      const [phase, setPhase] = useState('idle'); // idle | working | done | error
+      const [res, setRes] = useState(null);
+      const [msg, setMsg] = useState('');
+      const [copied, setCopied] = useState(false);
+
+      const copyScopes = () => {
+        try { navigator.clipboard.writeText(ZOHO_SCOPES); setCopied(true); setTimeout(() => setCopied(false), 1600); } catch (e) {}
+      };
+
+      async function connect() {
+        setPhase('working'); setMsg('');
+        try {
+          const { ok, data } = await callZoho({ action: 'zoho_reconnect', code: code.trim() });
+          if (!ok) { setRes(data && data.grants ? data : null); setMsg((data && data.error) || 'Zoho refused the code.'); setPhase('error'); return; }
+          setRes(data); setCode(''); setPhase('done');
+        } catch (e) { setMsg('Couldn’t reach the server.'); setPhase('error'); }
+      }
+
+      const Row = ({ label, on, note }) => (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.76rem', marginTop: 5 }}>
+          <i className={'ti ' + (on ? 'ti-circle-check' : 'ti-circle-x')} style={{ fontSize: 15, color: on ? '#0F6E56' : '#9B1C1C', flexShrink: 0 }} />
+          <span style={{ color: C.navy, fontWeight: 600 }}>{label}</span>
+          <span style={{ color: C.textMuted }}>{note}</span>
+        </div>
+      );
+
+      const mono = { fontFamily: C.fontMono || 'ui-monospace, SFMono-Regular, Menlo, monospace' };
+
+      return (
+        <div style={CARD}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 10 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-plug-connected" style={{ fontSize: 18, color: C.gold }} /></div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Zoho Connection</div>
+              <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Re-authorize Zoho so the app can read the Emails tab on a contact.</div>
+            </div>
+          </div>
+
+          <div style={{ fontSize: '0.74rem', color: C.textSecondary, lineHeight: 1.65 }}>
+            <div style={{ marginBottom: 7 }}><b style={{ color: C.navy }}>1.</b> Open <a href="https://api-console.zoho.com" target="_blank" rel="noopener noreferrer" style={{ color: C.gold, fontWeight: 600 }}>api-console.zoho.com</a> and click into the <b>Self Client</b> app.</div>
+            <div style={{ marginBottom: 7 }}><b style={{ color: C.navy }}>2.</b> On the <b>Generate Code</b> tab, paste this into Scope:</div>
+            <div style={{ ...mono, fontSize: '0.66rem', lineHeight: 1.55, wordBreak: 'break-all', background: C.bg, border: '1px solid ' + C.border, borderRadius: 9, padding: '9px 11px', color: C.navy, marginBottom: 6 }}>{ZOHO_SCOPES}</div>
+            <button onClick={copyScopes} style={{ fontFamily: C.fontSans, fontSize: '0.72rem', fontWeight: 600, color: copied ? '#0F6E56' : C.navy, background: C.surface, border: '1px solid ' + C.border, borderRadius: 8, padding: '6px 11px', cursor: 'pointer', marginBottom: 9 }}>
+              <i className={'ti ' + (copied ? 'ti-check' : 'ti-copy')} style={{ fontSize: 13, marginRight: 5 }} />{copied ? 'Copied' : 'Copy scope line'}
+            </button>
+            <div style={{ marginBottom: 7 }}><b style={{ color: C.navy }}>3.</b> Set duration to <b>10 minutes</b>, type anything as the description, and click Create. Pick your CRM portal if it asks.</div>
+            <div style={{ marginBottom: 10 }}><b style={{ color: C.navy }}>4.</b> Copy the code it shows and paste it below within 10 minutes — it only works once.</div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input value={code} onChange={e => setCode(e.target.value)} placeholder="Paste the grant code"
+              style={{ ...mono, flex: 1, minWidth: 170, fontSize: '0.76rem', padding: '9px 11px', border: '1px solid ' + C.border, borderRadius: 9, background: C.surface, color: C.textPrimary, outline: 'none' }} />
+            <button onClick={connect} disabled={!code.trim() || phase === 'working'}
+              style={{ fontFamily: C.fontSans, fontSize: '0.78rem', fontWeight: 600, color: '#fff', background: C.navy, border: 'none', borderRadius: 9, padding: '10px 16px', cursor: (!code.trim() || phase === 'working') ? 'default' : 'pointer', opacity: (!code.trim() || phase === 'working') ? 0.45 : 1 }}>
+              {phase === 'working' ? 'Checking…' : 'Reconnect'}
+            </button>
+          </div>
+
+          {/* Nothing is installed until the new key has proved it can still do
+              what the old one does, so an error here means the live connection
+              was never touched. Say that — an admin who thinks they have just
+              broken Zoho for the whole company will not try again. */}
+          {phase === 'error' && (
+            <div style={{ marginTop: 10, fontSize: '0.74rem', color: '#9B1C1C', lineHeight: 1.55 }}>
+              {msg}
+              <div style={{ color: C.textMuted, marginTop: 4 }}>The existing Zoho connection is unchanged and still working.</div>
+            </div>
+          )}
+          {phase === 'done' && res && res.grants && (
+            <div style={{ marginTop: 12, paddingTop: 11, borderTop: '1px dashed ' + C.border }}>
+              <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#0F6E56', marginBottom: 2 }}>Connected. What the new key can do:</div>
+              <Row label="Records" on={res.grants.records} note="contacts, deals, tasks" />
+              <Row label="Settings" on={res.grants.settings} note="modules and fields" />
+              <Row label="Contact emails" on={res.grants.contact_emails} note="the Emails tab — what this was for" />
+              <Row label="Users" on={res.grants.users} note="fixes KPI owner names" />
+              {!res.grants.contact_emails && (
+                <div style={{ fontSize: '0.72rem', color: '#9B1C1C', marginTop: 8, lineHeight: 1.5 }}>
+                  Zoho still won’t hand over contact emails. Either the scope line was edited before it was pasted, or the agents’ Zoho email sharing is set to private — Setup → Channels → Email → Email Sharing.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function AdminTab({ onOpenBuilder }) {
       return (
         <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
@@ -3417,6 +3533,7 @@ Rules:
           <AdminUsers />
           <TabAccess />
           <AdminUsage />
+          <ZohoReconnect />
           <div style={{ ...CARD, cursor: 'pointer' }} onClick={onOpenBuilder}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-layout-grid" style={{ fontSize: 18, color: C.gold }} /></div>

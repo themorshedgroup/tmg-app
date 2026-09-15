@@ -1726,6 +1726,120 @@ Deno.serve(async (req) => {
       return json({ tasks_by_contact: out, owner_by_contact: owners }, 200);
     }
 
+    // ── Re-grant the org's Zoho authorization [admin] ──────────────
+    //  Adding a scope to a Zoho grant is not an edit — Zoho mints a whole new
+    //  refresh token against the new scope list and the old one keeps working
+    //  until it is replaced. The admin pastes a 10-minute grant code from
+    //  Zoho's Self Client console; this exchanges it and installs the result.
+    //
+    //  THE ORDER MATTERS. The live refresh token is the single credential every
+    //  Zoho feature in this app runs on, so it is replaced LAST, and only after
+    //  the new one has proved it can still do the things the old one does:
+    //
+    //    1. exchange the code            (nothing written)
+    //    2. mint an access token         (nothing written)
+    //    3. probe modules + settings     (nothing written)
+    //    4. only if BOTH pass, write     ← the first and only write
+    //
+    //  A grant that comes back missing module or settings access is rejected
+    //  outright. Everything else — users, emails, coql — is reported but never
+    //  blocking: those are features, and losing one is not worth refusing a
+    //  reconnect the admin deliberately asked for.
+    if (action === "zoho_reconnect") {
+      if (!(auth as any).isService) {
+        const { data: prof } = await sb.from("profiles").select("access").eq("id", auth.userId).maybeSingle();
+        const roles = Array.isArray(prof?.access) ? prof.access : [];
+        if (!roles.includes("admin")) return json({ error: "Admin access required." }, 403);
+      }
+      const code = String(body.code || "").trim();
+      if (!code) return json({ error: "Paste the grant code from Zoho first." }, 400);
+
+      const clientId = Deno.env.get("ZOHO_CLIENT_ID") || "";
+      const clientSecret = Deno.env.get("ZOHO_CLIENT_SECRET") || "";
+      if (!clientId || !clientSecret)
+        return json({ error: "ZOHO_CLIENT_ID / ZOHO_CLIENT_SECRET are not set on this function." }, 500);
+
+      const conn = await loadConnection(sb);
+      const accountsUrl = conn.accounts_url || "https://accounts.zoho.com";
+
+      // 1 — code → tokens.
+      let minted: any = {};
+      try {
+        const tr = await fetch(`${accountsUrl}/oauth/v2/token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "authorization_code",
+            client_id: clientId, client_secret: clientSecret, code,
+          }).toString(),
+        });
+        minted = await tr.json().catch(() => ({}));
+      } catch (e) {
+        return json({ error: "Couldn’t reach Zoho to exchange the code." }, 502);
+      }
+      if (!minted.refresh_token) {
+        // "invalid_code" is overwhelmingly an expired one — Zoho's console
+        // codes last ten minutes and are single use. Say that, because
+        // "invalid" reads as "you pasted it wrong" and sends them hunting.
+        const raw = String(minted.error || minted.error_description || "unknown");
+        const friendly = /invalid.?code/i.test(raw)
+          ? "Zoho rejected that code. They expire after 10 minutes and only work once — generate a fresh one."
+          : "Zoho didn’t return a refresh token: " + raw;
+        return json({ error: friendly, zoho_error: raw }, 400);
+      }
+
+      const newApiDomain = minted.api_domain || conn.api_domain || "www.zohoapis.com";
+      const at = String(minted.access_token || "");
+
+      // 2/3 — what can the NEW grant actually do? Every probe is a read, and
+      // the Emails one uses record id "1", which cannot be a real Zoho id.
+      const probe = async (url: string) => {
+        try {
+          const r = await fetch(url, { headers: { Authorization: "Zoho-oauthtoken " + at } });
+          if (r.status === 204) return { ok: true, http: 204, code: null };
+          const d = await r.json().catch(() => ({}));
+          const c = String(d?.code || "");
+          // A scope refusal is the ONLY "no". Anything else (a bad id, an empty
+          // module) means the door was open and the request failed past it.
+          if (c === "OAUTH_SCOPE_MISMATCH") return { ok: false, http: r.status, code: c };
+          return { ok: true, http: r.status, code: c || null };
+        } catch { return { ok: false, http: 0, code: "unreachable" }; }
+      };
+
+      const [modules, settings, users, emails] = await Promise.all([
+        probe(`https://${newApiDomain}/crm/v6/Contacts?fields=Email&per_page=1`),
+        probe(`https://${newApiDomain}/crm/v6/settings/modules`),
+        probe(`https://${newApiDomain}/crm/v6/users?type=ActiveUsers&per_page=1`),
+        probe(`https://${newApiDomain}/crm/v6/Contacts/1/Emails`),
+      ]);
+
+      const grants = {
+        records: modules.ok, settings: settings.ok,
+        users: users.ok, contact_emails: emails.ok,
+      };
+      if (!modules.ok || !settings.ok) {
+        return json({
+          error: "That grant can’t read Zoho records or module settings, so it was NOT installed — the old connection is untouched. Generate a new code with the full scope list.",
+          installed: false, grants,
+        }, 400);
+      }
+
+      // 4 — install. The previous token is kept so a bad grant that slipped
+      // past the probes is one UPDATE away from being undone, and the cached
+      // access token is cleared so nothing serves a request on the old scope.
+      const { error: upErr } = await sb.from("zoho_connection").update({
+        previous_refresh_token: conn.refresh_token,
+        refresh_token: minted.refresh_token,
+        api_domain: newApiDomain,
+        access_token: null,
+        access_token_expires_at: null,
+        reconnected_at: new Date().toISOString(),
+      }).eq("refresh_token", conn.refresh_token);
+      if (upErr) return json({ error: "Zoho accepted the code but the new key couldn’t be saved: " + upErr.message, installed: false, grants }, 500);
+
+      return json({ ok: true, installed: true, grants, api_domain: newApiDomain }, 200);
+    }
+
     // ── Probe whether this connection may read a Contact's Emails [read-only] ──
     //  The Emails tab on a Zoho contact is a related list with its OWN OAuth
     //  scope (ZohoCRM.modules.emails.READ) — separate from the module scopes

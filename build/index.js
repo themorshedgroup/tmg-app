@@ -9155,6 +9155,317 @@ function TabAccess() {
     }
   }, saving ? 'Saving…' : saved ? 'Saved ✓' : 'Save changes')));
 }
+
+// ─── Zoho connection: re-grant the org's authorization ───────────
+//  Zoho scopes cannot be added to an existing grant. Reading the Emails tab
+//  on a contact needs ZohoCRM.modules.emails.READ, which is a SEPARATE
+//  scope from the module ones this app has always used and is not covered
+//  by ZohoCRM.modules.ALL — so the whole authorization has to be re-issued.
+//
+//  Zoho's Self Client console is the only place that code can come from and
+//  it needs a Zoho login, so that half is unavoidably the admin's. This card
+//  does everything on either side of it: hands them the exact scope line to
+//  paste in, takes the 10-minute code back, and reports what the new grant
+//  can actually do — verified against Zoho, not assumed.
+const ZOHO_SCOPES = [
+// Every record read and write the app already makes.
+'ZohoCRM.modules.ALL',
+// settings/modules + settings/fields — the schema explorer and the
+// Task_Type resolver.
+'ZohoCRM.settings.ALL',
+// The one the Emails tab needs. The reason for this reconnect.
+'ZohoCRM.modules.emails.READ',
+// NOT new decoration: the KPI owner bug was traced to this scope being
+// absent, and the workaround in zoho-crm (harvesting owner names off
+// recent records) exists only because /users 401s today.
+'ZohoCRM.users.READ',
+// Lets a future query filter server-side instead of paging the whole
+// module. Read-only, and the alternative is asking for another reconnect.
+'ZohoCRM.coql.READ'].join(',');
+function ZohoReconnect() {
+  const [code, setCode] = useState('');
+  const [phase, setPhase] = useState('idle'); // idle | working | done | error
+  const [res, setRes] = useState(null);
+  const [msg, setMsg] = useState('');
+  const [copied, setCopied] = useState(false);
+  const copyScopes = () => {
+    try {
+      navigator.clipboard.writeText(ZOHO_SCOPES);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch (e) {}
+  };
+  async function connect() {
+    setPhase('working');
+    setMsg('');
+    try {
+      const {
+        ok,
+        data
+      } = await callZoho({
+        action: 'zoho_reconnect',
+        code: code.trim()
+      });
+      if (!ok) {
+        setRes(data && data.grants ? data : null);
+        setMsg(data && data.error || 'Zoho refused the code.');
+        setPhase('error');
+        return;
+      }
+      setRes(data);
+      setCode('');
+      setPhase('done');
+    } catch (e) {
+      setMsg('Couldn’t reach the server.');
+      setPhase('error');
+    }
+  }
+  const Row = ({
+    label,
+    on,
+    note
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      fontSize: '0.76rem',
+      marginTop: 5
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: 'ti ' + (on ? 'ti-circle-check' : 'ti-circle-x'),
+    style: {
+      fontSize: 15,
+      color: on ? '#0F6E56' : '#9B1C1C',
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.navy,
+      fontWeight: 600
+    }
+  }, label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.textMuted
+    }
+  }, note));
+  const mono = {
+    fontFamily: C.fontMono || 'ui-monospace, SFMono-Regular, Menlo, monospace'
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: CARD
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 11,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 34,
+      height: 34,
+      borderRadius: 9,
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: '#F3EBDA'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plug-connected",
+    style: {
+      fontSize: 18,
+      color: C.gold
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans
+    }
+  }, "Zoho Connection"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: C.textSecondary,
+      marginTop: 2,
+      lineHeight: 1.4
+    }
+  }, "Re-authorize Zoho so the app can read the Emails tab on a contact."))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: C.textSecondary,
+      lineHeight: 1.65
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 7
+    }
+  }, /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: C.navy
+    }
+  }, "1."), " Open ", /*#__PURE__*/React.createElement("a", {
+    href: "https://api-console.zoho.com",
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      color: C.gold,
+      fontWeight: 600
+    }
+  }, "api-console.zoho.com"), " and click into the ", /*#__PURE__*/React.createElement("b", null, "Self Client"), " app."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 7
+    }
+  }, /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: C.navy
+    }
+  }, "2."), " On the ", /*#__PURE__*/React.createElement("b", null, "Generate Code"), " tab, paste this into Scope:"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...mono,
+      fontSize: '0.66rem',
+      lineHeight: 1.55,
+      wordBreak: 'break-all',
+      background: C.bg,
+      border: '1px solid ' + C.border,
+      borderRadius: 9,
+      padding: '9px 11px',
+      color: C.navy,
+      marginBottom: 6
+    }
+  }, ZOHO_SCOPES), /*#__PURE__*/React.createElement("button", {
+    onClick: copyScopes,
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: copied ? '#0F6E56' : C.navy,
+      background: C.surface,
+      border: '1px solid ' + C.border,
+      borderRadius: 8,
+      padding: '6px 11px',
+      cursor: 'pointer',
+      marginBottom: 9
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: 'ti ' + (copied ? 'ti-check' : 'ti-copy'),
+    style: {
+      fontSize: 13,
+      marginRight: 5
+    }
+  }), copied ? 'Copied' : 'Copy scope line'), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 7
+    }
+  }, /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: C.navy
+    }
+  }, "3."), " Set duration to ", /*#__PURE__*/React.createElement("b", null, "10 minutes"), ", type anything as the description, and click Create. Pick your CRM portal if it asks."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: C.navy
+    }
+  }, "4."), " Copy the code it shows and paste it below within 10 minutes \u2014 it only works once.")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: code,
+    onChange: e => setCode(e.target.value),
+    placeholder: "Paste the grant code",
+    style: {
+      ...mono,
+      flex: 1,
+      minWidth: 170,
+      fontSize: '0.76rem',
+      padding: '9px 11px',
+      border: '1px solid ' + C.border,
+      borderRadius: 9,
+      background: C.surface,
+      color: C.textPrimary,
+      outline: 'none'
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: connect,
+    disabled: !code.trim() || phase === 'working',
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: '0.78rem',
+      fontWeight: 600,
+      color: '#fff',
+      background: C.navy,
+      border: 'none',
+      borderRadius: 9,
+      padding: '10px 16px',
+      cursor: !code.trim() || phase === 'working' ? 'default' : 'pointer',
+      opacity: !code.trim() || phase === 'working' ? 0.45 : 1
+    }
+  }, phase === 'working' ? 'Checking…' : 'Reconnect')), phase === 'error' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      fontSize: '0.74rem',
+      color: '#9B1C1C',
+      lineHeight: 1.55
+    }
+  }, msg, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.textMuted,
+      marginTop: 4
+    }
+  }, "The existing Zoho connection is unchanged and still working.")), phase === 'done' && res && res.grants && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      paddingTop: 11,
+      borderTop: '1px dashed ' + C.border
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      fontWeight: 600,
+      color: '#0F6E56',
+      marginBottom: 2
+    }
+  }, "Connected. What the new key can do:"), /*#__PURE__*/React.createElement(Row, {
+    label: "Records",
+    on: res.grants.records,
+    note: "contacts, deals, tasks"
+  }), /*#__PURE__*/React.createElement(Row, {
+    label: "Settings",
+    on: res.grants.settings,
+    note: "modules and fields"
+  }), /*#__PURE__*/React.createElement(Row, {
+    label: "Contact emails",
+    on: res.grants.contact_emails,
+    note: "the Emails tab \u2014 what this was for"
+  }), /*#__PURE__*/React.createElement(Row, {
+    label: "Users",
+    on: res.grants.users,
+    note: "fixes KPI owner names"
+  }), !res.grants.contact_emails && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: '#9B1C1C',
+      marginTop: 8,
+      lineHeight: 1.5
+    }
+  }, "Zoho still won\u2019t hand over contact emails. Either the scope line was edited before it was pasted, or the agents\u2019 Zoho email sharing is set to private \u2014 Setup \u2192 Channels \u2192 Email \u2192 Email Sharing.")));
+}
 function AdminTab({
   onOpenBuilder
 }) {
@@ -9173,7 +9484,7 @@ function AdminTab({
       marginBottom: 24,
       fontFamily: C.fontDisplay
     }
-  }, "Admin"), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement("div", {
+  }, "Admin"), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement(ZohoReconnect, null), /*#__PURE__*/React.createElement("div", {
     style: {
       ...CARD,
       cursor: 'pointer'

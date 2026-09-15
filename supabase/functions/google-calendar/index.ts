@@ -259,6 +259,11 @@ const CB_SNIPPET_CHARS = 260;          // Gmail's snippet, clipped
 const CB_MAX_CONTEXT_CHARS = 12000;    // hard slice before the model sees it
 const CB_MAX_TOKENS = 260;             // a real brief is ~90; this is a ceiling
 const CB_READS_PER_HOUR = 60;          // per viewer. Stops a scripted sweep.
+// Zoho hands back ten emails per call and there is no per_page to raise it, so
+// ten is the whole page. All of them go to the model: these are one line each,
+// and the oldest of ten is still the thing that says "we have not emailed this
+// contact since March".
+const CB_ZOHO_EMAILS = 10;
 
 // Mint a Google access token for an ARBITRARY user id.
 //
@@ -357,6 +362,10 @@ const CONTACT_BRIEF_SYSTEM = [
   "- If the data is thin, write one short sentence and stop. A short honest brief beats a padded one.",
   "- Do not repeat the contact's own name back more than once.",
   "- Do not mention email addresses, thread subjects verbatim, or whose mailbox anything came from.",
+  "- The two email sections can describe the SAME message. Count an exchange once.",
+  "- A newsletter, market update or monthly-insights mailer is a mass send, not a conversation.",
+  "  Worth one clause so the agent knows it went out ('they get the monthly market email'), never",
+  "  worded as if the agent and the contact were in touch.",
   "- Do not give advice, do not suggest what to say on the call, and do not editorialise.",
   "- If there is genuinely nothing to report, say exactly: Nothing recent on file.",
 ].join("\n");
@@ -917,6 +926,15 @@ Deno.serve(async (req) => {
         lastByType.sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
       }
 
+      // Mail that Zoho already holds on the contact record — the Emails tab an
+      // agent sees on the profile, fed by each agent's IMAP sync. This is the
+      // source that had the July newsletter all along: it was BCC'd, so the
+      // Gmail search could not match it, but Zoho filed it against the contact
+      // anyway. Subject, direction and date only.
+      const zohoMail = (zd.emails || []).slice(0, CB_ZOHO_EMAILS).map((m: any) =>
+        `- ${String(m.time || "").slice(0, 10)} | ${m.sent ? "sent to them" : "received from them"}` +
+        `${m.from ? " | from " + m.from : ""} | ${m.subject || "(no subject)"}`);
+
       let ctx = [
         `TODAY: ${new Date().toISOString().slice(0, 10)}`,
         `CONTACT: ${contact.full_name || "(unnamed)"}` +
@@ -932,8 +950,20 @@ Deno.serve(async (req) => {
         touches.length ? "CALL AND TASK HISTORY (newest first):" : (zd.tasks_read ? "CALL AND TASK HISTORY: none on record." : "CALL AND TASK HISTORY: could not be read."),
         ...touches,
         "",
-        threadLines.length ? "RECENT EMAIL (subject, sender, first line only):" : "RECENT EMAIL: none found.",
+        threadLines.length ? "RECENT EMAIL FROM MAILBOX SEARCH (subject, sender, first line only):" : "RECENT EMAIL FROM MAILBOX SEARCH: none found.",
         ...threadLines,
+        "",
+        // Named as a separate source on purpose. The two overlap — a reply the
+        // agent sent is in both — and a model told these were one list would
+        // count the same exchange twice. It is also the only place a mass
+        // send shows up, so it deserves its own heading rather than being
+        // folded in as more of the same.
+        zohoMail.length
+          ? "EMAIL ON THE ZOHO CONTACT RECORD (may repeat the above; also includes mass sends such as newsletters):"
+          : (zd.emails_state === "read" || zd.emails_state === "none"
+              ? "EMAIL ON THE ZOHO CONTACT RECORD: none on file."
+              : "EMAIL ON THE ZOHO CONTACT RECORD: could not be read."),
+        ...zohoMail,
       ].join("\n");
       // Belt and braces. The caps above should already keep this near 6k, but a
       // silent overrun would hit ai-chat's 413 and show the wrong error entirely.
@@ -941,7 +971,7 @@ Deno.serve(async (req) => {
 
       // Nothing at all to summarise: don't pay a model to say so.
       let brief = "";
-      if (deals.length || touches.length || threadLines.length) {
+      if (deals.length || touches.length || threadLines.length || zohoMail.length) {
         const ar = await fetch(Deno.env.get("SUPABASE_URL") + "/functions/v1/ai-chat", {
           method: "POST",
           headers: {
@@ -1000,6 +1030,11 @@ Deno.serve(async (req) => {
         // when there are genuinely no completed tasks — the sheet only prints a
         // heading when there is at least one row, so both read the same way.
         last_by_type: lastByType,
+        // How many emails Zoho already had on the record, and why there were
+        // none if there were none. Counts and a state word only — the subjects
+        // stay server-side, same rule as the mailbox search.
+        zoho_emails: zohoMail.length,
+        zoho_emails_state: zd.emails_state || "failed",
         // null = the tag lookup was dropped, [] = read and there are none.
         tags: Array.isArray(contact.tags) ? contact.tags : null,
         threads_read: threadsRead,

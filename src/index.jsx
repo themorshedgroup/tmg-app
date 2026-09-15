@@ -4734,6 +4734,7 @@ Rules:
           brief: 'Under contract on 1903 Frazier Ave, closing 2026-10-02. The last emails were the lender chasing an updated pre-approval letter and a reply confirming Friday works for the walkthrough. Last spoken to on 2026-09-03.',
           classification: 'B', contact_email_on_file: true, deals_read: true, tasks_read: true, threads_read: 4,
           last_by_type: [{ type: 'Note', date: '2026-06-21' }, { type: 'Call', date: '2026-06-21' }, { type: 'Email', date: '2026-03-14' }],
+          zoho_emails: 7, zoho_emails_state: 'read',
           tags: ['Sphere', 'Past Client', 'Newsletter'],
           mailboxes: [
             { role: 'agent', name: 'Brad Baker', state: 'searched', threads: 3 },
@@ -4744,13 +4745,13 @@ Rules:
         const fail = (code, ownerName) => { const e = new Error(code); e.code = code; e.ownerName = ownerName || null; throw e; };
         let out;
         if (k === 1) out = good({ mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'searched', threads: 3 }, { role: 'tc', name: 'Alexandra Reyes', state: 'not_connected', threads: 0 }] });
-        else if (k === 2) out = good({ brief: '', threads_read: 0, contact_email_on_file: false, mailboxes: [], last_by_type: [], tags: [] });
+        else if (k === 2) out = good({ brief: '', threads_read: 0, contact_email_on_file: false, mailboxes: [], last_by_type: [], tags: [], zoho_emails: 0, zoho_emails_state: 'none' });
         else if (k === 3) fail('contact_not_found');
         else if (k === 4) fail('owner_unresolved', 'Cassandra Clemons');
         else if (k === 5) fail('not_permitted');
         else if (k === 6) fail('rate_limited');
         else if (k === 7) fail('zoho_unavailable');
-        else if (k === 8) out = good({ deals_read: false, tasks_read: false, threads_read: 0, last_by_type: [], tags: null, mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'not_scoped', threads: 0 }, { role: 'tc', name: '', state: 'no_tc_assigned', threads: 0 }] });
+        else if (k === 8) out = good({ deals_read: false, tasks_read: false, threads_read: 0, last_by_type: [], tags: null, zoho_emails: 0, zoho_emails_state: 'no_scope', mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'not_scoped', threads: 0 }, { role: 'tc', name: '', state: 'no_tc_assigned', threads: 0 }] });
         else if (k === 9) fail('ai_unavailable');
         else out = good();
         return out;
@@ -4794,15 +4795,32 @@ Rules:
     // Everything the brief could NOT see, in one list. Silence about a skipped
     // source reads as "there is nothing there", and an agent acting on that is
     // worse off than one who got no brief at all.
+    // Why the Emails tab on the Zoho contact came back empty. Each one names
+    // the fix, because they need completely different ones: a missing OAuth
+    // scope is an admin reconnecting Zoho, private sharing is the agent
+    // changing a setting in their own Zoho, and a sync in progress is waiting.
+    const BRIEF_ZOHO_MAIL_NOTE = {
+      no_scope: 'The Zoho connection can’t read the Emails tab yet — it needs reconnecting with email access turned on.',
+      not_shared: 'Zoho is holding this contact’s emails back — the agent’s Zoho email sharing is set to private.',
+      not_synced: 'Zoho is still syncing this agent’s mailbox, so the Emails tab wasn’t readable yet.',
+      failed: 'Couldn’t read the Emails tab on the Zoho contact this time.',
+    };
     function briefGaps(d) {
       const out = [];
       if (!d) return out;
-      if (!d.contact_email_on_file) out.push('No email address on this contact, so no mail was searched.');
+      // Only a real dead end once Zoho's own record came up empty too. With no
+      // address on file the mailbox search genuinely cannot run, but the
+      // contact's Emails tab is keyed on the RECORD, not on an address — so
+      // saying "no mail was searched" while ten emails sat on the record was
+      // the exact wrong sentence.
+      if (!d.contact_email_on_file && !d.zoho_emails) out.push('No email address on this contact, so no mailbox was searched.');
       (d.mailboxes || []).forEach(m => {
         if (m.state === 'searched') return;
         const f = BRIEF_MAILBOX_NOTE[m.state];
         if (f) out.push(f(m.name || 'That teammate'));
       });
+      const zm = BRIEF_ZOHO_MAIL_NOTE[d.zoho_emails_state];
+      if (zm) out.push(zm);
       if (d.deals_read === false) out.push('Zoho didn’t return this contact’s deals.');
       if (d.tasks_read === false) out.push('Zoho didn’t return this contact’s call history.');
       return out;

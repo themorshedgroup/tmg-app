@@ -1521,10 +1521,50 @@ Deno.serve(async (req) => {
         return { res: await get(contactFields), tagsRead: false };
       };
 
-      const [contactRes, dealsRes, tasksRes] = await Promise.all([
+      // The Emails related list on the contact — the one an agent SEES in Zoho
+      // under a contact's profile, holding mail synced in over IMAP from each
+      // agent's own mailbox.
+      //
+      // This is why the July newsletter was missing from every brief. It was
+      // BCC'd, so a Gmail `to:` search could never match it, and the app had no
+      // other place to look. Zoho had it the whole time, on the record.
+      //
+      // Deliberately NOT the generic related-records endpoint: Zoho's related
+      // list metadata gives Emails `"href": null`, meaning /Contacts/{id}/Emails
+      // is a dedicated API with its own OAuth scope (ZohoCRM.modules.emails.READ,
+      // required IN ADDITION to the module scopes this app already holds). No
+      // `type` param on purpose — the default is "all emails from the users and
+      // the ones sent from CRM", which is the widest view this connection has.
+      // Ten per call is the documented hard ceiling; there is no per_page.
+      //
+      // Every failure mode is NAMED rather than collapsed into "couldn't read".
+      // "The connection was never granted email access" and "the agent keeps
+      // their Zoho mail private" need two completely different fixes, and a
+      // brief that says only "no emails" sends the agent into a call believing
+      // a newsletter never went out.
+      const emailsGet = async (): Promise<{ state: string; rows: any[] }> => {
+        try {
+          const r = await zohoFetch(sb, conn, accessToken,
+            `https://${apiDomain}/crm/v6/Contacts/${cid}/Emails`, {});
+          if (r.status === 204) return { state: "none", rows: [] };
+          const d = await r.json().catch(() => ({}));
+          if (r.ok) return { state: "read", rows: Array.isArray(d?.Emails) ? d.Emails : [] };
+          const code = String(d?.code || "");
+          if (code === "OAUTH_SCOPE_MISMATCH") return { state: "no_scope", rows: [] };
+          if (code === "NO_PERMISSION") return { state: "not_shared", rows: [] };
+          // "IMAP is configured ... sync is in process or yet to be initiated",
+          // a deactivated Zoho Mail user, a deleted POP mailbox. All transient
+          // or somebody else's setup — never "this contact has no mail".
+          if (code === "CANNOT_PROCESS") return { state: "not_synced", rows: [] };
+          return { state: "failed", rows: [] };
+        } catch { return { state: "failed", rows: [] }; }
+      };
+
+      const [contactRes, dealsRes, tasksRes, emailsRes] = await Promise.all([
         contactGet(),
         related("Deals", "Deal_Name,Stage,Amount,Closing_Date,Type,Owner", CF_DEALS),
         tasksWithType(),
+        emailsGet(),
       ]);
       const cr = contactRes.res;
       if (cr.status === 204) return json({ found: false }, 200);
@@ -1571,6 +1611,22 @@ Deno.serve(async (req) => {
           // type, so the type matters more here than the subject line.
           type: t.Task_Type || null,
         })),
+        // Subject, direction and date only — no body, and the body would cost a
+        // second API call per message anyway (Zoho only returns content from
+        // the single-email endpoint). Newest first, same as tasks.
+        emails: emailsRes.rows.map((m: any) => ({
+          subject: m.subject || null,
+          from: (m.from && (m.from.user_name || m.from.email)) || null,
+          to: Array.isArray(m.to) ? m.to.map((t: any) => t.user_name || t.email).filter(Boolean).slice(0, 4) : [],
+          time: m.time || null,
+          // `sent` true = went out from the org; false = arrived from them.
+          sent: m.sent === true,
+          status: Array.isArray(m.status) && m.status[0] ? (m.status[0].type || null) : null,
+          owner: (m.owner && m.owner.name) || null,
+        })).sort((a: any, b: any) => (String(a.time) < String(b.time) ? 1 : String(a.time) > String(b.time) ? -1 : 0)),
+        // read · none · no_scope · not_shared · not_synced · failed.
+        // The brief turns each into a sentence that names the actual fix.
+        emails_state: emailsRes.state,
         tasks_read: tasksRes.ok,
         // false means Task_Type was refused and every `type` above is null —
         // the brief then says nothing rather than claiming there were no calls.

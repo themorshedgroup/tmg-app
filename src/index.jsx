@@ -5928,6 +5928,11 @@ Rules:
       const creamTx    = dark ? '#C9A45A' : '#8C6A24';
       const tealCol    = dark ? '#5DCAA5' : '#0F6E56';
       const redCol     = dark ? '#F87171' : '#9B1C1C';
+      // The app already has a purple, the one the pill builder offers. Reusing
+      // that exact pair keeps the AI mark from being a fifth accent colour.
+      const aiCol      = dark ? '#B79CEB' : '#5A3FA0';
+      const aiBg       = dark ? 'rgba(183,156,235,0.16)' : 'rgba(90,63,160,0.10)';
+      const aiBd       = dark ? 'rgba(183,156,235,0.32)' : 'rgba(90,63,160,0.22)';
       const bandBg     = dark ? '#08142B' : '#FBFAF7';
 
       // Pills on the control row: Capacity is the one filled control, Add KPIs
@@ -6053,9 +6058,19 @@ Rules:
               <i className="ti ti-heart-filled" style={{ fontSize: 10, color: dark ? '#C9A45A' : '#C9A45A' }} />{b.spouse.name}
             </a>
           )}
-          <button onClick={() => openInfo(b)} title={'About ' + b.cname}
-            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: faintCol, flexShrink: 0, display: 'inline-flex', alignItems: 'center' }}>
-            <i className="ti ti-info-circle" style={{ fontSize: 16 }} />
+          {/* Was a grey (i). An info circle promises "the details already on
+              the record"; what is actually behind this is a few sentences a
+              model just wrote from email, deals and call history. The purple
+              AI mark says so before the agent taps it.
+              Tabler's sparkles, NOT the ✨ emoji — an emoji is a fixed
+              multicolour glyph, so it cannot be purple and it renders as a
+              different picture on every platform. */}
+          <button onClick={() => openInfo(b)} title={'AI summary of ' + b.cname}
+            style={{ fontFamily: J, fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', lineHeight: 1.4,
+              padding: '2px 5px 2px 6px', borderRadius: 5, flexShrink: 0, cursor: 'pointer',
+              display: 'inline-flex', alignItems: 'center', gap: 2,
+              background: aiBg, color: aiCol, border: `1px solid ${aiBd}` }}>
+            AI<i className="ti ti-sparkles" style={{ fontSize: 10 }} />
           </button>
         </React.Fragment>
       );
@@ -6326,7 +6341,7 @@ Rules:
           </div>
           </React.Fragment>
           )}
-          {/* The (i) beside a name. Generated on press from the contact record,
+          {/* The AI mark beside a name. Generated on press from the contact record,
               its deals, its call history and a live search of the OWNING
               AGENT's mail and their TC's. Nothing here is stored. */}
           {infoFor && (

@@ -14774,6 +14774,11 @@ function CallsTab({
   const creamTx = dark ? '#C9A45A' : '#8C6A24';
   const tealCol = dark ? '#5DCAA5' : '#0F6E56';
   const redCol = dark ? '#F87171' : '#9B1C1C';
+  // The app already has a purple, the one the pill builder offers. Reusing
+  // that exact pair keeps the AI mark from being a fifth accent colour.
+  const aiCol = dark ? '#B79CEB' : '#5A3FA0';
+  const aiBg = dark ? 'rgba(183,156,235,0.16)' : 'rgba(90,63,160,0.10)';
+  const aiBd = dark ? 'rgba(183,156,235,0.32)' : 'rgba(90,63,160,0.22)';
   const bandBg = dark ? '#08142B' : '#FBFAF7';
 
   // Pills on the control row: Capacity is the one filled control, Add KPIs
@@ -15012,21 +15017,28 @@ function CallsTab({
     }
   }), b.spouse.name), /*#__PURE__*/React.createElement("button", {
     onClick: () => openInfo(b),
-    title: 'About ' + b.cname,
+    title: 'AI summary of ' + b.cname,
     style: {
-      background: 'none',
-      border: 'none',
-      padding: 0,
-      cursor: 'pointer',
-      color: faintCol,
+      fontFamily: J,
+      fontSize: 9,
+      fontWeight: 700,
+      letterSpacing: '0.04em',
+      lineHeight: 1.4,
+      padding: '2px 5px 2px 6px',
+      borderRadius: 5,
       flexShrink: 0,
+      cursor: 'pointer',
       display: 'inline-flex',
-      alignItems: 'center'
+      alignItems: 'center',
+      gap: 2,
+      background: aiBg,
+      color: aiCol,
+      border: `1px solid ${aiBd}`
     }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-info-circle",
+  }, "AI", /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-sparkles",
     style: {
-      fontSize: 16
+      fontSize: 10
     }
   })));
 

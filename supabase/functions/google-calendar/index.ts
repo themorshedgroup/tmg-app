@@ -257,7 +257,7 @@ function gmailPermalink(threadId: string): string {
 const CB_THREADS_PER_MAILBOX = 3;      // ≤3 per mailbox, so ≤6 threads a tap
 const CB_SNIPPET_CHARS = 260;          // Gmail's snippet, clipped
 const CB_MAX_CONTEXT_CHARS = 12000;    // hard slice before the model sees it
-const CB_MAX_TOKENS = 260;             // a real brief is ~90; this is a ceiling
+const CB_MAX_TOKENS = 340;             // a real brief is ~90; this is a ceiling
 const CB_READS_PER_HOUR = 60;          // per viewer. Stops a scripted sweep.
 // Zoho hands back ten emails per call and there is no per_page to raise it, so
 // ten is the whole page. All of them go to the model: these are one line each,
@@ -349,25 +349,38 @@ async function cbSearchMailbox(sb: any, person: any, role: string, contactEmail:
 const CONTACT_BRIEF_SYSTEM = [
   "You write a one-glance brief an estate agent reads in the five seconds before they dial.",
   "",
-  "OUTPUT: two to four short sentences of plain prose. No headings, no bullets, no preamble,",
-  "no sign-off, no greeting. Never address the agent as 'you should'. Under 70 words.",
+  "OUTPUT — exactly this shape, nothing before it and nothing after it:",
   "",
-  "SAY, in this order, only what the data supports:",
-  "1. Where this relationship stands right now — an open deal and its stage if there is one.",
-  "2. What the recent emails were actually about, in the plainest words available.",
-  "3. When they were last spoken to, and by whom if that is stated.",
+  "DEALS",
+  "- <bullet>",
+  "TOUCH",
+  "- <bullet>",
+  "EMAIL",
+  "- <bullet>",
+  "",
+  "FORMAT RULES:",
+  "- All three headings always appear, in that order, spelled exactly as shown, alone on their line.",
+  "- Each heading is followed by one to three bullets. Every bullet starts with '- '.",
+  "- A bullet is ONE short clause, under 18 words. No headings of your own, no paragraphs.",
+  "- A section with nothing to report gets exactly one bullet: '- Nothing on file.'",
+  "",
+  "WHAT BELONGS IN EACH SECTION:",
+  "- DEALS: open deals and their stage. Amount and closing date only if you were given them.",
+  "- TOUCH: when they were last actually spoken to or worked, and by whom if that is stated.",
+  "  A task dated in the FUTURE is a plan, not a touch — if that is all there is, say it is scheduled.",
+  "- EMAIL: what the recent email was actually about, in the plainest words available.",
   "",
   "RULES:",
   "- Never invent a name, a number, a date, a price or an event you were not given.",
-  "- If the data is thin, write one short sentence and stop. A short honest brief beats a padded one.",
-  "- Do not repeat the contact's own name back more than once.",
+  "- EVERY date you write must appear verbatim in the data above. Never approximate a date, never",
+  "  widen one into a season or a year, and never infer a range. If you are unsure, leave the date out.",
+  "- Do not repeat the contact's own name.",
   "- Do not mention email addresses, thread subjects verbatim, or whose mailbox anything came from.",
   "- The two email sections can describe the SAME message. Count an exchange once.",
   "- A newsletter, market update or monthly-insights mailer is a mass send, not a conversation.",
-  "  Worth one clause so the agent knows it went out ('they get the monthly market email'), never",
+  "  Worth one bullet so the agent knows it goes out ('gets the monthly market email'), never",
   "  worded as if the agent and the contact were in touch.",
   "- Do not give advice, do not suggest what to say on the call, and do not editorialise.",
-  "- If there is genuinely nothing to report, say exactly: Nothing recent on file.",
 ].join("\n");
 
 Deno.serve(async (req) => {
@@ -935,6 +948,23 @@ Deno.serve(async (req) => {
         `- ${String(m.time || "").slice(0, 10)} | ${m.sent ? "sent to them" : "received from them"}` +
         `${m.from ? " | from " + m.from : ""} | ${m.subject || "(no subject)"}`);
 
+      // The span the Zoho mail actually covers. Dates are primitives, not
+      // content, so this crosses the wire where the subjects do not -- and it
+      // is the cheapest possible check on the model: if the brief says 2020 and
+      // the span says 2026, the brief is wrong and anyone can see it.
+      //
+      // The regex is doing real work. Zoho's `time` is only sliceable if it is
+      // ISO; anything else silently yields a garbage prefix, so a non-match
+      // means "these dates are not readable", which the sheet then says out
+      // loud instead of printing nonsense.
+      const mailDates = (zd.emails || [])
+        .map((m: any) => String(m.time || "").slice(0, 10))
+        .filter((d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+        .sort();
+      const emailSpan = mailDates.length
+        ? { first: mailDates[0], last: mailDates[mailDates.length - 1] }
+        : null;
+
       let ctx = [
         `TODAY: ${new Date().toISOString().slice(0, 10)}`,
         `CONTACT: ${contact.full_name || "(unnamed)"}` +
@@ -1035,6 +1065,9 @@ Deno.serve(async (req) => {
         // stay server-side, same rule as the mailbox search.
         zoho_emails: zohoMail.length,
         zoho_emails_state: zd.emails_state || "failed",
+        // { first, last } as plain YYYY-MM-DD, or null when Zoho's dates were
+        // not in a readable format. Null WITH a non-zero count is the tell.
+        zoho_email_span: emailSpan,
         // null = the tag lookup was dropped, [] = read and there are none.
         tags: Array.isArray(contact.tags) ? contact.tags : null,
         threads_read: threadsRead,

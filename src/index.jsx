@@ -4871,10 +4871,10 @@ Rules:
         await new Promise(r => setTimeout(r, 550));   // so the loading state is visible
         const k = Number(String(contactId).slice(-1)) || 0;
         const good = (over) => Object.assign({
-          brief: 'Under contract on 1903 Frazier Ave, closing 2026-10-02. The last emails were the lender chasing an updated pre-approval letter and a reply confirming Friday works for the walkthrough. Last spoken to on 2026-09-03.',
+          brief: 'DEALS\n- Under contract on 1903 Frazier Ave, closing 2026-10-02\nTOUCH\n- Spoken to 2026-09-03; a call is scheduled for 2026-09-20\nEMAIL\n- Lender chasing an updated pre-approval letter\n- Friday confirmed for the walkthrough\n- Gets the monthly market email',
           classification: 'B', contact_email_on_file: true, deals_read: true, tasks_read: true, threads_read: 4,
           last_by_type: [{ type: 'Note', date: '2026-06-21' }, { type: 'Call', date: '2026-06-21' }, { type: 'Email', date: '2026-03-14' }],
-          zoho_emails: 7, zoho_emails_state: 'read',
+          zoho_emails: 7, zoho_emails_state: 'read', zoho_email_span: { first: '2018-06-14', last: '2026-08-05' },
           tags: ['Sphere', 'Past Client', 'Newsletter'],
           mailboxes: [
             { role: 'agent', name: 'Brad Baker', state: 'searched', threads: 3 },
@@ -4885,13 +4885,13 @@ Rules:
         const fail = (code, ownerName) => { const e = new Error(code); e.code = code; e.ownerName = ownerName || null; throw e; };
         let out;
         if (k === 1) out = good({ mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'searched', threads: 3 }, { role: 'tc', name: 'Alexandra Reyes', state: 'not_connected', threads: 0 }] });
-        else if (k === 2) out = good({ brief: '', threads_read: 0, contact_email_on_file: false, mailboxes: [], last_by_type: [], tags: [], zoho_emails: 0, zoho_emails_state: 'none' });
+        else if (k === 2) out = good({ brief: '', threads_read: 0, contact_email_on_file: false, mailboxes: [], last_by_type: [], tags: [], zoho_emails: 0, zoho_emails_state: 'none', zoho_email_span: null });
         else if (k === 3) fail('contact_not_found');
         else if (k === 4) fail('owner_unresolved', 'Cassandra Clemons');
         else if (k === 5) fail('not_permitted');
         else if (k === 6) fail('rate_limited');
         else if (k === 7) fail('zoho_unavailable');
-        else if (k === 8) out = good({ deals_read: false, tasks_read: false, threads_read: 0, last_by_type: [], tags: null, zoho_emails: 0, zoho_emails_state: 'no_scope', mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'not_scoped', threads: 0 }, { role: 'tc', name: '', state: 'no_tc_assigned', threads: 0 }] });
+        else if (k === 8) out = good({ deals_read: false, tasks_read: false, threads_read: 0, last_by_type: [], tags: null, zoho_emails: 0, zoho_emails_state: 'no_scope', zoho_email_span: null, mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'not_scoped', threads: 0 }, { role: 'tc', name: '', state: 'no_tc_assigned', threads: 0 }] });
         else if (k === 9) fail('ai_unavailable');
         else out = good();
         return out;
@@ -4908,12 +4908,14 @@ Rules:
     // "2026-06-21" → "21 Jun" this year, "21 Jun 2025" otherwise. Parsed at
     // noon UTC on purpose: a bare yyyy-mm-dd is parsed as midnight UTC, which
     // in US timezones renders as the day before.
-    function briefTouchDate(iso) {
+    // forceYear exists for date RANGES. "Jun 14, 2018 – Aug 5" reads as a typo:
+    // once one end of a span carries a year, the other has to as well.
+    function briefTouchDate(iso, forceYear) {
       const str = String(iso || '').slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
       try {
         const d = new Date(str + 'T12:00:00Z');
-        const sameYear = d.getUTCFullYear() === new Date().getUTCFullYear();
+        const sameYear = !forceYear && d.getUTCFullYear() === new Date().getUTCFullYear();
         return d.toLocaleDateString('en-US', Object.assign(
           { day: 'numeric', month: 'short', timeZone: 'UTC' },
           sameYear ? {} : { year: 'numeric' }
@@ -4939,6 +4941,47 @@ Rules:
     // the fix, because they need completely different ones: a missing OAuth
     // scope is an admin reconnecting Zoho, private sharing is the agent
     // changing a setting in their own Zoho, and a sync in progress is waiting.
+    // The brief arrives as three labelled sections. Parsing it rather than
+    // printing it raw IS the feature: one unbroken paragraph is what an agent
+    // has to read twice at the top of a call, which is the one moment they
+    // cannot spare.
+    //
+    // This is a fast model on a cheap call, so assume it will sometimes ignore
+    // the format. A parse that finds no sections returns [] and the sheet falls
+    // straight back to printing the prose — never worse than before, never blank.
+    const BRIEF_SECTIONS = [
+      { key: 'DEALS', label: 'Deals', icon: 'ti-home-dollar' },
+      { key: 'TOUCH', label: 'Last touch', icon: 'ti-phone-call' },
+      { key: 'EMAIL', label: 'Email', icon: 'ti-mail' },
+    ];
+    function briefSections(text) {
+      const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+      const out = [];
+      let cur = null;
+      lines.forEach(l => {
+        // Match the heading on letters alone, so "DEALS:", "**EMAIL**" and
+        // "Touch" all land — the model is not reliable about decoration.
+        const bare = l.toUpperCase().replace(/[^A-Z]/g, '');
+        const hit = BRIEF_SECTIONS.filter(sec => bare === sec.key)[0];
+        if (hit) { cur = { key: hit.key, label: hit.label, icon: hit.icon, bullets: [] }; out.push(cur); return; }
+        const b = l.replace(/^[-•*\u2022]\s*/, '').trim();
+        if (cur && b) cur.bullets.push(b);
+      });
+      return out.filter(sec => sec.bullets.length);
+    }
+
+    // "12 emails on the record · Jun 2018 – 5 Aug 2026". A span, not a list:
+    // the subjects deliberately never leave the server.
+    function briefMailSpan(d) {
+      if (!d || !d.zoho_emails) return '';
+      const n = d.zoho_emails + (d.zoho_emails === 1 ? ' email' : ' emails') + ' on the Zoho record';
+      const sp = d.zoho_email_span;
+      if (!sp || !sp.first) return n;
+      if (sp.first === sp.last) return n + ' · ' + briefTouchDate(sp.last);
+      const crossYear = String(sp.first).slice(0, 4) !== String(sp.last).slice(0, 4);
+      return n + ' · ' + briefTouchDate(sp.first, crossYear) + ' – ' + briefTouchDate(sp.last, crossYear);
+    }
+
     const BRIEF_ZOHO_MAIL_NOTE = {
       no_scope: 'The Zoho connection can’t read the Emails tab yet — it needs reconnecting with email access turned on.',
       not_shared: 'Zoho is holding this contact’s emails back — the agent’s Zoho email sharing is set to private.',
@@ -4961,6 +5004,15 @@ Rules:
       });
       const zm = BRIEF_ZOHO_MAIL_NOTE[d.zoho_emails_state];
       if (zm) out.push(zm);
+      // Emails came back but none of their dates parsed. Worth saying out loud:
+      // it means any date in the brief above was the model's guess, not Zoho's.
+      // `in` on purpose, same negative-caching rule as everywhere else here: a
+      // MISSING key means the server never reported a span (an older function
+      // still deployed), an explicit null means it looked and the dates were
+      // unreadable. Only the second is worth warning about -- treating the
+      // first as a fault would put a false warning on every brief until the
+      // function catches up.
+      if (d.zoho_emails > 0 && ('zoho_email_span' in d) && !d.zoho_email_span) out.push('Zoho returned these emails without readable dates.');
       if (d.deals_read === false) out.push('Zoho didn’t return this contact’s deals.');
       if (d.tasks_read === false) out.push('Zoho didn’t return this contact’s call history.');
       return out;
@@ -6594,9 +6646,35 @@ Rules:
 
                 {brief && brief.id === infoFor.id && brief.state === 'ready' && (
                   <React.Fragment>
-                    <div style={{ fontFamily: J, fontSize: 13.5, fontWeight: 300, color: headTitle, lineHeight: 1.6, margin: '10px 0 12px' }}>
-                      {brief.data.brief || 'Nothing recent on file.'}
-                    </div>
+                    {(() => {
+                      const secs = briefSections(brief.data.brief);
+                      const span = briefMailSpan(brief.data);
+                      if (!secs.length) return (
+                        <div style={{ fontFamily: J, fontSize: 13.5, fontWeight: 300, color: headTitle, lineHeight: 1.6, margin: '10px 0 12px' }}>
+                          {brief.data.brief || 'Nothing recent on file.'}
+                        </div>
+                      );
+                      return (
+                        <div style={{ margin: '10px 0 14px' }}>
+                          {secs.map((sec, i) => (
+                            <div key={sec.key} style={{ marginBottom: i === secs.length - 1 ? 0 : 13 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                                <i className={'ti ' + sec.icon} style={{ fontSize: 12, color: '#C9A45A', flexShrink: 0 }} />
+                                <span style={{ fontFamily: J, fontSize: 9.5, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: faintCol }}>{sec.label}</span>
+                              </div>
+                              {sec.bullets.map((b, j) => (
+                                <div key={j} style={{ display: 'flex', gap: 7, fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle, lineHeight: 1.55, marginBottom: 3 }}>
+                                  <span style={{ color: mutedCol, flexShrink: 0 }}>•</span><span style={{ minWidth: 0 }}>{b}</span>
+                                </div>
+                              ))}
+                              {sec.key === 'EMAIL' && span && (
+                                <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 300, color: mutedCol, marginTop: 4, paddingLeft: 14 }}>{span}</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     {/* What was and wasn't read. A brief that quietly skipped a
                         mailbox reads as "there's nothing there", which is a
                         different and much more expensive mistake. */}

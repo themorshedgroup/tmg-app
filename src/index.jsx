@@ -2410,6 +2410,7 @@ Rules:
       const [days, setDays] = useState(30);
       const [view, setView] = useState('feature'); // 'feature' | 'model' | 'user'
       const [model, setModel] = useState('');       // active ai-chat model (ai_config row 1)
+      const [modelFast, setModelFast] = useState(''); // ai_config.model_fast — the lane contact summaries ask for
       const [monthByUser, setMonthByUser] = useState({}); // user_id → {inTok,outTok,calls,cost} this calendar month
       useEffect(() => {
         const c = window.SupabaseAuth && window.SupabaseAuth._client;
@@ -2420,7 +2421,14 @@ Rules:
           else setRows(res.data || []);
           setUsers(us || []);
         });
-        c.from('ai_config').select('model').eq('id', 1).single().then(({ data }) => { if (data && data.model) setModel(data.model); }).catch(() => {});
+        // One row, two dials. `model` is what every AI feature gets; `model_fast`
+        // is the quicker lane, used only by whatever asks ai-chat for tier:"fast"
+        // (today: the Calls-tab contact summary). Blank means there is no second
+        // lane and everything is on `model`.
+        c.from('ai_config').select('model, model_fast').eq('id', 1).single().then(({ data }) => {
+          if (data && data.model) setModel(data.model);
+          if (data && data.model_fast) setModelFast(data.model_fast);
+        }).catch(() => {});
         c.rpc('usage_this_month').then(({ data }) => {
           const m = {};
           (data || []).forEach(r => {
@@ -2480,7 +2488,15 @@ Rules:
               </div>
             </div>
           )}
-          {model && <div style={{ fontSize: '0.68rem', color: C.textMuted, marginBottom: 10, fontFamily: C.fontSans }}>Active AI Chat model: <span style={{ color: C.navy, fontWeight: 600 }}>{model}</span></div>}
+          {model && (
+            <div style={{ fontSize: '0.68rem', color: C.textMuted, marginBottom: 10, fontFamily: C.fontSans, lineHeight: 1.6 }}>
+              Active AI model: <span style={{ color: C.navy, fontWeight: 600 }}>{model}</span>
+              <br />
+              {modelFast
+                ? <>Contact summaries (the AI mark on a call) use <span style={{ color: '#5A3FA0', fontWeight: 600 }}>{modelFast}</span> — quicker and cheaper. Clear <code>ai_config.model_fast</code> to put them back on the model above.</>
+                : <>Contact summaries use the same model — no fast lane is set.</>}
+            </div>
+          )}
           {overCap.length > 0 && (
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, background: '#FDECEA', border: `1px solid ${C.red}55`, borderRadius: 10, padding: '8px 12px', marginBottom: 10 }}>
               <i className="ti ti-alert-triangle" style={{ fontSize: 14, color: C.red, marginTop: 1, flexShrink: 0 }} />

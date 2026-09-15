@@ -4691,8 +4691,22 @@ Rules:
     //  Without it, closing the sheet by tapping the backdrop and reopening it
     //  bills a second AI call for an answer the agent just saw.
     const BRIEF_MEMO = new Map();
-    async function fetchContactBrief(contactId) {
+    // The in-flight REQUEST is what goes in the map, not the answer, and it
+    // goes in before the first await runs. A button that takes seconds invites
+    // a second tap, and two taps used to mean two Gmail sweeps and two AI
+    // calls for one answer. Now the second tap joins the first request.
+    function fetchContactBrief(contactId) {
       if (BRIEF_MEMO.has(contactId)) return BRIEF_MEMO.get(contactId);
+      const p = briefRequest(contactId);
+      // A failure must stay retryable, so the entry is dropped the moment it
+      // rejects. The handler is attached here rather than left to whoever
+      // called, so a request nobody is waiting on can't surface as an
+      // unhandled rejection in the console.
+      p.catch(() => { BRIEF_MEMO.delete(contactId); });
+      BRIEF_MEMO.set(contactId, p);
+      return p;
+    }
+    async function briefRequest(contactId) {
       if (callsIsDev()) {
         // One fixture per state the server can actually return, keyed off the
         // last digit of the dev contact id, so every branch of the sheet is
@@ -4721,7 +4735,6 @@ Rules:
         else if (k === 8) out = good({ deals_read: false, tasks_read: false, threads_read: 0, mailboxes: [{ role: 'agent', name: 'Brad Baker', state: 'not_scoped', threads: 0 }, { role: 'tc', name: '', state: 'no_tc_assigned', threads: 0 }] });
         else if (k === 9) fail('ai_unavailable');
         else out = good();
-        BRIEF_MEMO.set(contactId, out);
         return out;
       }
       const { ok, status, data } = await callCalendar({ action: 'contact_brief', contact_id: String(contactId) });
@@ -4729,9 +4742,8 @@ Rules:
         const e = new Error((data && data.error) || 'brief_failed');
         e.code = (data && data.error) || String(status);
         e.ownerName = (data && data.owner_name) || null;
-        throw e;   // deliberately NOT memoised — a failure must be retryable
+        throw e;   // the wrapper drops the entry — a failure must be retryable
       }
-      BRIEF_MEMO.set(contactId, data);
       return data;
     }
     // What a skipped mailbox means, in words an agent can act on. "Couldn't

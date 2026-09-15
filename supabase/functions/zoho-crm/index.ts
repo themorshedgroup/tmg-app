@@ -1367,14 +1367,6 @@ Deno.serve(async (req) => {
       const contactFields = "First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Other_Phone," +
         "Mailing_City,Mailing_State,Lead_Source,Created_Time,Client_Classification,Owner";
 
-      const cr = await zohoFetch(sb, conn, accessToken,
-        `https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(contactFields)}`, {});
-      if (cr.status === 204) return json({ found: false }, 200);
-      if (!cr.ok) return json({ error: "zoho_unavailable", retryable: true }, 502);
-      const cd = await cr.json().catch(() => ({}));
-      const c = cd?.data?.[0];
-      if (!c) return json({ found: false }, 200);
-
       // Deals and tasks are best-effort: a contact with neither is completely
       // normal, and a related list this connection cannot read must not sink
       // the whole brief. `deals_read` / `tasks_read` say which happened.
@@ -1389,10 +1381,28 @@ Deno.serve(async (req) => {
         } catch { return { ok: false, rows: [] as any[] }; }
       };
 
-      const [dealsRes, tasksRes] = await Promise.all([
+      // All three Zoho reads at once. They used to run contact-then-related,
+      // three round trips deep, for calls that never look at each other.
+      //
+      // The contact's Response is carried through UNPARSED on purpose. Calling
+      // .json() inside the settle would flatten a 204 and a 500 into the same
+      // empty object, and a Zoho outage would then reach the agent as a
+      // dead-end "Zoho no longer has this contact" instead of a retryable one.
+      //
+      // The cost of doing this eagerly: a contact id that no longer exists
+      // still spends two related-list calls. That path is rare, and the hourly
+      // ceiling in google-calendar caps how often it can be provoked.
+      const [cr, dealsRes, tasksRes] = await Promise.all([
+        zohoFetch(sb, conn, accessToken,
+          `https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(contactFields)}`, {}),
         related("Deals", "Deal_Name,Stage,Amount,Closing_Date,Type,Owner", CF_DEALS),
         related("Tasks", "Subject,Status,Due_Date,Closed_Time", CF_TASKS),
       ]);
+      if (cr.status === 204) return json({ found: false }, 200);
+      if (!cr.ok) return json({ error: "zoho_unavailable", retryable: true }, 502);
+      const cd = await cr.json().catch(() => ({}));
+      const c = cd?.data?.[0];
+      if (!c) return json({ found: false }, 200);
 
       const clsRaw = String(c.Client_Classification ?? "").trim();
       // Newest first. Zoho returns the related list in its own order, and the

@@ -778,24 +778,29 @@ Deno.serve(async (req) => {
       // if the client could name a mailbox or supply a Gmail query, the client
       // would be the authorization boundary.
 
-      // (1) The caller, with their roles. authorizeCaller above only selected
-      //     `status`, which is all the other actions need.
-      const { data: me } = await sb.from("profiles")
-        .select("id, status, access, assigned_tc").eq("id", auth.userId).single();
+      // (1) The caller with their roles, and (2) the hourly ceiling per viewer.
+      //     Two independent reads of two different tables, so they go together.
+      //     authorizeCaller above only selected `status`, which is all the other
+      //     actions in this file need.
+      //
+      //     The ceiling exists because without one, a single session can walk
+      //     every contact the firm owns and come away with a readable digest of
+      //     two colleagues' recent mail — plus the AI bill and the Zoho credits.
+      const since = new Date(Date.now() - 3600000).toISOString();
+      const [meRes, rlRes] = await Promise.all([
+        sb.from("profiles")
+          .select("id, status, access, assigned_tc").eq("id", auth.userId).single(),
+        sb.from("contact_brief_reads")
+          .select("id", { count: "exact", head: true })
+          .eq("viewer_id", auth.userId).gte("created_at", since),
+      ]);
+      const me: any = meRes.data;
       if (!me || me.status !== "active") return json({ error: "Account is not active." }, 403);
       const roles: string[] = Array.isArray(me.access)
         ? me.access.map((r: any) => String(r).toLowerCase())
         : String(me.access || "").toLowerCase().split(/[,\s]+/).filter(Boolean);
       const isAdmin = roles.some((r) => r === "admin" || r === "operations");
-
-      // (2) An hourly ceiling per viewer. Without one, a single session can walk
-      //     every contact the firm owns and come away with a readable digest of
-      //     two colleagues' recent mail — plus the AI bill and the Zoho credits.
-      const since = new Date(Date.now() - 3600000).toISOString();
-      const { count: recent } = await sb.from("contact_brief_reads")
-        .select("id", { count: "exact", head: true })
-        .eq("viewer_id", auth.userId).gte("created_at", since);
-      if ((recent || 0) >= CB_READS_PER_HOUR) {
+      if ((rlRes.count || 0) >= CB_READS_PER_HOUR) {
         return json({ error: "rate_limited", retry_after_minutes: 60 }, 429);
       }
 
@@ -849,15 +854,27 @@ Deno.serve(async (req) => {
 
       // (6) Search. No email on file means nothing to search — return without
       //     spending a Gmail call or an AI call.
-      const mailboxes: any[] = [];
+      let mailboxes: any[] = [];
       if (contact.email) {
         // An agent who is somehow their own TC would otherwise be minted twice
         // and read twice, and the model would see the same thread as two.
         const targets: Array<[string, any]> = [["agent", agent]];
         if (!tc || tc.id !== agent.id) targets.push(["tc", tc]);
-        for (const [role, person] of targets) {
-          mailboxes.push(await cbSearchMailbox(sb, person, role, contact.email));
-        }
+        // Both mailboxes are searched at the same time. Each one is a token
+        // mint, a threads.list and up to three metadata GETs, and they were
+        // queued one behind the other for two reads that never look at each
+        // other's result.
+        //
+        // Promise.all is fail-fast and the Gmail fetches inside cbSearchMailbox
+        // have no try/catch of their own, so each leg carries its own. The
+        // fallback rebuilds the WHOLE shape: a bare { state } would drop role
+        // and name, and the sheet's gap note would read "undefined couldn't be
+        // searched".
+        mailboxes = await Promise.all(targets.map(([role, person]) =>
+          cbSearchMailbox(sb, person, role, contact.email).catch(() => ({
+            role, name: cbName(person), state: "search_failed", threads: 0, lines: [] as string[],
+          }))
+        ));
       }
 
       const threadLines = mailboxes.flatMap((m) => m.lines || []);
@@ -906,6 +923,12 @@ Deno.serve(async (req) => {
             system: CONTACT_BRIEF_SYSTEM,
             max_tokens: CB_MAX_TOKENS,
             feature: "contact_summary",
+            // A two-to-four-sentence brief off a 6k context is the cheapest,
+            // most mechanical job the app gives a model, and it is the one the
+            // agent actually waits on. ai_config.model_fast decides what that
+            // means; if that column is blank, ai-chat falls back to the one
+            // app-wide model and this line changes nothing.
+            tier: "fast",
           }),
         });
         const ad = await ar.json().catch(() => ({}));
@@ -915,16 +938,24 @@ Deno.serve(async (req) => {
 
       // (7) The trail. Best-effort: a logging failure must not lose the answer
       //     the viewer already paid for.
-      try {
-        await sb.from("contact_brief_reads").insert({
+      const auditP = Promise.resolve(
+        sb.from("contact_brief_reads").insert({
           viewer_id: auth.userId,
           contact_id: contactId,
           agent_id: agent.id,
           tc_id: tc ? tc.id : null,
           mailboxes_read: mailboxes.filter((m) => m.state === "searched").map((m) => m.role),
           threads_read: threadsRead,
-        });
-      } catch (_e) { /* the brief still stands */ }
+        })
+      ).then(() => {}, () => {});
+      // waitUntil keeps the worker alive past the response, so the row still
+      // lands and the viewer doesn't wait for it. Where it isn't available we
+      // take the round trip rather than fire and forget: this row is the record
+      // of who read whose mailbox, and a dropped one is a hole in that record,
+      // not a missing metric.
+      const waitUntil = (globalThis as any).EdgeRuntime?.waitUntil;
+      if (typeof waitUntil === "function") waitUntil.call((globalThis as any).EdgeRuntime, auditP);
+      else await auditP;
 
       // Prose and primitives only. No thread ids, message ids, permalinks,
       // subjects, snippets or addresses — a viewer must not be handed

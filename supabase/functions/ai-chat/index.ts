@@ -71,13 +71,27 @@ async function authorizeCaller(req: Request) {
 }
 
 // Reads the active model from the ai_config table (single source of truth).
-async function getActiveModel(): Promise<string> {
+//
+// ONE row, two dials. `model` is what every AI activity in the app gets.
+// `model_fast` is an optional quicker, cheaper tier that a feature may ASK for
+// by sending tier:"fast" — it can ask, it can never name a model. Blank that
+// column and the whole app is back on one model with no redeploy anywhere.
+async function getActiveModel(tier?: string): Promise<string> {
   try {
     const sb = serviceClient();
     if (!sb) return DEFAULT_MODEL;
-    const { data, error } = await sb
-      .from("ai_config").select("model").eq("id", 1).single();
+    let { data, error } = await sb
+      .from("ai_config").select("model, model_fast").eq("id", 1).single();
+    if (error) {
+      // If model_fast has not been added to this project's ai_config yet,
+      // PostgREST 42703s the WHOLE row — which would drop EVERY AI feature in
+      // the app onto the hardcoded default, silently. Fall back to the select
+      // this function has always used.
+      const r = await sb.from("ai_config").select("model").eq("id", 1).single();
+      data = r.data as any; error = r.error;
+    }
     if (error || !data?.model) return DEFAULT_MODEL;
+    if (tier === "fast" && (data as any).model_fast) return String((data as any).model_fast);
     return data.model;
   } catch {
     return DEFAULT_MODEL;
@@ -106,7 +120,11 @@ Deno.serve(async (req) => {
       system = "",
       max_tokens = 1024,
       feature = "other",
+      tier = "",
     } = body;
+    // "fast" is the only tier a caller may ask for. Anything else is ignored
+    // rather than rejected — a stray value must not fail a real request.
+    const modelTier = tier === "fast" ? "fast" : "";
     // Which app surface made this call (for per-feature cost attribution).
     const feat = (typeof feature === "string" && feature.trim())
       ? feature.trim().slice(0, 40) : "other";
@@ -147,7 +165,7 @@ Deno.serve(async (req) => {
     const scopedSystem = system ? `${system}\n\n${SCOPE}` : SCOPE;
 
     // Single source of truth for the model — from the ai_config table.
-    const model = await getActiveModel();
+    const model = await getActiveModel(modelTier);
 
     const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",

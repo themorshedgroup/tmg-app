@@ -31,6 +31,7 @@ export const PAGES = {
   "timeoff.html": "timeoff",
   "tasks.html": "tasks",
   "sffu/index.html": "sffu",
+  "rsvp.html": "rsvp",
 };
 
 const BABEL_TAG = /\s*<script src="https:\/\/unpkg\.com\/@babel\/standalone@[^"]*"><\/script>\n?/;

@@ -1,0 +1,55 @@
+-- Documents (does not itself re-provision) the pg_cron job for
+-- tmg-calendar-summary. Same shape as 20260905120100_christies_events_cron:
+-- the vault secret + cron.schedule() call were run once via a one-off
+-- `supabase db query --linked -f <scratch file>` (NOT committed — it holds
+-- the raw secret), so the secret value never lands in git history.
+--
+-- One daily job, not two — pg_cron's 5-field schedule can express "every
+-- Thursday" but not "the last day of the month" (that varies 28-31), so a
+-- single daily tick at 08:00 Central checks both conditions in SQL and fires
+-- whichever (or both, on the rare day that coincides) apply. Each still goes
+-- through tmg_calendar_summary_log's (send_type, period_key) guard inside
+-- the function, so a retried tick can never double-send.
+--
+-- Live job: jobname 'tmg-calendar-summary-daily', schedule '0 13 * * *'
+-- (13:00 UTC = 08:00 Central during CDT; drifts to 07:00 during CST — not
+-- worth compensating for a once-a-week/month email).
+--
+-- To provision from scratch (new environment, or secret rotation):
+--   1. Generate a random value; `supabase secrets set TMG_CALENDAR_SUMMARY_CRON_SECRET=<value>`
+--      and deploy the function:
+--        supabase functions deploy tmg-calendar-summary --no-verify-jwt
+--      (--no-verify-jwt is required: the cron caller has no user session.
+--       preview_*/send_* also accept an admin session directly — see the
+--       function header.)
+--   2. Via `supabase db query --linked -f <scratch file>` (not a migration), run:
+--        delete from vault.secrets where name = 'tmg_calendar_summary_cron_secret';
+--        select vault.create_secret('<same value>', 'tmg_calendar_summary_cron_secret', 'tmg-calendar-summary cron');
+--        select cron.unschedule(jobid) from cron.job where jobname = 'tmg-calendar-summary-daily';
+--        select cron.schedule('tmg-calendar-summary-daily', '0 13 * * *', $c$
+--          do $do$
+--          declare
+--            _today date := (now() at time zone 'America/Chicago')::date;
+--            _secret text := (select decrypted_secret from vault.decrypted_secrets where name = 'tmg_calendar_summary_cron_secret');
+--            _url text := 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/tmg-calendar-summary';
+--          begin
+--            if extract(dow from _today) = 4 then
+--              perform net.http_post(url := _url,
+--                headers := jsonb_build_object('Content-Type','application/json','Authorization','Bearer ' || _secret),
+--                body := '{"action":"send_weekly"}'::jsonb);
+--            end if;
+--            if extract(month from (_today + 1)) <> extract(month from _today) then
+--              perform net.http_post(url := _url,
+--                headers := jsonb_build_object('Content-Type','application/json','Authorization','Bearer ' || _secret),
+--                body := '{"action":"send_monthly"}'::jsonb);
+--            end if;
+--          end;
+--          $do$;
+--        $c$);
+--
+-- Other secrets this function needs, all already set for other functions:
+--   GCAL_SA_CLIENT_EMAIL, GCAL_SA_PRIVATE_KEY (Team Calendar read + Gmail send-as).
+
+create extension if not exists pg_cron with schema extensions;
+create extension if not exists pg_net with schema extensions;
+create extension if not exists supabase_vault with schema vault;

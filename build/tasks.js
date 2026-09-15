@@ -4027,7 +4027,22 @@ const TaskDB = {
       if (k === 'weekly_priority' || k === 'weekly_rank' || k === 'daily_priority' || k === 'daily_rank' || k === 'decision_due_has_time' || k === 'recur_interval' || k === 'recur_unit' || k === 'recur_copy_fields') continue;
       if ((oldTask[k] || null) === (fields[k] || null)) continue;
       let msg;
-      if (k === 'status') msg = 'Status: ' + statusLabel(oldTask.status) + ' → ' + statusLabel(fields.status);else if (k === 'priority') msg = 'Priority: ' + priorityLabel(oldTask.priority) + ' → ' + priorityLabel(fields.priority);else if (k === 'recurrence') msg = 'Recurrence: ' + recurLabel(fields.recurrence);else if (k === 'is_milestone') msg = fields.is_milestone ? 'Marked as milestone' : 'Unmarked as milestone';else msg = (FL[k] || k) + ' updated';
+      if (k === 'status') msg = 'Status: ' + statusLabel(oldTask.status) + ' → ' + statusLabel(fields.status);else if (k === 'priority') msg = 'Priority: ' + priorityLabel(oldTask.priority) + ' → ' + priorityLabel(fields.priority);else if (k === 'recurrence') msg = 'Recurrence: ' + recurLabel(fields.recurrence);else if (k === 'is_milestone') msg = fields.is_milestone ? 'Marked as milestone' : 'Unmarked as milestone';
+      // Due date spells out both dates rather than "Due date updated": the
+      // question people actually ask of a closing is how many times it moved
+      // and by how much, and a generic line can't answer that later. Worded
+      // to match the line the Zoho sync writes for a due date moved on
+      // Zoho's side, so the two read as one history.
+      else if (k === 'due_at') {
+        const dl = v => v ? new Date(v).toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric'
+        }) : null;
+        const a = dl(oldTask.due_at),
+          b = dl(fields.due_at);
+        msg = !a ? 'Due date set to ' + b : !b ? 'Due date cleared (was ' + a + ')' : 'Due date moved from ' + a + ' to ' + b;
+      } else msg = (FL[k] || k) + ' updated';
       await this.addActivity(id, 'system', msg, user, k);
     }
     // Recurrence rule: completing a repeating task spawns the next occurrence.
@@ -7417,6 +7432,11 @@ function TaskDetail({
   // Field-row/section-header/caption values ported from the prototype's
   // .field/.field .fk/.pblock .bh — these constants propagate through
   // every Details/Dependencies/Decision/Subtasks row below.
+  // How many times this deadline has already moved — the question people
+  // ask of a closing that keeps slipping. Counts both in-app edits and ones
+  // made in Zoho (the sync tags its entries with the same field), and skips
+  // the first assignment, which is a date being set, not a date slipping.
+  const dueMoves = (activity || []).filter(a => a.field === 'due_at' && !/^Due date set to/.test(a.content || '')).length;
   const row = (k, v) => /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
@@ -7848,7 +7868,19 @@ function TaskDetail({
         color: mine ? gold : sub
       }
     }, r.label);
-  })), row('Due', fmt(task.due_at)), task.recurrence && task.recurrence !== 'none' ? row('Repeat', recurDesc(task)) : null, row('Project', task._projectName || '—'), row('Assignees', ppl('assignee')), row('Assigned by', ppl('assigner')), task.working_url ? row('Working URL', /*#__PURE__*/React.createElement("a", {
+  })), row('Due', dueMoves ? /*#__PURE__*/React.createElement(React.Fragment, null, fmt(task.due_at), /*#__PURE__*/React.createElement("span", {
+    title: 'This due date has moved ' + dueMoves + (dueMoves === 1 ? ' time' : ' times') + '. The Thread tab lists each change and when it happened.',
+    style: {
+      padding: '2px 8px',
+      borderRadius: 16,
+      fontSize: '0.68rem',
+      fontWeight: 600,
+      fontFamily: C.fontSans,
+      background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA',
+      color: gold,
+      whiteSpace: 'nowrap'
+    }
+  }, "moved ", dueMoves, "\xD7")) : fmt(task.due_at)), task.recurrence && task.recurrence !== 'none' ? row('Repeat', recurDesc(task)) : null, row('Project', task._projectName || '—'), row('Assignees', ppl('assignee')), row('Assigned by', ppl('assigner')), task.working_url ? row('Working URL', /*#__PURE__*/React.createElement("a", {
     href: task.working_url,
     target: "_blank",
     rel: "noopener noreferrer",
@@ -13732,7 +13764,8 @@ function TaskBoard({
   onContextMenu,
   onDrop,
   showSource,
-  linksByTask
+  linksByTask,
+  kidsByTask
 }) {
   const bord = dark ? '#152545' : '#E4DFD4',
     ink = dark ? '#fff' : '#001A4A',
@@ -13740,6 +13773,21 @@ function TaskBoard({
     gold = dark ? '#C9A45A' : '#AD832F';
   const [dragId, setDragId] = useState(null);
   const [overCol, setOverCol] = useState(null);
+  // A column here IS a status, and a subtask often sits in a different
+  // status than its parent — so subtasks stay as their own cards rather
+  // than folding into the parent the way the List nests them. Folding would
+  // hide a finished subtask from the Done column, which is the one thing
+  // this view exists to show. What was missing is the context that makes a
+  // loose subtask card legible: the count on the parent, the parent's name
+  // on the child.
+  const byId = new Map(items.map(t => [t.id, t]));
+  const derivedKids = {};
+  items.forEach(t => {
+    if (t.parent_task_id) (derivedKids[t.parent_task_id] = derivedKids[t.parent_task_id] || []).push(t);
+  });
+  // TasksScreen strips children out of its flat list, so it hands its own
+  // map down; ProjectsSurface's _tasks already holds them.
+  const kidsFor = id => kidsByTask && kidsByTask[id] || derivedKids[id] || [];
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
@@ -13804,82 +13852,121 @@ function TaskBoard({
         color: sub,
         marginLeft: 'auto'
       }
-    }, colItems.length)), colItems.map(t => /*#__PURE__*/React.createElement("div", {
-      key: t.id,
-      draggable: true,
-      onDragStart: e => {
-        setDragId(t.id);
-        e.dataTransfer.effectAllowed = 'move';
-      },
-      onDragEnd: () => setDragId(null),
-      onClick: () => onOpen(t),
-      onContextMenu: e => onContextMenu && onContextMenu(e, t),
-      style: {
-        background: dark ? '#0A1730' : '#fff',
-        border: `1px solid ${bord}`,
-        borderRadius: 6,
-        padding: '11px 12px',
-        marginBottom: 9,
-        boxShadow: '0 1px 2px rgba(0,13,38,.06)',
-        cursor: 'grab',
-        opacity: dragId === t.id ? 0.4 : 1
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 6,
-        marginBottom: 9
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        flex: 1,
-        minWidth: 0,
-        fontSize: 14,
-        color: ink,
-        fontFamily: C.fontSans,
-        lineHeight: 1.35
-      }
-    }, t.title), (linksByTask && linksByTask[t.id] || []).length > 0 && /*#__PURE__*/React.createElement("i", {
-      className: "ti ti-mail",
-      style: {
-        fontSize: 12,
-        color: '#185FA5',
-        flexShrink: 0
-      }
-    }), t.is_milestone && /*#__PURE__*/React.createElement("i", {
-      className: "ti ti-flag-3-filled",
-      style: {
-        fontSize: 12,
-        color: gold,
-        flexShrink: 0
-      }
-    })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 6,
-        flexWrap: 'wrap'
-      }
-    }, showSource && t._projectName ? /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 11,
-        color: sub,
-        fontFamily: C.fontSans,
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis'
-      }
-    }, t._projectName) : /*#__PURE__*/React.createElement("span", null), t.due_at && /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 12,
-        color: sub
-      }
-    }, new Date(t.due_at).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric'
-    }))))), !colItems.length && /*#__PURE__*/React.createElement("div", {
+    }, colItems.length)), colItems.map(t => {
+      const kids = kidsFor(t.id);
+      const parent = t.parent_task_id ? byId.get(t.parent_task_id) : null;
+      return /*#__PURE__*/React.createElement("div", {
+        key: t.id,
+        draggable: true,
+        onDragStart: e => {
+          setDragId(t.id);
+          e.dataTransfer.effectAllowed = 'move';
+        },
+        onDragEnd: () => setDragId(null),
+        onClick: () => onOpen(t),
+        onContextMenu: e => onContextMenu && onContextMenu(e, t),
+        style: {
+          background: dark ? '#0A1730' : '#fff',
+          border: `1px solid ${bord}`,
+          borderRadius: 6,
+          padding: '11px 12px',
+          marginBottom: 9,
+          boxShadow: '0 1px 2px rgba(0,13,38,.06)',
+          cursor: 'grab',
+          opacity: dragId === t.id ? 0.4 : 1
+        }
+      }, parent && /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          marginBottom: 5,
+          fontSize: 11,
+          color: sub,
+          fontFamily: C.fontSans,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }
+      }, /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-corner-down-right",
+        style: {
+          fontSize: 11,
+          flexShrink: 0
+        }
+      }), parent.title), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 6,
+          marginBottom: 9
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          flex: 1,
+          minWidth: 0,
+          fontSize: 14,
+          color: ink,
+          fontFamily: C.fontSans,
+          lineHeight: 1.35
+        }
+      }, t.title), kids.length > 0 && /*#__PURE__*/React.createElement("span", {
+        title: kids.length + (kids.length === 1 ? ' subtask' : ' subtasks') + ', ' + kids.filter(k => k.status === 'done').length + ' done',
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 2,
+          flexShrink: 0,
+          fontSize: 11,
+          color: gold,
+          fontFamily: C.fontSans
+        }
+      }, /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-subtask",
+        style: {
+          fontSize: 11
+        }
+      }), kids.filter(k => k.status === 'done').length, "/", kids.length), (linksByTask && linksByTask[t.id] || []).length > 0 && /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-mail",
+        style: {
+          fontSize: 12,
+          color: '#185FA5',
+          flexShrink: 0
+        }
+      }), t.is_milestone && /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-flag-3-filled",
+        style: {
+          fontSize: 12,
+          color: gold,
+          flexShrink: 0
+        }
+      })), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 6,
+          flexWrap: 'wrap'
+        }
+      }, showSource && t._projectName ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: 11,
+          color: sub,
+          fontFamily: C.fontSans,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }
+      }, t._projectName) : /*#__PURE__*/React.createElement("span", null), t.due_at && /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: 12,
+          color: sub
+        }
+      }, new Date(t.due_at).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric'
+      }))));
+    }), !colItems.length && /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: '0.7rem',
         color: sub,
@@ -14559,6 +14646,12 @@ function AccountabilitySurface({
   const [offset, setOffset] = useState(0); // 0 = this week, 1 = last week…
   const [openId, setOpenId] = useState(null); // person expanded inline
   const [openTasks, setOpenTasks] = useState(null);
+  // Subtasks of the week's tasks. Kept apart from openTasks because they're
+  // fetched by parent rather than by assignment — a subtask usually isn't
+  // assigned to anyone itself, so without this the week reads as fewer,
+  // bigger items than the person actually worked through.
+  const [openKids, setOpenKids] = useState(null);
+  const [subsOpen, setSubsOpen] = useState({});
   const p2 = n => String(n).padStart(2, '0');
   const isoD = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
   const mondayOf = d => {
@@ -14617,16 +14710,116 @@ function AccountabilitySurface({
     overdue: 0
   };
 
+  // A subtask can arrive twice — once because it was assigned that week,
+  // once as a child of a task that was. Keyed by id so it's listed once.
+  const kidsOf = id => {
+    const seen = new Map();
+    [...(openTasks || []), ...(openKids || [])].forEach(t => {
+      if (t.parent_task_id === id) seen.set(t.id, t);
+    });
+    return [...seen.values()];
+  };
+  // A subtask whose parent is also in this week's list nests under it; one
+  // whose parent isn't stands on its own, since it's still that week's work.
+  const topTasks = () => {
+    const here = new Set((openTasks || []).map(t => t.id));
+    return (openTasks || []).filter(t => !t.parent_task_id || !here.has(t.parent_task_id));
+  };
+  const taskLine = (t, depth) => {
+    const kids = depth ? [] : kidsOf(t.id);
+    const open = !!subsOpen[t.id];
+    const doneKids = kids.filter(k => k.status === 'done').length;
+    return /*#__PURE__*/React.createElement("div", {
+      key: t.id,
+      style: {
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 10,
+        padding: '4px 0',
+        paddingLeft: depth * 18
+      }
+    }, depth ? /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-corner-down-right",
+      style: {
+        fontSize: 11,
+        color: sub,
+        flexShrink: 0
+      }
+    }) : null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: depth ? 12.5 : 13,
+        color: t.status === 'done' ? sub : ink,
+        flex: 1,
+        minWidth: 0,
+        textDecoration: t.status === 'done' ? 'line-through' : 'none'
+      }
+    }, t.title), kids.length ? /*#__PURE__*/React.createElement("span", {
+      onClick: () => setSubsOpen(s => ({
+        ...s,
+        [t.id]: !s[t.id]
+      })),
+      style: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3,
+        flexShrink: 0,
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 11,
+        color: gold,
+        userSelect: 'none'
+      },
+      title: open ? 'Hide subtasks' : 'Show subtasks'
+    }, /*#__PURE__*/React.createElement("i", {
+      className: 'ti ti-chevron-' + (open ? 'down' : 'right'),
+      style: {
+        fontSize: 11
+      }
+    }), /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-subtask",
+      style: {
+        fontSize: 11
+      }
+    }), doneKids, "/", kids.length) : null, t.context && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 11,
+        color: sub,
+        flexShrink: 0
+      }
+    }, t.context), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontFamily: J,
+        fontSize: 11.5,
+        color: t.status === 'done' ? green : sub,
+        flexShrink: 0,
+        width: 96,
+        textAlign: 'right'
+      }
+    }, t.status === 'done' ? t.completed_at ? 'Done ' + new Date(t.completed_at).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric'
+    }) : 'Done' : t.due_at ? 'Due ' + new Date(t.due_at).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric'
+    }) : 'No date'));
+  };
+
   // Same rule as group assign: a login with no access tags isn't a person.
   const people = (team || []).filter(m => (!m.status || m.status === 'active') && (m.access || []).length);
+  const TCOLS = 'id,title,status,due_at,completed_at,context,parent_task_id';
   async function togglePerson(uid) {
     if (openId === uid) {
       setOpenId(null);
       setOpenTasks(null);
+      setOpenKids(null);
       return;
     }
     setOpenId(uid);
     setOpenTasks(null);
+    setOpenKids(null);
+    setSubsOpen({});
     const c = window.SupabaseAuth && window.SupabaseAuth._client;
     if (!c) return;
     const {
@@ -14635,11 +14828,21 @@ function AccountabilitySurface({
     const ids = [...new Set((tp || []).map(r => r.task_id))];
     if (!ids.length) {
       setOpenTasks([]);
+      setOpenKids([]);
       return;
     }
     const {
       data: ts
-    } = await c.from('tasks').select('id,title,status,due_at,completed_at,context').in('id', ids);
+    } = await c.from('tasks').select(TCOLS).in('id', ids);
+    const parentIds = (ts || []).map(t => t.id);
+    const {
+      data: kids
+    } = parentIds.length ? await c.from('tasks').select(TCOLS).in('parent_task_id', parentIds) : {
+      data: []
+    };
+    // Both at once — setting the parents first would paint a round of
+    // subtask counts computed before the children had arrived.
+    setOpenKids(kids || []);
     setOpenTasks(ts || []);
   }
   const th = {
@@ -14846,46 +15049,9 @@ function AccountabilitySurface({
         fontSize: 12.5,
         color: sub
       }
-    }, "Nothing was assigned to ", m.name, " that week.") : openTasks.map(t => /*#__PURE__*/React.createElement("div", {
-      key: t.id,
-      style: {
-        display: 'flex',
-        alignItems: 'baseline',
-        gap: 10,
-        padding: '4px 0'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontFamily: J,
-        fontSize: 13,
-        color: t.status === 'done' ? sub : ink,
-        flex: 1,
-        minWidth: 0,
-        textDecoration: t.status === 'done' ? 'line-through' : 'none'
-      }
-    }, t.title), t.context && /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontFamily: J,
-        fontSize: 11,
-        color: sub,
-        flexShrink: 0
-      }
-    }, t.context), /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontFamily: J,
-        fontSize: 11.5,
-        color: t.status === 'done' ? green : sub,
-        flexShrink: 0,
-        width: 96,
-        textAlign: 'right'
-      }
-    }, t.status === 'done' ? t.completed_at ? 'Done ' + new Date(t.completed_at).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric'
-    }) : 'Done' : t.due_at ? 'Due ' + new Date(t.due_at).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric'
-    }) : 'No date')))));
+    }, "Nothing was assigned to ", m.name, " that week.") : topTasks().map(t => /*#__PURE__*/React.createElement(React.Fragment, {
+      key: t.id
+    }, taskLine(t, 0), subsOpen[t.id] && kidsOf(t.id).map(k => taskLine(k, 1))))));
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -17789,7 +17955,8 @@ function TasksScreen({
     onContextMenu: openCtx,
     onDrop: boardDrop,
     showSource: true,
-    linksByTask: linksByTask
+    linksByTask: linksByTask,
+    kidsByTask: data.childrenByTask
   }) : viewMode === 'timeline' ? /*#__PURE__*/React.createElement(TaskTimeline, {
     items: filteredTasks,
     dark: dark,

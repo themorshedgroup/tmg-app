@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#001A4A" />
+  <title>RSVP - TMG App</title>
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <link rel="icon" type="image/png" href="icon-192.png" />
+  <meta name="apple-mobile-web-app-title" content="TMG App" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body, #root { height: 100%; width: 100%; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Jost', 'Helvetica Neue', Arial, sans-serif; background: #EDECE7; overscroll-behavior: none; color: #001A4A; }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.min.js"></script>
+  <script src="supabase.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- ─── Dev localhost mock (overrides supabase.js on localhost only; inert in prod) ─── -->
+  <script>
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+    window.SupabaseAuth = {
+      _state: { session: { user: { id: 'dev-user-id', email: 'symon@morshedgroup.com', user_metadata: { full_name: 'Symon', avatar_url: '' } }, access_token: 'dev-token' } },
+      signInWithGoogle: function() {},
+      signOut: function() { location.reload(); },
+      getSession: function() { return Promise.resolve(window.SupabaseAuth._state.session); },
+      onAuthStateChange: function(cb) { setTimeout(function() { cb({ session: window.SupabaseAuth._state.session }); }, 50); }
+    };
+  }
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+
+    <!-- Compiled ahead of time from src/rsvp.jsx -- DO NOT paste JSX back in here.
+       Edit src/rsvp.jsx; the pre-commit hook rebuilds build/rsvp.js. -->
+  <script defer src="build/rsvp.js?h=e4f2bbe5"></script>
+</body>
+</html>

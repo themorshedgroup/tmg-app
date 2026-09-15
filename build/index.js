@@ -9484,7 +9484,7 @@ function AdminTab({
       marginBottom: 24,
       fontFamily: C.fontDisplay
     }
-  }, "Admin"), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement(ZohoReconnect, null), /*#__PURE__*/React.createElement("div", {
+  }, "Admin"), /*#__PURE__*/React.createElement(ZohoReconnect, null), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement("div", {
     style: {
       ...CARD,
       cursor: 'pointer'

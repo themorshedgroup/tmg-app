@@ -3530,10 +3530,10 @@ Rules:
       return (
         <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
           <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Admin</div>
+          <ZohoReconnect />
           <AdminUsers />
           <TabAccess />
           <AdminUsage />
-          <ZohoReconnect />
           <div style={{ ...CARD, cursor: 'pointer' }} onClick={onOpenBuilder}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-layout-grid" style={{ fontSize: 18, color: C.gold }} /></div>

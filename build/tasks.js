@@ -1745,6 +1745,50 @@ async function callZohoProjects(payload) {
     data
   };
 }
+// ─── Getting a person OUT of this app and into Zoho ───────────────
+//  Deep-links straight to a record's page in Zoho CRM. crm.zoho.com is a
+//  fixed, data-center-neutral gateway: EntityInfo.do resolves the signed-in
+//  user's org server-side and redirects to the real record URL, so no org
+//  id has to be known or embedded here. Ported from src/crm-tasks.jsx,
+//  which has used this same gateway since the CRM tab shipped.
+//
+//  Returns null rather than a broken link when the id isn't a real Zoho id
+//  (several call sites hold a NAME as a fallback "id"), so callers can
+//  render the logo unlinked instead of sending someone to an error page.
+function zohoRecordUrl(module, id) {
+  if (!id || !/^\d+$/.test(String(id))) return null;
+  return `https://crm.zoho.com/crm/EntityInfo.do?module=${module}&id=${encodeURIComponent(id)}`;
+}
+
+//  Zoho PROJECTS has no such gateway — its URLs are portal-scoped, and the
+//  portal id is deliberately server-side (it sits on the connection row
+//  next to the refresh token). So the page asks the edge function once for
+//  the public base and remembers it for the rest of the session; opening
+//  twenty CTC files costs one call, not twenty.
+//
+//  Only failures are left uncached, so a portal lookup that failed once
+//  because the network blipped can still succeed on the next file opened.
+let ZOHO_PORTAL_BASE = '';
+async function zohoPortalBase() {
+  if (ZOHO_PORTAL_BASE) return ZOHO_PORTAL_BASE;
+  try {
+    const {
+      ok,
+      data
+    } = await callZohoProjects({
+      action: 'portal_info'
+    });
+    if (ok && data && data.web_base) ZOHO_PORTAL_BASE = data.web_base;
+  } catch (e) {/* leave it unset so the next open retries */}
+  return ZOHO_PORTAL_BASE;
+}
+//  Everything after the # is Zoho's own client-side routing — the server
+//  only ever sees /portal/<id>, which is why the numeric portal id works
+//  here in place of the portal slug nobody has stored.
+function zohoProjectUrl(base, projectId) {
+  if (!base || !projectId || !/^\d+$/.test(String(projectId))) return null;
+  return `${base}#dashboard/${encodeURIComponent(projectId)}`;
+}
 async function searchZohoContacts(query) {
   const {
     ok,
@@ -10118,6 +10162,28 @@ function ProjectsSurface({
   // rewriting the pasted URL (audit C7). Cleared when the user navigates.
   const [routeMiss, setRouteMiss] = useState(null);
   const [zohoLinkOpen, setZohoLinkOpen] = useState(false); // ctc_file only — see ZohoLinkModal
+  // Which Zoho logo's menu is open: 'projects' | 'deal' | null.
+  const [zMenu, setZMenu] = useState(null);
+  const [zBusy, setZBusy] = useState(''); // 'projects' | 'deal' while disconnecting
+  // The portal base behind the Zoho Projects link. Fetched once per page
+  // load (see zohoPortalBase) and kept here so the link is a plain href the
+  // browser can middle-click, open in a new tab, or copy — not a button
+  // that has to go and ask the server what it points at.
+  const [portalBase, setPortalBase] = useState(ZOHO_PORTAL_BASE);
+  //  Keyed on the open file, not just on mount: if the first lookup fails
+  //  (offline for a moment, function cold-starting) the next file opened
+  //  tries again, rather than leaving every Projects link dead until the
+  //  tab is reloaded.
+  useEffect(() => {
+    if (portalBase || !zohoSyncable || !(current && current.zoho_project_id)) return;
+    let on = true;
+    zohoPortalBase().then(b => {
+      if (on && b) setPortalBase(b);
+    });
+    return () => {
+      on = false;
+    };
+  }, [zohoSyncable, portalBase, current && current.id, current && current.zoho_project_id]);
   // 'files' | 'emails'. Seeded from the route (#ctc/emails) so a pasted
   // link to the Emails tab lands there, not on the file list.
   const [ctcTab, setCtcTab] = useState(() => isCtc && openCtcTab === 'emails' ? 'emails' : 'files');
@@ -10156,10 +10222,13 @@ function ProjectsSurface({
   useEffect(() => {
     let on = true;
     setDeal(null);
-    if (!current || !current.id || !isCtc || !(current.zoho_deal_name || current.name)) return;
+    // Explicit link only. This used to fall back to matching the file's
+    // ADDRESS against Zoho, which made "Disconnect" meaningless: clearing
+    // the link just sent the page looking for the same deal by name and
+    // finding it again. Finding a deal by address is still how you CONNECT
+    // one — that search lives in the picker now, where a person confirms it.
+    if (!current || !current.id || !isCtc || !current.zoho_deal_id) return;
     setDealBusy(true);
-    // A file explicitly linked to a deal looks that deal up by its own name;
-    // otherwise fall back to matching on the file's address.
     callZoho({
       action: 'search_deals',
       query: current.zoho_deal_name || current.name
@@ -10177,7 +10246,7 @@ function ProjectsSurface({
     return () => {
       on = false;
     };
-  }, [current && current.id, isCtc]);
+  }, [current && current.id, current && current.zoho_deal_id, isCtc]);
   // ─── Parties on the deal behind this CTC file ────────────────────
   //  "Parties" is Zoho's Participants module, attached to a deal through a
   //  many-to-many linking module: the same closer or inspector is ONE party
@@ -10186,10 +10255,11 @@ function ProjectsSurface({
   //  second deal should attach the existing Kara, not mint a second one
   //  whose history is split from the first.
   //
-  //  Prefer the file's explicit zoho_deal_id over the name-matched deal:
-  //  the link is a decision someone made, the name match is a guess.
+  //  Always the file's own explicit link — never a guess. Adding a party
+  //  permanently changes a Zoho transaction, and "the deal whose name looks
+  //  like this file" is not evidence enough to do that to one.
   const PARTY_ROLES = ['Seller', 'Buyer', 'Agent (Other Side)', 'Agent TC (Other Side)', 'Closer', 'Closer Assistant', 'Lender', 'Attorney', 'Inspector', 'Surveyor', 'Closer (Other Side)'];
-  const partyDealId = current && current.zoho_deal_id || deal && deal.id || null;
+  const partyDealId = current && current.zoho_deal_id || null;
   const [parties, setParties] = useState(null); // null = not loaded yet
   const [partiesBusy, setPartiesBusy] = useState(false);
   const [partiesErr, setPartiesErr] = useState('');
@@ -10208,13 +10278,6 @@ function ProjectsSurface({
   const [pErr, setPErr] = useState('');
   const [pRemoving, setPRemoving] = useState(null); // link id mid-removal
   const [pSugErr, setPSugErr] = useState(false); // the lookup itself failed
-
-  //  Reading from a name-matched deal is a reasonable guess. WRITING to one
-  //  is not: adding a party is a permanent change to a Zoho transaction, and
-  //  "the deal whose name looks like this file" is not good enough evidence
-  //  that it is the right transaction. So the table renders either way, but
-  //  the add form and the remove buttons need the file's explicit link.
-  const partyWritable = !!(current && current.zoho_deal_id);
 
   //  Reading a deal's parties is a two-hop Zoho call, so it routinely takes
   //  seconds and two of them can land out of order. Every load takes a
@@ -10404,7 +10467,7 @@ function ProjectsSurface({
     }
   }
   async function removeParty(linkId, name) {
-    if (!linkId || !partyWritable || pRemoving) return;
+    if (!linkId || pRemoving) return;
     if (!window.confirm(`Take ${name || 'this party'} off this deal?\n\nThe party record itself stays in Zoho — this only removes them from this transaction.`)) return;
     setPRemoving(linkId);
     setPartiesErr('');
@@ -10836,6 +10899,253 @@ function ProjectsSurface({
       fontFamily: C.fontSans
     }
   }, label, active && '✓');
+  // ─── Disconnecting a CTC file from Zoho ───────────────────────────
+  //  Two disconnects, and only one of them destroys anything.
+  //
+  //  The DEAL link is a pointer. Clearing it takes the Deal details and the
+  //  Parties table off this file and stops nothing else — the deal, and
+  //  every party on it, carry on untouched in Zoho.
+  //
+  //  The PROJECT link is the spine of the task sync, so cutting it has to
+  //  take the synced tasks with it: a task that came from Zoho and can no
+  //  longer reach Zoho is a copy that rots quietly. The confirmation counts
+  //  them out loud, because disconnecting should never be how someone finds
+  //  out what it cost.
+  //
+  //  Both writes read the row back instead of trusting the update. An UPDATE
+  //  that matches no rows is not an error in PostgREST — it is a silent
+  //  success — so without the read-back a disconnect blocked by a database
+  //  permission would report that it worked.
+  async function disconnectDeal(p) {
+    if (!window.confirm('Disconnect ' + (p.name || 'this file') + ' from its Zoho deal?\n\n' + 'The Deal details and the Parties table come off this file. Nothing changes in Zoho — the deal and everyone on it stay exactly as they are.')) return;
+    setZMenu(null);
+    setZBusy('deal');
+    try {
+      const c = ProjectDB.client();
+      if (!c) return;
+      const {
+        data,
+        error
+      } = await c.from('projects').update({
+        zoho_deal_id: null,
+        zoho_deal_name: null
+      }).eq('id', p.id).select('id,zoho_deal_id').maybeSingle();
+      if (error || !data || data.zoho_deal_id) {
+        window.alert('That would not save, so nothing was changed. This is usually a database permission — worth telling Claude.');
+        return;
+      }
+      setCurrent(cur => cur && cur.id === p.id ? {
+        ...cur,
+        zoho_deal_id: null,
+        zoho_deal_name: null
+      } : cur);
+      setRows(rs => rs.map(r => r.id === p.id ? {
+        ...r,
+        zoho_deal_id: null,
+        zoho_deal_name: null
+      } : r));
+    } finally {
+      setZBusy('');
+    }
+  }
+  async function disconnectProject(p) {
+    const c = ProjectDB.client();
+    if (!c) return;
+    setZMenu(null);
+    //  "Came from Zoho" is NOT the same as "has a zoho_task_id". A task a
+    //  TC types here gets pushed to Zoho on save and stamped with an id
+    //  seconds later, so the id alone would sweep up her own work. The
+    //  poller inserts Zoho-authored tasks with no created_by, and every
+    //  in-app create sets one — that is the honest line between the two.
+    const {
+      data: rows,
+      error: qErr
+    } = await c.from('tasks').select('id,parent_task_id').eq('project_id', p.id).not('zoho_task_id', 'is', null).is('created_by', null);
+    if (qErr) {
+      window.alert("Couldn't check which tasks came from Zoho, so nothing was changed.");
+      return;
+    }
+    const ids = (rows || []).map(r => r.id);
+    const n = ids.length;
+    if (!window.confirm('Disconnect ' + (p.name || 'this file') + ' from Zoho Projects?\n\n' + (n ? 'This deletes ' + n + ' task' + (n === 1 ? '' : 's') + ' that were created in Zoho. Anything you added here in the app stays.' : 'Nothing was created in Zoho, so no tasks will be deleted.') + '\n\nThe project itself stays in Zoho — this only stops TMG syncing with it.')) return;
+    setZBusy('projects');
+    try {
+      //  Children before parents: TaskDB.delete REFUSES a task that still
+      //  has subtasks, so deleting a parent first would fail, get skipped,
+      //  and leave it stranded with a dead Zoho id.
+      //  Peel leaves off repeatedly: each pass works out which of the
+      //  tasks STILL waiting are a parent of another one still waiting, and
+      //  deletes everything that isn't. Recomputing per pass is the point —
+      //  a parent becomes deletable only once its children have gone.
+      const parentOf = new Map((rows || []).map(r => [r.id, r.parent_task_id]));
+      let remaining = ids.slice();
+      const order = [];
+      while (remaining.length) {
+        const rem = new Set(remaining);
+        const parentsNow = new Set();
+        for (const id of remaining) {
+          const pid = parentOf.get(id);
+          if (pid && rem.has(pid)) parentsNow.add(pid);
+        }
+        const leaves = remaining.filter(id => !parentsNow.has(id));
+        if (!leaves.length) {
+          order.push(...remaining);
+          break;
+        } // cycle guard
+        order.push(...leaves);
+        remaining = remaining.filter(id => parentsNow.has(id));
+      }
+      //  One at a time through TaskDB.delete, which also clears the task's
+      //  people, labels, activity and links — a bare delete on `tasks`
+      //  would leave those rows behind. Its refusals are RETURNED, not
+      //  thrown, so they have to be read: a task kept back by a subtask the
+      //  TC added herself is a real outcome the user has to hear about.
+      let removed = 0;
+      const kept = [];
+      for (const id of order) {
+        try {
+          const res = await TaskDB.delete(id);
+          if (res && res.error) kept.push(res.error);else removed++;
+        } catch (e) {
+          kept.push(e && e.message ? e.message : 'could not be deleted');
+        }
+      }
+      const {
+        data,
+        error
+      } = await c.from('projects').update({
+        zoho_project_id: null,
+        zoho_tasklist_id: null,
+        zoho_sync_enabled: false
+      }).eq('id', p.id).select('id,zoho_project_id').maybeSingle();
+      const linkCleared = !error && data && !data.zoho_project_id;
+      if (linkCleared) {
+        //  Patch what is on screen as well as what is in the database —
+        //  refreshContainer re-hydrates from the row it is handed, so
+        //  without this the chip keeps claiming the file is still linked.
+        setCurrent(cur => cur && cur.id === p.id ? {
+          ...cur,
+          zoho_project_id: null,
+          zoho_tasklist_id: null,
+          zoho_sync_enabled: false
+        } : cur);
+        setRows(rs => rs.map(r => r.id === p.id ? {
+          ...r,
+          zoho_project_id: null,
+          zoho_tasklist_id: null,
+          zoho_sync_enabled: false
+        } : r));
+      }
+      if (!linkCleared) {
+        window.alert((removed ? 'Removed ' + removed + ' task' + (removed === 1 ? '' : 's') + ', but the' : 'The') + ' link itself would not clear, so this file is still connected to Zoho. Tell Claude — this is usually a database permission.');
+      } else if (kept.length) {
+        window.alert('Disconnected, and removed ' + removed + ' of ' + n + ' Zoho task' + (n === 1 ? '' : 's') + '.\n\n' + kept.length + (kept.length === 1 ? ' task is' : ' tasks are') + ' still on the file — usually because ' + (kept.length === 1 ? 'it has a subtask' : 'they have subtasks') + ' of their own. Delete those first if you want them gone.');
+      }
+      //  Only re-hydrate if the user is still looking at this file; a slow
+      //  disconnect that finishes after they have moved on should not haul
+      //  them back to it.
+      if (current && current.id === p.id) await refreshContainer();
+    } finally {
+      setZBusy('');
+    }
+  }
+
+  // ─── The Zoho logos ───────────────────────────────────────────────
+  //  Each is a link and a menu in one control: the mark itself opens the
+  //  record in Zoho, the chevron opens the actions. A real <a href> and not
+  //  a button, so it middle-clicks, opens in a new tab and copies like any
+  //  other link — and greys out instead of disappearing when there is
+  //  nothing to open yet.
+  //
+  //  The logos are Zoho's own files, byte for byte. That is why they sit on
+  //  a white plate even in dark mode: Zoho's blue on the dark navy card is
+  //  muddy, and recolouring someone's trademark to match a theme is not
+  //  ours to do.
+  const zohoChip = (which, {
+    logo,
+    alt,
+    href,
+    hint,
+    items
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative',
+      display: 'flex'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      border: `1px solid ${bord}`,
+      borderRadius: 6,
+      background: '#fff',
+      overflow: 'hidden'
+    }
+  }, href ? /*#__PURE__*/React.createElement("a", {
+    href: href,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    title: hint,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      padding: '6px 9px',
+      textDecoration: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: logo,
+    alt: alt,
+    style: {
+      height: 17,
+      width: 'auto',
+      display: 'block'
+    }
+  })) : /*#__PURE__*/React.createElement("span", {
+    title: hint,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      padding: '6px 9px',
+      opacity: 0.4,
+      cursor: 'default'
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: logo,
+    alt: alt,
+    style: {
+      height: 17,
+      width: 'auto',
+      display: 'block'
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => !zBusy && setZMenu(m => m === which ? null : which),
+    title: alt + ' actions',
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      padding: '7px 6px',
+      border: 'none',
+      borderLeft: `1px solid ${bord}`,
+      background: 'none',
+      cursor: zBusy ? 'default' : 'pointer',
+      color: '#5A6B85'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: zBusy === which ? 'ti ti-loader-2' : 'ti ti-chevron-down',
+    style: {
+      fontSize: 11,
+      animation: zBusy === which ? 'spin 1s linear infinite' : 'none'
+    }
+  }))), zMenu === which && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setZMenu(null),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 55
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: ddStyle
+  }, items)));
   const GROUP_OPTS = isCtc ? [['none', 'None'], ['status', 'Status'], ['group', 'Group'], ['agent', 'Agent'], ['owner', 'Owner']] : [['none', 'None'], ['status', 'Status'], ['group', 'Group'], ['owner', 'Owner']];
   const SORT_OPTS = [['target', 'Target date'], ['name', 'Name'], ['progress', 'Progress'], ['created', 'Recently added']];
   // .btn.on ported: border-color gold-soft, color navy, background gold-pale
@@ -12374,19 +12684,24 @@ function ProjectsSurface({
         textAlign: 'right'
       }
     }, v));
-    return /*#__PURE__*/React.createElement(React.Fragment, null, fld('Owner', p.owner_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.owner_id, 16), nameOf(p.owner_id)) : '—'), isCtc && fld('Agent', p.agent_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.agent_id, 16), nameOf(p.agent_id)) : '—'), isCtc && fld('Zoho deal', p.zoho_deal_id ? /*#__PURE__*/React.createElement("span", {
+    return /*#__PURE__*/React.createElement(React.Fragment, null, fld('Owner', p.owner_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.owner_id, 16), nameOf(p.owner_id)) : '—'), isCtc && fld('Agent', p.agent_id ? /*#__PURE__*/React.createElement(React.Fragment, null, avatar(p.agent_id, 16), nameOf(p.agent_id)) : '—'), isCtc && fld('Zoho deal', p.zoho_deal_id ? /*#__PURE__*/React.createElement("a", {
+      href: zohoRecordUrl('Deals', p.zoho_deal_id) || undefined,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: "Open this deal in Zoho CRM",
       style: {
         display: 'flex',
         alignItems: 'center',
-        gap: 5
+        gap: 5,
+        color: gold,
+        textDecoration: 'none'
       }
-    }, /*#__PURE__*/React.createElement("i", {
-      className: "ti ti-link",
+    }, p.zoho_deal_name || 'Linked', /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-external-link",
       style: {
-        fontSize: 12,
-        color: gold
+        fontSize: 12
       }
-    }), p.zoho_deal_name || 'Linked') : /*#__PURE__*/React.createElement("span", {
+    })) : /*#__PURE__*/React.createElement("span", {
       className: "nodeal",
       style: {
         fontSize: 11,
@@ -12418,19 +12733,39 @@ function ProjectsSurface({
       style: {
         marginLeft: i ? -5 : 0
       }
-    }, avatar(id, 18)))) : '—'), zohoSyncable && p.zoho_project_id && /*#__PURE__*/React.createElement(React.Fragment, null, fld('Zoho Project', /*#__PURE__*/React.createElement("span", {
-      style: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 5
-      }
-    }, /*#__PURE__*/React.createElement("i", {
-      className: "ti ti-link",
-      style: {
-        fontSize: 12,
-        color: gold
-      }
-    }), "Linked")), fld('Last synced', /*#__PURE__*/React.createElement("span", {
+    }, avatar(id, 18)))) : '—'), zohoSyncable && p.zoho_project_id && /*#__PURE__*/React.createElement(React.Fragment, null, fld('Zoho Project', (() => {
+      const u = zohoProjectUrl(portalBase, p.zoho_project_id);
+      return u ? /*#__PURE__*/React.createElement("a", {
+        href: u,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        title: "Open this project in Zoho Projects",
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          color: gold,
+          textDecoration: 'none'
+        }
+      }, p.zoho_sync_enabled ? 'Linked' : 'Linked · paused', /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-external-link",
+        style: {
+          fontSize: 12
+        }
+      })) : /*#__PURE__*/React.createElement("span", {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5
+        }
+      }, /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-link",
+        style: {
+          fontSize: 12,
+          color: gold
+        }
+      }), p.zoho_sync_enabled ? 'Linked' : 'Linked · paused');
+    })()), fld('Last synced', /*#__PURE__*/React.createElement("span", {
       style: {
         display: 'flex',
         alignItems: 'center',
@@ -12874,7 +13209,7 @@ function ProjectsSurface({
         fontFamily: C.fontSans,
         marginTop: 6
       }
-    }, "From Zoho CRM \xB7 matched on the property address")) : null;
+    }, "From Zoho CRM \xB7 the deal this file is linked to")) : null;
 
     // Parties table + the add form. Rendered only for a CTC file that
     // resolves to a deal — with no deal there is nothing to attach to.
@@ -12928,7 +13263,7 @@ function ProjectsSurface({
       style: {
         flex: 1
       }
-    }), !addOpen && partyWritable && /*#__PURE__*/React.createElement("button", {
+    }), !addOpen && /*#__PURE__*/React.createElement("button", {
       onClick: () => {
         resetPartyForm();
         setAddOpen(true);
@@ -12959,22 +13294,7 @@ function ProjectsSurface({
         fontFamily: C.fontSans,
         marginBottom: 8
       }
-    }, partiesErr), !partyWritable && /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 12,
-        color: sub,
-        fontFamily: C.fontSans,
-        marginBottom: 8,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6
-      }
-    }, /*#__PURE__*/React.createElement("i", {
-      className: "ti ti-info-circle",
-      style: {
-        fontSize: 13
-      }
-    }), "Read-only \u2014 this file was matched to a Zoho deal by name. Set its Zoho deal in Edit to add or remove parties."), parties === null ? /*#__PURE__*/React.createElement("div", {
+    }, partiesErr), parties === null ? /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 13,
         color: sub,
@@ -13058,7 +13378,7 @@ function ProjectsSurface({
         ...cellStyle,
         textAlign: 'right'
       }
-    }, partyWritable && /*#__PURE__*/React.createElement("button", {
+    }, /*#__PURE__*/React.createElement("button", {
       title: "Take off this deal",
       disabled: !!pRemoving,
       onClick: () => removeParty(p.link_id, p.name),
@@ -13113,7 +13433,7 @@ function ProjectsSurface({
         color: sub,
         fontFamily: C.fontSans
       }
-    }, p.role || ''), partyWritable && /*#__PURE__*/React.createElement("button", {
+    }, p.role || ''), /*#__PURE__*/React.createElement("button", {
       title: "Take off this deal",
       disabled: !!pRemoving,
       onClick: () => removeParty(p.link_id, p.name),
@@ -13464,33 +13784,58 @@ function ProjectsSurface({
     }, p.name), statusBadge(p.status)), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
-        gap: 8
+        gap: 8,
+        flexWrap: 'wrap',
+        alignItems: 'center'
       }
     }, /*#__PURE__*/React.createElement(CopyLinkBtn, {
       dark: dark,
       hash: (ROUTE_SEG_BY_KIND[p.record_type || kind] || 'project') + '/' + p.id + (dtab && dtab !== 'overview' ? '/' + dtab : ''),
       title: 'Copy a link straight to this ' + KL.singular.toLowerCase()
-    }), zohoSyncable && (p.zoho_project_id ? /*#__PURE__*/React.createElement("span", {
+    }), zohoSyncable && (p.zoho_project_id ? /*#__PURE__*/React.createElement(React.Fragment, null, zohoChip('projects', {
+      logo: 'zoho-projects.svg',
+      alt: 'Zoho Projects',
+      href: zohoProjectUrl(portalBase, p.zoho_project_id),
+      hint: portalBase ? 'Open this project in Zoho Projects' : 'Still finding your Zoho portal…',
+      items: /*#__PURE__*/React.createElement(React.Fragment, null, ddItem('Open in Zoho Projects', false, () => {
+        const u = zohoProjectUrl(portalBase, p.zoho_project_id);
+        setZMenu(null);
+        if (u) window.open(u, '_blank', 'noopener');
+      }, 'open'), ddItem(syncingNow ? 'Syncing…' : 'Sync now', false, () => {
+        setZMenu(null);
+        if (!syncingNow) syncNow(p);
+      }, 'sync'), ddItem(p.zoho_sync_enabled ? 'Pause syncing' : 'Resume syncing', false, async () => {
+        setZMenu(null);
+        const next = !p.zoho_sync_enabled;
+        await ProjectDB.update(p.id, {
+          zoho_sync_enabled: next
+        });
+        // Same reason as the disconnect: refreshContainer
+        // re-hydrates from the row it is given, so the
+        // menu would keep offering "Pause" after pausing.
+        setCurrent(cur => cur && cur.id === p.id ? {
+          ...cur,
+          zoho_sync_enabled: next
+        } : cur);
+        setRows(rs => rs.map(r => r.id === p.id ? {
+          ...r,
+          zoho_sync_enabled: next
+        } : r));
+      }, 'pause'), ddItem('Change project…', false, () => {
+        setZMenu(null);
+        setZohoLinkOpen(true);
+      }, 'change'), ddItem('Disconnect', false, () => disconnectProject(p), 'off'))
+    }), !p.zoho_sync_enabled && /*#__PURE__*/React.createElement("span", {
+      title: "Linked, but syncing is paused",
       style: {
-        fontSize: 12,
-        letterSpacing: '0.04em',
-        padding: '7px 12px',
-        borderRadius: 6,
-        fontWeight: 500,
-        border: `1px solid ${teal}55`,
-        color: teal,
-        background: dark ? 'rgba(15,110,86,.14)' : '#E6F2EC',
-        fontFamily: C.fontSans,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6
+        width: 7,
+        height: 7,
+        borderRadius: '50%',
+        background: '#E0A020',
+        alignSelf: 'center',
+        marginLeft: -4
       }
-    }, /*#__PURE__*/React.createElement("i", {
-      className: "ti ti-check",
-      style: {
-        fontSize: 13
-      }
-    }), "Synced with Zoho") : /*#__PURE__*/React.createElement("button", {
+    })) : /*#__PURE__*/React.createElement("button", {
       onClick: () => setZohoLinkOpen(true),
       style: {
         fontSize: 12,
@@ -13512,7 +13857,23 @@ function ProjectsSurface({
       style: {
         fontSize: 13
       }
-    }), "Link to Zoho Projects")), /*#__PURE__*/React.createElement("button", {
+    }), "Link to Zoho Projects")), isCtc && zohoChip('deal', {
+      logo: 'zoho-crm.svg',
+      alt: 'Zoho CRM',
+      href: zohoRecordUrl('Deals', p.zoho_deal_id),
+      hint: p.zoho_deal_id ? 'Open ' + (p.zoho_deal_name || 'this deal') + ' in Zoho CRM' : 'No Zoho deal linked yet',
+      items: p.zoho_deal_id ? /*#__PURE__*/React.createElement(React.Fragment, null, ddItem('Open in Zoho CRM', false, () => {
+        const u = zohoRecordUrl('Deals', p.zoho_deal_id);
+        setZMenu(null);
+        if (u) window.open(u, '_blank', 'noopener');
+      }, 'open'), ddItem('Change deal…', false, () => {
+        setZMenu(null);
+        setPview('form');
+      }, 'change'), ddItem('Disconnect', false, () => disconnectDeal(p), 'off')) : ddItem('Connect a deal…', false, () => {
+        setZMenu(null);
+        setPview('form');
+      }, 'connect')
+    }), /*#__PURE__*/React.createElement("button", {
       onClick: () => setPview('form'),
       style: {
         fontSize: 12,

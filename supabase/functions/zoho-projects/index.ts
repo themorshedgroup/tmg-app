@@ -45,7 +45,7 @@
 //   list_portals, list_projects, get_project, create_project, update_project,
 //   list_tasklists, create_tasklist, list_tasks, count_tasks_by_tasklist,
 //   get_task, create_task, update_task, delete_task, sync_now,
-//   backfill_zoho_links
+//   backfill_zoho_links, audit_transaction_fields
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -348,6 +348,28 @@ Deno.serve(async (req) => {
 
     // Every action below needs a real, saved connection.
     const conn = await loadConnection(sb);
+
+    // ── Where this portal lives on the web [link building] ────────────
+    //  The browser has no idea which Zoho Projects portal the org is on --
+    //  portal_id is stored here, server-side, and never leaves. But a link to
+    //  a project needs it in the path, so hand back just the public base and
+    //  let the page append its own project id.
+    //
+    //  Deliberately placed ABOVE getZohoToken: this answers from the row we
+    //  already loaded, so it costs no Zoho API call and no token refresh. The
+    //  portal ceiling is 100 calls per 2 minutes and this runs on every CTC
+    //  file opened, so it must stay free.
+    //
+    //  The numeric portal id works in the URL path in place of the portal
+    //  slug -- projects.zoho.com resolves it before login, so no slug needs
+    //  to be discovered or stored.
+    if (action === "portal_info") {
+      return json({
+        portal_id: conn.portal_id,
+        web_base: `https://projects.zoho.com/portal/${conn.portal_id}`,
+      }, 200);
+    }
+
     const accessToken = await getZohoToken(sb, conn);
     const apiDomain = conn.api_domain || "projectsapi.zoho.com";
     const portalBase = `https://${apiDomain}/restapi/portal/${conn.portal_id}`;
@@ -381,6 +403,80 @@ Deno.serve(async (req) => {
           end_date: zohoDateToIso(p.end_date),
         },
       }, 200);
+    }
+
+    // One-off audit: for every project in the portal, how many of the
+    // project-level custom fields ("Transaction Information" section — MLS
+    // Active Date, Agent, Effective Date, etc., defined portal-wide via
+    // Admin > Custom Fields > Projects) actually have a value set. Read-only —
+    // makes no writes to Zoho or to TMG's own tables. The value's exact
+    // location in Zoho's JSON isn't documented (Zoho's own docs show the
+    // definition shape but not the read shape), so findFieldValue searches a
+    // few known container shapes plus one level of nesting rather than
+    // assuming one.
+    if (action === "audit_transaction_fields") {
+      const rDefs = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/customfields/`, {});
+      const dDefs = await rDefs.json().catch(() => ({}));
+      if (!rDefs.ok) return json({ error: dDefs?.error || "Zoho custom fields error", detail: dDefs }, rDefs.status);
+      const fields = (dDefs.project_custom_fields || []).map((f: any) => ({
+        field_id: f.field_id, name: f.field_name || f.field_id,
+      }));
+
+      const projects: { id: string; name: string }[] = [];
+      let index = 1;
+      const range = 100;
+      for (let page = 0; page < 20; page++) {
+        const u = new URL(`${portalBase}/projects/`);
+        u.searchParams.set("index", String(index));
+        u.searchParams.set("range", String(range));
+        const r = await zohoFetch(sb, conn, accessToken, u.toString(), {});
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: d?.error || "Zoho projects list error", detail: d }, r.status);
+        const batch = d.projects || [];
+        projects.push(...batch.map((p: any) => ({ id: p.id_string || String(p.id), name: p.name })));
+        if (batch.length < range) break;
+        index += range;
+      }
+
+      const findFieldValue = (obj: any, fieldId: string, fieldName: string, depth = 0): any => {
+        if (!obj || typeof obj !== "object" || depth > 2) return undefined;
+        if (fieldId in obj) return (obj as any)[fieldId];
+        for (const key of ["custom_fields", "customfields", "customFields", "udfs"]) {
+          const c = (obj as any)[key];
+          if (Array.isArray(c)) {
+            const hit = c.find((x: any) => x && (x.field_id === fieldId || x.id === fieldId || x.column_name === fieldId || x.label === fieldName || x.name === fieldName));
+            if (hit) return hit.value !== undefined ? hit.value : hit.field_value;
+          } else if (c && typeof c === "object" && fieldId in c) {
+            return c[fieldId];
+          }
+        }
+        for (const k of Object.keys(obj)) {
+          const v = (obj as any)[k];
+          if (v && typeof v === "object" && !Array.isArray(v)) {
+            const found = findFieldValue(v, fieldId, fieldName, depth + 1);
+            if (found !== undefined) return found;
+          }
+        }
+        return undefined;
+      };
+
+      const results: { name: string; filled: number }[] = [];
+      let firstRawKeys: string[] | null = null;
+      for (const p of projects) {
+        const r = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${p.id}/`, {});
+        const d = await r.json().catch(() => ({}));
+        const raw = (d.projects || [])[0] || null;
+        if (!raw) { results.push({ name: p.name, filled: 0 }); continue; }
+        if (!firstRawKeys) firstRawKeys = Object.keys(raw);
+        let filled = 0;
+        for (const f of fields) {
+          const v = findFieldValue(raw, f.field_id, f.name);
+          if (v !== undefined && v !== null && String(v).trim() !== "") filled++;
+        }
+        results.push({ name: p.name, filled });
+      }
+
+      return json({ fields, results, debug_raw_project_keys: firstRawKeys }, 200);
     }
 
     if (action === "create_project") {
@@ -563,7 +659,24 @@ Deno.serve(async (req) => {
       const form = new URLSearchParams();
       if (typeof body.title === "string") form.set("name", body.title);
       if ("description" in body) form.set("description", String(body.description || ""));
-      if ("due_at" in body) { const zd = isoToZohoDate(body.due_at); if (zd) form.set("end_date", zd); }
+      if ("due_at" in body) {
+        const zd = isoToZohoDate(body.due_at);
+        if (zd) {
+          form.set("end_date", zd);
+          // Zoho treats start_date as a companion of end_date: send a due date
+          // for a task that has no start date and Zoho fills the start in
+          // itself, with the due date, producing a false one-day task. One
+          // extra GET (a due-date edit is rare, and the portal ceiling is 100
+          // calls / 2 min) buys back the start date Zoho already has so it can
+          // be re-sent untouched. If the task genuinely has no start date there
+          // is nothing to preserve, so this sends end_date alone exactly as
+          // before rather than inventing a start date of TMG's own.
+          const gr = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${projectId}/tasks/${taskId}/`, {});
+          const gd = await gr.json().catch(() => ({}));
+          const existingStart = gr.ok ? ((gd.tasks || [])[0]?.start_date || null) : null;
+          if (existingStart) form.set("start_date", existingStart);
+        }
+      }
       if (body.priority) form.set("priority", tmgPriorityToZoho(body.priority));
       if (body.status) form.set("status", tmgStatusToZoho(body.status));
       const assigneeEmails: string[] = Array.isArray(body.assignee_emails) ? body.assignee_emails : [];
@@ -658,12 +771,17 @@ Deno.serve(async (req) => {
             }).eq("id", local.id);
             await sb.from("zoho_sync_conflicts").insert({ task_id: local.id, project_id: proj.id, field: changedField, tmg_value: String((local as any)[changedField] ?? ""), zoho_value: String((zt as any)[changedField] ?? ""), resolution: "zoho_won" });
             await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync conflict on "${changedField}" — Zoho's edit was more recent; Zoho's value was kept.` });
+            const moved = dueDateMovedLine(local.due_at, zt.due_at);
+            if (moved) await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: moved, field: "due_at" });
           } else {
             const form = new URLSearchParams({
               name: local.title || "", description: local.description || "",
               priority: tmgPriorityToZoho(local.priority), status: tmgStatusToZoho(local.status),
             });
             const zd = isoToZohoDate(local.due_at); if (zd) form.set("end_date", zd);
+            // Hand Zoho back the start date it already has, so writing the due
+            // date can't make it invent one — see mapZohoTask's start_date note.
+            if (zd && zt.start_date) form.set("start_date", zt.start_date);
             await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${proj.zoho_project_id}/tasks/${zt.id}/`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
             await sb.from("tasks").update({ zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: Date.now() }).eq("id", local.id);
             await sb.from("zoho_sync_conflicts").insert({ task_id: local.id, project_id: proj.id, field: changedField, tmg_value: String((local as any)[changedField] ?? ""), zoho_value: String((zt as any)[changedField] ?? ""), resolution: "tmg_won" });
@@ -671,12 +789,14 @@ Deno.serve(async (req) => {
           }
           conflicts++;
         } else {
+          const moved = dueDateMovedLine(local.due_at, zt.due_at);
           await sb.from("tasks").update({
             title: zt.title, description: zt.description, due_at: zt.due_at,
             priority: zt.priority, status: zt.status,
             zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: zt.last_modified_time,
             zoho_tasklist_id: zt.tasklist_id, zoho_tasklist_name: zt.tasklist_name,
           }).eq("id", local.id);
+          if (moved) await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: moved, field: "due_at" });
           pulled++;
         }
       }
@@ -741,12 +861,42 @@ Deno.serve(async (req) => {
 // tasklist_id/name are the one exception: display-only grouping (e.g.
 // "Pre-List", "Clear to Close"), not part of the narrow field-sync scope,
 // but they ride along on every task object already so no extra API call.
+// A due date moving is the one change the team most wants a paper trail for
+// ("how many times did this closing slip, and when?"), and most of those edits
+// are made in Zoho's own UI, not in TMG — where the pull loop below used to
+// overwrite due_at silently. Phrased the same way TaskDB.update phrases an
+// in-app edit so both land in one readable timeline on the task.
+function dueDateMovedLine(oldIso: string | null, newIso: string | null): string | null {
+  if ((oldIso || null) === (newIso || null)) return null;
+  const fmt = (iso: string | null) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? null
+      // America/Chicago, not UTC: this line has to read the same as the due
+      // date printed on the task row, and TMG is a Central-time brokerage
+      // (accountability_weeks buckets on 'America/Chicago' for the same reason).
+      : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "America/Chicago" });
+  };
+  const a = fmt(oldIso), b = fmt(newIso);
+  if (!a && b) return `Due date set to ${b} — changed in Zoho Projects`;
+  if (a && !b) return `Due date cleared (was ${a}) — changed in Zoho Projects`;
+  if (a && b) return `Due date moved from ${a} to ${b} — changed in Zoho Projects`;
+  return null;
+}
+
 function mapZohoTask(t: any) {
   return {
     id: t.id_string || String(t.id),
     title: t.name || "",
     description: t.description || null,
     due_at: zohoDateToIso(t.end_date),
+    // Kept in Zoho's own MM-DD-YYYY form, and never written to TMG — it exists
+    // only to be handed straight back to Zoho on an end_date write. Zoho's
+    // Update Task API documents start_date as a companion parameter of
+    // end_date, and a task with no start date gets one invented for it (the
+    // due date itself), which reads as a false one-day task. Re-sending the
+    // start date Zoho already has keeps it where the team put it.
+    start_date: t.start_date || null,
     priority: zohoPriorityToTmg(t.priority),
     status: zohoStatusToTmg(t.status?.name || t.status),
     last_modified_time: t.last_modified_time_long != null ? Number(t.last_modified_time_long) : null,

@@ -9500,6 +9500,318 @@ function ZohoReconnect() {
     }
   }, "Zoho still won\u2019t hand over contact emails. Either the scope line was edited before it was pasted, or the agents\u2019 Zoho email sharing is set to private \u2014 Setup \u2192 Channels \u2192 Email \u2192 Email Sharing.")));
 }
+
+// ─── Delete every Zoho task owned by a former agent ──────────────
+//  A departed agent's finished tasks keep surfacing in the Calls tab. This
+//  removes them from Zoho outright, which also removes those calls from
+//  Zoho Reports — that tallies the Tasks module by Task Type, so a deleted
+//  task is a call that never happened as far as reporting is concerned.
+//  There is no undo, so the flow is deliberately two steps and the second
+//  one is armed only by what the first one actually found.
+function ZohoPurgeTasks() {
+  const [name, setName] = useState('');
+  const [phase, setPhase] = useState('idle'); // idle | finding | found | deleting | done | error
+  const [found, setFound] = useState(null); // { owner, count, sample[], capped }
+  const [choices, setChoices] = useState([]); // several people matched
+  const [result, setResult] = useState(null);
+  const [msg, setMsg] = useState('');
+  const reset = () => {
+    setFound(null);
+    setChoices([]);
+    setResult(null);
+    setMsg('');
+  };
+  async function find(ownerId) {
+    setPhase('finding');
+    reset();
+    const {
+      ok,
+      status,
+      data
+    } = await callZoho(ownerId ? {
+      action: 'purge_owner_tasks',
+      confirm_owner_id: ownerId
+    } // resolve only; no count sent, so it previews
+    : {
+      action: 'purge_owner_tasks',
+      owner_name: name.trim()
+    });
+    if (status === 409 && data && data.owners) {
+      setChoices(data.owners);
+      setPhase('idle');
+      return;
+    }
+    if (!ok) {
+      setMsg(data && data.error || 'Zoho didn’t answer.');
+      setPhase('error');
+      return;
+    }
+    setFound(data);
+    setPhase('found');
+  }
+  async function purge() {
+    if (!found || !found.owner) return;
+    setPhase('deleting');
+    setMsg('');
+    const {
+      ok,
+      data
+    } = await callZoho({
+      action: 'purge_owner_tasks',
+      confirm_owner_id: found.owner.id,
+      expected_count: found.count
+    });
+    if (!ok) {
+      setMsg(data && data.error || 'Nothing was deleted.');
+      setPhase('error');
+      return;
+    }
+    setResult(data);
+    setFound(null);
+    setPhase('done');
+  }
+  const mono = {
+    fontFamily: C.fontMono || 'ui-monospace, SFMono-Regular, Menlo, monospace'
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: CARD
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 11,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 34,
+      height: 34,
+      borderRadius: 9,
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: '#F7E4E4'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-trash-x",
+    style: {
+      fontSize: 18,
+      color: '#9B1C1C'
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans
+    }
+  }, "Delete a Former Agent\u2019s Tasks"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: C.textSecondary,
+      marginTop: 2,
+      lineHeight: 1.4
+    }
+  }, "Removes every Zoho task owned by one person. Permanent."))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: name,
+    onChange: e => {
+      setName(e.target.value);
+      if (phase !== 'idle') {
+        setPhase('idle');
+        reset();
+      }
+    },
+    onKeyDown: e => {
+      if (e.key === 'Enter' && name.trim()) find();
+    },
+    placeholder: "Agent\u2019s name in Zoho",
+    style: {
+      flex: 1,
+      minWidth: 160,
+      fontFamily: C.fontSans,
+      fontSize: '0.8rem',
+      padding: '9px 11px',
+      border: '1px solid ' + C.border,
+      borderRadius: 9,
+      background: C.surface,
+      color: C.textPrimary,
+      outline: 'none'
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => find(),
+    disabled: !name.trim() || phase === 'finding' || phase === 'deleting',
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: '0.78rem',
+      fontWeight: 600,
+      color: C.navy,
+      background: C.surface,
+      border: '1px solid ' + C.border,
+      borderRadius: 9,
+      padding: '9px 15px',
+      cursor: !name.trim() || phase === 'finding' ? 'default' : 'pointer',
+      opacity: !name.trim() || phase === 'finding' ? 0.45 : 1
+    }
+  }, phase === 'finding' ? 'Looking…' : 'Find their tasks')), choices.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 9
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.73rem',
+      color: C.textSecondary,
+      marginBottom: 5
+    }
+  }, "More than one person matches. Which one?"), choices.map(o => /*#__PURE__*/React.createElement("button", {
+    key: o.id,
+    onClick: () => find(o.id),
+    style: {
+      display: 'block',
+      width: '100%',
+      textAlign: 'left',
+      fontFamily: C.fontSans,
+      fontSize: '0.76rem',
+      color: C.navy,
+      background: C.bg,
+      border: '1px solid ' + C.border,
+      borderRadius: 8,
+      padding: '7px 10px',
+      marginBottom: 5,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("b", null, o.name), " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.textMuted
+    }
+  }, "\xB7 ", o.email, o.status ? ' · ' + o.status : '')))), phase === 'found' && found && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 11,
+      paddingTop: 10,
+      borderTop: '1px dashed ' + C.border
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: C.navy,
+      fontWeight: 600
+    }
+  }, found.owner.name, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 400,
+      color: C.textMuted
+    }
+  }, "\xB7 ", found.owner.email, found.owner.status ? ' · ' + found.owner.status : '')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.78rem',
+      color: C.textSecondary,
+      marginTop: 4
+    }
+  }, found.count === 0 ? 'Owns no tasks in Zoho — nothing to delete.' : /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: '#9B1C1C'
+    }
+  }, found.count), " task", found.count === 1 ? '' : 's', " would be deleted permanently.")), found.capped && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: '#9B1C1C',
+      marginTop: 4
+    }
+  }, "More than 6,000 \u2014 this is only the first 6,000. Run it again afterwards."), (found.sample || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...mono,
+      fontSize: '0.68rem',
+      color: C.textMuted,
+      lineHeight: 1.6,
+      marginTop: 7,
+      paddingLeft: 9,
+      borderLeft: '2px solid ' + C.border
+    }
+  }, found.sample.map((t, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, t.closed || t.due || '—', " \xB7 ", t.status || '?', " \xB7 ", t.subject || '(no subject)')), found.count > found.sample.length && /*#__PURE__*/React.createElement("div", null, "\u2026and ", found.count - found.sample.length, " more")), found.count > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      color: C.textMuted,
+      lineHeight: 1.5,
+      marginBottom: 7
+    }
+  }, "These also disappear from Zoho Reports, which counts calls by task type. This cannot be undone."), /*#__PURE__*/React.createElement("button", {
+    onClick: purge,
+    disabled: phase === 'deleting',
+    style: {
+      fontFamily: C.fontSans,
+      fontSize: '0.78rem',
+      fontWeight: 600,
+      color: '#fff',
+      background: '#9B1C1C',
+      border: 'none',
+      borderRadius: 9,
+      padding: '10px 16px',
+      cursor: phase === 'deleting' ? 'default' : 'pointer',
+      opacity: phase === 'deleting' ? 0.5 : 1
+    }
+  }, phase === 'deleting' ? 'Deleting…' : `Delete ${found.count} task${found.count === 1 ? '' : 's'} permanently`))), phase === 'done' && result && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 11,
+      paddingTop: 10,
+      borderTop: '1px dashed ' + C.border,
+      fontSize: '0.76rem',
+      lineHeight: 1.55
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#0F6E56',
+      fontWeight: 600
+    }
+  }, "Deleted ", result.deleted, " task", result.deleted === 1 ? '' : 's', " owned by ", result.owner && result.owner.name, "."), result.failed > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9B1C1C',
+      marginTop: 4
+    }
+  }, result.failed, " could not be deleted", (result.failures || []).length ? ': ' + result.failures.map(f => f.message).filter((v, i, a) => a.indexOf(v) === i).join('; ') : '.'), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.textMuted,
+      marginTop: 4
+    }
+  }, "The Calls tab will stop showing them on its next refresh.")), phase === 'error' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      fontSize: '0.75rem',
+      color: '#9B1C1C',
+      lineHeight: 1.55
+    }
+  }, msg, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.textMuted,
+      marginTop: 3
+    }
+  }, "Nothing was deleted.")));
+}
 function AdminTab({
   onOpenBuilder
 }) {
@@ -9518,7 +9830,7 @@ function AdminTab({
       marginBottom: 24,
       fontFamily: C.fontDisplay
     }
-  }, "Admin"), /*#__PURE__*/React.createElement(ZohoReconnect, null), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement("div", {
+  }, "Admin"), /*#__PURE__*/React.createElement(ZohoReconnect, null), /*#__PURE__*/React.createElement(ZohoPurgeTasks, null), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement("div", {
     style: {
       ...CARD,
       cursor: 'pointer'

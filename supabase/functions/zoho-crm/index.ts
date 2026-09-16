@@ -1962,6 +1962,160 @@ Deno.serve(async (req) => {
       return json({ tasks_by_contact: out, owner_by_contact: owners }, 200);
     }
 
+    // ── Delete every Task owned by one person [admin] ──────────────
+    //  For a departed agent whose finished tasks keep surfacing in the Calls
+    //  tab. This DESTROYS records: a deleted Zoho task stops being counted by
+    //  Zoho Reports, which tallies the Tasks module by Task Type, so this also
+    //  removes those calls from the org's KPI history. There is no undo.
+    //
+    //  Because of that, it is two trips, never one:
+    //
+    //    preview  ->  resolve the name against Zoho's user list, count what
+    //                 that person actually owns, return a sample. Deletes
+    //                 nothing.
+    //    confirm  ->  the caller sends back the exact owner id AND the count
+    //                 it was shown. If either no longer matches, nothing is
+    //                 deleted.
+    //
+    //  That second check is the point. "Monty Shady" and "Monty Shaddy" are
+    //  one keystroke apart, and a name that matched two users, or a count that
+    //  moved between the preview and the confirm, means the operator is not
+    //  looking at what they think they are looking at.
+    if (action === "purge_owner_tasks") {
+      if (!(auth as any).isService) {
+        const { data: prof } = await sb.from("profiles").select("access").eq("id", auth.userId).maybeSingle();
+        const roles = Array.isArray(prof?.access) ? prof.access : [];
+        if (!roles.includes("admin")) return json({ error: "Admin access required." }, 403);
+      }
+      const nameQuery = String(body.owner_name || "").trim();
+      const confirmId = String(body.confirm_owner_id || "").trim();
+      const expected = Number.isFinite(Number(body.expected_count)) ? Number(body.expected_count) : null;
+      if (!nameQuery && !confirmId) return json({ error: "Give a name to look for." }, 400);
+
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      // 1 — who is this. Matching against Zoho's own user list rather than
+      //     free-typing an id means a typo yields "no such person", not a
+      //     purge of somebody else's work.
+      const ur = await zohoFetch(sb, conn, accessToken,
+        `https://${apiDomain}/crm/v6/users?type=AllUsers&per_page=200`, {});
+      if (!ur.ok) {
+        const ud = await ur.json().catch(() => ({}));
+        return json({
+          error: String(ud?.code || "") === "OAUTH_SCOPE_MISMATCH"
+            ? "This Zoho connection can’t read the user list, so the owner can’t be identified. Reconnect Zoho with users access."
+            : "Couldn’t read the Zoho user list.",
+        }, 400);
+      }
+      const ud = await ur.json().catch(() => ({}));
+      const users = Array.isArray(ud?.users) ? ud.users : [];
+      const norm = (v: unknown) => String(v || "").trim().toLowerCase();
+      const matches = confirmId
+        ? users.filter((u: any) => String(u.id) === confirmId)
+        : users.filter((u: any) => norm(u.full_name).includes(norm(nameQuery)) || norm(u.email).includes(norm(nameQuery)));
+
+      if (!matches.length)
+        return json({ error: `Nobody in Zoho matches “${nameQuery || confirmId}”.`, owners: [] }, 404);
+      // Ambiguity is never resolved here. Hand back the candidates and let a
+      // person pick -- guessing which of two people to delete work from is not
+      // a decision this endpoint gets to make.
+      if (matches.length > 1)
+        return json({
+          error: "That matches more than one person in Zoho. Pick one.",
+          owners: matches.map((u: any) => ({ id: String(u.id), name: u.full_name, email: u.email, status: u.status })),
+        }, 409);
+
+      const owner = matches[0];
+      const ownerId = String(owner.id);
+
+      // 2 — everything that person owns. One page at a time; Zoho caps a
+      //     search page at 200 and the count is what the operator is about to
+      //     destroy, so it is counted honestly rather than estimated.
+      const PAGE = 200;
+      const MAX_PAGES = 30;               // 6000 tasks; a stop, not a target
+      const searchPage = async (page: number) => {
+        const u = new URL(`https://${apiDomain}/crm/v6/Tasks/search`);
+        u.searchParams.set("criteria", `(Owner:equals:${ownerId})`);
+        u.searchParams.set("fields", "Owner,Subject,Status,Due_Date,Closed_Time");
+        u.searchParams.set("per_page", String(PAGE));
+        u.searchParams.set("page", String(page));
+        const r = await zohoFetch(sb, conn, accessToken, u.toString(), {});
+        if (r.status === 204) return { rows: [], more: false, ok: true };
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return { rows: [], more: false, ok: false, err: d?.message || "Zoho search error" };
+        return { rows: Array.isArray(d.data) ? d.data : [], more: !!d?.info?.more_records, ok: true };
+      };
+
+      const all: any[] = [];
+      let capped = false;
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const r = await searchPage(page);
+        if (!r.ok) return json({ error: r.err || "Zoho search error" }, 400);
+        all.push(...r.rows);
+        if (!r.more) break;
+        if (page === MAX_PAGES) capped = true;
+      }
+
+      const ownerOut = { id: ownerId, name: owner.full_name, email: owner.email, status: owner.status };
+      // 3 — the preview. Gated on the COUNT being absent, not on the id: the
+      //     operator reaches this a second time after picking from a list of
+      //     same-name people, and that second look must still be a look.
+      //     Deleting is the branch that requires a count, and only that branch.
+      if (expected === null) {
+        return json({
+          preview: true, owner: ownerOut, count: all.length, capped,
+          sample: all.slice(0, 10).map((t: any) => ({
+            subject: t.Subject || null,
+            status: t.Status || null,
+            due: t.Due_Date || null,
+            closed: t.Closed_Time ? String(t.Closed_Time).slice(0, 10) : null,
+          })),
+        }, 200);
+      }
+
+      // 4 — the confirm. The count the operator was shown has to still be the
+      //     count that is there, or we are deleting something they never saw.
+      if (!confirmId)
+        return json({ error: "Confirm with the owner id you were shown." }, 400);
+      if (expected !== all.length)
+        return json({
+          error: `This changed since you looked — it was ${expected} tasks, now it’s ${all.length}. Nothing was deleted. Look again.`,
+          owner: ownerOut, count: all.length,
+        }, 409);
+      if (!all.length) return json({ ok: true, owner: ownerOut, deleted: 0, failed: 0 }, 200);
+
+      // Zoho takes up to 100 ids on one DELETE. Chunked, and every chunk's
+      // per-record status is read -- a 200 on the call does not mean all 100
+      // rows went.
+      const ids = all.map((t: any) => String(t.id)).filter(Boolean);
+      let deleted = 0;
+      const failures: Array<{ id: string; message: string }> = [];
+      for (let i = 0; i < ids.length; i += 100) {
+        const chunk = ids.slice(i, i + 100);
+        const u = new URL(`https://${apiDomain}/crm/v6/Tasks`);
+        u.searchParams.set("ids", chunk.join(","));
+        u.searchParams.set("wf_trigger", "false");
+        const r = await zohoFetch(sb, conn, accessToken, u.toString(), { method: "DELETE" });
+        const d = await r.json().catch(() => ({}));
+        const rows = Array.isArray(d?.data) ? d.data : [];
+        if (!r.ok && !rows.length) {
+          failures.push(...chunk.map((id) => ({ id, message: String(d?.message || `HTTP ${r.status}`) })));
+          continue;
+        }
+        rows.forEach((row: any, j: number) => {
+          if (row?.status === "success") deleted++;
+          else failures.push({ id: String(row?.details?.id || chunk[j] || ""), message: String(row?.message || "refused") });
+        });
+      }
+
+      return json({
+        ok: true, owner: ownerOut, deleted, failed: failures.length,
+        failures: failures.slice(0, 10), capped,
+      }, 200);
+    }
+
     // ── Re-grant the org's Zoho authorization [admin] ──────────────
     //  Adding a scope to a Zoho grant is not an edit — Zoho mints a whole new
     //  refresh token against the new scope list and the old one keeps working

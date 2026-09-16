@@ -3549,11 +3549,148 @@ Rules:
       );
     }
 
+    // ─── Delete every Zoho task owned by a former agent ──────────────
+    //  A departed agent's finished tasks keep surfacing in the Calls tab. This
+    //  removes them from Zoho outright, which also removes those calls from
+    //  Zoho Reports — that tallies the Tasks module by Task Type, so a deleted
+    //  task is a call that never happened as far as reporting is concerned.
+    //  There is no undo, so the flow is deliberately two steps and the second
+    //  one is armed only by what the first one actually found.
+    function ZohoPurgeTasks() {
+      const [name, setName] = useState('');
+      const [phase, setPhase] = useState('idle');   // idle | finding | found | deleting | done | error
+      const [found, setFound] = useState(null);     // { owner, count, sample[], capped }
+      const [choices, setChoices] = useState([]);   // several people matched
+      const [result, setResult] = useState(null);
+      const [msg, setMsg] = useState('');
+
+      const reset = () => { setFound(null); setChoices([]); setResult(null); setMsg(''); };
+
+      async function find(ownerId) {
+        setPhase('finding'); reset();
+        const { ok, status, data } = await callZoho(ownerId
+          ? { action: 'purge_owner_tasks', confirm_owner_id: ownerId }   // resolve only; no count sent, so it previews
+          : { action: 'purge_owner_tasks', owner_name: name.trim() });
+        if (status === 409 && data && data.owners) { setChoices(data.owners); setPhase('idle'); return; }
+        if (!ok) { setMsg((data && data.error) || 'Zoho didn’t answer.'); setPhase('error'); return; }
+        setFound(data); setPhase('found');
+      }
+
+      async function purge() {
+        if (!found || !found.owner) return;
+        setPhase('deleting'); setMsg('');
+        const { ok, data } = await callZoho({
+          action: 'purge_owner_tasks',
+          confirm_owner_id: found.owner.id,
+          expected_count: found.count,
+        });
+        if (!ok) { setMsg((data && data.error) || 'Nothing was deleted.'); setPhase('error'); return; }
+        setResult(data); setFound(null); setPhase('done');
+      }
+
+      const mono = { fontFamily: C.fontMono || 'ui-monospace, SFMono-Regular, Menlo, monospace' };
+
+      return (
+        <div style={CARD}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 10 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F7E4E4' }}><i className="ti ti-trash-x" style={{ fontSize: 18, color: '#9B1C1C' }} /></div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Delete a Former Agent’s Tasks</div>
+              <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginTop: 2, lineHeight: 1.4 }}>Removes every Zoho task owned by one person. Permanent.</div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 4 }}>
+            <input value={name} onChange={e => { setName(e.target.value); if (phase !== 'idle') { setPhase('idle'); reset(); } }}
+              onKeyDown={e => { if (e.key === 'Enter' && name.trim()) find(); }}
+              placeholder="Agent’s name in Zoho"
+              style={{ flex: 1, minWidth: 160, fontFamily: C.fontSans, fontSize: '0.8rem', padding: '9px 11px', border: '1px solid ' + C.border, borderRadius: 9, background: C.surface, color: C.textPrimary, outline: 'none' }} />
+            <button onClick={() => find()} disabled={!name.trim() || phase === 'finding' || phase === 'deleting'}
+              style={{ fontFamily: C.fontSans, fontSize: '0.78rem', fontWeight: 600, color: C.navy, background: C.surface, border: '1px solid ' + C.border, borderRadius: 9, padding: '9px 15px', cursor: (!name.trim() || phase === 'finding') ? 'default' : 'pointer', opacity: (!name.trim() || phase === 'finding') ? 0.45 : 1 }}>
+              {phase === 'finding' ? 'Looking…' : 'Find their tasks'}
+            </button>
+          </div>
+
+          {/* More than one person matched. Never guessed on their behalf — one
+              keystroke separates two real people here. */}
+          {choices.length > 0 && (
+            <div style={{ marginTop: 9 }}>
+              <div style={{ fontSize: '0.73rem', color: C.textSecondary, marginBottom: 5 }}>More than one person matches. Which one?</div>
+              {choices.map(o => (
+                <button key={o.id} onClick={() => find(o.id)}
+                  style={{ display: 'block', width: '100%', textAlign: 'left', fontFamily: C.fontSans, fontSize: '0.76rem', color: C.navy, background: C.bg, border: '1px solid ' + C.border, borderRadius: 8, padding: '7px 10px', marginBottom: 5, cursor: 'pointer' }}>
+                  <b>{o.name}</b> <span style={{ color: C.textMuted }}>· {o.email}{o.status ? ' · ' + o.status : ''}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {phase === 'found' && found && (
+            <div style={{ marginTop: 11, paddingTop: 10, borderTop: '1px dashed ' + C.border }}>
+              <div style={{ fontSize: '0.78rem', color: C.navy, fontWeight: 600 }}>
+                {found.owner.name} <span style={{ fontWeight: 400, color: C.textMuted }}>· {found.owner.email}{found.owner.status ? ' · ' + found.owner.status : ''}</span>
+              </div>
+              <div style={{ fontSize: '0.78rem', color: C.textSecondary, marginTop: 4 }}>
+                {found.count === 0 ? 'Owns no tasks in Zoho — nothing to delete.'
+                  : <span><b style={{ color: '#9B1C1C' }}>{found.count}</b> task{found.count === 1 ? '' : 's'} would be deleted permanently.</span>}
+              </div>
+              {found.capped && (
+                <div style={{ fontSize: '0.72rem', color: '#9B1C1C', marginTop: 4 }}>More than 6,000 — this is only the first 6,000. Run it again afterwards.</div>
+              )}
+              {(found.sample || []).length > 0 && (
+                <div style={{ ...mono, fontSize: '0.68rem', color: C.textMuted, lineHeight: 1.6, marginTop: 7, paddingLeft: 9, borderLeft: '2px solid ' + C.border }}>
+                  {found.sample.map((t, i) => (
+                    <div key={i} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {(t.closed || t.due || '—')} · {t.status || '?'} · {t.subject || '(no subject)'}
+                    </div>
+                  ))}
+                  {found.count > found.sample.length && <div>…and {found.count - found.sample.length} more</div>}
+                </div>
+              )}
+              {found.count > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: '0.72rem', color: C.textMuted, lineHeight: 1.5, marginBottom: 7 }}>
+                    These also disappear from Zoho Reports, which counts calls by task type. This cannot be undone.
+                  </div>
+                  <button onClick={purge} disabled={phase === 'deleting'}
+                    style={{ fontFamily: C.fontSans, fontSize: '0.78rem', fontWeight: 600, color: '#fff', background: '#9B1C1C', border: 'none', borderRadius: 9, padding: '10px 16px', cursor: phase === 'deleting' ? 'default' : 'pointer', opacity: phase === 'deleting' ? 0.5 : 1 }}>
+                    {phase === 'deleting' ? 'Deleting…' : `Delete ${found.count} task${found.count === 1 ? '' : 's'} permanently`}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {phase === 'done' && result && (
+            <div style={{ marginTop: 11, paddingTop: 10, borderTop: '1px dashed ' + C.border, fontSize: '0.76rem', lineHeight: 1.55 }}>
+              <div style={{ color: '#0F6E56', fontWeight: 600 }}>
+                Deleted {result.deleted} task{result.deleted === 1 ? '' : 's'} owned by {result.owner && result.owner.name}.
+              </div>
+              {result.failed > 0 && (
+                <div style={{ color: '#9B1C1C', marginTop: 4 }}>
+                  {result.failed} could not be deleted{(result.failures || []).length ? ': ' + result.failures.map(f => f.message).filter((v, i, a) => a.indexOf(v) === i).join('; ') : '.'}
+                </div>
+              )}
+              <div style={{ color: C.textMuted, marginTop: 4 }}>The Calls tab will stop showing them on its next refresh.</div>
+            </div>
+          )}
+
+          {phase === 'error' && (
+            <div style={{ marginTop: 10, fontSize: '0.75rem', color: '#9B1C1C', lineHeight: 1.55 }}>
+              {msg}
+              <div style={{ color: C.textMuted, marginTop: 3 }}>Nothing was deleted.</div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function AdminTab({ onOpenBuilder }) {
       return (
         <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
           <div style={{ fontSize: '1.5rem', fontWeight: 400, fontStyle: 'italic', color: C.navy, marginBottom: 24, fontFamily: C.fontDisplay }}>Admin</div>
           <ZohoReconnect />
+          <ZohoPurgeTasks />
           <AdminUsers />
           <TabAccess />
           <AdminUsage />

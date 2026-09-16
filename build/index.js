@@ -9522,6 +9522,188 @@ function ZohoReconnect() {
     }
   }, "Zoho still won\u2019t hand over contact emails. Either the scope line was edited before it was pasted, or the agents\u2019 Zoho email sharing is set to private \u2014 Setup \u2192 Channels \u2192 Email \u2192 Email Sharing."))));
 }
+
+// One-off audit tool: for every Zoho Projects project, count how many of
+// the "Transaction Information" custom fields (Agent, MLS Active Date,
+// Effective Date, etc.) are actually filled in. Read-only Zoho calls only
+// — nothing here writes to Zoho or to TMG's own tables. Tap Run, then Copy;
+// paste the result wherever it's needed. Safe to delete once the one-off
+// audit that prompted it is done.
+function ZohoProjectsFieldAudit() {
+  const [phase, setPhase] = useState('idle'); // idle | working | done | error
+  const [msg, setMsg] = useState('');
+  const [fields, setFields] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [copied, setCopied] = useState(false);
+  const ZOHO_PROJECTS_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-projects';
+  async function callZohoProjects(payload) {
+    const res = await fetch(ZOHO_PROJECTS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + authToken(),
+        'apikey': SUPABASE_ANON
+      },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    return {
+      ok: res.ok,
+      status: res.status,
+      data
+    };
+  }
+  async function run() {
+    setPhase('working');
+    setMsg('');
+    setRows([]);
+    setFields([]);
+    try {
+      const {
+        ok,
+        data
+      } = await callZohoProjects({
+        action: 'audit_transaction_fields'
+      });
+      if (!ok) {
+        setMsg(data.error || 'Audit failed.');
+        setPhase('error');
+        return;
+      }
+      setFields(data.fields || []);
+      setRows(data.results || []);
+      setPhase('done');
+    } catch (e) {
+      setMsg('Couldn’t reach the server.');
+      setPhase('error');
+    }
+  }
+  const asText = () => {
+    const total = fields.length;
+    return 'Project\tFilled fields (of ' + total + ')\n' + rows.map(r => r.name + '\t' + r.filled).join('\n');
+  };
+  const copy = () => {
+    try {
+      navigator.clipboard.writeText(asText());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch (e) {}
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: CARD
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      color: C.navy,
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+      fontFamily: C.fontSans,
+      marginBottom: 3
+    }
+  }, "Zoho Projects \u2014 Transaction Fields Audit"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.74rem',
+      color: C.textSecondary,
+      marginBottom: 10,
+      lineHeight: 1.5
+    }
+  }, "One-off: how many \"Transaction Information\" fields are filled in, per project."), /*#__PURE__*/React.createElement("button", {
+    onClick: run,
+    disabled: phase === 'working',
+    style: {
+      padding: '8px 14px',
+      borderRadius: 9,
+      border: 'none',
+      background: C.navy,
+      color: '#fff',
+      fontSize: '0.8rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans,
+      opacity: phase === 'working' ? 0.6 : 1
+    }
+  }, phase === 'working' ? 'Running…' : 'Run audit'), phase === 'error' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      fontSize: '0.78rem',
+      color: C.red
+    }
+  }, msg), phase === 'done' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.76rem',
+      color: C.textMuted,
+      fontFamily: C.fontSans
+    }
+  }, rows.length, " projects \xB7 ", fields.length, " fields tracked"), /*#__PURE__*/React.createElement("button", {
+    onClick: copy,
+    style: {
+      padding: '5px 10px',
+      borderRadius: 7,
+      border: `1px solid ${C.border}`,
+      background: C.surface,
+      color: C.navy,
+      fontSize: '0.72rem',
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, copied ? 'Copied!' : 'Copy as text')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      maxHeight: 320,
+      overflowY: 'auto',
+      border: `1px solid ${C.border}`,
+      borderRadius: 10
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontFamily: C.fontSans,
+      fontSize: '0.78rem'
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      background: C.surfaceHover
+    }
+  }, /*#__PURE__*/React.createElement("th", {
+    style: {
+      textAlign: 'left',
+      padding: '7px 10px',
+      color: C.navy
+    }
+  }, "Project"), /*#__PURE__*/React.createElement("th", {
+    style: {
+      textAlign: 'right',
+      padding: '7px 10px',
+      color: C.navy
+    }
+  }, "Filled fields"))), /*#__PURE__*/React.createElement("tbody", null, rows.map((r, i) => /*#__PURE__*/React.createElement("tr", {
+    key: i,
+    style: {
+      borderTop: `1px solid ${C.border}`
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      color: C.textPrimary
+    }
+  }, r.name), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      color: C.textPrimary,
+      textAlign: 'right'
+    }
+  }, r.filled, " / ", fields.length))))))));
+}
 function AdminTab({
   onOpenBuilder
 }) {
@@ -9540,7 +9722,7 @@ function AdminTab({
       marginBottom: 24,
       fontFamily: C.fontDisplay
     }
-  }, "Admin"), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement(ZohoReconnect, null), /*#__PURE__*/React.createElement("div", {
+  }, "Admin"), /*#__PURE__*/React.createElement(AdminUsers, null), /*#__PURE__*/React.createElement(TabAccess, null), /*#__PURE__*/React.createElement(AdminUsage, null), /*#__PURE__*/React.createElement(ZohoReconnect, null), /*#__PURE__*/React.createElement(ZohoProjectsFieldAudit, null), /*#__PURE__*/React.createElement("div", {
     style: {
       ...CARD,
       cursor: 'pointer'

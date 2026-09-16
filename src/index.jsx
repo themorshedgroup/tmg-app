@@ -3559,6 +3559,81 @@ Rules:
       );
     }
 
+    // One-off audit tool: for every Zoho Projects project, count how many of
+    // the "Transaction Information" custom fields (Agent, MLS Active Date,
+    // Effective Date, etc.) are actually filled in. Read-only Zoho calls only
+    // — nothing here writes to Zoho or to TMG's own tables. Tap Run, then Copy;
+    // paste the result wherever it's needed. Safe to delete once the one-off
+    // audit that prompted it is done.
+    function ZohoProjectsFieldAudit() {
+      const [phase, setPhase] = useState('idle'); // idle | working | done | error
+      const [msg, setMsg] = useState('');
+      const [fields, setFields] = useState([]);
+      const [rows, setRows] = useState([]);
+      const [copied, setCopied] = useState(false);
+
+      const ZOHO_PROJECTS_ENDPOINT = 'https://ipqoqhsnjubopybujetn.supabase.co/functions/v1/zoho-projects';
+      async function callZohoProjects(payload) {
+        const res = await fetch(ZOHO_PROJECTS_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + authToken(), 'apikey': SUPABASE_ANON },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        return { ok: res.ok, status: res.status, data };
+      }
+
+      async function run() {
+        setPhase('working'); setMsg(''); setRows([]); setFields([]);
+        try {
+          const { ok, data } = await callZohoProjects({ action: 'audit_transaction_fields' });
+          if (!ok) { setMsg(data.error || 'Audit failed.'); setPhase('error'); return; }
+          setFields(data.fields || []);
+          setRows(data.results || []);
+          setPhase('done');
+        } catch (e) { setMsg('Couldn’t reach the server.'); setPhase('error'); }
+      }
+
+      const asText = () => {
+        const total = fields.length;
+        return 'Project\tFilled fields (of ' + total + ')\n' +
+          rows.map(r => r.name + '\t' + r.filled).join('\n');
+      };
+      const copy = () => {
+        try { navigator.clipboard.writeText(asText()); setCopied(true); setTimeout(() => setCopied(false), 1600); } catch (e) {}
+      };
+
+      return (
+        <div style={CARD}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 600, color: C.navy, letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans, marginBottom: 3 }}>Zoho Projects — Transaction Fields Audit</div>
+          <div style={{ fontSize: '0.74rem', color: C.textSecondary, marginBottom: 10, lineHeight: 1.5 }}>One-off: how many "Transaction Information" fields are filled in, per project.</div>
+          <button onClick={run} disabled={phase === 'working'} style={{ padding: '8px 14px', borderRadius: 9, border: 'none', background: C.navy, color: '#fff', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans, opacity: phase === 'working' ? 0.6 : 1 }}>{phase === 'working' ? 'Running…' : 'Run audit'}</button>
+          {phase === 'error' && <div style={{ marginTop: 10, fontSize: '0.78rem', color: C.red }}>{msg}</div>}
+          {phase === 'done' && (
+            <React.Fragment>
+              <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ fontSize: '0.76rem', color: C.textMuted, fontFamily: C.fontSans }}>{rows.length} projects · {fields.length} fields tracked</div>
+                <button onClick={copy} style={{ padding: '5px 10px', borderRadius: 7, border: `1px solid ${C.border}`, background: C.surface, color: C.navy, fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans }}>{copied ? 'Copied!' : 'Copy as text'}</button>
+              </div>
+              <div style={{ marginTop: 8, maxHeight: 320, overflowY: 'auto', border: `1px solid ${C.border}`, borderRadius: 10 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: C.fontSans, fontSize: '0.78rem' }}>
+                  <thead><tr style={{ background: C.surfaceHover }}><th style={{ textAlign: 'left', padding: '7px 10px', color: C.navy }}>Project</th><th style={{ textAlign: 'right', padding: '7px 10px', color: C.navy }}>Filled fields</th></tr></thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}>
+                        <td style={{ padding: '6px 10px', color: C.textPrimary }}>{r.name}</td>
+                        <td style={{ padding: '6px 10px', color: C.textPrimary, textAlign: 'right' }}>{r.filled} / {fields.length}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </React.Fragment>
+          )}
+        </div>
+      );
+    }
+
     function AdminTab({ onOpenBuilder }) {
       return (
         <div style={{ padding: '20px 16px 100px', height: '100%', overflowY: 'auto' }}>
@@ -3567,6 +3642,7 @@ Rules:
           <TabAccess />
           <AdminUsage />
           <ZohoReconnect />
+          <ZohoProjectsFieldAudit />
           <div style={{ ...CARD, cursor: 'pointer' }} onClick={onOpenBuilder}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <div style={{ width: 34, height: 34, borderRadius: 9, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F3EBDA' }}><i className="ti ti-layout-grid" style={{ fontSize: 18, color: C.gold }} /></div>

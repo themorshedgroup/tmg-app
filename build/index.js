@@ -13593,11 +13593,14 @@ function devProspect() {
   return {
     prospect_label: 'Prospect Form Type',
     prospect_api: 'Prospect_Form_Type',
-    types: ['Buyer Form'],
+    types: ['Residential Buyer'],
     sections_read: true,
     batches_failed: 0,
+    // Ordered the way the server now orders it: the whole left column of
+    // the Zoho section, then the whole right column, with the spouse block
+    // pulled together and Trigger / Spouse's First & Last Name dropped.
     groups: [{
-      title: 'Buyer Form',
+      title: 'Residential Buyer',
       source: 'section',
       fields: [{
         api: 'Budget_Max',
@@ -13625,6 +13628,29 @@ function devProspect() {
         label: 'Pre-approved',
         type: 'boolean',
         value: 'Yes',
+        options: null,
+        read_only: false
+      }, {
+        api: 'Spouse_Contact',
+        label: "Spouse's Contact Connection",
+        type: 'lookup',
+        value: 'Dana Carlin',
+        options: null,
+        read_only: false,
+        link_module: 'Contacts',
+        link_id: '6597827000001111222'
+      }, {
+        api: 'Spouse_Mobile',
+        label: "Spouse's Mobile",
+        type: 'phone',
+        value: '(713) 555-0184',
+        options: null,
+        read_only: false
+      }, {
+        api: 'Spouse_Email',
+        label: "Spouse's Email",
+        type: 'email',
+        value: 'dana.carlin@example.com',
         options: null,
         read_only: false
       }, {
@@ -13669,7 +13695,7 @@ async function briefRequest(contactId) {
     await new Promise(r => setTimeout(r, 550)); // so the loading state is visible
     const k = Number(String(contactId).slice(-1)) || 0;
     const good = over => Object.assign({
-      brief: 'DEALS\n- Under contract on 1903 Frazier Ave, closing 2026-10-02\nTOUCH\n- Spoken to 2026-09-03; a call is scheduled for 2026-09-20\nEMAIL\n- Lender chasing an updated pre-approval letter\n- Friday confirmed for the walkthrough\n- Gets the monthly market email',
+      brief: 'DEALS\n- Under contract on 1903 Frazier Ave, closing 2026-10-02',
       classification: 'B',
       contact_email_on_file: true,
       deals_read: true,
@@ -13691,6 +13717,56 @@ async function briefRequest(contactId) {
         first: '2018-06-14',
         last: '2026-08-05'
       },
+      // Written in code now, not by the model: the most recent task dated
+      // today or earlier. A call still in the diary must never appear here.
+      last_touch: {
+        type: 'Call',
+        date: '2026-09-03',
+        subject: 'Follow up on pre-approval'
+      },
+      zoho_email_list: [{
+        id: '900001',
+        subject: 'Updated pre-approval letter',
+        time: '2026-08-05',
+        sent: false,
+        from: 'ricardo.carlin@example.com'
+      }, {
+        id: '900002',
+        subject: 'Re: Friday walkthrough — 1903 Frazier',
+        time: '2026-07-28',
+        sent: true,
+        from: 'brad@themorshedgroup.com'
+      }, {
+        id: '900003',
+        subject: 'Showing feedback',
+        time: '2026-07-14',
+        sent: false,
+        from: 'ricardo.carlin@example.com'
+      }, {
+        id: '900004',
+        subject: 'Houston market — July',
+        time: '2026-07-01',
+        sent: true,
+        from: 'brad@themorshedgroup.com'
+      }, {
+        id: '900005',
+        subject: 'Re: Offer terms',
+        time: '2026-06-22',
+        sent: false,
+        from: 'ricardo.carlin@example.com'
+      }, {
+        id: '900006',
+        subject: 'Listing alert: Montrose',
+        time: '2026-06-09',
+        sent: true,
+        from: 'brad@themorshedgroup.com'
+      }, {
+        id: '900007',
+        subject: 'Nice to meet you',
+        time: '2018-06-14',
+        sent: true,
+        from: 'brad@themorshedgroup.com'
+      }],
       tags: ['Sphere', 'Past Client', 'Newsletter'],
       mailboxes: [{
         role: 'agent',
@@ -13731,15 +13807,20 @@ async function briefRequest(contactId) {
       contact_email_on_file: false,
       mailboxes: [],
       last_by_type: [],
+      last_touch: null,
+      zoho_email_list: [],
       tags: [],
       zoho_emails: 0,
       zoho_emails_state: 'none',
-      zoho_email_span: null
+      zoho_email_span: null,
+      prospect: null
     });else if (k === 3) fail('contact_not_found');else if (k === 4) fail('owner_unresolved', 'Cassandra Clemons');else if (k === 5) fail('not_permitted');else if (k === 6) fail('rate_limited');else if (k === 7) fail('zoho_unavailable');else if (k === 8) out = good({
       deals_read: false,
       tasks_read: false,
       threads_read: 0,
       last_by_type: [],
+      last_touch: null,
+      zoho_email_list: [],
       tags: null,
       zoho_emails: 0,
       zoho_emails_state: 'no_scope',

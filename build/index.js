@@ -13589,100 +13589,249 @@ function fetchContactBrief(contactId) {
 // One fixture, two consumers: the brief's prospect section and the pop-out
 // both read this in dev, so what the preview shows is the shape the server
 // actually returns.
-function devProspect() {
+// Saved prospect-form edits, for the preview only. The dev save used to
+// resolve after 400ms and throw the values away, so "type lorem ipsum in
+// and check it shows up" could not actually be checked — reopening the
+// window showed the original fixture again. Held in memory for the life of
+// the page: long enough to prove a round trip, short enough that a reload
+// gives a clean slate.
+const DEV_PROSPECT_EDITS = new Map(); // contactId -> { api: value }
+
+// One form per prospect type, because that IS the feature: the whole point
+// of the type is that a Buyer and a Seller are asked different questions.
+// A single shared fixture made every contact a Residential Buyer no matter
+// what their chip said, which is the one thing the window must never do.
+const DEV_FORMS = {
+  'Residential Buyer': {
+    fields: [{
+      api: 'Budget_Max',
+      label: 'Budget',
+      type: 'currency',
+      value: '650000'
+    }, {
+      api: 'Buyer_Timeline',
+      label: 'Timeline',
+      type: 'picklist',
+      value: '3-6 months',
+      options: ['0-3 months', '3-6 months', '6-12 months']
+    }, {
+      api: 'Areas',
+      label: 'Areas of interest',
+      type: 'multiselectpicklist',
+      value: 'Montrose, Heights',
+      options: ['Montrose', 'Heights', 'Rice Village']
+    }, {
+      api: 'Pre_Approved',
+      label: 'Pre-approved',
+      type: 'boolean',
+      value: 'Yes'
+    }, {
+      api: 'Spouse_Contact',
+      label: "Spouse's Contact Connection",
+      type: 'lookup',
+      value: 'Dana Carlin',
+      link_module: 'Contacts',
+      link_id: '6597827000001111222'
+    }, {
+      api: 'Spouse_Mobile',
+      label: "Spouse's Mobile",
+      type: 'phone',
+      value: '(713) 555-0184'
+    }, {
+      api: 'Spouse_Email',
+      label: "Spouse's Email",
+      type: 'email',
+      value: 'dana.carlin@example.com'
+    }, {
+      api: 'Lender',
+      label: 'Lender',
+      type: 'text',
+      value: 'Cadence Bank'
+    }],
+    empty: [{
+      api: 'Beds_Min',
+      label: 'Minimum beds',
+      type: 'integer'
+    }, {
+      api: 'Notes_Buyer',
+      label: 'Buyer notes',
+      type: 'textarea'
+    }, {
+      api: 'Target_Move',
+      label: 'Target move date',
+      type: 'date'
+    }]
+  },
+  'Residential Seller': {
+    fields: [{
+      api: 'Ask_Price',
+      label: 'Asking price',
+      type: 'currency',
+      value: '875000'
+    }, {
+      api: 'Sell_Reason',
+      label: 'Reason for selling',
+      type: 'picklist',
+      value: 'Relocating',
+      options: ['Relocating', 'Upsizing', 'Downsizing', 'Investment']
+    }, {
+      api: 'List_Timeline',
+      label: 'Listing timeline',
+      type: 'picklist',
+      value: '30-60 days',
+      options: ['ASAP', '30-60 days', '60-90 days']
+    }, {
+      api: 'Occupied',
+      label: 'Currently occupied',
+      type: 'boolean',
+      value: 'Yes'
+    }, {
+      api: 'Spouse_Contact',
+      label: "Spouse's Contact Connection",
+      type: 'lookup',
+      value: 'Ronan Okafor',
+      link_module: 'Contacts',
+      link_id: '6597827000001111333'
+    }, {
+      api: 'Spouse_Mobile',
+      label: "Spouse's Mobile",
+      type: 'phone',
+      value: '(281) 555-0142'
+    }, {
+      api: 'Spouse_Email',
+      label: "Spouse's Email",
+      type: 'email',
+      value: 'ronan.okafor@example.com'
+    }, {
+      api: 'Mortgage_Balance',
+      label: 'Mortgage balance',
+      type: 'currency',
+      value: '312000'
+    }],
+    empty: [{
+      api: 'Repairs',
+      label: 'Repairs needed',
+      type: 'textarea'
+    }, {
+      api: 'Seller_Notes',
+      label: 'Seller notes',
+      type: 'textarea'
+    }, {
+      api: 'Target_List',
+      label: 'Target list date',
+      type: 'date'
+    }]
+  },
+  'Open House': {
+    fields: [{
+      api: 'Property_Seen',
+      label: 'Property visited',
+      type: 'text',
+      value: '271 Egret Ln'
+    }, {
+      api: 'Has_Agent',
+      label: 'Working with an agent',
+      type: 'boolean',
+      value: ''
+    }, {
+      api: 'OH_Timeline',
+      label: 'Timeline',
+      type: 'picklist',
+      value: 'Just looking',
+      options: ['Just looking', '0-3 months', '3-6 months']
+    }, {
+      api: 'Financing',
+      label: 'Financing',
+      type: 'picklist',
+      value: 'Conventional',
+      options: ['Cash', 'Conventional', 'FHA', 'VA']
+    }],
+    empty: [{
+      api: 'OH_Notes',
+      label: 'Notes',
+      type: 'textarea'
+    }, {
+      api: 'OH_Follow_Up',
+      label: 'Follow-up date',
+      type: 'date'
+    }, {
+      api: 'Interest',
+      label: 'Interest level',
+      type: 'picklist',
+      options: ['Low', 'Medium', 'High']
+    }]
+  },
+  'Investor': {
+    fields: [{
+      api: 'Target_Return',
+      label: 'Target return',
+      type: 'text',
+      value: '8% cap'
+    }, {
+      api: 'Asset_Class',
+      label: 'Asset class',
+      type: 'multiselectpicklist',
+      value: 'Multifamily, Retail',
+      options: ['Multifamily', 'Retail', 'Industrial', 'Land']
+    }, {
+      api: 'Cash_Available',
+      label: 'Cash available',
+      type: 'currency',
+      value: '1200000'
+    }, {
+      api: 'Exchange_1031',
+      label: '1031 exchange',
+      type: 'boolean',
+      value: 'Yes'
+    }],
+    empty: [{
+      api: 'Markets',
+      label: 'Target markets',
+      type: 'textarea'
+    }, {
+      api: 'Entity_Name',
+      label: 'Entity name',
+      type: 'text'
+    }]
+  }
+};
+
+// `type` decides the form; `contactId` decides whose saved edits get laid
+// back over it. No type means this contact has no prospect form at all,
+// which is a real and common shape — it must return null, not an empty
+// window.
+function devProspect(type, contactId) {
+  const spec = DEV_FORMS[type];
+  if (!spec) return null;
+  const saved = DEV_PROSPECT_EDITS.get(String(contactId || '')) || {};
+  const build = f => {
+    const v = Object.prototype.hasOwnProperty.call(saved, f.api) ? saved[f.api] === true ? 'Yes' : saved[f.api] === false ? '' : String(saved[f.api] == null ? '' : saved[f.api]) : String(f.value || '');
+    return {
+      api: f.api,
+      label: f.label,
+      type: f.type,
+      value: v,
+      options: f.options || null,
+      read_only: false,
+      link_module: f.link_module || null,
+      link_id: f.link_id || null
+    };
+  };
+  const all = spec.fields.concat(spec.empty).map(build);
   return {
     prospect_label: 'Prospect Form Type',
     prospect_api: 'Prospect_Form_Type',
-    types: ['Residential Buyer'],
+    types: [type],
     sections_read: true,
     batches_failed: 0,
-    // Ordered the way the server now orders it: the whole left column of
-    // the Zoho section, then the whole right column, with the spouse block
-    // pulled together and Trigger / Spouse's First & Last Name dropped.
+    // Re-split on the CURRENT value, not on which list it started in, so a
+    // field filled in from the window moves up out of "blank" the way the
+    // real response would after a save.
     groups: [{
-      title: 'Residential Buyer',
+      title: type,
       source: 'section',
-      fields: [{
-        api: 'Budget_Max',
-        label: 'Budget',
-        type: 'currency',
-        value: '650000',
-        options: null,
-        read_only: false
-      }, {
-        api: 'Buyer_Timeline',
-        label: 'Timeline',
-        type: 'picklist',
-        value: '3-6 months',
-        options: ['0-3 months', '3-6 months', '6-12 months'],
-        read_only: false
-      }, {
-        api: 'Areas',
-        label: 'Areas of interest',
-        type: 'multiselectpicklist',
-        value: 'Montrose, Heights',
-        options: ['Montrose', 'Heights', 'Rice Village'],
-        read_only: false
-      }, {
-        api: 'Pre_Approved',
-        label: 'Pre-approved',
-        type: 'boolean',
-        value: 'Yes',
-        options: null,
-        read_only: false
-      }, {
-        api: 'Spouse_Contact',
-        label: "Spouse's Contact Connection",
-        type: 'lookup',
-        value: 'Dana Carlin',
-        options: null,
-        read_only: false,
-        link_module: 'Contacts',
-        link_id: '6597827000001111222'
-      }, {
-        api: 'Spouse_Mobile',
-        label: "Spouse's Mobile",
-        type: 'phone',
-        value: '(713) 555-0184',
-        options: null,
-        read_only: false
-      }, {
-        api: 'Spouse_Email',
-        label: "Spouse's Email",
-        type: 'email',
-        value: 'dana.carlin@example.com',
-        options: null,
-        read_only: false
-      }, {
-        api: 'Lender',
-        label: 'Lender',
-        type: 'text',
-        value: 'Cadence Bank',
-        options: null,
-        read_only: false
-      }],
-      empty: [{
-        api: 'Beds_Min',
-        label: 'Minimum beds',
-        type: 'integer',
-        value: '',
-        options: null,
-        read_only: false
-      }, {
-        api: 'Notes_Buyer',
-        label: 'Buyer notes',
-        type: 'textarea',
-        value: '',
-        options: null,
-        read_only: false
-      }, {
-        api: 'Target_Move',
-        label: 'Target move date',
-        type: 'date',
-        value: '',
-        options: null,
-        read_only: false
-      }]
+      fields: all.filter(f => f.value !== ''),
+      empty: all.filter(f => f.value === '')
     }]
   };
 }
@@ -13693,7 +13842,8 @@ async function briefRequest(contactId) {
     // reachable in the preview without a Supabase session. A real failure
     // that nobody has ever seen rendered is a failure that ships broken.
     await new Promise(r => setTimeout(r, 550)); // so the loading state is visible
-    const k = Number(String(contactId).slice(-1)) || 0;
+    const k = devPersonIndex(contactId);
+    const person = devPerson(contactId);
     const good = over => Object.assign({
       brief: 'DEALS\n- Under contract on 1903 Frazier Ave, closing 2026-10-02',
       classification: 'B',
@@ -13779,7 +13929,7 @@ async function briefRequest(contactId) {
         state: 'searched',
         threads: 1
       }],
-      prospect: devProspect(),
+      prospect: devProspect(person && person.pform, contactId),
       generated_at: new Date().toISOString()
     }, over || {});
     const fail = (code, ownerName) => {
@@ -13789,7 +13939,31 @@ async function briefRequest(contactId) {
       throw e;
     };
     let out;
-    if (k === 1) out = good({
+    // 10 and up are the healthy roster: they always answer, and they vary
+    // in the ways a brief actually varies — some have a deal on, some do
+    // not, and the email history is a different length for each. 0-9 stay
+    // as the one-fixture-per-failure map, because a failure nobody has
+    // ever seen rendered is a failure that ships broken.
+    if (k >= 10) {
+      const mail = good().zoho_email_list.slice(0, 1 + k % 7);
+      out = good({
+        classification: person && person.cls || null,
+        tags: person && person.tags.slice() || [],
+        brief: k % 3 === 0 ? 'DEALS\n- Nothing on file.' : good().brief,
+        zoho_email_list: mail,
+        zoho_emails: mail.length,
+        zoho_emails_state: mail.length ? 'read' : 'none',
+        zoho_email_span: mail.length ? {
+          first: mail[mail.length - 1].time,
+          last: mail[0].time
+        } : null,
+        last_touch: k % 4 === 3 ? null : {
+          type: ['Call', 'Pop-by', 'Meeting', 'Email'][k % 4],
+          date: '2026-09-0' + (1 + k % 9),
+          subject: null
+        }
+      });
+    } else if (k === 1) out = good({
       mailboxes: [{
         role: 'agent',
         name: 'Brad Baker',
@@ -14012,22 +14186,222 @@ function prospectText(v) {
 // localhost has no Zoho connection, so the preview runs off a fixture that
 // has the same shape a real search_tasks response returns.
 const callsIsDev = () => window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
+// ONE roster, read by the call list, the row hydration and the brief
+// fixture alike. It used to be three separate `i % 4`-style formulas keyed
+// off the contact's POSITION in whatever array was being filled, which
+// meant the same person was a different person on a different day tab —
+// Ariana Hall was a Seller on Yesterday and had no form at all on Today.
+// A preview that contradicts itself cannot be used to test anything, so
+// identity now comes from the contact id and nowhere else.
+//
+// 0-9 reproduce the original edge cases exactly (no number with and
+// without a spouse to rescue it, no email, no tags, no classification, no
+// form) because those are the shapes the row has to survive. 10-21 are the
+// healthy population: every classification against every form type against
+// every tag shape, so a real test sweep has something to sweep.
+const DEV_PEOPLE = [{
+  name: 'Steve Johnson',
+  cls: 'A',
+  pform: null,
+  tags: ['Sphere', 'Past Client', 'Newsletter', 'Luxury', 'Referral'],
+  phone: 1,
+  email: 1,
+  spouse: 1
+}, {
+  name: 'Jonathan Hewitt',
+  cls: 'B',
+  pform: 'Residential Seller',
+  tags: [],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Nick Spiller',
+  cls: 'C',
+  pform: 'Open House',
+  tags: ['Sphere'],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Courtney Gill',
+  cls: 'A',
+  pform: 'Residential Buyer',
+  tags: ['Sphere', 'Past Client', 'Newsletter', 'Luxury', 'Referral'],
+  phone: 1,
+  email: 0,
+  spouse: 1
+}, {
+  name: 'Adriana Culling',
+  cls: 'B',
+  pform: null,
+  tags: ['Sphere', 'Past Client', 'Newsletter', 'Luxury', 'Referral'],
+  phone: 0,
+  email: 1,
+  spouse: 2
+}, {
+  name: 'Daksha Patel',
+  cls: null,
+  pform: 'Open House',
+  tags: [],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Chris Gober',
+  cls: 'A',
+  pform: 'Residential Buyer',
+  tags: ['Sphere'],
+  phone: 0,
+  email: 1,
+  spouse: 1
+}, {
+  name: 'Ariana Hall',
+  cls: 'B',
+  pform: 'Residential Seller',
+  tags: ['Sphere', 'Past Client', 'Newsletter', 'Luxury', 'Referral'],
+  phone: 1,
+  email: 0,
+  spouse: 0
+}, {
+  name: 'Jeremy Bell',
+  cls: 'C',
+  pform: 'Open House',
+  tags: ['Sphere', 'Past Client', 'Newsletter', 'Luxury', 'Referral'],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Michael Beeler',
+  cls: 'A',
+  pform: 'Residential Buyer',
+  tags: [],
+  phone: 1,
+  email: 1,
+  spouse: 1
+}, {
+  name: 'Marisol Vega',
+  cls: 'A',
+  pform: 'Residential Buyer',
+  tags: ['Referral', 'Sphere'],
+  phone: 1,
+  email: 1,
+  spouse: 1
+}, {
+  name: 'Dwight Okafor',
+  cls: 'B',
+  pform: 'Residential Seller',
+  tags: ['Past Client'],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Priya Raghunathan',
+  cls: 'C',
+  pform: 'Investor',
+  tags: [],
+  phone: 1,
+  email: 0,
+  spouse: 0
+}, {
+  name: 'Tomas Delgado',
+  cls: null,
+  pform: 'Open House',
+  tags: ['Referral'],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Bernadette Lau',
+  cls: 'A',
+  pform: 'Residential Buyer',
+  tags: ['Sphere', 'Luxury', 'Referral'],
+  phone: 0,
+  email: 1,
+  spouse: 2
+}, {
+  name: 'Curtis Whitfield',
+  cls: 'B',
+  pform: null,
+  tags: [],
+  phone: 0,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Aiko Tanaka',
+  cls: 'C',
+  pform: 'Residential Seller',
+  tags: ['Newsletter'],
+  phone: 1,
+  email: 1,
+  spouse: 1
+}, {
+  name: 'Ravi Chandrasekaran',
+  cls: 'A',
+  pform: 'Investor',
+  tags: ['Referral', 'Past Client'],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Noor Haddad',
+  cls: 'B',
+  pform: 'Residential Buyer',
+  tags: [],
+  phone: 1,
+  email: 0,
+  spouse: 1
+}, {
+  name: 'Gavin Mbeki',
+  cls: 'C',
+  pform: 'Open House',
+  tags: ['Sphere'],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}, {
+  name: 'Elena Rossi',
+  cls: null,
+  pform: 'Residential Seller',
+  tags: ['Referral'],
+  phone: 1,
+  email: 1,
+  spouse: 1
+}, {
+  name: 'Hassan Farouk',
+  cls: 'A',
+  pform: null,
+  tags: ['Luxury'],
+  phone: 1,
+  email: 1,
+  spouse: 0
+}];
+// The contact id IS the index. '55000000000000' + (100 + k), so the last
+// three digits minus 100 give the person back from any id, anywhere.
+const devContactId = k => '55000000000000' + String(100 + k);
+const devPersonIndex = id => {
+  const n = Number(String(id || '').slice(-3)) - 100;
+  return Number.isFinite(n) && n >= 0 && n < DEV_PEOPLE.length ? n : -1;
+};
+const devPerson = id => DEV_PEOPLE[devPersonIndex(id)] || null;
 function devCalls(iso, n, seed) {
-  const names = ['Steve Johnson', 'Jonathan Hewitt', 'Nick Spiller', 'Courtney Gill', 'Adriana Culling', 'Daksha Patel', 'Chris Gober', 'Ariana Hall', 'Jeremy Bell', 'Michael Beeler'];
-  const tiers = ['A', 'B', 'C', 'A', 'B', 'EO', 'C', 'A', 'B', 'C'];
   return Array.from({
     length: n
   }, (_, i) => {
-    const k = (seed + i) % names.length;
+    const k = (seed + i) % DEV_PEOPLE.length;
+    const p = DEV_PEOPLE[k];
     return {
       id: 'dev-' + iso + '-' + i,
-      Subject: tiers[k] + ' Touch Call: ' + names[k],
+      // The subject carries a tier because that is the ONLY place a real
+      // cadence task records one, and the subject-derived fallback has to
+      // stay exercisable for the contacts whose record has no class.
+      Subject: (p.cls || 'EO') + ' Touch Call: ' + p.name,
       Status: seed === 0 && i % 3 === 0 ? 'Completed' : 'Not Started',
       Due_Date: iso,
       Task_Type: 'Call',
       Who_Id: {
-        id: '55000000000000' + String(100 + k),
-        name: names[k]
+        id: devContactId(k),
+        name: p.name
       }
     };
   });
@@ -14865,6 +15239,7 @@ function ProspectSheet({
   label,
   types,
   preloaded,
+  onSaved,
   onClose
 }) {
   const J = "'Jost', sans-serif";
@@ -14896,9 +15271,10 @@ function ProspectSheet({
       };
     }
     if (callsIsDev()) {
+      const t = types && types[0] || (devPerson(contactId) || {}).pform || null;
       setTimeout(() => {
         if (!dead) {
-          setData(devProspect());
+          setData(devProspect(t, contactId));
           setState('ready');
         }
       }, 400);
@@ -14956,7 +15332,12 @@ function ProspectSheet({
     });
     try {
       if (callsIsDev()) {
+        // Remember it, so reopening the window shows what was typed
+        // instead of the fixture. Without this there is no way to check
+        // that a save did anything.
         await new Promise(r => setTimeout(r, 400));
+        const prev = DEV_PROSPECT_EDITS.get(String(contactId)) || {};
+        DEV_PROSPECT_EDITS.set(String(contactId), Object.assign({}, prev, record));
       } else {
         const r = await callZoho({
           action: 'update_record',
@@ -14968,24 +15349,34 @@ function ProspectSheet({
       }
       // Fold the saved values into the loaded copy so the window shows what
       // Zoho now holds, without a second read.
-      setData(d => {
-        if (!d) return d;
-        const patch = f => Object.prototype.hasOwnProperty.call(edits, f.api) ? {
-          ...f,
-          value: String(edits[f.api] === true ? 'Yes' : edits[f.api] === false ? '' : edits[f.api] || '')
-        } : f;
-        return {
-          ...d,
-          groups: (d.groups || []).map(g => {
-            const all = (g.fields || []).concat(g.empty || []).map(patch);
-            return {
-              ...g,
-              fields: all.filter(f => !!f.value),
-              empty: all.filter(f => !f.value && !f.read_only)
-            };
-          })
-        };
+      const patch = f => Object.prototype.hasOwnProperty.call(edits, f.api) ? {
+        ...f,
+        value: String(edits[f.api] === true ? 'Yes' : edits[f.api] === false ? '' : edits[f.api] || '')
+      } : f;
+      const repatch = d => ({
+        ...d,
+        groups: (d.groups || []).map(g => {
+          const all = (g.fields || []).concat(g.empty || []).map(patch);
+          return {
+            ...g,
+            fields: all.filter(f => !!f.value),
+            empty: all.filter(f => !f.value && !f.read_only)
+          };
+        })
       });
+      setData(d => d ? repatch(d) : d);
+      // The brief that opened this window is holding its own copy of the
+      // same fields, memoised for the life of the page. Without this it
+      // keeps showing the OLD value after a save — an agent changes the
+      // asking price, closes the window, and the summary underneath still
+      // reads the previous number as though it were current. Handing the
+      // patched groups back is cheaper and steadier than dropping the memo
+      // and paying for the whole brief, AI call included, a second time.
+      if (typeof onSaved === 'function') {
+        try {
+          onSaved(contactId, repatch);
+        } catch (e) {}
+      }
       setEdits({});
       setSaved(true);
     } catch (e) {
@@ -15542,10 +15933,13 @@ function CallsTab({
         }
       }));
       const spread = (iso, n, seed) => team ? stamp(devCalls(iso, n, seed), 'Tarek Morshed').concat(stamp(devCalls(iso, Math.max(1, n - 2), seed + 4), 'Kyle Baird')) : stamp(devCalls(iso, n, seed), myOwner || 'Me');
+      // Seeds chosen so the three day tabs plus the two owners between
+      // them reach every one of the 22 roster contacts. A test contact
+      // nothing ever lists is a test contact that was never tested.
       setBuckets({
-        yesterday: spread(dates.yesterday, 6, 0),
-        today: spread(dates.today, 5, 3),
-        tomorrow: spread(dates.tomorrow, 4, 6)
+        yesterday: spread(dates.yesterday, 11, 0),
+        today: spread(dates.today, 11, 7),
+        tomorrow: spread(dates.tomorrow, 10, 14)
       });
       const od = spread(dates.yesterday, 8, 2);
       setOverdue({
@@ -15875,26 +16269,37 @@ function CallsTab({
     };
     if (callsIsDev()) {
       const out = {};
-      ids.forEach((id, i) => {
+      ids.forEach(id => {
+        const k = devPersonIndex(id);
+        const p = DEV_PEOPLE[k];
+        if (!p) {
+          out[id] = {
+            detail: true,
+            phone: null,
+            email: null,
+            spouse: null,
+            spousePhone: null,
+            cls: null,
+            pform: null,
+            tags: []
+          };
+          return;
+        }
+        // phone: 1 = has one, 0 = none, and spouse 2 = no number of their
+        // own but a spouse whose number rescues the row. Both no-number
+        // shapes have to stay visible; they render differently.
         out[id] = {
           detail: true,
-          // Two no-number shapes on purpose: one the spouse fallback rescues
-          // (i%5), one it can't (i%7), so both render paths are visible.
-          phone: i % 5 === 4 || i % 7 === 6 ? null : String(5122000000 + i * 3737),
-          email: i % 4 === 3 ? null : 'contact' + i + '@example.com',
-          spouse: i % 3 === 0 || i % 5 === 4 ? {
-            id: '55000000000009' + String(100 + i),
+          phone: p.phone ? String(5122000000 + k * 3737) : null,
+          email: p.email ? 'contact' + k + '@example.com' : null,
+          spouse: p.spouse ? {
+            id: '55000000000009' + String(100 + k),
             name: 'Pat Example'
           } : null,
-          spousePhone: i % 5 === 4 ? String(5129000000 + i * 11) : null,
-          // The record's own classification, and one contact in six with none
-          // on file — that is the case the subject-derived fallback exists
-          // for, and it has to be visible in the preview.
-          cls: i % 6 === 5 ? null : ['A', 'B', 'C'][i % 3],
-          pform: i % 4 === 0 ? null : ['Buyer form', 'Seller form', 'Open house'][i % 3],
-          // Every shape the row has to survive: none, one, and a contact
-          // carrying more tags than the row can comfortably hold.
-          tags: i % 4 === 1 ? [] : i % 4 === 2 ? ['Sphere'] : ['Sphere', 'Past Client', 'Newsletter', 'Luxury', 'Referral Source']
+          spousePhone: p.spouse === 2 ? String(5129000000 + k * 11) : null,
+          cls: p.cls,
+          pform: p.pform,
+          tags: p.tags.slice()
         };
       });
       merge(out);
@@ -17228,6 +17633,22 @@ function CallsTab({
     label: pfield && pfield.label ? pfield.label : 'Prospect form',
     types: pformFor.types,
     preloaded: pformFor.preloaded,
+    onSaved: (cid, repatch) => {
+      // The memo holds a promise, so the patch is applied when it
+      // settles — which it already has by the time this window could
+      // have been opened from it.
+      const memo = BRIEF_MEMO.get(cid);
+      if (memo && memo.then) memo.then(d => {
+        if (d && d.prospect) d.prospect = repatch(d.prospect);
+      }).catch(() => {});
+      setBrief(b => b && b.id === cid && b.state === 'ready' && b.data && b.data.prospect ? {
+        ...b,
+        data: {
+          ...b.data,
+          prospect: repatch(b.data.prospect)
+        }
+      } : b);
+    },
     onClose: () => setPformFor(null)
   }), infoFor && /*#__PURE__*/React.createElement("div", {
     onClick: closeInfo,

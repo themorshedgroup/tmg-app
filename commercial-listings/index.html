@@ -41,6 +41,7 @@
   .pagebar .who{font-size:12px;color:var(--muted)}
   .tag{font-size:11px;color:var(--muted);background:#F3F4F6;border:1px solid var(--line);
     border-radius:999px;padding:3px 9px;white-space:nowrap}
+  .tag img.logo{height:11px;width:auto;vertical-align:-1px;margin:0 2px}
   .backarrow{color:rgba(255,255,255,.7);text-decoration:none;display:flex;align-items:center;
     margin-right:3px;font-size:18px}
   .backarrow:hover{color:#fff}
@@ -101,9 +102,11 @@
   th .srt.active{color:var(--gold);font-size:8px;letter-spacing:0}
   td.wrap-cell{white-space:normal;min-width:190px}
   .brokerline{font-size:11px;color:var(--muted);margin-top:2px;font-weight:400}
-  .srctag{display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;
-    background:#EFE7D6;color:#8A6100;border:1px solid #E0D2B4;
-    font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;vertical-align:1px}
+  /* CoStar's own mark rather than the word, so licensed rows are recognisable
+     at a glance. line-height:0 stops the image adding descender space. */
+  .srctag{display:inline-block;margin-left:6px;padding:2px 5px;border-radius:3px;
+    background:#EFE7D6;border:1px solid #E0D2B4;line-height:0;vertical-align:1px}
+  .srctag img{display:block;height:10px;width:auto}
   th.actcol,td.actcol{width:92px;min-width:92px;padding-left:10px;padding-right:6px;
     text-align:left;vertical-align:middle;white-space:nowrap}
   .actwrap{display:flex;align-items:center;gap:5px}
@@ -157,7 +160,7 @@
   <h1>Commercial Listings</h1>
   <span class="tag" id="tag-sched">Sync schedule: Tue / Thu / Sat, 12:01 AM</span>
   <span class="tag" id="tag-sync">Last auto sync: &mdash;</span>
-  <span class="tag" id="tag-import">Last import: &mdash;</span>
+  <span class="tag" id="tag-import">Last <img class="logo" src="costar.png" alt="CoStar"> import: <span id="tag-import-t">&mdash;</span></span>
   <div class="pageactions">
     <span class="who" id="who"></span>
     <button class="btn" id="btn-cols"><i class="ti ti-columns-3"></i> Columns</button>
@@ -395,7 +398,7 @@
         .eq("source","costar").order("updated_at",{ascending:false}).limit(1);
       if(!c.error && c.data && c.data.length) imported = c.data[0].updated_at;
     }
-    $("tag-import").textContent = "Last import: "+stamp(imported);
+    $("tag-import-t").textContent = stamp(imported);
   }
 
   async function loadAll(){
@@ -599,7 +602,7 @@
       // CoStar's export carries no listing URL, and their site 403s every
       // request from us, so a link cannot be built or verified. Surface the
       // Property ID instead -- it pastes straight into CoStar's search.
-      var tag = l.source==="costar" ? '<span class="srctag">CoStar</span>' : "";
+      var tag = l.source==="costar" ? '<span class="srctag"><img src="costar.png" alt="CoStar"></span>' : "";
       var line = (l.broker ? esc(l.broker) : "") + tag;
       return head + (line ? '<div class="brokerline">'+line+'</div>' : "");
     }

@@ -2017,17 +2017,21 @@ Deno.serve(async (req) => {
       // brief that says only "no emails" sends the agent into a call believing
       // a newsletter never went out.
       const emailsGet = async (): Promise<{ state: string; rows: any[] }> => {
-        // Ten per call is the ceiling and there is no per_page, so the later
-        // pages are walked. `page` is not documented for this related list, so
-        // the loop is written to survive it being IGNORED: if a page comes back
-        // holding ids we have already seen, that is the tell that paging does
-        // nothing here, and we stop rather than spinning.
+        // Ten per call is the ceiling and there is no per_page. This list does
+        // NOT paginate with `page` — it hands back an opaque `info.next_index`
+        // cursor which the next call passes as `index`. The earlier `page=N`
+        // loop was silently a no-op: Zoho ignored the param, returned the same
+        // newest ten every time, and the duplicate guard stopped the loop on
+        // round two. Every contact was therefore capped at ten emails, which
+        // is exactly the "why is it just one email" complaint, one order of
+        // magnitude up.
         const rows: any[] = [];
         const seen = new Set<string>();
+        let index: string | null = null;
         for (let page = 1; page <= CF_EMAIL_PAGES; page++) {
           try {
             const r = await zohoFetch(sb, conn, accessToken,
-              `https://${apiDomain}/crm/v6/Contacts/${cid}/Emails${page > 1 ? `?page=${page}` : ""}`, {});
+              `https://${apiDomain}/crm/v6/Contacts/${cid}/Emails${index ? `?index=${encodeURIComponent(index)}` : ""}`, {});
             if (r.status === 204) return { state: rows.length ? "read" : "none", rows };
             const d = await r.json().catch(() => ({}));
             if (!r.ok) {
@@ -2045,7 +2049,12 @@ Deno.serve(async (req) => {
               if (seen.has(key)) continue;
               seen.add(key); rows.push(m); fresh++;
             }
-            if (!got.length || !fresh) break;   // end of the list, or paging is a no-op
+            // `more_records` is the server's own word for whether another page
+            // exists. The duplicate guard stays as a backstop in case the
+            // cursor ever loops, but it is no longer what ends the walk.
+            const info = d?.info || {};
+            index = (info.more_records === true && info.next_index) ? String(info.next_index) : null;
+            if (!got.length || !fresh || !index) break;
           } catch { break; }
         }
         return { state: "read", rows };
@@ -2438,11 +2447,27 @@ Deno.serve(async (req) => {
       const sections: Array<{ name: string; cols: number; fields: string[] }> = [];
       for (const lay of (Array.isArray(ld?.layouts) ? ld.layouts : [])) {
         for (const sec of (Array.isArray(lay?.sections) ? lay.sections : [])) {
-          const raw = (Array.isArray(sec?.fields) ? sec.fields : []).slice();
+          // Only the fields Zoho itself DRAWS on the record detail page.
+          // `view_type.view === false` marks an input that exists for editing
+          // but is replaced on the page by a read-only twin: First Name and
+          // Last Name are both view:false because Full Name, view:true, stands
+          // in for the pair. Keeping all three emits a field Zoho never shows
+          // and pushes everything after it into the wrong cell — the real
+          // reason the arrangement looked scrambled rather than merely
+          // mis-ordered. `type: "unused"` is the Unused Fields tray, which
+          // nobody has put on the layout at all.
+          const raw = (Array.isArray(sec?.fields) ? sec.fields : []).slice()
+            .filter((f: any) => f?.view_type?.view !== false && String(f?.type || "") !== "unused");
           // Zoho hands fields back in an order that is close to, but not
           // reliably, the order they are drawn in. sequence_number is the
           // authority, so sort by it and only fall back to array order for
           // fields that carry no sequence at all.
+          //
+          // It is an ORDINAL, never a grid slot: Zoho's own sample layout has
+          // gaps (16, 18, 19 … 23, 26, 30) where fields were moved to Unused,
+          // and outright ties (Last_Name and Full_Name both 4). Computing a
+          // row from it arithmetically would put fields in the wrong places on
+          // any layout an admin has ever edited. Sort, then deal by position.
           raw.sort((a: any, b: any) => {
             const sa = Number(a?.sequence_number); const sb2 = Number(b?.sequence_number);
             if (Number.isFinite(sa) && Number.isFinite(sb2)) return sa - sb2;
@@ -2525,24 +2550,31 @@ Deno.serve(async (req) => {
       };
       const arrange = (apis: string[], cols: number) => groupSpouse(columnMajor(apis.filter(keep), cols));
 
-      // 3 -- the record. Ask ONLY for the fields we are going to show. The old
-      //      shape asked for every field on the module in batches of 45, which
-      //      cost five or six round trips to answer a question about twelve
-      //      fields.
+      // 3 -- the record, in ONE call. `fields=` is documented as "mandatory
+      //      when fetching all records" — meaning it is OPTIONAL when fetching
+      //      a specific one, and omitting it returns the entire record. Same
+      //      single API credit either way. Asking for a named subset only ever
+      //      bought a smaller payload, and it cost a round trip per 45 names
+      //      plus a whole extra call earlier just to learn the form type.
+      //
+      //      Reading everything once also fixes that second call for free: by
+      //      the time the type is needed the value is already in hand. Zoho
+      //      only returns subforms and multi-select lookups on a specific-
+      //      record read as well, so this is strictly more capable, not just
+      //      fewer calls.
       const values: Record<string, any> = {};
       let readFailed = 0;
-      const readFields = async (apis: string[]) => {
-        for (let i = 0; i < apis.length; i += 45) {
-          const batch = apis.slice(i, i + 45);
-          if (!batch.length) continue;
-          try {
-            const rr = await get(`https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(batch.join(","))}`);
-            if (!rr.ok) { readFailed++; try { await rr.body?.cancel(); } catch { /* drained */ } continue; }
-            const rd = await rr.json().catch(() => ({}));
-            const rec = rd?.data?.[0];
-            if (rec) for (const k of Object.keys(rec)) values[k] = rec[k];
-          } catch { readFailed++; }
-        }
+      let wholeRecordRead = false;
+      const readFields = async (_apis?: string[]) => {
+        if (wholeRecordRead) return;
+        wholeRecordRead = true;
+        try {
+          const rr = await get(`https://${apiDomain}/crm/v6/Contacts/${cid}`);
+          if (!rr.ok) { readFailed++; try { await rr.body?.cancel(); } catch { /* drained */ } return; }
+          const rd = await rr.json().catch(() => ({}));
+          const rec = rd?.data?.[0];
+          if (rec) for (const k of Object.keys(rec)) values[k] = rec[k];
+        } catch { readFailed++; }
       };
 
       // Flatten Zoho's shapes to something printable. A lookup is an object, a

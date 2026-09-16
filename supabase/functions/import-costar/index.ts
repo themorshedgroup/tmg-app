@@ -32,6 +32,43 @@ const COMPANY_FIELDS = ["leasingcompanyname", "salecompanyname", "listingcompany
 const CONTACT_FIELDS = ["leasingcompanycontact", "salecompanycontact", "listingbrokeragent", "brokeragent", "agent"];
 const ALREADY_CRAWLED = [/\becr\b|equitable commercial/i, /aquila/i, /\bhpi\b/i, /cushman/i, /kucera/i];
 
+// CoStar names the rent column after whatever period the exporting user has
+// their account set to display -- "Rent/SF/Mo", "Rent/SF/Yr" or a bare
+// "Rent/SF". Matching only the bare form silently dropped every rent in the
+// 2026-09-01 export (377 of 449 rows). Carry the period through to the label so
+// a monthly figure can never be read as an annual one.
+const RENT_FIELDS: [string, string][] = [
+  ["rentsfmo", "/SF/mo"],
+  ["rentsfyr", "/SF/yr"],
+  ["rentsf", ""],
+  ["askingrent", ""],
+  ["rate", ""],
+];
+// CoStar writes "Not Disclosed" into the rent column on rows that are not
+// actually for lease -- in the 2026-09-01 export, 63 of those 72 rows carried a
+// Sale Company and only 15 a Leasing Company. So a withheld rate is NOT a lease
+// signal; only a real number is.
+const RATE_WITHHELD = /^(not disclosed|undisclosed|withheld|negotiable|upon request|n\/?a|-+)$/i;
+// A trailing qualifier such as "(Est.)" has to stay last, after the unit.
+const RATE_QUALIFIER = /\s*(\([^)]*\))\s*$/;
+
+function rentOf(r: Record<string, unknown>): { label: string | null; forLease: boolean } {
+  for (const [key, unit] of RENT_FIELDS) {
+    const v = pick(r, key);
+    if (!v) continue;
+    const t = v.trim();
+    if (RATE_WITHHELD.test(t)) return { label: null, forLease: false };
+    if (!/[0-9]/.test(t)) return { label: null, forLease: false };
+    // Don't double up a unit the value already carries.
+    if (!unit || /\/\s*sf/i.test(t)) return { label: t, forLease: true };
+    const q = t.match(RATE_QUALIFIER);
+    return q
+      ? { label: `${t.replace(RATE_QUALIFIER, "")}${unit} ${q[1]}`, forLease: true }
+      : { label: `${t}${unit}`, forLease: true };
+  }
+  return { label: null, forLease: false };
+}
+
 const norm = (k: string) => k.toLowerCase().replace(/[^a-z]/g, "");
 function pick(row: Record<string, unknown>, ...names: string[]) {
   for (const n of names) {
@@ -108,10 +145,17 @@ Deno.serve(async (req) => {
 
   const today = new Date().toISOString().slice(0, 10);
   const mapped = kept.map((r) => {
-    const rent = pick(r, "rentsf", "rentsfyr", "askingrent", "rate");
+    const rent = rentOf(r);
     const sale = pick(r, "forsaleprice", "salesprice", "price");
-    const saleOff = /not for sale|off market/i.test(pick(r, "forsalestatus") || "");
-    const forSale = !!sale && !saleOff;
+    // Older exports spell this column out; current ones write "Y"/"N". Only an
+    // explicit negative rules a sale out -- "Y" with no price is common and
+    // means the price is withheld, not that the listing is off market.
+    const saleStatus = (pick(r, "forsalestatus") || "").trim();
+    const saleOff = /^n$/i.test(saleStatus) || /not for sale|off market|sold/i.test(saleStatus);
+    // Most sale listings in the export withhold the price but still name a Sale
+    // Company. Without this, those rows would land with no status at all.
+    const saleCo = pick(r, "salecompanyname");
+    const forSale = (!!sale || (!!saleCo && !rent.forLease)) && !saleOff;
     const sizeRaw = pick(r, "totalavailablespacesf", "rentablebuildingarea", "rba", "availablesf", "buildingsf", "size");
     const sizeNum = sizeRaw ? Number(String(sizeRaw).replace(/[^0-9.]/g, "")) : NaN;
     const address = clean(pick(r, "propertyaddress", "address", "streetaddress"));
@@ -125,9 +169,9 @@ Deno.serve(async (req) => {
       city: clean(pick(r, "city")) || "Austin",
       submarket: clean(pick(r, "submarketname", "submarket", "submarketcluster")),
       property_type: mapType(pick(r, "propertytype", "secondarytype", "spaceuse", "type")),
-      status: rent && forSale ? "both" : forSale ? "for_sale" : rent ? "for_lease" : null,
+      status: rent.forLease && forSale ? "both" : forSale ? "for_sale" : rent.forLease ? "for_lease" : null,
       size: Number.isFinite(sizeNum) && sizeNum > 0 ? `${sizeNum.toLocaleString("en-US")} SF` : sizeRaw,
-      price_or_rate: clean(rent || sale),
+      price_or_rate: clean(rent.label || sale),
       agents: [{ name: clean(pick(r, ...CONTACT_FIELDS)), phone: clean(pick(r, "brokerphone", "phone")), email: null }]
         .filter((a) => a.name),
       url: listingUrl || (costarId ? `https://product.costar.com/detail/all-properties/${encodeURIComponent(costarId)}/summary` : null),

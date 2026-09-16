@@ -15308,13 +15308,31 @@ function ProspectSheet({
   const groups = data && data.groups || [];
   const dirty = Object.keys(edits);
 
+  // Both the backdrop and the X used to close straight over unsaved edits,
+  // so a mistimed tap lost everything typed with nothing said about it.
+  function tryClose() {
+    if (dirty.length && !saving) {
+      const many = dirty.length > 1;
+      if (!window.confirm(dirty.length + (many ? ' changes have' : ' change has') + ' not been saved yet. Close anyway and lose ' + (many ? 'them' : 'it') + '?')) return;
+    }
+    onClose();
+  }
+
   // Zoho wants the field's own shape back, not the string we displayed.
   // Multi-selects are the one that bites: sending "A, B" as a string is a
   // silent no-op on some layouts, so it goes back as an array.
+  // Every Zoho type that is stored as a number rather than as text.
+  const NUMERIC_TYPES = /^(currency|integer|double|bigint|decimal|long)$/i;
+  // "$750,000.50" -> "750000.50", and null when nothing numeric survives.
+  function numberish(v) {
+    const s = String(v == null ? '' : v).replace(/[^0-9.\-]/g, '');
+    return s === '' || s === '-' || s === '.' || !isFinite(Number(s)) ? null : s;
+  }
   function outbound(f, v) {
     if (f.type === 'boolean') return !!v;
     if (f.type === 'multiselectpicklist') return String(v || '').split(',').map(x => x.trim()).filter(Boolean);
     if (v === '') return null;
+    if (NUMERIC_TYPES.test(f.type || '')) return Number(numberish(v));
     return v;
   }
   async function save() {
@@ -15326,6 +15344,14 @@ function ProspectSheet({
     groups.forEach(g => (g.fields || []).concat(g.empty || []).forEach(f => {
       byApi[f.api] = f;
     }));
+    // Refuse rather than guess. Sending Number(null) would write 0 over a
+    // real figure, which is worse than the wipe it replaced.
+    const bad = dirty.filter(a => byApi[a] && String(edits[a] == null ? '' : edits[a]) !== '' && NUMERIC_TYPES.test(byApi[a].type || '') && numberish(edits[a]) === null);
+    if (bad.length) {
+      setSaving(false);
+      setSaveErr(bad.map(a => byApi[a].label).join(', ') + (bad.length > 1 ? ' need to be numbers.' : ' needs to be a number.'));
+      return;
+    }
     const record = {};
     dirty.forEach(a => {
       if (byApi[a]) record[a] = outbound(byApi[a], edits[a]);
@@ -15480,7 +15506,7 @@ function ProspectSheet({
         style: inputStyle
       }, /*#__PURE__*/React.createElement("option", {
         value: ""
-      }, "\u2014"), f.options.map((o, i) => /*#__PURE__*/React.createElement("option", {
+      }, "\u2014"), (val && f.options.indexOf(val) === -1 ? [val].concat(f.options) : f.options).map((o, i) => /*#__PURE__*/React.createElement("option", {
         key: i,
         value: o
       }, o)));
@@ -15495,12 +15521,21 @@ function ProspectSheet({
         }
       });
     } else {
-      const t = f.type === 'date' ? 'date' : f.type === 'integer' || f.type === 'double' || f.type === 'currency' || f.type === 'bigint' ? 'number' : 'text';
+      // Numbers go into a plain text box on purpose. `type="number"` hands
+      // back an EMPTY STRING for anything it cannot parse -- the comma in
+      // "750,000", a stray currency sign -- and outbound() turns an empty
+      // string into null, so one mistyped price SILENTLY WIPES the field in
+      // Zoho while the box on screen still shows what was typed. Text keeps
+      // every character, numberish() cleans it on the way out, and a value
+      // that is genuinely not a number stops the save by name instead.
+      const numeric = NUMERIC_TYPES.test(f.type || '');
+      const t = f.type === 'date' ? 'date' : 'text';
       control = /*#__PURE__*/React.createElement("input", {
         type: t,
         value: val || '',
         onChange: e => set(e.target.value),
         style: inputStyle,
+        inputMode: numeric ? 'decimal' : undefined,
         placeholder: f.type === 'multiselectpicklist' ? 'Separate with commas' : ''
       });
     }
@@ -15522,7 +15557,7 @@ function ProspectSheet({
     }, f.label, touched ? ' · edited' : ''), control);
   }
   return /*#__PURE__*/React.createElement("div", {
-    onClick: onClose,
+    onClick: tryClose,
     style: {
       position: 'fixed',
       inset: 0,
@@ -15570,7 +15605,7 @@ function ProspectSheet({
       color: mutedCol
     }
   }, contactName)), /*#__PURE__*/React.createElement("button", {
-    onClick: onClose,
+    onClick: tryClose,
     style: {
       background: 'none',
       border: 'none',
@@ -15941,7 +15976,15 @@ function CallsTab({
         today: spread(dates.today, 11, 7),
         tomorrow: spread(dates.tomorrow, 10, 14)
       });
-      const od = spread(dates.yesterday, 8, 2);
+      // Own id namespace. The overdue list and the Yesterday bucket come
+      // off the same generator on the same date, so without this they hand
+      // out identical ids for DIFFERENT people -- ticking a Yesterday row
+      // struck a stranger off the overdue count and the preview contradicted
+      // itself. Real Zoho ids are unique; this makes the fixture behave.
+      const od = spread(dates.yesterday, 8, 2).map(t => ({
+        ...t,
+        id: 'od-' + t.id
+      }));
       setOverdue({
         list: od,
         count: od.length,

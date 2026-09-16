@@ -5946,13 +5946,32 @@ Rules:
       const groups = (data && data.groups) || [];
       const dirty = Object.keys(edits);
 
+      // Both the backdrop and the X used to close straight over unsaved edits,
+      // so a mistimed tap lost everything typed with nothing said about it.
+      function tryClose() {
+        if (dirty.length && !saving) {
+          const many = dirty.length > 1;
+          if (!window.confirm(dirty.length + (many ? ' changes have' : ' change has') + ' not been saved yet. Close anyway and lose ' + (many ? 'them' : 'it') + '?')) return;
+        }
+        onClose();
+      }
+
       // Zoho wants the field's own shape back, not the string we displayed.
       // Multi-selects are the one that bites: sending "A, B" as a string is a
       // silent no-op on some layouts, so it goes back as an array.
+      // Every Zoho type that is stored as a number rather than as text.
+      const NUMERIC_TYPES = /^(currency|integer|double|bigint|decimal|long)$/i;
+      // "$750,000.50" -> "750000.50", and null when nothing numeric survives.
+      function numberish(v) {
+        const s = String(v == null ? '' : v).replace(/[^0-9.\-]/g, '');
+        return (s === '' || s === '-' || s === '.' || !isFinite(Number(s))) ? null : s;
+      }
+
       function outbound(f, v) {
         if (f.type === 'boolean') return !!v;
         if (f.type === 'multiselectpicklist') return String(v || '').split(',').map(x => x.trim()).filter(Boolean);
         if (v === '') return null;
+        if (NUMERIC_TYPES.test(f.type || '')) return Number(numberish(v));
         return v;
       }
 
@@ -5961,6 +5980,15 @@ Rules:
         setSaving(true); setSaveErr(''); setSaved(false);
         const byApi = {};
         groups.forEach(g => (g.fields || []).concat(g.empty || []).forEach(f => { byApi[f.api] = f; }));
+        // Refuse rather than guess. Sending Number(null) would write 0 over a
+        // real figure, which is worse than the wipe it replaced.
+        const bad = dirty.filter(a => byApi[a] && String(edits[a] == null ? '' : edits[a]) !== ''
+          && NUMERIC_TYPES.test(byApi[a].type || '') && numberish(edits[a]) === null);
+        if (bad.length) {
+          setSaving(false);
+          setSaveErr(bad.map(a => byApi[a].label).join(', ') + (bad.length > 1 ? ' need to be numbers.' : ' needs to be a number.'));
+          return;
+        }
         const record = {};
         dirty.forEach(a => { if (byApi[a]) record[a] = outbound(byApi[a], edits[a]); });
         try {
@@ -6032,14 +6060,23 @@ Rules:
           control = (
             <select value={val || ''} onChange={e => set(e.target.value)} style={inputStyle}>
               <option value="">—</option>
-              {f.options.map((o, i) => <option key={i} value={o}>{o}</option>)}
+              {((val && f.options.indexOf(val) === -1) ? [val].concat(f.options) : f.options).map((o, i) => <option key={i} value={o}>{o}</option>)}
             </select>
           );
         } else if (f.type === 'textarea') {
           control = <textarea value={val || ''} onChange={e => set(e.target.value)} rows={3} style={{ ...inputStyle, resize: 'vertical' }} />;
         } else {
-          const t = f.type === 'date' ? 'date' : (f.type === 'integer' || f.type === 'double' || f.type === 'currency' || f.type === 'bigint') ? 'number' : 'text';
+          // Numbers go into a plain text box on purpose. `type="number"` hands
+          // back an EMPTY STRING for anything it cannot parse -- the comma in
+          // "750,000", a stray currency sign -- and outbound() turns an empty
+          // string into null, so one mistyped price SILENTLY WIPES the field in
+          // Zoho while the box on screen still shows what was typed. Text keeps
+          // every character, numberish() cleans it on the way out, and a value
+          // that is genuinely not a number stops the save by name instead.
+          const numeric = NUMERIC_TYPES.test(f.type || '');
+          const t = f.type === 'date' ? 'date' : 'text';
           control = <input type={t} value={val || ''} onChange={e => set(e.target.value)} style={inputStyle}
+            inputMode={numeric ? 'decimal' : undefined}
             placeholder={f.type === 'multiselectpicklist' ? 'Separate with commas' : ''} />;
         }
         return (
@@ -6053,14 +6090,14 @@ Rules:
       }
 
       return (
-        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(10,20,45,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+        <div onClick={tryClose} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(10,20,45,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
           <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, maxHeight: '88vh', overflowY: 'auto', background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: '20px 20px calc(26px + env(safe-area-inset-bottom))' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 2 }}>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontFamily: J, fontSize: 17, fontWeight: 600, color: headTitle }}>{label || 'Prospect form'}</div>
                 <div style={{ fontFamily: J, fontSize: 11.5, fontWeight: 300, color: mutedCol }}>{contactName}</div>
               </div>
-              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: faintCol, padding: 0 }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
+              <button onClick={tryClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: faintCol, padding: 0 }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
             </div>
 
             {state === 'loading' && (
@@ -6272,7 +6309,12 @@ Rules:
           // them reach every one of the 22 roster contacts. A test contact
           // nothing ever lists is a test contact that was never tested.
           setBuckets({ yesterday: spread(dates.yesterday, 11, 0), today: spread(dates.today, 11, 7), tomorrow: spread(dates.tomorrow, 10, 14) });
-          const od = spread(dates.yesterday, 8, 2);
+          // Own id namespace. The overdue list and the Yesterday bucket come
+          // off the same generator on the same date, so without this they hand
+          // out identical ids for DIFFERENT people -- ticking a Yesterday row
+          // struck a stranger off the overdue count and the preview contradicted
+          // itself. Real Zoho ids are unique; this makes the fixture behave.
+          const od = spread(dates.yesterday, 8, 2).map(t => ({ ...t, id: 'od-' + t.id }));
           setOverdue({ list: od, count: od.length, capped: false });
           setBusy(false);
           return;

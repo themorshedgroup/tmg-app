@@ -15375,9 +15375,23 @@ function ProspectSheet({
       }
       // Fold the saved values into the loaded copy so the window shows what
       // Zoho now holds, without a second read.
+      // Show what Zoho now holds, not the keystrokes that got there. A
+      // budget typed as "$750,000.50" is stored as 750000.5, so echoing the
+      // typed string back would leave the form and the summary underneath
+      // both claiming a value the record does not have.
+      const shown = f => {
+        const v = edits[f.api];
+        if (v === true) return 'Yes';
+        if (v === false || v == null || v === '') return '';
+        if (NUMERIC_TYPES.test(f.type || '')) {
+          const c = numberish(v);
+          return c === null ? String(v) : String(Number(c));
+        }
+        return String(v);
+      };
       const patch = f => Object.prototype.hasOwnProperty.call(edits, f.api) ? {
         ...f,
-        value: String(edits[f.api] === true ? 'Yes' : edits[f.api] === false ? '' : edits[f.api] || '')
+        value: shown(f)
       } : f;
       const repatch = d => ({
         ...d,

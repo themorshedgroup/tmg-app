@@ -55,6 +55,14 @@ const ROUTE_LIST_SEG = {
   accountability: 'accountability'
 };
 const ROUTE_DTABS = ['overview', 'list', 'board', 'timeline'];
+// Which sub-tab a record opens on when the link doesn't name one. A CTC
+// file is a checklist first — the TC opens it to work the task list, not
+// to read the summary — so it lands on List. Everything else still opens
+// on Overview.
+const DTAB_DEFAULT = {
+  ctc_file: 'list'
+};
+const defaultDtab = kind => DTAB_DEFAULT[kind] || 'overview';
 const ROUTE_ID_RE = /^[0-9a-f-]{36}$/i;
 
 // hash -> route, or null when it isn't ours (a tab token, #calendar,
@@ -82,7 +90,10 @@ function parseTaskRoute(hash) {
   };
   const kind = ROUTE_KIND_BY_SEG[s[0]];
   if (!kind) return null;
-  const tab = s[2] && ROUTE_DTABS.indexOf(s[2]) !== -1 ? s[2] : 'overview';
+  // null, not 'overview': a link with no tab segment means "open it
+  // wherever this kind of record opens by default", which is not the same
+  // thing as a link that explicitly says /overview.
+  const tab = s[2] && ROUTE_DTABS.indexOf(s[2]) !== -1 ? s[2] : null;
   return {
     type: 'record',
     kind,
@@ -10140,7 +10151,7 @@ function ProjectsSurface({
   // Container detail: Overview/List/Board tabs, and the task opened from
   // any of them (fixes tasks-inside-a-project being unopenable — they now
   // reuse the exact same TaskDetail/TaskForm as everywhere else).
-  const [dtab, setDtab] = useState('overview'); // 'overview' | 'list' | 'board'
+  const [dtab, setDtab] = useState(() => defaultDtab(kind)); // 'overview' | 'list' | 'board' | 'timeline'
   const [openTask, setOpenTask] = useState(null);
   const [taskEditing, setTaskEditing] = useState(false);
   // Creating a task in here used to mean the one-line quick-add box and
@@ -10247,6 +10258,55 @@ function ProjectsSurface({
       on = false;
     };
   }, [current && current.id, current && current.zoho_deal_id, isCtc]);
+
+  // ─── Transaction Information, from the linked Zoho PROJECT ────────
+  //  These are project-level custom fields in Zoho Projects (Agent,
+  //  Effective Date, Option Period End Date, …) — NOT CRM deal fields, and
+  //  not stored in TMG's own tables. They are read live so the dates a TC
+  //  sees here are the dates Zoho has right now; nothing is written back.
+  const [txFields, setTxFields] = useState(null); // null = not loaded yet
+  const [txBusy, setTxBusy] = useState(false);
+  const [txErr, setTxErr] = useState('');
+  const txGen = React.useRef(0);
+  const txProjectId = isCtc && current && current.zoho_project_id || null;
+  const loadTx = React.useCallback(async projectId => {
+    if (!projectId) {
+      setTxFields(null);
+      return;
+    }
+    // Same generation guard as Parties: switching files fast must not let
+    // a slow answer for the PREVIOUS file paint over the new one.
+    const gen = ++txGen.current;
+    setTxBusy(true);
+    setTxErr('');
+    try {
+      const {
+        ok,
+        data
+      } = await callZohoProjects({
+        action: 'get_project',
+        project_id: projectId
+      });
+      if (gen !== txGen.current) return;
+      if (ok && data && data.project) setTxFields(data.project.custom_fields || []);else {
+        setTxFields([]);
+        setTxErr(data && data.error || 'Could not read the transaction details from Zoho.');
+      }
+    } catch (e) {
+      if (gen !== txGen.current) return;
+      setTxFields([]);
+      setTxErr('Could not reach the server.');
+    }
+    setTxBusy(false);
+  }, []);
+  useEffect(() => {
+    txGen.current++;
+    setTxFields(null);
+    setTxErr('');
+    if (!txProjectId) return;
+    loadTx(txProjectId);
+  }, [txProjectId]);
+
   // ─── Parties on the deal behind this CTC file ────────────────────
   //  "Parties" is Zoho's Participants module, attached to a deal through a
   //  many-to-many linking module: the same closer or inspector is ONE party
@@ -10428,13 +10488,20 @@ function ProjectsSurface({
     }
     setPSaving(true);
     setPErr('');
+    // Who is adding this. Zoho files an Owner-less record under whoever
+    // owns the API connection, so without this every party anyone added
+    // showed up as Symon's. The edge function prefers the Zoho id stored
+    // on the profile and uses this only as its fallback.
+    const myEmail = user && user.email || null;
     const payload = pPicked ? {
       action: 'add_party',
       deal_id: partyDealId,
-      party_id: pPicked.id
+      party_id: pPicked.id,
+      owner_email: myEmail
     } : {
       action: 'add_party',
       deal_id: partyDealId,
+      owner_email: myEmail,
       party: {
         name,
         role: pForm.role,
@@ -10457,6 +10524,9 @@ function ProjectsSurface({
       setAddOpen(false);
       setPSaving(false);
       await loadParties(partyDealId);
+      // Saved, but filed under the wrong name — that has to be said out
+      // loud, not swallowed, or it repeats silently for months.
+      if (data && data.owner_warning) setPartiesErr(data.owner_warning);
     } catch (e) {
       // The request died in transit, which is NOT the same as "it failed".
       // Zoho may well have created the person already, so a blind retry is
@@ -10496,7 +10566,7 @@ function ProjectsSurface({
   // any tab the route set.
   useEffect(() => {
     const routed = current && PENDING_ROUTE.id === current.id ? PENDING_ROUTE.tab : null;
-    setDtab(routed && ROUTE_DTABS.indexOf(routed) !== -1 ? routed : 'overview');
+    setDtab(routed && ROUTE_DTABS.indexOf(routed) !== -1 ? routed : defaultDtab(current ? current.record_type || kind : kind));
     if (routed) {
       PENDING_ROUTE.kind = null;
       PENDING_ROUTE.id = null;
@@ -10538,7 +10608,7 @@ function ProjectsSurface({
     if (!seg) return;
     // This surface owns its whole hash — list and record alike.
     const listSeg = ROUTE_LIST_SEG[ROUTE_SURFACE_BY_SEG[seg]];
-    const hash = pview === 'detail' && current ? seg + '/' + current.id + (dtab && dtab !== 'overview' ? '/' + dtab : '') : isCtc && ctcTab === 'emails' ? listSeg + '/emails' : listSeg;
+    const hash = pview === 'detail' && current ? seg + '/' + current.id + (dtab && dtab !== defaultDtab(current.record_type || kind) ? '/' + dtab : '') : isCtc && ctcTab === 'emails' ? listSeg + '/emails' : listSeg;
     const t = setTimeout(() => {
       try {
         if (location.hash.replace(/^#\/?/, '') !== hash) history.replaceState(null, '', '#' + hash);
@@ -13211,6 +13281,116 @@ function ProjectsSurface({
       }
     }, "From Zoho CRM \xB7 the deal this file is linked to")) : null;
 
+    // ── Transaction Information, live from the linked Zoho project ──
+    //  Every field Zoho defines is listed, including the empty ones: a
+    //  blank Closing Date is information — it means nobody has set it —
+    //  and hiding it would read as "this file has no closing date field".
+    const txDate = ymd => {
+      // The value is a plain YYYY-MM-DD string on purpose. Parsing it with
+      // Date() would put it at UTC midnight and render a day early for
+      // anyone west of Greenwich, which is everyone at TMG.
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+      if (!m) return ymd || '—';
+      const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return `${MON[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]}`;
+    };
+    const txValue = f => {
+      if (!f.value) return /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: sub,
+          fontWeight: 400
+        }
+      }, "\u2014");
+      if (f.type === 'date') return txDate(f.value);
+      if (f.type === 'url') {
+        const href = /^https?:\/\//i.test(f.value) ? f.value : 'https://' + f.value;
+        return /*#__PURE__*/React.createElement("a", {
+          href: href,
+          target: "_blank",
+          rel: "noopener noreferrer",
+          style: {
+            color: gold,
+            textDecoration: 'none',
+            wordBreak: 'break-all'
+          }
+        }, f.value);
+      }
+      return f.value;
+    };
+    const txBlock = isCtc && txProjectId ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        margin: '22px 0 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: sub,
+        fontWeight: 600
+      }
+    }, "Transaction information"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }), /*#__PURE__*/React.createElement("button", {
+      title: "Re-read these from Zoho",
+      onClick: () => loadTx(txProjectId),
+      disabled: txBusy,
+      style: {
+        fontSize: 12,
+        padding: '4px 9px',
+        borderRadius: 6,
+        border: `1px solid ${bord}`,
+        color: sub,
+        background: 'none',
+        cursor: txBusy ? 'default' : 'pointer',
+        fontFamily: C.fontSans,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5,
+        opacity: txBusy ? 0.5 : 1
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-refresh",
+      style: {
+        fontSize: 13
+      }
+    }), txBusy ? 'Reading…' : 'Refresh')), txErr && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        color: dark ? '#F08A8A' : '#9B1C1C',
+        fontFamily: C.fontSans,
+        marginBottom: 8
+      }
+    }, txErr), txFields === null ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: sub,
+        fontFamily: C.fontSans,
+        padding: '6px 0'
+      }
+    }, txBusy ? 'Reading from Zoho…' : '') : txFields.length === 0 ? !txErr && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: sub,
+        fontFamily: C.fontSans,
+        padding: '6px 0'
+      }
+    }, "Zoho has no transaction fields on this project.") : /*#__PURE__*/React.createElement(React.Fragment, null, txFields.map(f => /*#__PURE__*/React.createElement(React.Fragment, {
+      key: f.api_name || f.name
+    }, dealRow(f.name, txValue(f)))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: sub,
+        fontFamily: C.fontSans,
+        marginTop: 6
+      }
+    }, "From Zoho Projects \xB7 edit them in Zoho and refresh"))) : null;
+
     // Parties table + the add form. Rendered only for a CTC file that
     // resolves to a deal — with no deal there is nothing to attach to.
     const pInput = {
@@ -13694,7 +13874,7 @@ function ProjectsSurface({
         fontFamily: C.fontSans
       }
     }, "Saved to Zoho")))) : null;
-    const tasksBlock = /*#__PURE__*/React.createElement(React.Fragment, null, dealBlock, partiesBlock, updates.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    const tasksBlock = /*#__PURE__*/React.createElement(React.Fragment, null, dealBlock, txBlock, partiesBlock, updates.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         letterSpacing: '0.14em',
@@ -13790,7 +13970,7 @@ function ProjectsSurface({
       }
     }, /*#__PURE__*/React.createElement(CopyLinkBtn, {
       dark: dark,
-      hash: (ROUTE_SEG_BY_KIND[p.record_type || kind] || 'project') + '/' + p.id + (dtab && dtab !== 'overview' ? '/' + dtab : ''),
+      hash: (ROUTE_SEG_BY_KIND[p.record_type || kind] || 'project') + '/' + p.id + (dtab && dtab !== defaultDtab(p.record_type || kind) ? '/' + dtab : ''),
       title: 'Copy a link straight to this ' + KL.singular.toLowerCase()
     }), zohoSyncable && (p.zoho_project_id ? /*#__PURE__*/React.createElement(React.Fragment, null, zohoChip('projects', {
       logo: 'zoho-projects.svg',

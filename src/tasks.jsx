@@ -18,6 +18,12 @@
     const ROUTE_LIST = { tasks: 'my', ctc: 'ctc', projects: 'projects', rocks: 'rocks', accountability: 'accountability' };
     const ROUTE_LIST_SEG = { my: 'tasks', ctc: 'ctc', projects: 'projects', rocks: 'rocks', accountability: 'accountability' };
     const ROUTE_DTABS = ['overview', 'list', 'board', 'timeline'];
+    // Which sub-tab a record opens on when the link doesn't name one. A CTC
+    // file is a checklist first — the TC opens it to work the task list, not
+    // to read the summary — so it lands on List. Everything else still opens
+    // on Overview.
+    const DTAB_DEFAULT = { ctc_file: 'list' };
+    const defaultDtab = (kind) => DTAB_DEFAULT[kind] || 'overview';
     const ROUTE_ID_RE = /^[0-9a-f-]{36}$/i;
 
     // hash -> route, or null when it isn't ours (a tab token, #calendar,
@@ -35,7 +41,10 @@
       if (s[0] === 'task') return { type: 'task', id: s[1] };
       const kind = ROUTE_KIND_BY_SEG[s[0]];
       if (!kind) return null;
-      const tab = s[2] && ROUTE_DTABS.indexOf(s[2]) !== -1 ? s[2] : 'overview';
+      // null, not 'overview': a link with no tab segment means "open it
+      // wherever this kind of record opens by default", which is not the same
+      // thing as a link that explicitly says /overview.
+      const tab = s[2] && ROUTE_DTABS.indexOf(s[2]) !== -1 ? s[2] : null;
       return { type: 'record', kind, surface: ROUTE_SURFACE_BY_SEG[s[0]], id: s[1], tab };
     }
     // True for any hash this router owns — App must not rewrite these.
@@ -4032,7 +4041,7 @@ Rules:
       // Container detail: Overview/List/Board tabs, and the task opened from
       // any of them (fixes tasks-inside-a-project being unopenable — they now
       // reuse the exact same TaskDetail/TaskForm as everywhere else).
-      const [dtab, setDtab] = useState('overview');   // 'overview' | 'list' | 'board'
+      const [dtab, setDtab] = useState(() => defaultDtab(kind));   // 'overview' | 'list' | 'board' | 'timeline'
       const [openTask, setOpenTask] = useState(null);
       const [taskEditing, setTaskEditing] = useState(false);
       // Creating a task in here used to mean the one-line quick-add box and
@@ -4108,6 +4117,41 @@ Rules:
           .catch(() => { if (on) setDealBusy(false); });
         return () => { on = false; };
       }, [current && current.id, current && current.zoho_deal_id, isCtc]);
+
+      // ─── Transaction Information, from the linked Zoho PROJECT ────────
+      //  These are project-level custom fields in Zoho Projects (Agent,
+      //  Effective Date, Option Period End Date, …) — NOT CRM deal fields, and
+      //  not stored in TMG's own tables. They are read live so the dates a TC
+      //  sees here are the dates Zoho has right now; nothing is written back.
+      const [txFields, setTxFields] = useState(null);   // null = not loaded yet
+      const [txBusy, setTxBusy] = useState(false);
+      const [txErr, setTxErr] = useState('');
+      const txGen = React.useRef(0);
+      const txProjectId = (isCtc && current && current.zoho_project_id) || null;
+      const loadTx = React.useCallback(async (projectId) => {
+        if (!projectId) { setTxFields(null); return; }
+        // Same generation guard as Parties: switching files fast must not let
+        // a slow answer for the PREVIOUS file paint over the new one.
+        const gen = ++txGen.current;
+        setTxBusy(true); setTxErr('');
+        try {
+          const { ok, data } = await callZohoProjects({ action: 'get_project', project_id: projectId });
+          if (gen !== txGen.current) return;
+          if (ok && data && data.project) setTxFields(data.project.custom_fields || []);
+          else { setTxFields([]); setTxErr((data && data.error) || 'Could not read the transaction details from Zoho.'); }
+        } catch (e) {
+          if (gen !== txGen.current) return;
+          setTxFields([]); setTxErr('Could not reach the server.');
+        }
+        setTxBusy(false);
+      }, []);
+      useEffect(() => {
+        txGen.current++;
+        setTxFields(null); setTxErr('');
+        if (!txProjectId) return;
+        loadTx(txProjectId);
+      }, [txProjectId]);
+
       // ─── Parties on the deal behind this CTC file ────────────────────
       //  "Parties" is Zoho's Participants module, attached to a deal through a
       //  many-to-many linking module: the same closer or inspector is ONE party
@@ -4221,14 +4265,22 @@ Rules:
         const name = (pForm.name || '').trim();
         if (!pPicked && !name) { setPErr('Give the party a name.'); return; }
         setPSaving(true); setPErr('');
+        // Who is adding this. Zoho files an Owner-less record under whoever
+        // owns the API connection, so without this every party anyone added
+        // showed up as Symon's. The edge function prefers the Zoho id stored
+        // on the profile and uses this only as its fallback.
+        const myEmail = (user && user.email) || null;
         const payload = pPicked
-          ? { action: 'add_party', deal_id: partyDealId, party_id: pPicked.id }
-          : { action: 'add_party', deal_id: partyDealId, party: { name, role: pForm.role, company: pForm.company, email: pForm.email, phone: pForm.phone } };
+          ? { action: 'add_party', deal_id: partyDealId, party_id: pPicked.id, owner_email: myEmail }
+          : { action: 'add_party', deal_id: partyDealId, owner_email: myEmail, party: { name, role: pForm.role, company: pForm.company, email: pForm.email, phone: pForm.phone } };
         try {
           const { ok, data } = await callZoho(payload);
           if (!ok) { setPErr(data.error || 'Zoho refused that party.'); setPSaving(false); return; }
           resetPartyForm(); setAddOpen(false); setPSaving(false);
           await loadParties(partyDealId);
+          // Saved, but filed under the wrong name — that has to be said out
+          // loud, not swallowed, or it repeats silently for months.
+          if (data && data.owner_warning) setPartiesErr(data.owner_warning);
         } catch (e) {
           // The request died in transit, which is NOT the same as "it failed".
           // Zoho may well have created the person already, so a blind retry is
@@ -4260,7 +4312,7 @@ Rules:
       // any tab the route set.
       useEffect(() => {
         const routed = current && PENDING_ROUTE.id === current.id ? PENDING_ROUTE.tab : null;
-        setDtab(routed && ROUTE_DTABS.indexOf(routed) !== -1 ? routed : 'overview');
+        setDtab(routed && ROUTE_DTABS.indexOf(routed) !== -1 ? routed : defaultDtab(current ? (current.record_type || kind) : kind));
         if (routed) { PENDING_ROUTE.kind = null; PENDING_ROUTE.id = null; PENDING_ROUTE.tab = null; }
         setOpenTask(null); setTaskEditing(false);
       }, [current && current.id]);
@@ -4294,7 +4346,7 @@ Rules:
         // This surface owns its whole hash — list and record alike.
         const listSeg = ROUTE_LIST_SEG[ROUTE_SURFACE_BY_SEG[seg]];
         const hash = (pview === 'detail' && current)
-          ? seg + '/' + current.id + (dtab && dtab !== 'overview' ? '/' + dtab : '')
+          ? seg + '/' + current.id + (dtab && dtab !== defaultDtab(current.record_type || kind) ? '/' + dtab : '')
           : (isCtc && ctcTab === 'emails') ? listSeg + '/emails'
           : listSeg;
         const t = setTimeout(() => {
@@ -5333,6 +5385,54 @@ Rules:
           </React.Fragment>
         ) : null;
 
+        // ── Transaction Information, live from the linked Zoho project ──
+        //  Every field Zoho defines is listed, including the empty ones: a
+        //  blank Closing Date is information — it means nobody has set it —
+        //  and hiding it would read as "this file has no closing date field".
+        const txDate = (ymd) => {
+          // The value is a plain YYYY-MM-DD string on purpose. Parsing it with
+          // Date() would put it at UTC midnight and render a day early for
+          // anyone west of Greenwich, which is everyone at TMG.
+          const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+          if (!m) return ymd || '—';
+          const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+          return `${MON[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]}`;
+        };
+        const txValue = (f) => {
+          if (!f.value) return <span style={{ color: sub, fontWeight: 400 }}>—</span>;
+          if (f.type === 'date') return txDate(f.value);
+          if (f.type === 'url') {
+            const href = /^https?:\/\//i.test(f.value) ? f.value : 'https://' + f.value;
+            return <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: gold, textDecoration: 'none', wordBreak: 'break-all' }}>{f.value}</a>;
+          }
+          return f.value;
+        };
+        const txBlock = isCtc && txProjectId ? (
+          <React.Fragment>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '22px 0 8px' }}>
+              <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600 }}>Transaction information</div>
+              <div style={{ flex: 1 }} />
+              <button title="Re-read these from Zoho" onClick={() => loadTx(txProjectId)} disabled={txBusy}
+                style={{ fontSize: 12, padding: '4px 9px', borderRadius: 6, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: txBusy ? 'default' : 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 5, opacity: txBusy ? 0.5 : 1 }}>
+                <i className="ti ti-refresh" style={{ fontSize: 13 }} />{txBusy ? 'Reading…' : 'Refresh'}
+              </button>
+            </div>
+            {txErr && <div style={{ fontSize: 12.5, color: dark ? '#F08A8A' : '#9B1C1C', fontFamily: C.fontSans, marginBottom: 8 }}>{txErr}</div>}
+            {txFields === null ? (
+              <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans, padding: '6px 0' }}>{txBusy ? 'Reading from Zoho…' : ''}</div>
+            ) : txFields.length === 0 ? (
+              !txErr && <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans, padding: '6px 0' }}>Zoho has no transaction fields on this project.</div>
+            ) : (
+              <React.Fragment>
+                {txFields.map(f => (
+                  <React.Fragment key={f.api_name || f.name}>{dealRow(f.name, txValue(f))}</React.Fragment>
+                ))}
+                <div style={{ fontSize: 11, color: sub, fontFamily: C.fontSans, marginTop: 6 }}>From Zoho Projects · edit them in Zoho and refresh</div>
+              </React.Fragment>
+            )}
+          </React.Fragment>
+        ) : null;
+
         // Parties table + the add form. Rendered only for a CTC file that
         // resolves to a deal — with no deal there is nothing to attach to.
         const pInput = { fontFamily: C.fontSans, fontSize: 13, padding: '8px 10px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? 'rgba(255,255,255,.04)' : '#fff', color: ink, outline: 'none', width: '100%', boxSizing: 'border-box' };
@@ -5481,6 +5581,7 @@ Rules:
         const tasksBlock = (
           <React.Fragment>
             {dealBlock}
+            {txBlock}
             {partiesBlock}
             {/* Updates filed from the Emails tab — approved by a human, never
                 auto-applied. Sits below Milestones, where Open tasks used to. */}
@@ -5511,7 +5612,7 @@ Rules:
                 {statusBadge(p.status)}
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                <CopyLinkBtn dark={dark} hash={(ROUTE_SEG_BY_KIND[p.record_type || kind] || 'project') + '/' + p.id + (dtab && dtab !== 'overview' ? '/' + dtab : '')} title={'Copy a link straight to this ' + KL.singular.toLowerCase()} />
+                <CopyLinkBtn dark={dark} hash={(ROUTE_SEG_BY_KIND[p.record_type || kind] || 'project') + '/' + p.id + (dtab && dtab !== defaultDtab(p.record_type || kind) ? '/' + dtab : '')} title={'Copy a link straight to this ' + KL.singular.toLowerCase()} />
                 {/* Zoho Projects. The logo shows whenever the file is linked —
                     its job is the link, so it does not disappear when syncing
                     is merely paused; that shows as an amber dot instead. */}

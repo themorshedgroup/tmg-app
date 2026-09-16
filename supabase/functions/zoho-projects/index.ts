@@ -88,8 +88,27 @@ async function authorizeCaller(req: Request) {
     data: { user },
     error,
   } = await sb.auth.getUser(token);
-  if (error || !user)
+  if (error || !user) {
+    // Ops tooling, second door — the same probe zoho-crm uses, for the same
+    // reason. The string match above only recognises an ops caller while BOTH
+    // sides hold the identical secret, and this project has more than one
+    // valid secret key (the newer `sb_secret_…` format is issued alongside the
+    // legacy JWT). A CLI holding a different-but-equally-valid key was being
+    // told "invalid or expired session", which is not what had happened.
+    //
+    // So ask Supabase what the token can DO rather than what it looks like.
+    // listUsers is an Auth ADMIN call: anon and publishable keys are refused
+    // by Supabase itself, and a signed-in user's JWT never reaches this line
+    // (it resolves at getUser above). Passing it therefore means service-role,
+    // which is exactly the privilege the string match already grants — no new
+    // access, just a second spelling of the same key.
+    try {
+      const probe = createClient(Deno.env.get("SUPABASE_URL") || "", token);
+      const { error: probeErr } = await probe.auth.admin.listUsers({ page: 1, perPage: 1 });
+      if (!probeErr) return { ok: true as const, userId: "service", sb, isService: true as const };
+    } catch { /* not a service key — fall through to the 401 below */ }
     return { ok: false as const, status: 401, error: "Invalid or expired session." };
+  }
 
   const { data: profile, error: pErr } = await sb
     .from("profiles")
@@ -286,6 +305,79 @@ function zohoDateToIso(mmddyyyy: string | null | undefined): string | null {
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+// ── Project custom fields ("Transaction Information" in Zoho's UI) ────────
+// Zoho hands back the DEFINITIONS and the VALUES from two different places
+// and in two different shapes:
+//   definitions  GET /projects/customfields/  → [{field_id, field_name,
+//                api_name, field_type, is_visible}]  (portal-wide)
+//   values       inside the project itself     → custom_fields: [{"<label>":
+//                "<value>"}]  — one single-key object per field, and ONLY
+//                for fields that actually have a value.
+// So a project with nothing filled in has no custom_fields array at all, and
+// there is no way to know a field exists — let alone render it blank —
+// without the definitions. We merge the two.
+//
+// The definitions are portal-wide and change only when an admin edits them,
+// while the portal's ceiling is 100 API calls / 2 minutes, so they are cached
+// for the life of the isolate: without this every project open would cost two
+// Zoho calls instead of one.
+let PROJECT_FIELD_DEFS: any[] | null = null;
+async function projectFieldDefs(sb: any, conn: any, accessToken: string, portalBase: string) {
+  if (PROJECT_FIELD_DEFS) return PROJECT_FIELD_DEFS;
+  try {
+    const r = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/customfields/`, {});
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && Array.isArray(d.project_custom_fields)) PROJECT_FIELD_DEFS = d.project_custom_fields;
+  } catch { /* leave null so the next open retries */ }
+  return PROJECT_FIELD_DEFS || [];
+}
+
+// The order Zoho's own project page shows them in, which is the order the TC
+// reads them in. Anything not listed keeps its definition order and lands
+// after these, so a field added in Zoho tomorrow still appears.
+const PROJECT_FIELD_ORDER = [
+  "Agent", "Property Website", "MLS Active Date", "Effective Date",
+  "Inspection Due Date", "Option Period End Date", "Tiltle Commit Obj Date",
+  "Appraisal Due Date", "Finance Period End Date", "Closing Date",
+];
+
+function mergeProjectCustomFields(defs: any[], raw: any) {
+  // values: [{label: value}, …] → one flat lookup
+  const values: Record<string, any> = {};
+  for (const entry of (raw && raw.custom_fields) || []) {
+    if (entry && typeof entry === "object") {
+      for (const k of Object.keys(entry)) values[k] = entry[k];
+    }
+  }
+  const visible = (defs || []).filter((f: any) => f && f.is_visible !== false);
+  const rank = (name: string) => {
+    const i = PROJECT_FIELD_ORDER.indexOf(name);
+    return i === -1 ? PROJECT_FIELD_ORDER.length : i;
+  };
+  const ordered = visible
+    .map((f: any, i: number) => ({ f, i }))
+    .sort((a, b) => (rank(a.f.field_name) - rank(b.f.field_name)) || (a.i - b.i))
+    .map((x) => x.f);
+
+  return ordered.map((f: any) => {
+    const v = values[f.field_name];
+    let value = v === undefined || v === null || String(v).trim() === "" ? null : String(v).trim();
+    // Dates arrive MM-DD-YYYY. Keep them as a plain YYYY-MM-DD string rather
+    // than a timestamp — a date-only field parsed through Date() shifts a day
+    // for anyone east or west of the server.
+    if (value && f.field_type === "date") {
+      const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value);
+      if (m) value = `${m[3]}-${m[1]}-${m[2]}`;
+    }
+    return {
+      name: f.field_name,
+      api_name: f.api_name || null,
+      type: f.field_type || "single_line",
+      value,
+    };
+  });
+}
+
 // ── Priority / status mapping — deliberately lenient (case-insensitive
 // substring match), because Zoho Projects' exact label set is portal-
 // customizable and hasn't been confirmed against the real pilot portal yet
@@ -395,12 +487,16 @@ Deno.serve(async (req) => {
       if (!r.ok) return json({ error: d?.error || "Zoho project error", detail: d }, r.status);
       const p = (d.projects || [])[0] || null;
       if (!p) return json({ project: null }, 200);
+      const defs = await projectFieldDefs(sb, conn, accessToken, portalBase);
       return json({
         project: {
           id: p.id_string || String(p.id),
           name: p.name,
           start_date: zohoDateToIso(p.start_date),
           end_date: zohoDateToIso(p.end_date),
+          status: p.status || null,
+          owner_name: p.owner_name || null,
+          custom_fields: mergeProjectCustomFields(defs, p),
         },
       }, 200);
     }

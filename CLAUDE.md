@@ -52,3 +52,22 @@ Pin every CDN version — a floating `@babel` URL broke login once. The heavy
 Office libraries (xlsx, mammoth, jszip, docx, pptxgenjs, ~1.9MB) load on
 first use via `ensureLib()`, not on page load; their pinned URLs live in the
 `window.CDN` map near the top of `index.html`.
+
+## Every new record carries the person who made it
+
+A record created from the app belongs to whoever was signed in, never to the
+API connection. Zoho files an `Owner`-less record under the connection's own
+user, so a create path that forgets this silently puts everyone's work under
+one person's name — which is how goals, KPIs and parties each ended up
+attributed to the wrong person, one forgotten call site at a time.
+
+So: **any new create path sets the author before it ships.**
+
+| Where | How |
+|---|---|
+| Zoho CRM (`zoho-crm`) | `ownerForCaller(...)` → put its `owner` on the record, return its `warning` to the UI |
+| Zoho Projects (`zoho-projects`) | `resolveZohoOwnerIds(...)` → `person_responsible`. Zoho's own "created by" always shows the connection — per-user OAuth would be the only fix, and we don't have it |
+| Our own tables | `created_by: user?.id` (or `added_by_id` / `author_id`, matching the table) |
+
+And the warning is shown, never swallowed: a record saved under the wrong name
+looks identical to one saved correctly, so silence means it repeats for months.

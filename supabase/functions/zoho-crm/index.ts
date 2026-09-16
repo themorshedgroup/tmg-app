@@ -59,8 +59,28 @@ async function authorizeCaller(req: Request) {
     data: { user },
     error,
   } = await sb.auth.getUser(token);
-  if (error || !user)
+  if (error || !user) {
+    // Ops tooling, second door. The check further up compares the bearer token
+    // to this function's own SUPABASE_SERVICE_ROLE_KEY, which only recognises
+    // an ops caller while BOTH sides hold the same string -- and this project
+    // has more than one valid secret key (the newer `sb_secret_…` format is
+    // issued alongside the legacy JWT). A CLI holding a different-but-equally-
+    // valid secret key was being told "invalid or expired session", which is
+    // not what had happened.
+    //
+    // So ask Supabase what the token can DO rather than what it looks like.
+    // listUsers is an Auth ADMIN call: anon and publishable keys are refused
+    // by Supabase itself, and a signed-in user's JWT never reaches this line
+    // (it resolves at getUser above). Passing it therefore means service-role,
+    // which is the same privilege the string match was already granting -- no
+    // new access, just a second spelling of the same key.
+    try {
+      const probe = createClient(Deno.env.get("SUPABASE_URL") || "", token);
+      const { error: probeErr } = await probe.auth.admin.listUsers({ page: 1, perPage: 1 });
+      if (!probeErr) return { ok: true as const, userId: "service", sb, isService: true as const };
+    } catch { /* not a service key -- fall through to the 401 below */ }
     return { ok: false as const, status: 401, error: "Invalid or expired session." };
+  }
 
   const { data: profile, error: pErr } = await sb
     .from("profiles")
@@ -1037,6 +1057,222 @@ Deno.serve(async (req) => {
         }));
 
       return json({ module: moduleName, count: fields.length, fields }, 200);
+    }
+
+    // ── Create ONE custom field in a module [write, admin-only] ──────
+    //  Two-step by design: the same action previews and creates, and it only
+    //  writes when the caller passes confirm:true. A field is not a record --
+    //  Zoho has no API to delete one and no undo, the api_name it generates is
+    //  permanent, and every module has a hard per-edition cap on custom fields.
+    //  So the cheap half (validate the spec, check the label isn't already
+    //  taken, count how much room is left) always runs first and returns the
+    //  exact JSON that a later confirm would post.
+    //
+    //  Deliberately one field per call even though Zoho accepts five. A partial
+    //  failure inside a five-field batch leaves some created and some not, with
+    //  no way to roll the created ones back.
+    //
+    //  Needs ZohoCRM.settings.fields.CREATE, which ZohoCRM.settings.ALL covers.
+    //  The reconnect card's scope line already asks for settings.ALL, but a
+    //  grant issued before that was added will 401 here -- which is why an
+    //  OAUTH_SCOPE_MISMATCH is translated into "re-authorize" rather than
+    //  surfaced raw.
+    if (action === "create_field") {
+      if (!(auth as any).isService) {
+        const { data: prof } = await sb.from("profiles").select("access").eq("id", auth.userId).maybeSingle();
+        const roles = Array.isArray(prof?.access) ? prof.access : [];
+        if (!roles.includes("admin")) return json({ error: "Admin access required." }, 403);
+      }
+
+      const moduleName = String(body.module || "").trim();
+      if (!moduleName) return json({ error: "Missing module." }, 400);
+      const spec = body.field;
+      if (!spec || typeof spec !== "object") return json({ error: "Missing field spec." }, 400);
+
+      // Types this action will build. Deliberately excludes formula, lookup,
+      // autonumber, fileupload and imageupload: each needs its own object and
+      // its own validation, and each is a bigger footgun than the plain types
+      // (a lookup rewires two modules; an autonumber can renumber every
+      // existing record). Adding one later is additive -- adding it blind is
+      // not. LIMITS mirrors Zoho's published length table exactly.
+      const LIMITS: Record<string, { min: number; max: number } | null> = {
+        text: { min: 1, max: 255 },
+        textarea: null,          // length comes from the textarea type
+        email: { min: 1, max: 100 },
+        phone: { min: 1, max: 30 },
+        website: { min: 1, max: 450 },
+        integer: { min: 1, max: 9 },
+        bigint: { min: 1, max: 18 },
+        double: { min: 1, max: 18 },
+        currency: { min: 1, max: 16 },
+        percent: { min: 1, max: 5 },
+        date: null,
+        datetime: null,
+        boolean: null,
+        picklist: null,
+        multiselectpicklist: null,
+      };
+
+      const label = String(spec.label || spec.field_label || "").trim();
+      const dataType = String(spec.data_type || "").trim().toLowerCase();
+      if (!label) return json({ error: "Give the field a label." }, 400);
+      if (label.length > 50) return json({ error: "Field labels are capped at 50 characters." }, 400);
+      if (!(dataType in LIMITS))
+        return json({ error: `This tool doesn't create "${dataType || "(blank)"}" fields. Supported: ${Object.keys(LIMITS).join(", ")}.` }, 400);
+
+      // Build exactly what Zoho will be posted, so the preview can show it and
+      // the confirm step has nothing left to decide.
+      const field: Record<string, any> = { field_label: label, data_type: dataType };
+      const notes: string[] = [];
+
+      const lim = LIMITS[dataType];
+      if (lim) {
+        const wanted = Number(spec.length);
+        const len = Number.isFinite(wanted) && wanted > 0 ? Math.round(wanted) : lim.max;
+        if (len < lim.min || len > lim.max)
+          return json({ error: `Length for ${dataType} must be between ${lim.min} and ${lim.max}.` }, 400);
+        field.length = len;
+      }
+
+      if (dataType === "textarea") {
+        const t = String(spec.textarea_type || "small").toLowerCase();
+        const sizes: Record<string, number> = { small: 2000, large: 32000, rich_text: 50000 };
+        if (!(t in sizes)) return json({ error: "Text area size must be small, large or rich_text." }, 400);
+        field.textarea = { type: t };
+        field.length = sizes[t];
+      }
+
+      if (dataType === "picklist" || dataType === "multiselectpicklist") {
+        const raw = Array.isArray(spec.picklist_values) ? spec.picklist_values : [];
+        const seen = new Set<string>();
+        const values: any[] = [];
+        for (const v of raw) {
+          const display = String(typeof v === "string" ? v : v?.display_value || "").trim();
+          if (!display) continue;
+          const key = display.toLowerCase();
+          if (seen.has(key)) continue;   // Zoho rejects the whole call on a dupe
+          seen.add(key);
+          values.push({ display_value: display, actual_value: display });
+        }
+        if (!values.length) return json({ error: "A picklist needs at least one option." }, 400);
+        if (values.length > 200) return json({ error: "That's more than 200 options — trim the list." }, 400);
+        field.pick_list_values = values;
+        if (raw.length !== values.length) notes.push("Blank or duplicate options were dropped.");
+      }
+
+      if (dataType === "currency") {
+        const dp = Number(spec.decimal_place);
+        const decimal = Number.isFinite(dp) ? Math.round(dp) : 2;
+        if (decimal < 0 || decimal > 9) return json({ error: "Decimal places must be 0–9." }, 400);
+        const pr = Number(spec.precision);
+        const precision = Number.isFinite(pr) ? Math.round(pr) : Math.max(0, decimal - 1);
+        if (precision >= decimal)
+          return json({ error: "Zoho requires precision to be LESS than decimal places." }, 400);
+        field.decimal_place = decimal;
+        field.currency = { rounding_option: String(spec.rounding_option || "normal"), precision };
+      }
+
+      if (dataType === "double") {
+        const dp = Number(spec.decimal_place);
+        const decimal = Number.isFinite(dp) ? Math.round(dp) : 2;
+        if (decimal < 0 || decimal > 9) return json({ error: "Decimal places must be 0–9." }, 400);
+        field.decimal_place = decimal;
+      }
+
+      // Tooltip: picklist, date, datetime and currency accept only the info
+      // icon. Sending static_text on those is a 400 from Zoho, so coerce rather
+      // than let a dropdown choice nobody thinks about fail the whole create.
+      const tip = String(spec.tooltip || "").trim();
+      if (tip) {
+        const iconOnly = ["picklist", "multiselectpicklist", "date", "datetime", "currency"].includes(dataType);
+        const name = iconOnly ? "info_icon" : "static_text";
+        const cap = name === "static_text" ? 35 : 255;
+        field.tooltip = { name, value: tip.slice(0, cap) };
+        if (tip.length > cap) notes.push(`Tooltip was trimmed to ${cap} characters.`);
+      }
+
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      // Read the module's current fields: this is both the duplicate check and
+      // the "how much room is left" count, and it doubles as a scope probe --
+      // if settings can't even be READ, creating was never going to work.
+      const listUrl = new URL(`https://${apiDomain}/crm/v6/settings/fields`);
+      listUrl.searchParams.set("module", moduleName);
+      const listRes = await zohoFetch(sb, conn, accessToken, listUrl.toString(), {});
+      const listData = listRes.status === 204 ? { fields: [] } : await listRes.json().catch(() => ({}));
+      if (!listRes.ok) {
+        return json({
+          error: listData?.code === "OAUTH_SCOPE_MISMATCH"
+            ? "This Zoho connection can't read module settings. Re-authorize it from the Zoho Connection card above."
+            : (listData?.message || "Zoho wouldn't list that module's fields."),
+          detail: listData,
+        }, listRes.status);
+      }
+      const existing = Array.isArray(listData.fields) ? listData.fields : [];
+      const norm = (s: unknown) => String(s || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+      const clash = existing.find((f: any) => norm(f.field_label) === norm(label) || norm(f.api_name) === norm(label));
+      const customCount = existing.filter((f: any) => f.custom_field).length;
+
+      const preview = {
+        module: moduleName,
+        payload: { fields: [field] },
+        existing_custom_fields: customCount,
+        conflict: clash ? { field_label: clash.field_label, api_name: clash.api_name, data_type: clash.data_type } : null,
+        notes,
+      };
+
+      // A name Zoho already uses is refused at BOTH steps, not just warned
+      // about in the preview -- otherwise the confirm round-trip could still
+      // post it and get a bare "duplicate" back from Zoho.
+      if (clash) {
+        return json({
+          ...preview,
+          error: `"${clash.field_label}" already exists on ${moduleName} (api name ${clash.api_name}). Pick a different label.`,
+        }, 409);
+      }
+
+      if (body.confirm !== true) return json({ ...preview, created: false }, 200);
+
+      const createRes = await zohoFetch(sb, conn, accessToken, listUrl.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: [field] }),
+      });
+      const created = await createRes.json().catch(() => ({}));
+      const row = created?.fields?.[0];
+      if (!createRes.ok || row?.status !== "success") {
+        const code = String(row?.code || created?.code || "");
+        return json({
+          ...preview,
+          created: false,
+          error: code === "OAUTH_SCOPE_MISMATCH"
+            ? "This Zoho connection isn't allowed to create fields. Re-authorize it from the Zoho Connection card above — the scope line there includes what's needed."
+            : (row?.message || created?.message || "Zoho refused to create the field."),
+          detail: created,
+        }, createRes.ok ? 400 : createRes.status);
+      }
+
+      // Zoho names the field, not us, and every later query has to use that
+      // api_name -- so read it back rather than leaving the admin to guess how
+      // "Deal Temperature" was mangled.
+      const newId = row?.details?.id || null;
+      let apiName: string | null = null;
+      try {
+        const reRes = await zohoFetch(sb, conn, accessToken, listUrl.toString(), {});
+        const reData = reRes.status === 204 ? { fields: [] } : await reRes.json().catch(() => ({}));
+        const found = (reData.fields || []).find((f: any) => String(f.id) === String(newId));
+        apiName = found?.api_name || null;
+      } catch { /* the field exists either way; the api_name is a convenience */ }
+
+      return json({
+        ...preview,
+        created: true,
+        id: newId,
+        api_name: apiName,
+        message: `Created "${label}" on ${moduleName}.`,
+      }, 200);
     }
 
     // ── Fuzzy-match a typed name against Contacts [KPI resolver] ─────

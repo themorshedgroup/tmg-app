@@ -1059,6 +1059,205 @@ Deno.serve(async (req) => {
       return json({ module: moduleName, count: fields.length, fields }, 200);
     }
 
+
+    // ── Parties on a deal ─────────────────────────────────────────────
+    //  "Parties" is the Participants module; a party is attached to a deal
+    //  through the Deals_X_Participants linking module, which is many-to-many
+    //  by design — Kara Killion is one Party record that closes several deals,
+    //  not a fresh row per transaction. So reading them is two hops: the links
+    //  for this deal, then the party records those links point at.
+    //
+    //  The link's own lookup carries only {id, name}, which is not enough to
+    //  render a table (no role, company, email or phone), hence the second
+    //  fetch. `ids` takes the whole set in one request rather than N.
+    const PARTY_FIELDS = ["Name", "Role", "Company", "Title", "Email", "Mobile_Number"];
+    const partyOut = (p: any, linkId: string | null = null) => ({
+      id: p.id,
+      link_id: linkId,
+      name: p.Name || null,
+      role: p.Role && p.Role !== "-None-" ? p.Role : null,
+      company: p.Company || null,
+      title: p.Title || null,
+      email: p.Email || null,
+      phone: p.Mobile_Number || null,
+    });
+
+    if (action === "deal_parties") {
+      const dealId = String(body.deal_id || "").replace(/[^0-9]/g, "");
+      if (!dealId) return json({ error: "Missing deal_id." }, 400);
+
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      const lu = new URL(`https://${apiDomain}/crm/v6/Deals_X_Participants/search`);
+      lu.searchParams.set("criteria", `(Deals:equals:${dealId})`);
+      lu.searchParams.set("per_page", "200");
+      const lr = await zohoFetch(sb, conn, accessToken, lu.toString(), {});
+      if (lr.status === 204) return json({ parties: [], count: 0 }, 200);
+      const ld = await lr.json().catch(() => ({}));
+      if (!lr.ok) return json({ error: ld?.message || "Couldn't read this deal's parties.", detail: ld }, lr.status);
+
+      // linkByParty, not a plain list: a party linked twice to the same deal
+      // (possible if someone adds it in Zoho directly) should still render once.
+      const linkByParty = new Map<string, string>();
+      for (const row of (ld.data || [])) {
+        const pid = row?.Parties?.id;
+        if (pid && !linkByParty.has(String(pid))) linkByParty.set(String(pid), String(row.id));
+      }
+      if (!linkByParty.size) return json({ parties: [], count: 0 }, 200);
+
+      const pu = new URL(`https://${apiDomain}/crm/v6/Participants`);
+      pu.searchParams.set("ids", [...linkByParty.keys()].join(","));
+      pu.searchParams.set("fields", PARTY_FIELDS.join(","));
+      const pr = await zohoFetch(sb, conn, accessToken, pu.toString(), {});
+      if (pr.status === 204) return json({ parties: [], count: 0 }, 200);
+      const pd = await pr.json().catch(() => ({}));
+      if (!pr.ok) return json({ error: pd?.message || "Couldn't read the party records.", detail: pd }, pr.status);
+
+      const parties = (pd.data || []).map((p: any) => partyOut(p, linkByParty.get(String(p.id)) || null));
+      // Group the table the way the transaction reads, not the way Zoho
+      // happens to return it.
+      const ORDER = ["Seller", "Buyer", "Agent (Other Side)", "Agent TC (Other Side)", "Closer", "Closer Assistant", "Lender", "Attorney", "Inspector", "Surveyor", "Closer (Other Side)"];
+      parties.sort((a: any, b: any) => {
+        const ia = ORDER.indexOf(a.role || ""), ib = ORDER.indexOf(b.role || "");
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || String(a.name || "").localeCompare(String(b.name || ""));
+      });
+      return json({ parties, count: parties.length }, 200);
+    }
+
+    // ── Autocomplete over parties that already exist [read-only] ──────
+    //  The point of the many-to-many is reuse: the same closer, inspector and
+    //  lender come back deal after deal. Typing a name that already exists
+    //  should offer the existing record instead of quietly minting a second
+    //  "Kara Killion" that splits her history in two.
+    if (action === "search_parties") {
+      const query = String(body.query || "").trim();
+      if (query.length < 2) return json({ parties: [], count: 0 }, 200);
+
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      const u = new URL(`https://${apiDomain}/crm/v6/Participants/search`);
+      u.searchParams.set("word", query);
+      u.searchParams.set("per_page", "25");
+      u.searchParams.set("fields", PARTY_FIELDS.join(","));
+      const r = await zohoFetch(sb, conn, accessToken, u.toString(), {});
+      if (r.status === 204) return json({ parties: [], count: 0 }, 200);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: d?.message || "Party search failed.", detail: d }, r.status);
+
+      // Zoho's word search matches across every field, so a query like "title"
+      // drags in everyone whose COMPANY contains it. Rank by how well the name
+      // itself matches and let the caller show the best first.
+      const norm = (s: unknown) => String(s || "").toLowerCase();
+      const q = norm(query);
+      const parties = (d.data || []).map((p: any) => partyOut(p));
+      parties.sort((a: any, b: any) => {
+        const sc = (p: any) => {
+          const n = norm(p.name);
+          if (n === q) return 3;
+          if (n.startsWith(q)) return 2;
+          if (n.includes(q)) return 1;
+          return 0;
+        };
+        return sc(b) - sc(a) || String(a.name || "").localeCompare(String(b.name || ""));
+      });
+      return json({ parties, count: parties.length }, 200);
+    }
+
+    // ── Attach a party to a deal — existing one, or a new one [write] ──
+    //  Two doors, one action. `party_id` links a party that already exists;
+    //  a `party` object creates the record first and then links it. Both end
+    //  at the same place, so the UI does not have to branch.
+    if (action === "add_party") {
+      const dealId = String(body.deal_id || "").replace(/[^0-9]/g, "");
+      if (!dealId) return json({ error: "Missing deal_id." }, 400);
+
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+
+      let partyId = String(body.party_id || "").replace(/[^0-9]/g, "");
+      let createdParty: any = null;
+
+      if (!partyId) {
+        const spec = body.party || {};
+        const name = String(spec.name || "").trim();
+        if (!name) return json({ error: "A party needs a name." }, 400);
+        const rec: Record<string, any> = { Name: name };
+        const role = String(spec.role || "").trim();
+        if (role && role !== "-None-") rec.Role = role;
+        if (String(spec.company || "").trim()) rec.Company = String(spec.company).trim();
+        if (String(spec.email || "").trim()) rec.Email = String(spec.email).trim();
+        if (String(spec.phone || "").trim()) rec.Mobile_Number = String(spec.phone).trim();
+
+        const cr = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Participants`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: [rec] }),
+        });
+        const cd = await cr.json().catch(() => ({}));
+        const crow = cd?.data?.[0];
+        if (!cr.ok || crow?.status !== "success")
+          return json({ error: crow?.message || cd?.message || "Zoho wouldn't create that party.", detail: cd }, cr.ok ? 400 : cr.status);
+        partyId = String(crow?.details?.id || "");
+        createdParty = { ...partyOut({ id: partyId, Name: name, Role: rec.Role, Company: rec.Company, Email: rec.Email, Mobile_Number: rec.Mobile_Number }) };
+      }
+      if (!partyId) return json({ error: "No party to attach." }, 400);
+
+      // Already on this deal? Say so rather than stacking a second identical
+      // link — the table would show the person twice and neither row would be
+      // obviously the one to remove.
+      const cu = new URL(`https://${apiDomain}/crm/v6/Deals_X_Participants/search`);
+      cu.searchParams.set("criteria", `((Deals:equals:${dealId})and(Parties:equals:${partyId}))`);
+      const cr2 = await zohoFetch(sb, conn, accessToken, cu.toString(), {});
+      if (cr2.ok && cr2.status !== 204) {
+        const cd2 = await cr2.json().catch(() => ({}));
+        if ((cd2.data || []).length)
+          return json({ error: "That party is already on this deal.", already: true, party_id: partyId }, 409);
+      }
+
+      const lr = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Deals_X_Participants`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: [{ Deals: { id: dealId }, Parties: { id: partyId } }] }),
+      });
+      const ld = await lr.json().catch(() => ({}));
+      const lrow = ld?.data?.[0];
+      if (!lr.ok || lrow?.status !== "success") {
+        // The party record itself may have just been created. Say that plainly
+        // — otherwise a retry makes a second copy of the same person.
+        return json({
+          error: (lrow?.message || ld?.message || "Zoho wouldn't attach that party to the deal.")
+            + (createdParty ? " The party record WAS created — attach it from the picker instead of retyping it." : ""),
+          detail: ld, party_id: partyId, party_created: !!createdParty,
+        }, lr.ok ? 400 : lr.status);
+      }
+
+      return json({ ok: true, party_id: partyId, link_id: lrow?.details?.id || null, created: !!createdParty }, 200);
+    }
+
+    // ── Detach a party from a deal [write] ────────────────────────────
+    //  Deletes the LINK, never the party. Removing Kara Killion from one deal
+    //  must not remove her from the other three.
+    if (action === "remove_party") {
+      const linkId = String(body.link_id || "").replace(/[^0-9]/g, "");
+      if (!linkId) return json({ error: "Missing link_id." }, 400);
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+      const u = new URL(`https://${apiDomain}/crm/v6/Deals_X_Participants`);
+      u.searchParams.set("ids", linkId);
+      const r = await zohoFetch(sb, conn, accessToken, u.toString(), { method: "DELETE" });
+      const d = await r.json().catch(() => ({}));
+      const row = d?.data?.[0];
+      if (!r.ok || row?.status !== "success")
+        return json({ error: row?.message || d?.message || "Couldn't take that party off the deal.", detail: d }, r.ok ? 400 : r.status);
+      return json({ ok: true }, 200);
+    }
+
     // ── Create ONE custom field in a module [write, admin-only] ──────
     //  Two-step by design: the same action previews and creates, and it only
     //  writes when the caller passes confirm:true. A field is not a record --
@@ -1700,7 +1899,9 @@ Deno.serve(async (req) => {
       const apiDomain = conn.api_domain || "www.zohoapis.com";
 
       const CF_DEALS = 5;   // open deals are rare; 5 is already generous
-      const CF_TASKS = 12;  // enough to find the last completed touch
+      const CF_TASKS = 25;  // headroom: past and future tasks are split apart downstream,
+                            // and a contact with several appointments booked can otherwise
+                            // fill the whole window with things that have not happened yet.
 
       const contactFields = "First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Other_Phone," +
         "Mailing_City,Mailing_State,Lead_Source,Created_Time,Client_Classification,Owner";

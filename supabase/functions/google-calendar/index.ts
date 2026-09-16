@@ -366,9 +366,14 @@ const CONTACT_BRIEF_SYSTEM = [
   "",
   "WHAT BELONGS IN EACH SECTION:",
   "- DEALS: open deals and their stage. Amount and closing date only if you were given them.",
-  "- TOUCH: when they were last actually spoken to or worked, and by whom if that is stated.",
-  "  A task dated in the FUTURE is a plan, not a touch — if that is all there is, say it is scheduled.",
-  "- EMAIL: what the recent email was actually about, in the plainest words available.",
+  "- TOUCH: the single most recent thing under DONE, with its date. ANY task type counts —",
+  "  a note, an email task and a text are touches exactly as much as a call is. Take the newest one",
+  "  and say what it was and when. NEVER put a SCHEDULED item here as though it had happened.",
+  "  Only when DONE is empty do you say there is nothing logged, and then you may add what is booked.",
+  "- EMAIL: what the most recent email was actually about, in the plainest words available.",
+  "  If ANY mail is listed on the Zoho contact record, this section is never 'Nothing on file' —",
+  "  say what the newest one was and give its date, even when that date is years ago. Old mail is",
+  "  a fact worth knowing; silence reads as 'never emailed', which is a different and worse answer.",
   "",
   "RULES:",
   "- Never invent a name, a number, a date, a price or an event you were not given.",
@@ -910,9 +915,33 @@ Deno.serve(async (req) => {
       const deals = (zd.deals || []).map((d: any) =>
         `- ${d.name || "(unnamed deal)"} | stage ${d.stage || "unknown"}${money(d.amount)}` +
         `${d.closing_date ? " | closing " + d.closing_date : ""}${d.type ? " | " + d.type : ""}`);
-      const touches = (zd.tasks || []).slice(0, 8).map((t: any) =>
-        `- ${t.closed || t.due || "(no date)"} | ${t.status || "?"}` +
-        `${t.type ? " | " + t.type : ""} | ${t.subject || ""}`);
+      const today = new Date().toISOString().slice(0, 10);
+
+      // A touch is something that HAPPENED. Zoho's related list comes back in
+      // no particular date order and is capped, so a contact with a couple of
+      // appointments booked can arrive with every future task at the top and
+      // no past one in the window at all. Handed that, the model said the last
+      // touch was "a call scheduled for 2026-09-18" -- a date that has not
+      // happened yet, printed as history, which is exactly the lie an agent
+      // would carry into the conversation.
+      //
+      // So the two are split HERE, by date, rather than left for the model to
+      // tell apart in prose. Done is done: a Closed_Time, a completed status,
+      // or a due date already past. Everything else is a plan.
+      const tDate = (t: any) => String(t.closed || t.due || "").slice(0, 10);
+      const tDone = (t: any) =>
+        !!t.closed || /complet/i.test(String(t.status || "")) || (!!tDate(t) && tDate(t) <= today);
+      const dated = (zd.tasks || []).filter((t: any) => tDate(t));
+      const donePast = dated.filter(tDone)
+        .sort((a: any, b: any) => (tDate(a) < tDate(b) ? 1 : tDate(a) > tDate(b) ? -1 : 0))
+        .slice(0, 8);
+      const upcoming = dated.filter((t: any) => !tDone(t))
+        .sort((a: any, b: any) => (tDate(a) > tDate(b) ? 1 : tDate(a) < tDate(b) ? -1 : 0))
+        .slice(0, 4);
+      const line = (t: any) =>
+        `- ${tDate(t)} | ${t.status || "?"}${t.type ? " | " + t.type : ""} | ${t.subject || ""}`;
+      const touches = donePast.map(line);
+      const planned = upcoming.map(line);
 
       // The newest touch of each KIND — one "Call", one "Note", one "Email" —
       // rather than the newest few touches, which on a busy contact are all the
@@ -922,7 +951,6 @@ Deno.serve(async (req) => {
       // a touch, and printing it as the last call would be a lie the agent
       // would carry into the conversation. Closed_Time OR a completed status OR
       // a due date already in the past all count; anything else is skipped.
-      const today = new Date().toISOString().slice(0, 10);
       const lastByType: Array<{ type: string; date: string }> = [];
       if (zd.tasks_type_read) {
         const seen = new Set<string>();
@@ -977,8 +1005,13 @@ Deno.serve(async (req) => {
         deals.length ? "DEALS:" : (zd.deals_read ? "DEALS: none open." : "DEALS: could not be read."),
         ...deals,
         "",
-        touches.length ? "CALL AND TASK HISTORY (newest first):" : (zd.tasks_read ? "CALL AND TASK HISTORY: none on record." : "CALL AND TASK HISTORY: could not be read."),
+        touches.length
+          ? "DONE — TASKS THAT HAVE ALREADY HAPPENED (newest first). ANY type counts as a touch:"
+          : (zd.tasks_read ? "DONE — TASKS THAT HAVE ALREADY HAPPENED: none on record." : "TASK HISTORY: could not be read."),
         ...touches,
+        "",
+        planned.length ? "SCHEDULED — NOT YET HAPPENED. These are plans, never a touch:" : "SCHEDULED: nothing booked.",
+        ...planned,
         "",
         threadLines.length ? "RECENT EMAIL FROM MAILBOX SEARCH (subject, sender, first line only):" : "RECENT EMAIL FROM MAILBOX SEARCH: none found.",
         ...threadLines,
@@ -1001,7 +1034,7 @@ Deno.serve(async (req) => {
 
       // Nothing at all to summarise: don't pay a model to say so.
       let brief = "";
-      if (deals.length || touches.length || threadLines.length || zohoMail.length) {
+      if (deals.length || touches.length || planned.length || threadLines.length || zohoMail.length) {
         const ar = await fetch(Deno.env.get("SUPABASE_URL") + "/functions/v1/ai-chat", {
           method: "POST",
           headers: {

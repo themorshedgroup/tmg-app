@@ -13421,6 +13421,11 @@ function isCallTask(t, typeField) {
 // DC-neutral Zoho gateway link — resolves the logged-in user's org server
 // side. Guarded to real numeric record ids so a missing id degrades to
 // plain text instead of a dead link.
+// Zoho has no documented deep link to ONE message on a record, so this
+// opens the contact — where the Emails tab is one click away and the whole
+// thread is readable. Better an honest link to the right record than a
+// guessed url that 404s.
+const zohoEmailUrl = contactId => zohoContactUrl(contactId);
 const zohoContactUrl = id => id && /^\d+$/.test(String(id)) ? 'https://crm.zoho.com/crm/EntityInfo.do?module=Contacts&id=' + encodeURIComponent(id) : null;
 
 // The "Task Type" field is a custom field, so its api-name is org-specific.
@@ -13466,7 +13471,21 @@ async function resolveTaskTypeField() {
 //  "prospect type" outright), and exactly ONE field may match. Two
 //  candidates means the org has something we don't understand, and the
 //  honest answer there is to show no chip at all.
-const CONTACT_FIELDS_KEY = 'tmg-contact-fields-v1';
+// v2: the cached shape gained the Contact Tags field, so a v1 payload
+// would otherwise be read as "this org has no such field" for a week.
+const CONTACT_FIELDS_KEY = 'tmg-contact-fields-v2';
+// A custom field an admin fills in, NOT Zoho's built-in Tag. Ricardo Carlin
+// is tagged "Referral" in this field and it was only visible by opening the
+// prospect form, which is the wrong place for something that changes how
+// you open the call. Strict on purpose: exactly one field may match.
+const CONTACT_TAGS_LABEL = /^\s*contact\s*tags?\s*$/i;
+function pickTagsField(fields) {
+  const hits = (fields || []).filter(f => f && f.api_name && CONTACT_TAGS_LABEL.test(f.field_label || ''));
+  return hits.length === 1 ? {
+    api: hits[0].api_name,
+    label: hits[0].field_label || 'Contact tags'
+  } : null;
+}
 const PROSPECT_LABEL = /(prospect.*(form|type))|((form|type).*prospect)/i;
 function pickProspectField(fields) {
   const hits = (fields || []).filter(f => f && f.api_name && PROSPECT_LABEL.test(f.field_label || ''));
@@ -13480,27 +13499,42 @@ function pickProspectField(fields) {
 // Zoho shows up the same morning), and a FAILED READ, which caches nothing
 // at all. Caching a failure as "no such field" is how a single bad moment
 // becomes permanent.
-async function resolveProspectField() {
+async function resolveContactFields() {
+  const EMPTY = {
+    pform: null,
+    ctags: null
+  };
   try {
     const raw = JSON.parse(localStorage.getItem(CONTACT_FIELDS_KEY) || 'null');
     if (raw && raw.at) {
       const age = Date.now() - raw.at;
-      if (raw.field && age < 7 * 86400000) return raw.field;
-      if (!raw.field && age < 3600000) return null;
+      if (raw.pform && age < 7 * 86400000) return {
+        pform: raw.pform,
+        ctags: raw.ctags || null
+      };
+      if (!raw.pform && age < 3600000) return {
+        pform: null,
+        ctags: raw.ctags || null
+      };
     }
   } catch (e) {}
   if (callsIsDev()) {
-    const field = {
-      api: 'Prospect_Form_Type',
-      label: 'Prospect Form Type'
+    const out = {
+      pform: {
+        api: 'Prospect_Form_Type',
+        label: 'Prospect Form Type'
+      },
+      ctags: {
+        api: 'Contact_Tags',
+        label: 'Contact Tags'
+      }
     };
     try {
-      localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify({
-        field,
+      localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify(Object.assign({
         at: Date.now()
-      }));
+      }, out)));
     } catch (e) {}
-    return field;
+    return out;
   }
   let data;
   try {
@@ -13508,19 +13542,21 @@ async function resolveProspectField() {
       action: 'get_fields',
       module: 'Contacts'
     });
-    if (!r.ok || !r.data || !Array.isArray(r.data.fields)) return null; // caches nothing
+    if (!r.ok || !r.data || !Array.isArray(r.data.fields)) return EMPTY; // caches nothing
     data = r.data;
   } catch (e) {
-    return null;
+    return EMPTY;
   } // caches nothing
-  const field = pickProspectField(data.fields);
+  const out = {
+    pform: pickProspectField(data.fields),
+    ctags: pickTagsField(data.fields)
+  };
   try {
-    localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify({
-      field,
+    localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify(Object.assign({
       at: Date.now()
-    }));
+    }, out)));
   } catch (e) {}
-  return field;
+  return out;
 }
 // ─── Contact brief (the (i) on a call row) ───────────────────────
 //  Generated on press, from the contact record, their open deals, their
@@ -14746,6 +14782,8 @@ function ProspectSheet({
   contactId,
   contactName,
   label,
+  types,
+  preloaded,
   onClose
 }) {
   const J = "'Jost', sans-serif";
@@ -14767,6 +14805,15 @@ function ProspectSheet({
     let dead = false;
     setState('loading');
     setErr('');
+    // The brief sheet already asked Zoho this exact question a moment ago.
+    // Asking again to draw the same fields is a second wait for nothing.
+    if (preloaded && Array.isArray(preloaded.groups)) {
+      setData(preloaded);
+      setState('ready');
+      return () => {
+        dead = true;
+      };
+    }
     if (callsIsDev()) {
       setTimeout(() => {
         if (!dead) {
@@ -14780,7 +14827,8 @@ function ProspectSheet({
     }
     callZoho({
       action: 'prospect_form',
-      contact_id: contactId
+      contact_id: contactId,
+      types: types || undefined
     }).then(r => {
       if (dead) return;
       if (!r.ok) {
@@ -14889,7 +14937,35 @@ function ProspectSheet({
       }));
     };
     let control;
-    if (f.read_only) {
+    if (f.link_id) {
+      // A lookup points AT a record. A text box here would invite someone
+      // to retype a name and quietly break the link, so it is shown as
+      // what it is: a way through to the other person's record.
+      control = /*#__PURE__*/React.createElement("a", {
+        href: zohoContactUrl(f.link_id) || undefined,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          fontFamily: J,
+          fontSize: 13,
+          fontWeight: 300,
+          color: headTitle,
+          padding: '7px 0',
+          textDecoration: 'underline',
+          textDecorationStyle: 'dotted',
+          textUnderlineOffset: 2
+        }
+      }, f.value, /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-external-link",
+        style: {
+          fontSize: 11,
+          color: mutedCol
+        }
+      }));
+    } else if (f.read_only) {
       control = /*#__PURE__*/React.createElement("div", {
         style: {
           fontFamily: J,
@@ -15069,10 +15145,8 @@ function ProspectSheet({
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontFamily: J,
-      fontSize: 10,
+      fontSize: 13,
       fontWeight: 600,
-      letterSpacing: '0.07em',
-      textTransform: 'uppercase',
       color: '#C9A45A',
       marginBottom: 9,
       paddingBottom: 6,
@@ -15174,11 +15248,16 @@ function CallsTab({
   // field" — resolveProspectField tells those apart internally, and either
   // way the second chip simply doesn't render.
   const [pfield, setPfield] = useState(null);
-  const [pformFor, setPformFor] = useState(null); // contact whose prospect form is open — { id, name }
+  const [pformFor, setPformFor] = useState(null);
+  const [mailAll, setMailAll] = useState(false); // the Email list starts short and opens on tap   // contact whose prospect form is open — { id, name }
+  const [cfield, setCfield] = useState(null);
   useEffect(() => {
     let dead = false;
-    resolveProspectField().then(f => {
-      if (!dead) setPfield(f);
+    resolveContactFields().then(f => {
+      if (!dead) {
+        setPfield(f.pform);
+        setCfield(f.ctags);
+      }
     });
     return () => {
       dead = true;
@@ -15226,6 +15305,7 @@ function CallsTab({
     briefGen.current++;
     setInfoFor(null);
     setBrief(null);
+    setMailAll(false);
   };
   useEffect(() => {
     callPrefSet(CALL_VIEW_KEY, listView);
@@ -15777,11 +15857,12 @@ function CallsTab({
           try {
             // phone AND email off the same call — email was already being
             // fetched here and thrown away.
+            const extras = [pfield && pfield.api, cfield && cfield.api].filter(Boolean);
             const r = await callZoho(Object.assign({
               action: 'get_contact',
               id
-            }, pfield && pfield.api ? {
-              extra_fields: [pfield.api]
+            }, extras.length ? {
+              extra_fields: extras
             } : {}));
             // `found === false` means Zoho was reached but the record was
             // not — caching that as "they have no number" is a lie that
@@ -15809,6 +15890,24 @@ function CallsTab({
             // drop the Tag ask to save the phone number, and an array when
             // it read them — stamping null as "no tags" would be permanent.
             if (c && Array.isArray(c.tags)) v.tags = c.tags;
+            // Zoho's own tags and the "Contact Tags" field say the same
+            // KIND of thing about a person, so the row shows them as one
+            // set. Same negative-caching rule as everything else here: only
+            // stamped when the field was actually asked for and survived.
+            if (cfield && cfield.api && c && !c.extra_failed) {
+              const extra = String(prospectText(c.extra ? c.extra[cfield.api] : null) || '').split(',').map(x => x.trim()).filter(Boolean);
+              if (extra.length) {
+                const seen = {};
+                v.tags = (v.tags || []).concat(extra).filter(t => {
+                  const k = String(t).toLowerCase();
+                  if (seen[k]) return false;
+                  seen[k] = 1;
+                  return true;
+                });
+              } else if (!('tags' in v)) {
+                v.tags = [];
+              }
+            }
             return [id, v];
           } catch (e) {
             return [id, null];
@@ -16219,7 +16318,47 @@ function CallsTab({
   // in Zoho showed "No class" unless the subject happened to say "A Touch
   // Call" — a wrong answer stated confidently. The subject is still used,
   // but only while the record is loading and only labelled as a guess.
+  // A circle, and first in the row rather than last. As a square chip at
+  // the end of a line of chips it sat wherever the tags happened to stop,
+  // so it moved from row to row and was never in the same place twice. In
+  // front of the name it is always in the same place, and it is the one
+  // control on the row that opens something rather than describing it.
+  const aiButton = b => /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      openInfo(b);
+    },
+    title: 'AI summary of ' + b.cname,
+    style: {
+      width: 26,
+      height: 26,
+      borderRadius: '50%',
+      flexShrink: 0,
+      cursor: 'pointer',
+      padding: 0,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      alignSelf: 'flex-start',
+      marginTop: 1,
+      background: aiBg,
+      color: aiCol,
+      border: `1px solid ${aiBd}`
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-sparkles",
+    style: {
+      fontSize: 13
+    }
+  }));
   const nameCluster = (t, b, size) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      display: 'flex',
+      gap: 8
+    }
+  }, aiButton(b), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
       minWidth: 0
@@ -16263,33 +16402,9 @@ function CallsTab({
     }
   }, b.cname), b.clsKnown ? b.grade ? chip(b.grade, 'Client classification ' + b.grade + ', from the contact record in Zoho', false) : chip('No class', 'This contact has no client classification set in Zoho', true) : b.gradeFromSubject ? chip(b.gradeFromSubject + '?', 'Read off the task subject while the contact record loads — it may not match the record', true) : chip('…', 'Reading this contact’s classification from Zoho', true), b.eo && chip('EO', 'This task is an EO touch call — a kind of call, not a client classification', true), b.pform && chip(b.pform, (pfield && pfield.label ? pfield.label : 'Prospect form') + ': ' + b.pform + ' — tap to see and edit the form', true, () => setPformFor({
     id: b.cid,
-    name: b.cname
-  })), b.tags.map(tagChip), /*#__PURE__*/React.createElement("button", {
-    onClick: () => openInfo(b),
-    title: 'AI summary of ' + b.cname,
-    style: {
-      fontFamily: J,
-      fontSize: 9,
-      fontWeight: 700,
-      letterSpacing: '0.04em',
-      lineHeight: 1.4,
-      padding: '2px 5px 2px 6px',
-      borderRadius: 5,
-      flexShrink: 0,
-      cursor: 'pointer',
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 2,
-      background: aiBg,
-      color: aiCol,
-      border: `1px solid ${aiBd}`
-    }
-  }, "AI", /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-sparkles",
-    style: {
-      fontSize: 10
-    }
-  }))), b.spouse && b.spouse.name && /*#__PURE__*/React.createElement("a", {
+    name: b.cname,
+    types: b.pform ? [b.pform] : null
+  })), b.tags.map(tagChip)), b.spouse && b.spouse.name && /*#__PURE__*/React.createElement("a", {
     href: zohoContactUrl(b.spouse.id) || undefined,
     target: "_blank",
     rel: "noopener noreferrer",
@@ -16315,7 +16430,7 @@ function CallsTab({
       color: '#C9A45A',
       flexShrink: 0
     }
-  }), b.spouse.name));
+  }), b.spouse.name)));
 
   // What was logged against this call, and anything that went wrong doing
   // it. Both hang under the row on either breakpoint.
@@ -17030,6 +17145,8 @@ function CallsTab({
     contactId: pformFor.id,
     contactName: pformFor.name,
     label: pfield && pfield.label ? pfield.label : 'Prospect form',
+    types: pformFor.types,
+    preloaded: pformFor.preloaded,
     onClose: () => setPformFor(null)
   }), infoFor && /*#__PURE__*/React.createElement("div", {
     onClick: closeInfo,
@@ -17100,36 +17217,36 @@ function CallsTab({
       display: 'inline-block'
     }
   }), " Reading Zoho and recent email\u2026"), brief && brief.id === infoFor.id && brief.state === 'ready' && /*#__PURE__*/React.createElement(React.Fragment, null, (() => {
-    const secs = briefSections(brief.data.brief);
-    const span = briefMailSpan(brief.data);
-    if (!secs.length) return /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontFamily: J,
-        fontSize: 13.5,
-        fontWeight: 300,
-        color: headTitle,
-        lineHeight: 1.6,
-        margin: '10px 0 12px'
-      }
-    }, brief.data.brief || 'Nothing recent on file.');
-    return /*#__PURE__*/React.createElement("div", {
-      style: {
-        margin: '10px 0 14px'
-      }
-    }, secs.map((sec, i) => /*#__PURE__*/React.createElement("div", {
-      key: sec.key,
-      style: {
-        marginBottom: i === secs.length - 1 ? 0 : 13
-      }
-    }, /*#__PURE__*/React.createElement("div", {
+    const d = brief.data;
+    const openForm = () => setPformFor({
+      id: infoFor.id,
+      name: infoFor.name,
+      types: d.prospect && d.prospect.types || null,
+      preloaded: d.prospect || null
+    });
+
+    // One heading style for the whole sheet. `plain` keeps a
+    // name as its owner spelled it — "Residential Buyer", not
+    // RESIDENTIAL BUYER, which is a label and not a shout.
+    const head = (icon, label, plain, onClick) => /*#__PURE__*/React.createElement("div", {
+      role: onClick ? 'button' : undefined,
+      tabIndex: onClick ? 0 : undefined,
+      onClick: onClick,
+      onKeyDown: onClick ? e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
+      } : undefined,
       style: {
         display: 'flex',
         alignItems: 'center',
         gap: 6,
-        marginBottom: 5
+        marginBottom: 5,
+        cursor: onClick ? 'pointer' : undefined
       }
     }, /*#__PURE__*/React.createElement("i", {
-      className: 'ti ' + sec.icon,
+      className: 'ti ' + icon,
       style: {
         fontSize: 12,
         color: '#C9A45A',
@@ -17138,14 +17255,22 @@ function CallsTab({
     }), /*#__PURE__*/React.createElement("span", {
       style: {
         fontFamily: J,
-        fontSize: 9.5,
+        fontSize: plain ? 12 : 9.5,
         fontWeight: 600,
-        letterSpacing: '0.06em',
-        textTransform: 'uppercase',
-        color: faintCol
+        letterSpacing: plain ? '0' : '0.06em',
+        textTransform: plain ? 'none' : 'uppercase',
+        color: plain ? headTitle : faintCol
       }
-    }, sec.label)), sec.bullets.map((b, j) => /*#__PURE__*/React.createElement("div", {
-      key: j,
+    }, label), onClick && /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-pencil",
+      style: {
+        fontSize: 10,
+        color: faintCol,
+        flexShrink: 0
+      }
+    }));
+    const bullet = (node, key) => /*#__PURE__*/React.createElement("div", {
+      key: key,
       style: {
         display: 'flex',
         gap: 7,
@@ -17165,7 +17290,86 @@ function CallsTab({
       style: {
         minWidth: 0
       }
-    }, b))), sec.key === 'EMAIL' && span && /*#__PURE__*/React.createElement("div", {
+    }, node));
+
+    // DEALS is the only part a model still writes. Everything
+    // below it is printed from Zoho exactly as Zoho holds it.
+    const deals = briefSections(d.brief).filter(x => x.key === 'DEALS')[0];
+    const mail = Array.isArray(d.zoho_email_list) ? d.zoho_email_list : [];
+    const shown = mailAll ? mail : mail.slice(0, 6);
+    const span = briefMailSpan(d);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        margin: '10px 0 14px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 13
+      }
+    }, head('ti-home-dollar', 'Deals'), (deals ? deals.bullets : [d.brief || 'Nothing on file.']).map((b, j) => bullet(b, j))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 13
+      }
+    }, head('ti-phone-call', 'Last touch'), d.last_touch ? bullet( /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 600
+      }
+    }, d.last_touch.type || 'Task'), /*#__PURE__*/React.createElement("span", null, ': ' + briefTouchDate(d.last_touch.date))), 'lt') : bullet(d.tasks_read ? 'Nothing logged yet.' : 'Couldn’t read the task history.', 'lt')), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 13
+      }
+    }, head('ti-mail', 'Email'), !mail.length && bullet(d.zoho_emails_state === 'read' || d.zoho_emails_state === 'none' ? 'Nothing on file.' : 'Couldn’t read the email history.', 'm0'), shown.map((m, j) => /*#__PURE__*/React.createElement("a", {
+      key: j,
+      href: zohoEmailUrl(infoFor.id) || undefined,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      style: {
+        display: 'flex',
+        gap: 7,
+        fontFamily: J,
+        fontSize: 13,
+        fontWeight: 300,
+        color: headTitle,
+        lineHeight: 1.55,
+        marginBottom: 3,
+        textDecoration: 'none'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: 'ti ' + (m.sent ? 'ti-arrow-up-right' : 'ti-arrow-down-left'),
+      title: m.sent ? 'Sent to them' : 'Received from them',
+      style: {
+        fontSize: 11,
+        color: mutedCol,
+        flexShrink: 0,
+        marginTop: 4
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        textDecoration: 'underline',
+        textDecorationStyle: 'dotted',
+        textUnderlineOffset: 2
+      }
+    }, m.subject || '(no subject)'), m.time && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: mutedCol
+      }
+    }, ' · ' + briefTouchDate(m.time))))), mail.length > shown.length && /*#__PURE__*/React.createElement("button", {
+      onClick: () => setMailAll(true),
+      style: {
+        background: 'none',
+        border: 'none',
+        padding: '2px 0 0 14px',
+        cursor: 'pointer',
+        fontFamily: J,
+        fontSize: 11.5,
+        fontWeight: 600,
+        color: mutedCol
+      }
+    }, "+ ", mail.length - shown.length, " more"), span && /*#__PURE__*/React.createElement("div", {
       style: {
         fontFamily: J,
         fontSize: 10.5,
@@ -17174,93 +17378,27 @@ function CallsTab({
         marginTop: 4,
         paddingLeft: 14
       }
-    }, span))));
-  })(), (brief.data.prospect && brief.data.prospect.groups || []).filter(g => (g.fields || []).length).map((g, gi) => /*#__PURE__*/React.createElement("div", {
-    key: 'pf' + gi,
-    style: {
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    role: "button",
-    tabIndex: 0,
-    onClick: () => setPformFor({
-      id: infoFor.id,
-      name: infoFor.name
-    }),
-    onKeyDown: e => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        setPformFor({
-          id: infoFor.id,
-          name: infoFor.name
-        });
+    }, span)), (d.prospect && d.prospect.groups || []).filter(g => (g.fields || []).length).map((g, gi) => /*#__PURE__*/React.createElement("div", {
+      key: 'pf' + gi,
+      style: {
+        marginBottom: 13
       }
-    },
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      marginBottom: 5,
-      cursor: 'pointer'
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-clipboard-text",
-    style: {
-      fontSize: 12,
-      color: '#C9A45A',
-      flexShrink: 0
-    }
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontFamily: J,
-      fontSize: 9.5,
-      fontWeight: 600,
-      letterSpacing: '0.06em',
-      textTransform: 'uppercase',
-      color: faintCol
-    }
-  }, g.title), /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-pencil",
-    style: {
-      fontSize: 10,
-      color: faintCol,
-      flexShrink: 0
-    }
-  })), (g.fields || []).slice(0, 12).map((f, j) => /*#__PURE__*/React.createElement("div", {
-    key: j,
-    style: {
-      display: 'flex',
-      gap: 7,
-      fontFamily: J,
-      fontSize: 13,
-      fontWeight: 300,
-      color: headTitle,
-      lineHeight: 1.55,
-      marginBottom: 3
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: mutedCol,
-      flexShrink: 0
-    }
-  }, "\u2022"), /*#__PURE__*/React.createElement("span", {
-    style: {
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: mutedCol
-    }
-  }, f.label + ': '), f.value))), (g.fields || []).length > 12 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontFamily: J,
-      fontSize: 10.5,
-      fontWeight: 300,
-      color: mutedCol,
-      marginTop: 4,
-      paddingLeft: 14
-    }
-  }, (g.fields || []).length - 12 + ' more — tap the heading to see them all'))), briefGaps(brief.data).length > 0 && /*#__PURE__*/React.createElement("div", {
+    }, head('ti-clipboard-text', g.title, true, openForm), (g.fields || []).map((f, j) => bullet( /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: mutedCol
+      }
+    }, f.label + ': '), f.link_id ? /*#__PURE__*/React.createElement("a", {
+      href: zohoContactUrl(f.link_id) || undefined,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      style: {
+        color: headTitle,
+        textDecoration: 'underline',
+        textDecorationStyle: 'dotted',
+        textUnderlineOffset: 2
+      }
+    }, f.value) : f.value), j)))));
+  })(), briefGaps(brief.data).length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       fontFamily: J,
       fontSize: 10.5,

@@ -433,6 +433,25 @@ async function harvestOwnerFromRecords(
 }
 
 // ── Load the single org Zoho connection row ───────────────────────────
+// Contacts field metadata and layout sections, held for the life of a warm
+// edge-function instance. These describe the ORG SCHEMA, not a record: they
+// change when an admin edits a layout, which is roughly never, while the
+// prospect-form window asks for them on every open. Two calls saved per open
+// is the difference the user is actually feeling when they say it loads slow.
+//
+// Deliberately in memory and not in a table: a cold instance simply pays for
+// the read again, which is correct, whereas a stale row in Postgres would
+// outlive the mistake that wrote it.
+const SCHEMA_CACHE = new Map<string, { at: number; value: any }>();
+const SCHEMA_TTL_MS = 10 * 60 * 1000;
+async function cachedJson(key: string, fetcher: () => Promise<any>) {
+  const hit = SCHEMA_CACHE.get(key);
+  if (hit && Date.now() - hit.at < SCHEMA_TTL_MS) return hit.value;
+  const value = await fetcher();
+  if (value) SCHEMA_CACHE.set(key, { at: Date.now(), value });
+  return value;
+}
+
 async function loadConnection(sb: any) {
   const { data, error } = await sb
     .from("zoho_connection")
@@ -1182,6 +1201,14 @@ Deno.serve(async (req) => {
       let partyId = String(body.party_id || "").replace(/[^0-9]/g, "");
       let createdParty: any = null;
 
+      // Whoever is typing owns what they type. Zoho files an Owner-less record
+      // under the API connection's own user, which is why every new party was
+      // landing on Symon no matter who added it. Resolved once and used for
+      // both the party record and the link record below.
+      const partyOwnerEmail = typeof body.owner_email === "string" ? body.owner_email.trim() : "";
+      const partyOwnerRes = await ownerForCaller(sb, conn, accessToken, apiDomain, auth, partyOwnerEmail);
+      const partyOwner = partyOwnerRes.owner;
+
       if (!partyId) {
         const spec = body.party || {};
         const name = String(spec.name || "").trim();
@@ -1192,6 +1219,7 @@ Deno.serve(async (req) => {
         if (String(spec.company || "").trim()) rec.Company = String(spec.company).trim();
         if (String(spec.email || "").trim()) rec.Email = String(spec.email).trim();
         if (String(spec.phone || "").trim()) rec.Mobile_Number = String(spec.phone).trim();
+        if (partyOwner) rec.Owner = partyOwner;
 
         const cr = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Participants`, {
           method: "POST",
@@ -1222,7 +1250,7 @@ Deno.serve(async (req) => {
       const lr = await zohoFetch(sb, conn, accessToken, `https://${apiDomain}/crm/v6/Deals_X_Participants`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data: [{ Deals: { id: dealId }, Parties: { id: partyId } }] }),
+        body: JSON.stringify({ data: [{ Deals: { id: dealId }, Parties: { id: partyId }, ...(partyOwner ? { Owner: partyOwner } : {}) }] }),
       });
       const ld = await lr.json().catch(() => ({}));
       const lrow = ld?.data?.[0];
@@ -1236,7 +1264,13 @@ Deno.serve(async (req) => {
         }, lr.ok ? 400 : lr.status);
       }
 
-      return json({ ok: true, party_id: partyId, link_id: lrow?.details?.id || null, created: !!createdParty }, 200);
+      // Permanent record of who added them. Zoho only ever names the API
+      // connection as creator, so without this the author survives nowhere.
+      if (createdParty) await stampSubmission(sb, "Participants", partyId, auth.userId, partyOwnerRes.callerName);
+      return json({
+        ok: true, party_id: partyId, link_id: lrow?.details?.id || null,
+        created: !!createdParty, owner_warning: partyOwnerRes.warning,
+      }, 200);
     }
 
     // ── Detach a party from a deal [write] ────────────────────────────
@@ -1899,6 +1933,9 @@ Deno.serve(async (req) => {
       const apiDomain = conn.api_domain || "www.zohoapis.com";
 
       const CF_DEALS = 5;   // open deals are rare; 5 is already generous
+      // Five pages of ten. Enough to show a real correspondence history without
+      // letting one pathological record walk a hundred pages of newsletters.
+      const CF_EMAIL_PAGES = 5;
       const CF_TASKS = 25;  // headroom: past and future tasks are split apart downstream,
                             // and a contact with several appointments booked can otherwise
                             // fill the whole window with things that have not happened yet.
@@ -1980,21 +2017,38 @@ Deno.serve(async (req) => {
       // brief that says only "no emails" sends the agent into a call believing
       // a newsletter never went out.
       const emailsGet = async (): Promise<{ state: string; rows: any[] }> => {
-        try {
-          const r = await zohoFetch(sb, conn, accessToken,
-            `https://${apiDomain}/crm/v6/Contacts/${cid}/Emails`, {});
-          if (r.status === 204) return { state: "none", rows: [] };
-          const d = await r.json().catch(() => ({}));
-          if (r.ok) return { state: "read", rows: Array.isArray(d?.Emails) ? d.Emails : [] };
-          const code = String(d?.code || "");
-          if (code === "OAUTH_SCOPE_MISMATCH") return { state: "no_scope", rows: [] };
-          if (code === "NO_PERMISSION") return { state: "not_shared", rows: [] };
-          // "IMAP is configured ... sync is in process or yet to be initiated",
-          // a deactivated Zoho Mail user, a deleted POP mailbox. All transient
-          // or somebody else's setup — never "this contact has no mail".
-          if (code === "CANNOT_PROCESS") return { state: "not_synced", rows: [] };
-          return { state: "failed", rows: [] };
-        } catch { return { state: "failed", rows: [] }; }
+        // Ten per call is the ceiling and there is no per_page, so the later
+        // pages are walked. `page` is not documented for this related list, so
+        // the loop is written to survive it being IGNORED: if a page comes back
+        // holding ids we have already seen, that is the tell that paging does
+        // nothing here, and we stop rather than spinning.
+        const rows: any[] = [];
+        const seen = new Set<string>();
+        for (let page = 1; page <= CF_EMAIL_PAGES; page++) {
+          try {
+            const r = await zohoFetch(sb, conn, accessToken,
+              `https://${apiDomain}/crm/v6/Contacts/${cid}/Emails${page > 1 ? `?page=${page}` : ""}`, {});
+            if (r.status === 204) return { state: rows.length ? "read" : "none", rows };
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) {
+              if (rows.length) return { state: "read", rows };   // keep what page 1 gave us
+              const code0 = String(d?.code || "");
+              if (code0 === "OAUTH_SCOPE_MISMATCH") return { state: "no_scope", rows: [] };
+              if (code0 === "NO_PERMISSION") return { state: "not_shared", rows: [] };
+              if (code0 === "CANNOT_PROCESS") return { state: "not_synced", rows: [] };
+              return { state: "failed", rows: [] };
+            }
+            const got = Array.isArray(d?.Emails) ? d.Emails : [];
+            let fresh = 0;
+            for (const m of got) {
+              const key = String(m?.message_id || m?.id || JSON.stringify(m).slice(0, 120));
+              if (seen.has(key)) continue;
+              seen.add(key); rows.push(m); fresh++;
+            }
+            if (!got.length || !fresh) break;   // end of the list, or paging is a no-op
+          } catch { break; }
+        }
+        return { state: "read", rows };
       };
 
       const [contactRes, dealsRes, tasksRes, emailsRes] = await Promise.all([
@@ -2052,6 +2106,8 @@ Deno.serve(async (req) => {
         // second API call per message anyway (Zoho only returns content from
         // the single-email endpoint). Newest first, same as tasks.
         emails: emailsRes.rows.map((m: any) => ({
+          // Zoho's own id for the message. The only handle a deep link can use.
+          id: m.message_id || m.id || null,
           subject: m.subject || null,
           from: (m.from && (m.from.user_name || m.from.email)) || null,
           to: Array.isArray(m.to) ? m.to.map((t: any) => t.user_name || t.email).filter(Boolean).slice(0, 4) : [],
@@ -2329,29 +2385,39 @@ Deno.serve(async (req) => {
     //  reports it. So the mapping is DERIVED, two ways, and which one was used
     //  is always reported back:
     //
-    //    section  — the layout has a section whose name matches the type
-    //               ("Buyer Form"). That IS the rule's shape, read live from
-    //               Zoho, so it stays correct on its own. Preferred.
-    //    filled   — no such section. Fall back to every custom field on the
-    //               record that actually has a value. Not as clean, but it
-    //               leans on the same truth the rule does: a buyer only has
-    //               buyer fields filled in.
+    //    section  -- the layout has a section whose name matches the type
+    //                ("Residential Buyer"). That IS the rule's shape, read live
+    //                from Zoho, so it stays correct on its own. Preferred.
+    //    filled   -- no such section. Fall back to every custom field on the
+    //                record that actually has a value. Not as clean, but it
+    //                leans on the same truth the rule does: a buyer only has
+    //                buyer fields filled in.
     //
-    //  Nothing here is cached and nothing is written.
+    //  Nothing about a RECORD is cached and nothing is written. The org's field
+    //  list and layout are cached for ten minutes -- see SCHEMA_CACHE.
     if (action === "prospect_form") {
       const cid = String(body.contact_id || "").trim();
       if (!cid) return json({ error: "Missing contact id." }, 400);
+      // The Calls row already knows the form type from the chip it just drew.
+      // Passing it saves an entire round trip to Zoho before we can even work
+      // out which fields to ask for.
+      const typeHint = Array.isArray(body.types)
+        ? body.types.map((t: any) => String(t || "").trim()).filter(Boolean)
+        : [];
 
       const conn = await loadConnection(sb);
       const accessToken = await getZohoToken(sb, conn);
       const apiDomain = conn.api_domain || "www.zohoapis.com";
       const get = (u: string) => zohoFetch(sb, conn, accessToken, u, {});
 
-      // 1 — field metadata. Labels, types and picklist options; needed to
-      //     render an editable form rather than a wall of text boxes.
-      const fr = await get(`https://${apiDomain}/crm/v6/settings/fields?module=Contacts`);
-      if (!fr.ok) return json({ error: "Couldn’t read the Contacts field list." }, 400);
-      const fd = await fr.json().catch(() => ({}));
+      // 1 -- field metadata. Labels, types and picklist options; needed to
+      //      render an editable form rather than a wall of text boxes.
+      const fd = await cachedJson("fields:Contacts", async () => {
+        const r = await get(`https://${apiDomain}/crm/v6/settings/fields?module=Contacts`);
+        if (!r.ok) { try { await r.body?.cancel(); } catch { /* drained */ } return null; }
+        return await r.json().catch(() => null);
+      });
+      if (!fd) return json({ error: "Couldn’t read the Contacts field list." }, 400);
       const allFields = Array.isArray(fd?.fields) ? fd.fields : [];
       const meta = new Map<string, any>();
       for (const f of allFields) if (f?.api_name) meta.set(f.api_name, f);
@@ -2361,58 +2427,64 @@ Deno.serve(async (req) => {
       const prospectApi = pf.length === 1 ? String(pf[0].api_name) : "";
       const prospectLabel = pf.length === 1 ? String(pf[0].field_label || "Prospect form") : "Prospect form";
 
-      // 2 — layout sections. This is the part Zoho WILL give us, and when the
-      //     org's sections are named after the form types it reproduces the
-      //     rule exactly, for free, forever.
-      const lr = await get(`https://${apiDomain}/crm/v6/settings/layouts?module=Contacts`);
-      const ld = lr.ok ? await lr.json().catch(() => ({})) : {};
-      const sections: Array<{ name: string; fields: string[] }> = [];
+      // 2 -- layout sections, WITH their column shape. This is the part Zoho
+      //      will give us, and when the org's sections are named after the form
+      //      types it reproduces the rule exactly, for free, forever.
+      const ld = await cachedJson("layouts:Contacts", async () => {
+        const r = await get(`https://${apiDomain}/crm/v6/settings/layouts?module=Contacts`);
+        if (!r.ok) { try { await r.body?.cancel(); } catch { /* drained */ } return null; }
+        return await r.json().catch(() => null);
+      });
+      const sections: Array<{ name: string; cols: number; fields: string[] }> = [];
       for (const lay of (Array.isArray(ld?.layouts) ? ld.layouts : [])) {
         for (const sec of (Array.isArray(lay?.sections) ? lay.sections : [])) {
+          const raw = (Array.isArray(sec?.fields) ? sec.fields : []).slice();
+          // Zoho hands fields back in an order that is close to, but not
+          // reliably, the order they are drawn in. sequence_number is the
+          // authority, so sort by it and only fall back to array order for
+          // fields that carry no sequence at all.
+          raw.sort((a: any, b: any) => {
+            const sa = Number(a?.sequence_number); const sb2 = Number(b?.sequence_number);
+            if (Number.isFinite(sa) && Number.isFinite(sb2)) return sa - sb2;
+            if (Number.isFinite(sa)) return -1;
+            if (Number.isFinite(sb2)) return 1;
+            return 0;
+          });
           sections.push({
             name: String(sec?.display_label || sec?.name || "").trim(),
-            fields: (Array.isArray(sec?.fields) ? sec.fields : []).map((f: any) => String(f?.api_name || "")).filter(Boolean),
+            cols: Math.max(1, Number(sec?.column_count) || 1),
+            fields: raw.map((f: any) => String(f?.api_name || "")).filter(Boolean),
           });
         }
       }
 
-      // 3 — the record. Zoho caps `fields` at 50 per call, so custom fields are
-      //     asked for in batches. A batch that 400s is dropped rather than
-      //     taking the whole read down with it: one bad api name must not cost
-      //     the agent every other answer on the page.
-      const wanted = allFields
-        .filter((f: any) => f?.api_name && f?.data_type !== "subform" && String(f.data_type) !== "profileimage")
-        .map((f: any) => String(f.api_name));
-      const values: Record<string, any> = {};
-      let readFailed = 0;
-      for (let i = 0; i < wanted.length; i += 45) {
-        const batch = wanted.slice(i, i + 45);
-        try {
-          const rr = await get(`https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(batch.join(","))}`);
-          if (!rr.ok) { readFailed++; try { await rr.body?.cancel(); } catch { /* drained */ } continue; }
-          const rd = await rr.json().catch(() => ({}));
-          const rec = rd?.data?.[0];
-          if (rec) for (const k of Object.keys(rec)) values[k] = rec[k];
-        } catch { readFailed++; }
-      }
-      if (!Object.keys(values).length) return json({ error: "Couldn’t read that contact." }, 404);
-
-      // Flatten Zoho's shapes to something printable. A lookup is an object, a
-      // multi-select is an array, and "-None-" is Zoho's way of writing empty.
-      const flat = (v: any): string => {
-        if (v === null || v === undefined || v === "") return "";
-        if (Array.isArray(v)) return v.map(flat).filter(Boolean).join(", ");
-        if (typeof v === "object") return String(v.name ?? v.display_value ?? "").trim();
-        const t = String(v).trim();
-        return /^-?\s*none\s*-?$/i.test(t) ? "" : t;
+      // Zoho lays a multi-column section out ACROSS first: with two columns,
+      // sequence 1 is top-left, 2 is top-right, 3 is second-row-left. Reading
+      // that list straight down therefore zig-zags between the two columns,
+      // which is exactly the "information is all over the place" the user saw.
+      // Regroup it the way a person reads the page: the whole left column top
+      // to bottom, then the whole right column.
+      const columnMajor = (apis: string[], cols: number) => {
+        if (cols < 2 || apis.length < 2) return apis;
+        const out: string[] = [];
+        for (let c = 0; c < cols; c++)
+          for (let i = c; i < apis.length; i += cols) out.push(apis[i]);
+        return out;
       };
 
-      const types = prospectApi
-        ? (Array.isArray(values[prospectApi]) ? values[prospectApi].map(flat) : [flat(values[prospectApi])]).filter(Boolean)
-        : [];
+      // Labels the user has asked never to see again. Matched on the LABEL and
+      // not the api name because these are custom fields whose api names are
+      // org-generated noise, and matched loosely because Zoho labels wander
+      // between straight and curly apostrophes.
+      const labelKey = (v: string) => String(v || "").toLowerCase().replace(/[^a-z]/g, "");
+      const HIDDEN_LABELS = new Set([
+        "trigger",            // an automation flag, meaningless to an agent
+        "spousesfirstname",   // already inside Spouse's Contact Connection
+        "spouseslastname",
+      ]);
 
       // Everything the sheet already shows by other means, plus Zoho's own
-      // plumbing. Repeating these under a "Buyer Form" heading would be noise.
+      // plumbing. Repeating these under a "Residential Buyer" heading is noise.
       const SKIP = new Set([
         "id", "Owner", "Created_By", "Modified_By", "Created_Time", "Modified_Time",
         "Last_Activity_Time", "Tag", "First_Name", "Last_Name", "Full_Name", "Email",
@@ -2422,9 +2494,109 @@ Deno.serve(async (req) => {
         "Record_Image", "Unsubscribed_Mode", "Unsubscribed_Time", "Change_Log_Time__s",
         "Locked__s", "Enrich_Status__s", "Last_Enriched_Time__s", prospectApi,
       ].filter(Boolean) as string[]);
+      const keep = (a: string) =>
+        !SKIP.has(a) && !HIDDEN_LABELS.has(labelKey(meta.get(a)?.field_label || ""));
+
+      // The spouse's details arrive scattered across the layout. They describe
+      // ONE person, so they are pulled together and put in the order someone
+      // would actually use them: who it is, then how to reach them.
+      const spouseRank = (a: string) => {
+        const k = labelKey(meta.get(a)?.field_label || "");
+        if (!k.startsWith("spouse")) return -1;
+        if (k.includes("contactconnection")) return 0;
+        if (k.includes("mobile") || k.includes("phone")) return 1;
+        if (k.includes("email")) return 2;
+        return 3;
+      };
+      const groupSpouse = (apis: string[]) => {
+        const spouse = apis.filter(a => spouseRank(a) >= 0)
+          .sort((a, b) => spouseRank(a) - spouseRank(b));
+        if (spouse.length < 2) return apis;
+        const out: string[] = [];
+        let placed = false;
+        for (const a of apis) {
+          if (spouseRank(a) >= 0) {
+            if (!placed) { out.push(...spouse); placed = true; }
+            continue;   // every other spouse field is already in the block
+          }
+          out.push(a);
+        }
+        return out;
+      };
+      const arrange = (apis: string[], cols: number) => groupSpouse(columnMajor(apis.filter(keep), cols));
+
+      // 3 -- the record. Ask ONLY for the fields we are going to show. The old
+      //      shape asked for every field on the module in batches of 45, which
+      //      cost five or six round trips to answer a question about twelve
+      //      fields.
+      const values: Record<string, any> = {};
+      let readFailed = 0;
+      const readFields = async (apis: string[]) => {
+        for (let i = 0; i < apis.length; i += 45) {
+          const batch = apis.slice(i, i + 45);
+          if (!batch.length) continue;
+          try {
+            const rr = await get(`https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(batch.join(","))}`);
+            if (!rr.ok) { readFailed++; try { await rr.body?.cancel(); } catch { /* drained */ } continue; }
+            const rd = await rr.json().catch(() => ({}));
+            const rec = rd?.data?.[0];
+            if (rec) for (const k of Object.keys(rec)) values[k] = rec[k];
+          } catch { readFailed++; }
+        }
+      };
+
+      // Flatten Zoho's shapes to something printable. A lookup is an object, a
+      // multi-select is an array, and "-None-" is Zoho's way of writing empty.
+      // A false checkbox flattens to EMPTY rather than the string "false":
+      // "Trigger: false" was being printed as though somebody had filled it in.
+      const flat = (v: any): string => {
+        if (v === null || v === undefined || v === "") return "";
+        if (v === true) return "Yes";
+        if (v === false) return "";
+        if (Array.isArray(v)) return v.map(flat).filter(Boolean).join(", ");
+        if (typeof v === "object") return String(v.name ?? v.display_value ?? "").trim();
+        const t = String(v).trim();
+        return /^-?\s*none\s*-?$/i.test(t) ? "" : t;
+      };
+
+      const norm = (v: string) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const matchSection = (t: string) => sections.filter(x => x.name && norm(x.name) === norm(t))[0];
+
+      // Work out the form type with as few calls as possible: trust the hint
+      // the row already drew, and only go and ask Zoho when there isn't one.
+      let types: string[] = [];
+      if (typeHint.length && typeHint.filter(matchSection).length === typeHint.length) {
+        types = typeHint;
+      } else if (prospectApi) {
+        await readFields([prospectApi]);
+        types = (Array.isArray(values[prospectApi]) ? values[prospectApi].map(flat) : [flat(values[prospectApi])]).filter(Boolean);
+      }
+
+      const matched = types.map(matchSection).filter(Boolean);
+      let plan: Array<{ title: string; source: string; apis: string[] }> = [];
+      if (matched.length) {
+        plan = types.filter(matchSection).map(t => {
+          const sec = matchSection(t)!;
+          return { title: t, source: "section", apis: arrange(sec.fields, sec.cols) };
+        });
+      } else {
+        // The expensive path, and only now: no section is named after the form
+        // type, so the candidate set is every custom field on the module.
+        const custom = allFields
+          .filter((f: any) => f?.api_name && f?.custom_field && f?.data_type !== "subform")
+          .map((f: any) => String(f.api_name));
+        plan = [{ title: types.join(" · ") || prospectLabel, source: "filled", apis: groupSpouse(custom.filter(keep)) }];
+      }
+      await readFields(Array.from(new Set(plan.flatMap(g => g.apis))));
+      if (!Object.keys(values).length) return json({ error: "Couldn’t read that contact." }, 404);
 
       const entry = (api: string) => {
         const m = meta.get(api) || {};
+        const raw = values[api];
+        // A lookup carries the id of the record it points at. Keeping it is
+        // what lets "Spouse's Contact Connection" become a link to the spouse
+        // instead of their name as dead text.
+        const linkId = (raw && typeof raw === "object" && !Array.isArray(raw) && raw.id) ? String(raw.id) : null;
         return {
           api,
           label: String(m.field_label || api),
@@ -2433,39 +2605,25 @@ Deno.serve(async (req) => {
           options: Array.isArray(m.pick_list_values)
             ? m.pick_list_values.filter((p: any) => p?.type !== "deleted_value").map((p: any) => String(p.display_value))
             : null,
-          value: flat(values[api]),
-          raw: values[api] ?? null,
+          value: flat(raw),
+          link_module: linkId ? String(m.lookup?.module?.api_name || m.lookup?.module || "Contacts") : null,
+          link_id: linkId,
         };
       };
-      const norm = (v: string) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
       // `fields` are the ones with a value -- that is the at-a-glance summary.
       // `empty` are the rest of the same candidate set, kept apart rather than
       // dropped: the pop-out has to let someone FILL a blank field, not only
       // change a filled one, and a field it never returned is a field nobody
       // can ever complete from this app.
-      const split = (apis: string[], source: string, title: string) => {
-        const all = apis.filter(a => !SKIP.has(a)).map(entry);
+      const groups = plan.map(g => {
+        const all = g.apis.map(entry);
         return {
-          title, source,
+          title: g.title, source: g.source,
           fields: all.filter(f => !!f.value),
           empty: all.filter(f => !f.value && !f.read_only).slice(0, 40),
         };
-      };
-
-      const groups: any[] = [];
-      for (const t of types) {
-        const sec = sections.filter(x => x.name && norm(x.name) === norm(t))[0];
-        if (sec) groups.push(split(sec.fields, "section", t));
-      }
-      // No section is named after the form type -- fall back to the custom
-      // fields, which is the same truth the layout rule leans on: a buyer only
-      // has buyer fields filled in.
-      if (!groups.length) {
-        const custom = wanted.filter(a => meta.get(a)?.custom_field);
-        const g = split(custom, "filled", types.join(" · ") || prospectLabel);
-        if (g.fields.length || types.length) groups.push(g);
-      }
+      }).filter(g => g.fields.length || g.empty.length || types.length);
 
       return json({
         contact_id: cid,
@@ -2473,7 +2631,7 @@ Deno.serve(async (req) => {
         prospect_api: prospectApi || null,
         types,
         groups,
-        sections_read: lr.ok,
+        sections_read: !!ld,
         batches_failed: readFailed,
       }, 200);
     }

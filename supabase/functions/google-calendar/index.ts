@@ -257,12 +257,13 @@ function gmailPermalink(threadId: string): string {
 const CB_THREADS_PER_MAILBOX = 3;      // ≤3 per mailbox, so ≤6 threads a tap
 const CB_SNIPPET_CHARS = 260;          // Gmail's snippet, clipped
 const CB_MAX_CONTEXT_CHARS = 12000;    // hard slice before the model sees it
-const CB_MAX_TOKENS = 340;             // a real brief is ~90; this is a ceiling
+const CB_MAX_TOKENS = 170;             // DEALS only now; a real one is ~40
 const CB_READS_PER_HOUR = 60;          // per viewer. Stops a scripted sweep.
 // Zoho hands back ten emails per call and there is no per_page to raise it, so
 // ten is the whole page. All of them go to the model: these are one line each,
 // and the oldest of ten is still the thing that says "we have not emailed this
 // contact since March".
+const CB_ZOHO_EMAIL_LIST = 50;   // how many the sheet will list
 const CB_ZOHO_EMAILS = 10;
 
 // Mint a Google access token for an ARBITRARY user id.
@@ -353,38 +354,31 @@ const CONTACT_BRIEF_SYSTEM = [
   "",
   "DEALS",
   "- <bullet>",
-  "TOUCH",
-  "- <bullet>",
-  "EMAIL",
-  "- <bullet>",
   "",
   "FORMAT RULES:",
-  "- All three headings always appear, in that order, spelled exactly as shown, alone on their line.",
-  "- Each heading is followed by one to three bullets. Every bullet starts with '- '.",
+  "- The heading DEALS appears exactly once, alone on its line, spelled exactly as shown.",
+  "- It is followed by one to three bullets. Every bullet starts with '- '.",
   "- A bullet is ONE short clause, under 18 words. No headings of your own, no paragraphs.",
-  "- A section with nothing to report gets exactly one bullet: '- Nothing on file.'",
+  "- With no open deals, write exactly one bullet: '- Nothing on file.'",
   "",
-  "WHAT BELONGS IN EACH SECTION:",
-  "- DEALS: open deals and their stage. Amount and closing date only if you were given them.",
-  "- TOUCH: the single most recent thing under DONE, with its date. ANY task type counts —",
-  "  a note, an email task and a text are touches exactly as much as a call is. Take the newest one",
-  "  and say what it was and when. NEVER put a SCHEDULED item here as though it had happened.",
-  "  Only when DONE is empty do you say there is nothing logged, and then you may add what is booked.",
-  "- EMAIL: what the most recent email was actually about, in the plainest words available.",
-  "  If ANY mail is listed on the Zoho contact record, this section is never 'Nothing on file' —",
-  "  say what the newest one was and give its date, even when that date is years ago. Old mail is",
-  "  a fact worth knowing; silence reads as 'never emailed', which is a different and worse answer.",
+  "WHAT BELONGS THERE:",
+  "- Open deals and their stage. Amount and closing date only if you were given them.",
+  "- Anything in the other sections below that changes how an agent should read those deals —",
+  "  a lender chasing paperwork, a walkthrough booked. One bullet, only if it bears on a deal.",
+  "",
+  "WHAT DOES NOT BELONG THERE — and this matters:",
+  "- The last touch and the email history are printed for the agent DIRECTLY from Zoho, exactly",
+  "  as recorded, underneath what you write. They are not your job and never were. Do not",
+  "  summarise them, do not restate them, and above all do not write a TOUCH or EMAIL heading.",
+  "  You were getting the last touch wrong — putting a SCHEDULED call where a completed one",
+  "  belonged — which is precisely why it was taken off you.",
   "",
   "RULES:",
   "- Never invent a name, a number, a date, a price or an event you were not given.",
   "- EVERY date you write must appear verbatim in the data above. Never approximate a date, never",
   "  widen one into a season or a year, and never infer a range. If you are unsure, leave the date out.",
   "- Do not repeat the contact's own name.",
-  "- Do not mention email addresses, thread subjects verbatim, or whose mailbox anything came from.",
-  "- The two email sections can describe the SAME message. Count an exchange once.",
-  "- A newsletter, market update or monthly-insights mailer is a mass send, not a conversation.",
-  "  Worth one bullet so the agent knows it goes out ('gets the monthly market email'), never",
-  "  worded as if the agent and the contact were in touch.",
+  "- Do not mention email addresses or whose mailbox anything came from.",
   "- Do not give advice, do not suggest what to say on the call, and do not editorialise.",
 ].join("\n");
 
@@ -855,18 +849,6 @@ Deno.serve(async (req) => {
       // "Budget: $650k" the model paraphrased is a number it could get wrong.
       // The client prints them verbatim. The model still SEES them below, so
       // the deals and touch lines can read as though it knows the client.
-      let prospect: any = null;
-      try {
-        const pr = await fetch(Deno.env.get("SUPABASE_URL") + "/functions/v1/zoho-crm", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: req.headers.get("Authorization") || "" },
-          body: JSON.stringify({ action: "prospect_form", contact_id: contactId }),
-        });
-        if (pr.ok) {
-          const pd = await pr.json().catch(() => ({}));
-          if (pd && Array.isArray(pd.groups)) prospect = pd;
-        } else { try { await pr.body?.cancel(); } catch { /* drained */ } }
-      } catch { /* a missing prospect form must never cost the whole brief */ }
 
       // (4) Zoho Owner id → TMG profile, by STORED ID only. Never by name: the
       //     loose bidirectional substring match used to shade the capacity grid
@@ -901,6 +883,25 @@ Deno.serve(async (req) => {
             .eq("id", agent.assigned_tc).maybeSingle()
         : { data: null } as any;
 
+      // Started here, awaited AFTER the mailbox search. It needs nothing from
+      // the owner lookup, the permission check or Gmail, and awaiting it here
+      // meant three Zoho round trips happened before the Gmail search had even
+      // been asked for. Now they overlap.
+      const prospectPromise = (async (): Promise<any> => {
+      try {
+        const pr = await fetch(Deno.env.get("SUPABASE_URL") + "/functions/v1/zoho-crm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: req.headers.get("Authorization") || "" },
+          body: JSON.stringify({ action: "prospect_form", contact_id: contactId }),
+        });
+        if (pr.ok) {
+          const pd = await pr.json().catch(() => ({}));
+          if (pd && Array.isArray(pd.groups)) return pd;
+        } else { try { await pr.body?.cancel(); } catch { /* drained */ } }
+      } catch { /* a missing prospect form must never cost the whole brief */ }
+      return null;
+      })();
+
       // (6) Search. No email on file means nothing to search — return without
       //     spending a Gmail call or an AI call.
       let mailboxes: any[] = [];
@@ -926,6 +927,7 @@ Deno.serve(async (req) => {
         ));
       }
 
+      const prospect = await prospectPromise;
       const threadLines = mailboxes.flatMap((m) => m.lines || []);
       const threadsRead = threadLines.length;
 
@@ -959,6 +961,17 @@ Deno.serve(async (req) => {
       const line = (t: any) =>
         `- ${tDate(t)} | ${t.status || "?"}${t.type ? " | " + t.type : ""} | ${t.subject || ""}`;
       const touches = donePast.map(line);
+      // THE last touch, as a fact rather than a sentence. The model kept
+      // reporting a call that is still in the diary as though it had already
+      // happened; this cannot, because donePast holds only things with a date
+      // on or before today. Type and date is all the agent asked for.
+      const lastTouch = donePast.length
+        ? {
+            type: donePast[0].type || (donePast[0].subject ? "Task" : null),
+            date: tDate(donePast[0]),
+            subject: donePast[0].subject || null,
+          }
+        : null;
       const planned = upcoming.map(line);
 
       // The newest touch of each KIND — one "Call", one "Note", one "Email" —
@@ -1060,8 +1073,13 @@ Deno.serve(async (req) => {
       if (ctx.length > CB_MAX_CONTEXT_CHARS) ctx = ctx.slice(0, CB_MAX_CONTEXT_CHARS);
 
       // Nothing at all to summarise: don't pay a model to say so.
-      let brief = "";
-      if (deals.length || touches.length || planned.length || threadLines.length || zohoMail.length) {
+      // No open deals means the only section the model still writes has exactly
+      // one possible answer, and it is cheaper and faster to write it here than
+      // to send twelve thousand characters of context to a model to be told
+      // what we already know. The touch and email sections below are drawn from
+      // Zoho either way, so this costs the agent nothing.
+      let brief = deals.length ? "" : "DEALS\n- Nothing on file.";
+      if (deals.length) {
         const ar = await fetch(Deno.env.get("SUPABASE_URL") + "/functions/v1/ai-chat", {
           method: "POST",
           headers: {
@@ -1120,6 +1138,9 @@ Deno.serve(async (req) => {
         // when there are genuinely no completed tasks — the sheet only prints a
         // heading when there is at least one row, so both read the same way.
         last_by_type: lastByType,
+        // { type, date, subject } of the newest task that has ALREADY happened,
+        // or null when nothing has. Never something still in the diary.
+        last_touch: lastTouch,
         // How many emails Zoho already had on the record, and why there were
         // none if there were none. Counts and a state word only — the subjects
         // stay server-side, same rule as the mailbox search.
@@ -1127,6 +1148,20 @@ Deno.serve(async (req) => {
         zoho_emails_state: zd.emails_state || "failed",
         // { first, last } as plain YYYY-MM-DD, or null when Zoho's dates were
         // not in a readable format. Null WITH a non-zero count is the tell.
+        // Every email Zoho holds on the record, newest first — subject, date
+        // and the id a link needs. This is NOT the mailbox-search rule being
+        // relaxed: those threads come from an agent's private Gmail and stay
+        // unexposed. These are already ON the Zoho contact record, and the only
+        // people who can reach this endpoint are the owning agent, their TC and
+        // admins — the same people who can open that record in Zoho and read
+        // them there. Showing them here reveals nothing new to anyone.
+        zoho_email_list: (zd.emails || []).slice(0, CB_ZOHO_EMAIL_LIST).map((m: any) => ({
+          id: m.id || null,
+          subject: m.subject || null,
+          time: m.time || null,
+          sent: m.sent === true,
+          from: m.from || null,
+        })),
         zoho_email_span: emailSpan,
         // { types[], groups[{title, source, fields[{api,label,type,value,options,read_only}]}] }
         // `source` is "section" when Zoho's own layout supplied the grouping and

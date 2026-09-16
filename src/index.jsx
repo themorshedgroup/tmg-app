@@ -4851,6 +4851,12 @@ Rules:
     // DC-neutral Zoho gateway link — resolves the logged-in user's org server
     // side. Guarded to real numeric record ids so a missing id degrades to
     // plain text instead of a dead link.
+    // Zoho has no documented deep link to ONE message on a record, so this
+    // opens the contact — where the Emails tab is one click away and the whole
+    // thread is readable. Better an honest link to the right record than a
+    // guessed url that 404s.
+    const zohoEmailUrl = (contactId) => zohoContactUrl(contactId);
+
     const zohoContactUrl = (id) => (id && /^\d+$/.test(String(id)))
       ? 'https://crm.zoho.com/crm/EntityInfo.do?module=Contacts&id=' + encodeURIComponent(id) : null;
 
@@ -4887,7 +4893,18 @@ Rules:
     //  "prospect type" outright), and exactly ONE field may match. Two
     //  candidates means the org has something we don't understand, and the
     //  honest answer there is to show no chip at all.
-    const CONTACT_FIELDS_KEY = 'tmg-contact-fields-v1';
+    // v2: the cached shape gained the Contact Tags field, so a v1 payload
+    // would otherwise be read as "this org has no such field" for a week.
+    const CONTACT_FIELDS_KEY = 'tmg-contact-fields-v2';
+    // A custom field an admin fills in, NOT Zoho's built-in Tag. Ricardo Carlin
+    // is tagged "Referral" in this field and it was only visible by opening the
+    // prospect form, which is the wrong place for something that changes how
+    // you open the call. Strict on purpose: exactly one field may match.
+    const CONTACT_TAGS_LABEL = /^\s*contact\s*tags?\s*$/i;
+    function pickTagsField(fields) {
+      const hits = (fields || []).filter(f => f && f.api_name && CONTACT_TAGS_LABEL.test(f.field_label || ''));
+      return hits.length === 1 ? { api: hits[0].api_name, label: hits[0].field_label || 'Contact tags' } : null;
+    }
     const PROSPECT_LABEL = /(prospect.*(form|type))|((form|type).*prospect)/i;
     function pickProspectField(fields) {
       const hits = (fields || []).filter(f => f && f.api_name && PROSPECT_LABEL.test(f.field_label || ''));
@@ -4898,29 +4915,30 @@ Rules:
     // Zoho shows up the same morning), and a FAILED READ, which caches nothing
     // at all. Caching a failure as "no such field" is how a single bad moment
     // becomes permanent.
-    async function resolveProspectField() {
+    async function resolveContactFields() {
+      const EMPTY = { pform: null, ctags: null };
       try {
         const raw = JSON.parse(localStorage.getItem(CONTACT_FIELDS_KEY) || 'null');
         if (raw && raw.at) {
           const age = Date.now() - raw.at;
-          if (raw.field && age < 7 * 86400000) return raw.field;
-          if (!raw.field && age < 3600000) return null;
+          if (raw.pform && age < 7 * 86400000) return { pform: raw.pform, ctags: raw.ctags || null };
+          if (!raw.pform && age < 3600000) return { pform: null, ctags: (raw.ctags || null) };
         }
       } catch (e) {}
       if (callsIsDev()) {
-        const field = { api: 'Prospect_Form_Type', label: 'Prospect Form Type' };
-        try { localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify({ field, at: Date.now() })); } catch (e) {}
-        return field;
+        const out = { pform: { api: 'Prospect_Form_Type', label: 'Prospect Form Type' }, ctags: { api: 'Contact_Tags', label: 'Contact Tags' } };
+        try { localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify(Object.assign({ at: Date.now() }, out))); } catch (e) {}
+        return out;
       }
       let data;
       try {
         const r = await callZoho({ action: 'get_fields', module: 'Contacts' });
-        if (!r.ok || !r.data || !Array.isArray(r.data.fields)) return null;   // caches nothing
+        if (!r.ok || !r.data || !Array.isArray(r.data.fields)) return EMPTY;   // caches nothing
         data = r.data;
-      } catch (e) { return null; }                                            // caches nothing
-      const field = pickProspectField(data.fields);
-      try { localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify({ field, at: Date.now() })); } catch (e) {}
-      return field;
+      } catch (e) { return EMPTY; }                                            // caches nothing
+      const out = { pform: pickProspectField(data.fields), ctags: pickTagsField(data.fields) };
+      try { localStorage.setItem(CONTACT_FIELDS_KEY, JSON.stringify(Object.assign({ at: Date.now() }, out))); } catch (e) {}
+      return out;
     }
     // ─── Contact brief (the (i) on a call row) ───────────────────────
     //  Generated on press, from the contact record, their open deals, their
@@ -5724,7 +5742,7 @@ Rules:
     //
     //  Edits go straight to Zoho. Only changed fields are sent, so a field
     //  this window never showed cannot be blanked by saving.
-    function ProspectSheet({ dark, contactId, contactName, label, onClose }) {
+    function ProspectSheet({ dark, contactId, contactName, label, types, preloaded, onClose }) {
       const J = "'Jost', sans-serif";
       const headTitle = dark ? '#FFFFFF' : '#001A4A';
       const mutedCol  = dark ? 'rgba(255,255,255,0.45)' : '#8E897C';
@@ -5745,11 +5763,14 @@ Rules:
       useEffect(() => {
         let dead = false;
         setState('loading'); setErr('');
+        // The brief sheet already asked Zoho this exact question a moment ago.
+        // Asking again to draw the same fields is a second wait for nothing.
+        if (preloaded && Array.isArray(preloaded.groups)) { setData(preloaded); setState('ready'); return () => { dead = true; }; }
         if (callsIsDev()) {
           setTimeout(() => { if (!dead) { setData(devProspect()); setState('ready'); } }, 400);
           return () => { dead = true; };
         }
-        callZoho({ action: 'prospect_form', contact_id: contactId }).then(r => {
+        callZoho({ action: 'prospect_form', contact_id: contactId, types: types || undefined }).then(r => {
           if (dead) return;
           if (!r.ok) { setErr((r.data && r.data.error) || 'Couldn’t read the prospect form.'); setState('error'); return; }
           setData(r.data); setState('ready');
@@ -5810,7 +5831,17 @@ Rules:
         const val = touched ? edits[f.api] : (f.type === 'boolean' ? /^(true|yes)$/i.test(f.value) : f.value);
         const set = v => { setSaved(false); setEdits(e => ({ ...e, [f.api]: v })); };
         let control;
-        if (f.read_only) {
+        if (f.link_id) {
+          // A lookup points AT a record. A text box here would invite someone
+          // to retype a name and quietly break the link, so it is shown as
+          // what it is: a way through to the other person's record.
+          control = (
+            <a href={zohoContactUrl(f.link_id) || undefined} target="_blank" rel="noopener noreferrer"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle, padding: '7px 0', textDecoration: 'underline', textDecorationStyle: 'dotted', textUnderlineOffset: 2 }}>
+              {f.value}<i className="ti ti-external-link" style={{ fontSize: 11, color: mutedCol }} />
+            </a>
+          );
+        } else if (f.read_only) {
           control = <div style={{ fontFamily: J, fontSize: 13, fontWeight: 300, color: mutedCol, padding: '7px 0' }}>{f.value || '—'}</div>;
         } else if (f.type === 'boolean') {
           control = (
@@ -5870,7 +5901,7 @@ Rules:
 
             {state === 'ready' && groups.map((g, gi) => (
               <div key={gi} style={{ marginTop: 16 }}>
-                <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#C9A45A', marginBottom: 9, paddingBottom: 6, borderBottom: `1px solid ${lineCol}` }}>{g.title}</div>
+                <div style={{ fontFamily: J, fontSize: 13, fontWeight: 600, color: '#C9A45A', marginBottom: 9, paddingBottom: 6, borderBottom: `1px solid ${lineCol}` }}>{g.title}</div>
                 {(g.fields || []).map(field)}
                 {!(g.fields || []).length && (
                   <div style={{ fontFamily: J, fontSize: 12.5, fontWeight: 300, color: mutedCol, marginBottom: 10 }}>Nothing filled in yet.</div>
@@ -5929,8 +5960,14 @@ Rules:
       // field" — resolveProspectField tells those apart internally, and either
       // way the second chip simply doesn't render.
       const [pfield, setPfield] = useState(null);
-      const [pformFor, setPformFor] = useState(null);   // contact whose prospect form is open — { id, name }
-      useEffect(() => { let dead = false; resolveProspectField().then(f => { if (!dead) setPfield(f); }); return () => { dead = true; }; }, []);
+      const [pformFor, setPformFor] = useState(null);
+      const [mailAll, setMailAll] = useState(false);    // the Email list starts short and opens on tap   // contact whose prospect form is open — { id, name }
+      const [cfield, setCfield] = useState(null);
+      useEffect(() => {
+        let dead = false;
+        resolveContactFields().then(f => { if (!dead) { setPfield(f.pform); setCfield(f.ctags); } });
+        return () => { dead = true; };
+      }, []);
       // The brief behind the (i). `null` until a sheet is open.
       //   { id, state: 'loading' | 'ready' | 'error', data, code, ownerName }
       const [brief, setBrief] = useState(null);
@@ -5951,7 +5988,7 @@ Rules:
         });
       };
       const openInfo = (b) => { setInfoFor({ id: b.cid, name: b.cname }); loadBrief(b.cid, false); };
-      const closeInfo = () => { briefGen.current++; setInfoFor(null); setBrief(null); };
+      const closeInfo = () => { briefGen.current++; setInfoFor(null); setBrief(null); setMailAll(false); };
       useEffect(() => { callPrefSet(CALL_VIEW_KEY, listView); }, [listView]);
       useEffect(() => { callPrefSet(CALL_DAYSEG_KEY, day); }, [day]);
       useEffect(() => { if (weekday) callPrefSet(CALL_WEEKDAY_KEY, weekday); }, [weekday]);
@@ -6363,9 +6400,10 @@ Rules:
               try {
                 // phone AND email off the same call — email was already being
                 // fetched here and thrown away.
+                const extras = [pfield && pfield.api, cfield && cfield.api].filter(Boolean);
                 const r = await callZoho(Object.assign(
                   { action: 'get_contact', id },
-                  (pfield && pfield.api) ? { extra_fields: [pfield.api] } : {}
+                  extras.length ? { extra_fields: extras } : {}
                 ));
                 // `found === false` means Zoho was reached but the record was
                 // not — caching that as "they have no number" is a lie that
@@ -6392,6 +6430,19 @@ Rules:
                 // drop the Tag ask to save the phone number, and an array when
                 // it read them — stamping null as "no tags" would be permanent.
                 if (c && Array.isArray(c.tags)) v.tags = c.tags;
+                // Zoho's own tags and the "Contact Tags" field say the same
+                // KIND of thing about a person, so the row shows them as one
+                // set. Same negative-caching rule as everything else here: only
+                // stamped when the field was actually asked for and survived.
+                if (cfield && cfield.api && c && !c.extra_failed) {
+                  const extra = String(prospectText(c.extra ? c.extra[cfield.api] : null) || '')
+                    .split(',').map(x => x.trim()).filter(Boolean);
+                  if (extra.length) {
+                    const seen = {};
+                    v.tags = (v.tags || []).concat(extra)
+                      .filter(t => { const k = String(t).toLowerCase(); if (seen[k]) return false; seen[k] = 1; return true; });
+                  } else if (!('tags' in v)) { v.tags = []; }
+                }
                 return [id, v];
               } catch (e) { return [id, null]; }   // a failure caches NOTHING, so it is retried
             }));
@@ -6640,8 +6691,24 @@ Rules:
       // in Zoho showed "No class" unless the subject happened to say "A Touch
       // Call" — a wrong answer stated confidently. The subject is still used,
       // but only while the record is loading and only labelled as a guess.
+      // A circle, and first in the row rather than last. As a square chip at
+      // the end of a line of chips it sat wherever the tags happened to stop,
+      // so it moved from row to row and was never in the same place twice. In
+      // front of the name it is always in the same place, and it is the one
+      // control on the row that opens something rather than describing it.
+      const aiButton = (b) => (
+        <button onClick={(e) => { e.stopPropagation(); openInfo(b); }} title={'AI summary of ' + b.cname}
+          style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0, cursor: 'pointer', padding: 0,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-start',
+            marginTop: 1, background: aiBg, color: aiCol, border: `1px solid ${aiBd}` }}>
+          <i className="ti ti-sparkles" style={{ fontSize: 13 }} />
+        </button>
+      );
+
       const nameCluster = (t, b, size) => (
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: 8 }}>
+          {aiButton(b)}
+          <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 }}>
             {b.href
               ? <a href={b.href} target="_blank" rel="noopener noreferrer" style={{ fontFamily: J, fontSize: size, fontWeight: 600, letterSpacing: '-0.01em', color: nameCol, textDecoration: b.done ? 'line-through' : 'none', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.cname}</a>
@@ -6654,25 +6721,13 @@ Rules:
                   ? chip(b.gradeFromSubject + '?', 'Read off the task subject while the contact record loads — it may not match the record', true)
                   : chip('…', 'Reading this contact’s classification from Zoho', true))}
             {b.eo && chip('EO', 'This task is an EO touch call — a kind of call, not a client classification', true)}
-            {b.pform && chip(b.pform, (pfield && pfield.label ? pfield.label : 'Prospect form') + ': ' + b.pform + ' — tap to see and edit the form', true, () => setPformFor({ id: b.cid, name: b.cname }))}
+            {b.pform && chip(b.pform, (pfield && pfield.label ? pfield.label : 'Prospect form') + ': ' + b.pform + ' — tap to see and edit the form', true, () => setPformFor({ id: b.cid, name: b.cname, types: b.pform ? [b.pform] : null }))}
             {/* Every tag on the record, not the first few. A contact tagged
                 "Do Not Call" behind a "…+3" would be exactly the one that
-                got hidden. */}
+                got hidden. Reading order is deliberate and was asked for:
+                who they are (A/B/C), what kind of client (the form type),
+                then whatever else is true of them (tags). */}
             {b.tags.map(tagChip)}
-            {/* Was a grey (i). An info circle promises "the details already on
-                the record"; what is actually behind this is a few sentences a
-                model just wrote from email, deals and call history. The purple
-                AI mark says so before the agent taps it.
-                Tabler's sparkles, NOT the ✨ emoji — an emoji is a fixed
-                multicolour glyph, so it cannot be purple and it renders as a
-                different picture on every platform. */}
-            <button onClick={() => openInfo(b)} title={'AI summary of ' + b.cname}
-              style={{ fontFamily: J, fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', lineHeight: 1.4,
-                padding: '2px 5px 2px 6px', borderRadius: 5, flexShrink: 0, cursor: 'pointer',
-                display: 'inline-flex', alignItems: 'center', gap: 2,
-                background: aiBg, color: aiCol, border: `1px solid ${aiBd}` }}>
-              AI<i className="ti ti-sparkles" style={{ fontSize: 10 }} />
-            </button>
           </div>
           {b.spouse && b.spouse.name && (
             <a href={zohoContactUrl(b.spouse.id) || undefined} target="_blank" rel="noopener noreferrer" title={'Spouse: ' + b.spouse.name}
@@ -6680,6 +6735,7 @@ Rules:
               <i className="ti ti-heart-filled" style={{ fontSize: 10, color: '#C9A45A', flexShrink: 0 }} />{b.spouse.name}
             </a>
           )}
+          </div>
         </div>
       );
 
@@ -6957,6 +7013,7 @@ Rules:
           {pformFor && (
             <ProspectSheet dark={dark} contactId={pformFor.id} contactName={pformFor.name}
               label={pfield && pfield.label ? pfield.label : 'Prospect form'}
+              types={pformFor.types} preloaded={pformFor.preloaded}
               onClose={() => setPformFor(null)} />
           )}
 
@@ -6977,62 +7034,109 @@ Rules:
                 {brief && brief.id === infoFor.id && brief.state === 'ready' && (
                   <React.Fragment>
                     {(() => {
-                      const secs = briefSections(brief.data.brief);
-                      const span = briefMailSpan(brief.data);
-                      if (!secs.length) return (
-                        <div style={{ fontFamily: J, fontSize: 13.5, fontWeight: 300, color: headTitle, lineHeight: 1.6, margin: '10px 0 12px' }}>
-                          {brief.data.brief || 'Nothing recent on file.'}
+                      const d = brief.data;
+                      const openForm = () => setPformFor({ id: infoFor.id, name: infoFor.name, types: (d.prospect && d.prospect.types) || null, preloaded: d.prospect || null });
+
+                      // One heading style for the whole sheet. `plain` keeps a
+                      // name as its owner spelled it — "Residential Buyer", not
+                      // RESIDENTIAL BUYER, which is a label and not a shout.
+                      const head = (icon, label, plain, onClick) => (
+                        <div role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined}
+                          onClick={onClick}
+                          onKeyDown={onClick ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }) : undefined}
+                          style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5, cursor: onClick ? 'pointer' : undefined }}>
+                          <i className={'ti ' + icon} style={{ fontSize: 12, color: '#C9A45A', flexShrink: 0 }} />
+                          <span style={{ fontFamily: J, fontSize: plain ? 12 : 9.5, fontWeight: 600,
+                            letterSpacing: plain ? '0' : '0.06em', textTransform: plain ? 'none' : 'uppercase',
+                            color: plain ? headTitle : faintCol }}>{label}</span>
+                          {onClick && <i className="ti ti-pencil" style={{ fontSize: 10, color: faintCol, flexShrink: 0 }} />}
                         </div>
                       );
+                      const bullet = (node, key) => (
+                        <div key={key} style={{ display: 'flex', gap: 7, fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle, lineHeight: 1.55, marginBottom: 3 }}>
+                          <span style={{ color: mutedCol, flexShrink: 0 }}>•</span><span style={{ minWidth: 0 }}>{node}</span>
+                        </div>
+                      );
+
+                      // DEALS is the only part a model still writes. Everything
+                      // below it is printed from Zoho exactly as Zoho holds it.
+                      const deals = briefSections(d.brief).filter(x => x.key === 'DEALS')[0];
+                      const mail = Array.isArray(d.zoho_email_list) ? d.zoho_email_list : [];
+                      const shown = mailAll ? mail : mail.slice(0, 6);
+                      const span = briefMailSpan(d);
+
                       return (
                         <div style={{ margin: '10px 0 14px' }}>
-                          {secs.map((sec, i) => (
-                            <div key={sec.key} style={{ marginBottom: i === secs.length - 1 ? 0 : 13 }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-                                <i className={'ti ' + sec.icon} style={{ fontSize: 12, color: '#C9A45A', flexShrink: 0 }} />
-                                <span style={{ fontFamily: J, fontSize: 9.5, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: faintCol }}>{sec.label}</span>
-                              </div>
-                              {sec.bullets.map((b, j) => (
-                                <div key={j} style={{ display: 'flex', gap: 7, fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle, lineHeight: 1.55, marginBottom: 3 }}>
-                                  <span style={{ color: mutedCol, flexShrink: 0 }}>•</span><span style={{ minWidth: 0 }}>{b}</span>
-                                </div>
-                              ))}
-                              {sec.key === 'EMAIL' && span && (
-                                <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 300, color: mutedCol, marginTop: 4, paddingLeft: 14 }}>{span}</div>
-                              )}
+                          <div style={{ marginBottom: 13 }}>
+                            {head('ti-home-dollar', 'Deals')}
+                            {(deals ? deals.bullets : [d.brief || 'Nothing on file.']).map((b, j) => bullet(b, j))}
+                          </div>
+
+                          {/* The last thing that ACTUALLY happened. Decided in
+                              code from tasks dated today or earlier, so a call
+                              still sitting in the diary can never appear here
+                              dressed up as one that took place. */}
+                          <div style={{ marginBottom: 13 }}>
+                            {head('ti-phone-call', 'Last touch')}
+                            {d.last_touch
+                              ? bullet(
+                                  <React.Fragment>
+                                    <span style={{ fontWeight: 600 }}>{d.last_touch.type || 'Task'}</span>
+                                    <span>{': ' + briefTouchDate(d.last_touch.date)}</span>
+                                  </React.Fragment>, 'lt')
+                              : bullet(d.tasks_read ? 'Nothing logged yet.' : 'Couldn’t read the task history.', 'lt')}
+                          </div>
+
+                          {/* Every email on the Zoho record, not a sentence
+                              about the newest one. Each opens the contact in
+                              Zoho, where the thread is readable in full. */}
+                          <div style={{ marginBottom: 13 }}>
+                            {head('ti-mail', 'Email')}
+                            {!mail.length && bullet(
+                              (d.zoho_emails_state === 'read' || d.zoho_emails_state === 'none')
+                                ? 'Nothing on file.' : 'Couldn’t read the email history.', 'm0')}
+                            {shown.map((m, j) => (
+                              <a key={j} href={zohoEmailUrl(infoFor.id) || undefined} target="_blank" rel="noopener noreferrer"
+                                style={{ display: 'flex', gap: 7, fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle, lineHeight: 1.55, marginBottom: 3, textDecoration: 'none' }}>
+                                <i className={'ti ' + (m.sent ? 'ti-arrow-up-right' : 'ti-arrow-down-left')}
+                                  title={m.sent ? 'Sent to them' : 'Received from them'}
+                                  style={{ fontSize: 11, color: mutedCol, flexShrink: 0, marginTop: 4 }} />
+                                <span style={{ minWidth: 0 }}>
+                                  <span style={{ textDecoration: 'underline', textDecorationStyle: 'dotted', textUnderlineOffset: 2 }}>{m.subject || '(no subject)'}</span>
+                                  {m.time && <span style={{ color: mutedCol }}>{' · ' + briefTouchDate(m.time)}</span>}
+                                </span>
+                              </a>
+                            ))}
+                            {mail.length > shown.length && (
+                              <button onClick={() => setMailAll(true)}
+                                style={{ background: 'none', border: 'none', padding: '2px 0 0 14px', cursor: 'pointer', fontFamily: J, fontSize: 11.5, fontWeight: 600, color: mutedCol }}>
+                                + {mail.length - shown.length} more
+                              </button>
+                            )}
+                            {span && <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 300, color: mutedCol, marginTop: 4, paddingLeft: 14 }}>{span}</div>}
+                          </div>
+
+                          {/* The prospect form, one section per type they carry.
+                              Printed field by field from Zoho rather than
+                              summarised by the model: these are budgets, dates
+                              and addresses, and a paraphrased number is a wrong
+                              number. Tapping the heading opens the editor. */}
+                          {((d.prospect && d.prospect.groups) || []).filter(g => (g.fields || []).length).map((g, gi) => (
+                            <div key={'pf' + gi} style={{ marginBottom: 13 }}>
+                              {head('ti-clipboard-text', g.title, true, openForm)}
+                              {(g.fields || []).map((f, j) => bullet(
+                                <React.Fragment>
+                                  <span style={{ color: mutedCol }}>{f.label + ': '}</span>
+                                  {f.link_id
+                                    ? <a href={zohoContactUrl(f.link_id) || undefined} target="_blank" rel="noopener noreferrer"
+                                        style={{ color: headTitle, textDecoration: 'underline', textDecorationStyle: 'dotted', textUnderlineOffset: 2 }}>{f.value}</a>
+                                    : f.value}
+                                </React.Fragment>, j))}
                             </div>
                           ))}
                         </div>
                       );
                     })()}
-                    {/* The prospect form, one section per type they carry.
-                        Printed field by field from Zoho rather than summarised
-                        by the model: these are budgets, dates and addresses,
-                        and a paraphrased number is a wrong number. Tapping the
-                        heading opens the same window the row chip opens. */}
-                    {((brief.data.prospect && brief.data.prospect.groups) || []).filter(g => (g.fields || []).length).map((g, gi) => (
-                      <div key={'pf' + gi} style={{ marginBottom: 14 }}>
-                        <div role="button" tabIndex={0}
-                          onClick={() => setPformFor({ id: infoFor.id, name: infoFor.name })}
-                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setPformFor({ id: infoFor.id, name: infoFor.name }); } }}
-                          style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5, cursor: 'pointer' }}>
-                          <i className="ti ti-clipboard-text" style={{ fontSize: 12, color: '#C9A45A', flexShrink: 0 }} />
-                          <span style={{ fontFamily: J, fontSize: 9.5, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: faintCol }}>{g.title}</span>
-                          <i className="ti ti-pencil" style={{ fontSize: 10, color: faintCol, flexShrink: 0 }} />
-                        </div>
-                        {(g.fields || []).slice(0, 12).map((f, j) => (
-                          <div key={j} style={{ display: 'flex', gap: 7, fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle, lineHeight: 1.55, marginBottom: 3 }}>
-                            <span style={{ color: mutedCol, flexShrink: 0 }}>•</span>
-                            <span style={{ minWidth: 0 }}><span style={{ color: mutedCol }}>{f.label + ': '}</span>{f.value}</span>
-                          </div>
-                        ))}
-                        {(g.fields || []).length > 12 && (
-                          <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 300, color: mutedCol, marginTop: 4, paddingLeft: 14 }}>
-                            {((g.fields || []).length - 12) + ' more — tap the heading to see them all'}
-                          </div>
-                        )}
-                      </div>
-                    ))}
 
                     {/* What was and wasn't read. A brief that quietly skipped a
                         mailbox reads as "there's nothing there", which is a

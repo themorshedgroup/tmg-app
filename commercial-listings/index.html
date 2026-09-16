@@ -251,7 +251,7 @@
   <input id="i-file" type="file" accept=".xlsx,.xls,.csv">
   <div id="i-result" class="hint" style="margin-top:12px"></div>
   <div class="row">
-    <button class="btn" value="cancel">Close</button>
+    <button class="btn" id="i-close" value="cancel">Close</button>
     <button class="btn btn-primary" id="i-go" value="go">Import</button>
   </div>
 </form></dialog>
@@ -946,8 +946,22 @@
   $("btn-copy").addEventListener("click",copyTable);
 
   // ── CoStar import ─────────────────────────────────────────────────
+  // The primary button doubles as the confirm and the dismiss. Once an import
+  // has run it must stop submitting -- the natural instinct is to click it to
+  // acknowledge the result, and that used to re-send the same file.
+  function importIdle(){
+    $("i-go").textContent="Import"; $("i-go").value="go"; $("i-go").disabled=false;
+    $("i-close").style.display=""; $("i-close").disabled=false;
+  }
+  function importBusy(){
+    $("i-go").disabled=true; $("i-close").disabled=true;
+  }
+  function importFinished(){
+    $("i-go").textContent="Finish"; $("i-go").value="cancel"; $("i-go").disabled=false;
+    $("i-close").style.display="none";
+  }
   $("btn-import").addEventListener("click",function(){
-    $("i-file").value=""; $("i-result").textContent=""; $("i-go").textContent="Import";
+    $("i-file").value=""; $("i-result").textContent=""; importIdle();
     $("dlg-import").showModal();
   });
   $("dlg-import").addEventListener("close", async function(){
@@ -957,14 +971,19 @@
     clearErr();
     var res=$("i-result"); res.textContent="Importing "+f.name+"…";
     $("dlg-import").showModal();
+    importBusy();
     try{
       var session=await window.SupabaseAuth.getSession();
       var token=session && session.access_token;
       var fd=new FormData(); fd.append("file", f);
       var r=await fetch(FN_BASE+"/import-costar",{method:"POST",headers:{Authorization:"Bearer "+token},body:fd});
       var d=await r.json();
-      if(!r.ok||d.error){ res.innerHTML='<span style="color:#991B1B">'+esc(d.error||("HTTP "+r.status))+'</span>'; return; }
-      $("i-go").textContent="Done";
+      if(!r.ok||d.error){
+        res.innerHTML='<span style="color:#991B1B">'+esc(d.error||("HTTP "+r.status))+'</span>';
+        importIdle();   // a failed import is worth retrying, so keep Import live
+        return;
+      }
+      importFinished();
       res.innerHTML="Read "+d.read+" row(s). Imported <b>"+d.imported+"</b> ("+d.new+" new).<br>"+
         "Skipped "+d.skipped_already_crawled+" from brokers we already crawl, "+
         d.skipped_same_address+" already listed at the same address"+
@@ -972,6 +991,7 @@
       await loadListings(); await loadStamps(); buildFilters(); render();
     }catch(e){
       res.innerHTML='<span style="color:#991B1B">'+esc(e.message||String(e))+'</span>';
+      importIdle();
     }
   });
 

@@ -1615,6 +1615,16 @@ Rules:
           else if (k === 'priority') msg = 'Priority: ' + priorityLabel(oldTask.priority) + ' → ' + priorityLabel(fields.priority);
           else if (k === 'recurrence') msg = 'Recurrence: ' + recurLabel(fields.recurrence);
           else if (k === 'is_milestone') msg = fields.is_milestone ? 'Marked as milestone' : 'Unmarked as milestone';
+          // Due date spells out both dates rather than "Due date updated": the
+          // question people actually ask of a closing is how many times it moved
+          // and by how much, and a generic line can't answer that later. Worded
+          // to match the line the Zoho sync writes for a due date moved on
+          // Zoho's side, so the two read as one history.
+          else if (k === 'due_at') {
+            const dl = (v) => v ? new Date(v).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null;
+            const a = dl(oldTask.due_at), b = dl(fields.due_at);
+            msg = !a ? 'Due date set to ' + b : !b ? 'Due date cleared (was ' + a + ')' : 'Due date moved from ' + a + ' to ' + b;
+          }
           else msg = (FL[k] || k) + ' updated';
           await this.addActivity(id, 'system', msg, user, k);
         }
@@ -3155,6 +3165,11 @@ Rules:
       // Field-row/section-header/caption values ported from the prototype's
       // .field/.field .fk/.pblock .bh — these constants propagate through
       // every Details/Dependencies/Decision/Subtasks row below.
+      // How many times this deadline has already moved — the question people
+      // ask of a closing that keeps slipping. Counts both in-app edits and ones
+      // made in Zoho (the sync tags its entries with the same field), and skips
+      // the first assignment, which is a date being set, not a date slipping.
+      const dueMoves = (activity || []).filter(a => a.field === 'due_at' && !/^Due date set to/.test(a.content || '')).length;
       const row = (k, v) => <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', alignItems: 'center', gap: 8, padding: '11px 0', borderBottom: `1px solid ${bord}`, fontSize: 14 }}><span style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{k}</span><span style={{ color: ink, fontWeight: 500, fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 7 }}>{v}</span></div>;
       const kindTag = { system: { t: 'CHANGE', c: '#6B6B6B' }, update: { t: 'UPDATE', c: '#2A6FD4' }, ai: { t: 'AI', c: '#AD832F' } };
       const secHead = (icon, txt) => <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 10 }}><i className={`ti ${icon}`} style={{ fontSize: 14, color: gold }} /><span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: gold, fontFamily: C.fontSans }}>{txt}</span></div>;
@@ -3268,7 +3283,13 @@ Rules:
               ); })}
             </div>
           )}
-          {row('Due', fmt(task.due_at))}
+          {row('Due', dueMoves ? <React.Fragment>
+            {fmt(task.due_at)}
+            <span title={'This due date has moved ' + dueMoves + (dueMoves === 1 ? ' time' : ' times') + '. The Thread tab lists each change and when it happened.'}
+              style={{ padding: '2px 8px', borderRadius: 16, fontSize: '0.68rem', fontWeight: 600, fontFamily: C.fontSans, background: dark ? 'rgba(201,164,90,0.15)' : '#F3EBDA', color: gold, whiteSpace: 'nowrap' }}>
+              moved {dueMoves}×
+            </span>
+          </React.Fragment> : fmt(task.due_at))}
           {task.recurrence && task.recurrence !== 'none' ? row('Repeat', recurDesc(task)) : null}
           {row('Project', task._projectName || '—')}
           {row('Assignees', ppl('assignee'))}
@@ -4026,6 +4047,158 @@ Rules:
           .catch(() => { if (on) setDealBusy(false); });
         return () => { on = false; };
       }, [current && current.id, isCtc]);
+      // ─── Parties on the deal behind this CTC file ────────────────────
+      //  "Parties" is Zoho's Participants module, attached to a deal through a
+      //  many-to-many linking module: the same closer or inspector is ONE party
+      //  record that appears on several deals. That shape is the whole reason
+      //  the add form searches before it creates — typing "Kara Killion" on a
+      //  second deal should attach the existing Kara, not mint a second one
+      //  whose history is split from the first.
+      //
+      //  Prefer the file's explicit zoho_deal_id over the name-matched deal:
+      //  the link is a decision someone made, the name match is a guess.
+      const PARTY_ROLES = ['Seller', 'Buyer', 'Agent (Other Side)', 'Agent TC (Other Side)', 'Closer', 'Closer Assistant', 'Lender', 'Attorney', 'Inspector', 'Surveyor', 'Closer (Other Side)'];
+      const partyDealId = (current && current.zoho_deal_id) || (deal && deal.id) || null;
+      const [parties, setParties] = useState(null);      // null = not loaded yet
+      const [partiesBusy, setPartiesBusy] = useState(false);
+      const [partiesErr, setPartiesErr] = useState('');
+      const [addOpen, setAddOpen] = useState(false);
+      const [pForm, setPForm] = useState({ name: '', role: '', company: '', email: '', phone: '' });
+      const [pPicked, setPPicked] = useState(null);      // an existing party chosen from the dropdown
+      const [pSug, setPSug] = useState([]);
+      const [pSugOpen, setPSugOpen] = useState(false);
+      const [pSaving, setPSaving] = useState(false);
+      const [pErr, setPErr] = useState('');
+      const [pRemoving, setPRemoving] = useState(null);  // link id mid-removal
+      const [pSugErr, setPSugErr] = useState(false);     // the lookup itself failed
+
+      //  Reading from a name-matched deal is a reasonable guess. WRITING to one
+      //  is not: adding a party is a permanent change to a Zoho transaction, and
+      //  "the deal whose name looks like this file" is not good enough evidence
+      //  that it is the right transaction. So the table renders either way, but
+      //  the add form and the remove buttons need the file's explicit link.
+      const partyWritable = !!(current && current.zoho_deal_id);
+
+      //  Reading a deal's parties is a two-hop Zoho call, so it routinely takes
+      //  seconds and two of them can land out of order. Every load takes a
+      //  ticket; only the newest ticket is allowed to write to the screen.
+      //  Without this, opening file A and then file B before A returns paints
+      //  A's parties under B's name -- and each row's "take off this deal" X
+      //  carries A's link id, so clicking it would detach someone from a
+      //  transaction nobody is looking at.
+      const partyGen = React.useRef(0);
+      const loadParties = React.useCallback(async (dealId) => {
+        if (!dealId) { setParties(null); return; }
+        const gen = ++partyGen.current;
+        setPartiesBusy(true); setPartiesErr('');
+        try {
+          const { ok, data } = await callZoho({ action: 'deal_parties', deal_id: dealId });
+          if (gen !== partyGen.current) return;   // a newer load has taken over
+          if (ok) setParties(data.parties || []);
+          else { setParties([]); setPartiesErr(data.error || 'Could not read the parties.'); }
+        } catch (e) {
+          if (gen !== partyGen.current) return;
+          setParties([]); setPartiesErr('Could not reach the server.');
+        }
+        setPartiesBusy(false);
+      }, []);
+
+      useEffect(() => {
+        // Bump the ticket first: whatever is already in flight for the file we
+        // just left must not be allowed to land on this one.
+        partyGen.current++;
+        setParties(null); setAddOpen(false); setPartiesErr(''); setPRemoving(null);
+        if (!isCtc || !partyDealId) return;
+        loadParties(partyDealId);
+      }, [partyDealId, isCtc]);
+
+      // Autocomplete: search what already exists as the name is typed. Held
+      // back 250ms so a five-letter name is one request, not five.
+      //  Read through a ref, not the dep array: depending on `parties` would
+      //  re-fire this search every time the table refreshes and re-open a
+      //  dropdown the user had already dismissed.
+      const partiesRef = React.useRef(parties);
+      partiesRef.current = parties;
+      useEffect(() => {
+        const q = (pForm.name || '').trim();
+        if (pPicked || !addOpen || q.length < 2) { setPSug([]); setPSugErr(false); return; }
+        let on = true;
+        const t = setTimeout(async () => {
+          try {
+            const { ok, data } = await callZoho({ action: 'search_parties', query: q });
+            if (!on) return;
+            const already = new Set((partiesRef.current || []).map(p => String(p.id)));
+            // Someone already on this deal is not a useful suggestion — offering
+            // them only leads to the "already on this deal" error.
+            setPSug(ok ? (data.parties || []).filter(p => !already.has(String(p.id))).slice(0, 6) : []);
+            // An empty list because the lookup FAILED looks identical to "this
+            // person is new" -- and that is the difference between attaching
+            // Kara and minting a second Kara. Say which one happened.
+            setPSugErr(!ok);
+            setPSugOpen(true);
+          } catch (e) { if (on) { setPSug([]); setPSugErr(true); } }
+        }, 250);
+        return () => { on = false; clearTimeout(t); };
+      }, [pForm.name, pPicked, addOpen]);
+
+      const resetPartyForm = () => {
+        setPForm({ name: '', role: '', company: '', email: '', phone: '' });
+        setPPicked(null); setPSug([]); setPSugOpen(false); setPErr(''); setPSugErr(false);
+      };
+      //  Typing over a picked name means "not that person after all". The other
+      //  fields were filled FROM that person, so they have to go too -- keeping
+      //  them would create a brand-new record carrying Kara Killion's email and
+      //  phone number under somebody else's name.
+      const editPartyName = (value) => {
+        setPForm(f => (pPicked ? { name: value, role: '', company: '', email: '', phone: '' } : { ...f, name: value }));
+        setPPicked(null);
+      };
+      // Choosing a suggestion fills the form from the existing record and locks
+      // it: those values live on the party, and editing them here would imply
+      // this deal can hold its own copy of Kara Killion's phone number.
+      const pickParty = (p) => {
+        setPPicked(p);
+        setPForm({ name: p.name || '', role: p.role || '', company: p.company || '', email: p.email || '', phone: p.phone || '' });
+        setPSug([]); setPSugOpen(false);
+      };
+      async function saveParty() {
+        if (!partyDealId) return;
+        const name = (pForm.name || '').trim();
+        if (!pPicked && !name) { setPErr('Give the party a name.'); return; }
+        setPSaving(true); setPErr('');
+        const payload = pPicked
+          ? { action: 'add_party', deal_id: partyDealId, party_id: pPicked.id }
+          : { action: 'add_party', deal_id: partyDealId, party: { name, role: pForm.role, company: pForm.company, email: pForm.email, phone: pForm.phone } };
+        try {
+          const { ok, data } = await callZoho(payload);
+          if (!ok) { setPErr(data.error || 'Zoho refused that party.'); setPSaving(false); return; }
+          resetPartyForm(); setAddOpen(false); setPSaving(false);
+          await loadParties(partyDealId);
+        } catch (e) {
+          // The request died in transit, which is NOT the same as "it failed".
+          // Zoho may well have created the person already, so a blind retry is
+          // how you end up with two of them. Reload and let the table answer it.
+          setPSaving(false);
+          setPErr('The connection dropped before Zoho answered. Check the list below — if '
+            + (name || 'the party') + ' is already there, it worked; only try again if it is not.');
+          loadParties(partyDealId);
+        }
+      }
+      async function removeParty(linkId, name) {
+        if (!linkId || !partyWritable || pRemoving) return;
+        if (!window.confirm(`Take ${name || 'this party'} off this deal?\n\nThe party record itself stays in Zoho — this only removes them from this transaction.`)) return;
+        setPRemoving(linkId); setPartiesErr('');
+        // Held, not set: loadParties clears partiesErr on the way in, so an
+        // error set before the reload would be wiped before anyone saw it.
+        let failed = '';
+        try {
+          const { ok, data } = await callZoho({ action: 'remove_party', link_id: linkId });
+          if (!ok) failed = data.error || 'Could not remove that party.';
+        } catch (e) { failed = 'Could not reach the server.'; }
+        await loadParties(partyDealId);
+        setPRemoving(null);
+        if (failed) setPartiesErr(failed);
+      }
       // Reset on record change — but honour a routed sub-tab (#ctc/<id>/board).
       // PENDING_ROUTE is consumed here rather than read in the router, because
       // this effect runs a render AFTER setCurrent and would otherwise clobber
@@ -4937,9 +5110,161 @@ Rules:
           </React.Fragment>
         ) : null;
 
+        // Parties table + the add form. Rendered only for a CTC file that
+        // resolves to a deal — with no deal there is nothing to attach to.
+        const pInput = { fontFamily: C.fontSans, fontSize: 13, padding: '8px 10px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? 'rgba(255,255,255,.04)' : '#fff', color: ink, outline: 'none', width: '100%', boxSizing: 'border-box' };
+        const cellStyle = { padding: '9px 10px 9px 0', fontSize: 13, color: ink, fontFamily: C.fontSans, verticalAlign: 'top', wordBreak: 'break-word' };
+        const headStyle = { padding: '0 10px 6px 0', fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontWeight: 600, fontFamily: C.fontSans, textAlign: 'left', whiteSpace: 'nowrap' };
+        const partiesBlock = isCtc && partyDealId ? (
+          <React.Fragment>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '22px 0 8px' }}>
+              <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600 }}>
+                Parties{parties && parties.length ? ' · ' + parties.length : ''}
+              </div>
+              <div style={{ flex: 1 }} />
+              {!addOpen && partyWritable && (
+                <button onClick={() => { resetPartyForm(); setAddOpen(true); }}
+                  style={{ fontSize: 12, padding: '5px 10px', borderRadius: 6, border: `1px solid ${bord}`, color: sub, background: 'none', cursor: 'pointer', fontFamily: C.fontSans, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <i className="ti ti-plus" style={{ fontSize: 13, color: gold }} />Add a party
+                </button>
+              )}
+            </div>
+
+            {partiesErr && <div style={{ fontSize: 12.5, color: dark ? '#F08A8A' : '#9B1C1C', fontFamily: C.fontSans, marginBottom: 8 }}>{partiesErr}</div>}
+            {!partyWritable && (
+              <div style={{ fontSize: 12, color: sub, fontFamily: C.fontSans, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <i className="ti ti-info-circle" style={{ fontSize: 13 }} />
+                Read-only — this file was matched to a Zoho deal by name. Set its Zoho deal in Edit to add or remove parties.
+              </div>
+            )}
+
+            {parties === null ? (
+              <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans, padding: '6px 0' }}>{partiesBusy ? 'Loading parties…' : ''}</div>
+            ) : parties.length === 0 ? (
+              <div style={{ fontSize: 13, color: sub, fontFamily: C.fontSans, padding: '6px 0' }}>No parties on this deal yet.</div>
+            ) : wide ? (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead><tr style={{ borderBottom: `1px solid ${bord}` }}>
+                    <th style={headStyle}>Role</th><th style={headStyle}>Name</th><th style={headStyle}>Company</th>
+                    <th style={headStyle}>Email</th><th style={headStyle}>Phone</th><th style={{ ...headStyle, width: 28 }} />
+                  </tr></thead>
+                  <tbody>
+                    {parties.map(p => (
+                      <tr key={p.link_id || p.id} style={{ borderBottom: `1px solid ${bord}` }}>
+                        <td style={{ ...cellStyle, color: sub, whiteSpace: 'nowrap' }}>{p.role || '—'}</td>
+                        <td style={{ ...cellStyle, fontWeight: 500 }}>{p.name || '—'}</td>
+                        <td style={cellStyle}>{p.company || '—'}</td>
+                        <td style={cellStyle}>{p.email ? <a href={'mailto:' + p.email} style={{ color: gold, textDecoration: 'none' }}>{p.email}</a> : '—'}</td>
+                        <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{p.phone ? <a href={'tel:' + String(p.phone).replace(/[^0-9+]/g, '')} style={{ color: ink, textDecoration: 'none' }}>{p.phone}</a> : '—'}</td>
+                        <td style={{ ...cellStyle, textAlign: 'right' }}>
+                          {partyWritable && (
+                            <button title="Take off this deal" disabled={!!pRemoving} onClick={() => removeParty(p.link_id, p.name)}
+                              style={{ border: 'none', background: 'none', cursor: pRemoving ? 'default' : 'pointer', color: sub, padding: 2, lineHeight: 1, opacity: pRemoving && pRemoving !== p.link_id ? 0.35 : 1 }}>
+                              <i className={pRemoving === p.link_id ? 'ti ti-loader-2' : 'ti ti-x'} style={{ fontSize: 13, animation: pRemoving === p.link_id ? 'spin 1s linear infinite' : 'none' }} />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              /* Narrow: a five-column table would be unreadable, so each party
+                 becomes a stacked card carrying the same fields. */
+              <div style={{ borderTop: `1px solid ${bord}` }}>
+                {parties.map(p => (
+                  <div key={p.link_id || p.id} style={{ padding: '10px 0', borderBottom: `1px solid ${bord}` }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                      <span style={{ fontSize: 13.5, fontWeight: 500, color: ink, fontFamily: C.fontSans, flex: 1 }}>{p.name || '—'}</span>
+                      <span style={{ fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{p.role || ''}</span>
+                      {partyWritable && (
+                        <button title="Take off this deal" disabled={!!pRemoving} onClick={() => removeParty(p.link_id, p.name)}
+                          style={{ border: 'none', background: 'none', cursor: pRemoving ? 'default' : 'pointer', color: sub, padding: 2, lineHeight: 1, opacity: pRemoving && pRemoving !== p.link_id ? 0.35 : 1 }}>
+                          <i className={pRemoving === p.link_id ? 'ti ti-loader-2' : 'ti ti-x'} style={{ fontSize: 13, animation: pRemoving === p.link_id ? 'spin 1s linear infinite' : 'none' }} /></button>
+                      )}
+                    </div>
+                    {p.company && <div style={{ fontSize: 12.5, color: sub, fontFamily: C.fontSans, marginTop: 2 }}>{p.company}</div>}
+                    {p.email && <div style={{ fontSize: 12.5, marginTop: 2 }}><a href={'mailto:' + p.email} style={{ color: gold, textDecoration: 'none', fontFamily: C.fontSans }}>{p.email}</a></div>}
+                    {p.phone && <div style={{ fontSize: 12.5, marginTop: 2 }}><a href={'tel:' + String(p.phone).replace(/[^0-9+]/g, '')} style={{ color: ink, textDecoration: 'none', fontFamily: C.fontSans }}>{p.phone}</a></div>}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {addOpen && (
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 8, border: `1px solid ${bord}`, background: dark ? 'rgba(255,255,255,.03)' : '#FAF8F4' }}>
+                <div style={{ position: 'relative', marginBottom: 8 }}>
+                  <input autoFocus value={pForm.name} placeholder="Name — start typing to find someone already in Zoho"
+                    onChange={e => editPartyName(e.target.value)}
+                    onFocus={() => pSug.length && setPSugOpen(true)}
+                    /* Delayed: a plain onBlur fires BEFORE the suggestion's own
+                       click handler, so closing immediately would swallow every
+                       pick. */
+                    onBlur={() => setTimeout(() => setPSugOpen(false), 150)}
+                    style={pInput} />
+                  {/* The "auto feed": whoever is already in Parties surfaces as
+                      you type, and picking one attaches THAT record instead of
+                      creating a duplicate person. */}
+                  {pSugOpen && pSug.length > 0 && (
+                    <div style={{ position: 'absolute', zIndex: 30, top: '100%', left: 0, right: 0, marginTop: 3, borderRadius: 7, border: `1px solid ${bord}`, background: dark ? '#1C2333' : '#fff', boxShadow: '0 10px 28px rgba(0,26,74,.16)', overflow: 'hidden' }}>
+                      <div style={{ fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans, padding: '7px 10px 4px' }}>Already in Zoho</div>
+                      {pSug.map(s => (
+                        <button key={s.id} onClick={() => pickParty(s)}
+                          style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 10px', border: 'none', borderTop: `1px solid ${bord}`, background: 'none', cursor: 'pointer', fontFamily: C.fontSans }}>
+                          <div style={{ fontSize: 13, color: ink, fontWeight: 500 }}>{s.name}</div>
+                          <div style={{ fontSize: 11.5, color: sub, marginTop: 1 }}>{[s.role, s.company, s.email].filter(Boolean).join(' · ') || 'No other details'}</div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {pPicked ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: sub, fontFamily: C.fontSans, padding: '2px 0 10px' }}>
+                    <i className="ti ti-link" style={{ fontSize: 14, color: gold }} />
+                    <span style={{ flex: 1 }}>Attaching the existing party — {[pPicked.role, pPicked.company].filter(Boolean).join(' · ') || 'no other details on file'}</span>
+                    <button onClick={resetPartyForm} style={{ border: 'none', background: 'none', color: gold, cursor: 'pointer', fontFamily: C.fontSans, fontSize: 12.5 }}>Use a new person instead</button>
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: wide ? '1fr 1fr' : '1fr', gap: 8, marginBottom: 9 }}>
+                    <select value={pForm.role} onChange={e => setPForm(f => ({ ...f, role: e.target.value }))} style={pInput}>
+                      <option value="">Role — optional</option>
+                      {PARTY_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                    <input value={pForm.company} onChange={e => setPForm(f => ({ ...f, company: e.target.value }))} placeholder="Company" style={pInput} />
+                    <input value={pForm.email} onChange={e => setPForm(f => ({ ...f, email: e.target.value }))} placeholder="Email" style={pInput} />
+                    <input value={pForm.phone} onChange={e => setPForm(f => ({ ...f, phone: e.target.value }))} placeholder="Phone" style={pInput} />
+                  </div>
+                )}
+
+                {pSugErr && !pPicked && (
+                  <div style={{ fontSize: 12, color: dark ? '#E0B25A' : '#8A6A16', fontFamily: C.fontSans, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <i className="ti ti-alert-triangle" style={{ fontSize: 13 }} />
+                    Couldn't check Zoho for someone with this name — saving now may create a second copy of an existing person.
+                  </div>
+                )}
+                {pErr && <div style={{ fontSize: 12.5, color: dark ? '#F08A8A' : '#9B1C1C', fontFamily: C.fontSans, marginBottom: 8 }}>{pErr}</div>}
+
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button onClick={saveParty} disabled={pSaving || (!pPicked && !(pForm.name || '').trim())}
+                    style={{ fontSize: 12.5, fontWeight: 500, padding: '8px 14px', borderRadius: 6, border: 'none', background: gold, color: '#fff', cursor: (pSaving || (!pPicked && !(pForm.name || '').trim())) ? 'default' : 'pointer', opacity: (pSaving || (!pPicked && !(pForm.name || '').trim())) ? 0.5 : 1, fontFamily: C.fontSans }}>
+                    {pSaving ? 'Adding…' : pPicked ? 'Attach to this deal' : 'Create and attach'}
+                  </button>
+                  <button onClick={() => { resetPartyForm(); setAddOpen(false); }}
+                    style={{ fontSize: 12.5, padding: '8px 12px', borderRadius: 6, border: `1px solid ${bord}`, background: 'none', color: sub, cursor: 'pointer', fontFamily: C.fontSans }}>Cancel</button>
+                  <span style={{ fontSize: 11.5, color: sub, fontFamily: C.fontSans }}>Saved to Zoho</span>
+                </div>
+              </div>
+            )}
+          </React.Fragment>
+        ) : null;
+
         const tasksBlock = (
           <React.Fragment>
             {dealBlock}
+            {partiesBlock}
             {/* Updates filed from the Emails tab — approved by a human, never
                 auto-applied. Sits below Milestones, where Open tasks used to. */}
             {updates.length > 0 && (
@@ -5380,10 +5705,23 @@ Rules:
       };
     };
 
-    function TaskBoard({ items, dark, onOpen, onContextMenu, onDrop, showSource, linksByTask }) {
+    function TaskBoard({ items, dark, onOpen, onContextMenu, onDrop, showSource, linksByTask, kidsByTask }) {
       const bord = dark ? '#152545' : '#E4DFD4', ink = dark ? '#fff' : '#001A4A', sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B', gold = dark ? '#C9A45A' : '#AD832F';
       const [dragId, setDragId] = useState(null);
       const [overCol, setOverCol] = useState(null);
+      // A column here IS a status, and a subtask often sits in a different
+      // status than its parent — so subtasks stay as their own cards rather
+      // than folding into the parent the way the List nests them. Folding would
+      // hide a finished subtask from the Done column, which is the one thing
+      // this view exists to show. What was missing is the context that makes a
+      // loose subtask card legible: the count on the parent, the parent's name
+      // on the child.
+      const byId = new Map(items.map(t => [t.id, t]));
+      const derivedKids = {};
+      items.forEach(t => { if (t.parent_task_id) (derivedKids[t.parent_task_id] = derivedKids[t.parent_task_id] || []).push(t); });
+      // TasksScreen strips children out of its flat list, so it hands its own
+      // map down; ProjectsSurface's _tasks already holds them.
+      const kidsFor = (id) => (kidsByTask && kidsByTask[id]) || derivedKids[id] || [];
       return (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))', gap: 14, padding: '18px 34px', overflowX: 'auto', flex: 1, minHeight: 0, alignContent: 'start' }}>
           {TASK_STATUS.map(col => {
@@ -5399,12 +5737,22 @@ Rules:
                   <span style={{ fontSize: 11, letterSpacing: '0.12em', textTransform: 'uppercase', fontWeight: 600, color: ink, fontFamily: C.fontSans }}>{col.label}</span>
                   <span style={{ fontSize: 11, color: sub, marginLeft: 'auto' }}>{colItems.length}</span>
                 </div>
-                {colItems.map(t => (
+                {colItems.map(t => {
+                  const kids = kidsFor(t.id);
+                  const parent = t.parent_task_id ? byId.get(t.parent_task_id) : null;
+                  return (
                   <div key={t.id} draggable onDragStart={(e) => { setDragId(t.id); e.dataTransfer.effectAllowed = 'move'; }} onDragEnd={() => setDragId(null)}
                     onClick={() => onOpen(t)} onContextMenu={(e) => onContextMenu && onContextMenu(e, t)}
                     style={{ background: dark ? '#0A1730' : '#fff', border: `1px solid ${bord}`, borderRadius: 6, padding: '11px 12px', marginBottom: 9, boxShadow: '0 1px 2px rgba(0,13,38,.06)', cursor: 'grab', opacity: dragId === t.id ? 0.4 : 1 }}>
+                    {parent && <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 5, fontSize: 11, color: sub, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <i className="ti ti-corner-down-right" style={{ fontSize: 11, flexShrink: 0 }} />{parent.title}
+                    </div>}
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 9 }}>
                       <div style={{ flex: 1, minWidth: 0, fontSize: 14, color: ink, fontFamily: C.fontSans, lineHeight: 1.35 }}>{t.title}</div>
+                      {kids.length > 0 && <span title={kids.length + (kids.length === 1 ? ' subtask' : ' subtasks') + ', ' + kids.filter(k => k.status === 'done').length + ' done'}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0, fontSize: 11, color: gold, fontFamily: C.fontSans }}>
+                        <i className="ti ti-subtask" style={{ fontSize: 11 }} />{kids.filter(k => k.status === 'done').length}/{kids.length}
+                      </span>}
                       {(linksByTask && linksByTask[t.id] || []).length > 0 && <i className="ti ti-mail" style={{ fontSize: 12, color: '#185FA5', flexShrink: 0 }} />}
                       {t.is_milestone && <i className="ti ti-flag-3-filled" style={{ fontSize: 12, color: gold, flexShrink: 0 }} />}
                     </div>
@@ -5413,7 +5761,8 @@ Rules:
                       {t.due_at && <span style={{ fontSize: 12, color: sub }}>{new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
                 {!colItems.length && <div style={{ fontSize: '0.7rem', color: sub, padding: '8px 4px', fontFamily: C.fontSans }}>No tasks.</div>}
               </div>
             );
@@ -5650,6 +5999,12 @@ Rules:
       const [offset, setOffset] = useState(0);         // 0 = this week, 1 = last week…
       const [openId, setOpenId] = useState(null);      // person expanded inline
       const [openTasks, setOpenTasks] = useState(null);
+      // Subtasks of the week's tasks. Kept apart from openTasks because they're
+      // fetched by parent rather than by assignment — a subtask usually isn't
+      // assigned to anyone itself, so without this the week reads as fewer,
+      // bigger items than the person actually worked through.
+      const [openKids, setOpenKids] = useState(null);
+      const [subsOpen, setSubsOpen] = useState({});
 
       const p2 = (n) => String(n).padStart(2, '0');
       const isoD = (d) => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
@@ -5680,19 +6035,67 @@ Rules:
       const statFor = (uid) => (rows || []).find(r => r.user_id === uid && String(r.week_start).slice(0, 10) === weekKey)
         || { assigned: 0, completed: 0, still_open: 0, overdue: 0 };
 
+      // A subtask can arrive twice — once because it was assigned that week,
+      // once as a child of a task that was. Keyed by id so it's listed once.
+      const kidsOf = (id) => {
+        const seen = new Map();
+        [...(openTasks || []), ...(openKids || [])].forEach(t => { if (t.parent_task_id === id) seen.set(t.id, t); });
+        return [...seen.values()];
+      };
+      // A subtask whose parent is also in this week's list nests under it; one
+      // whose parent isn't stands on its own, since it's still that week's work.
+      const topTasks = () => {
+        const here = new Set((openTasks || []).map(t => t.id));
+        return (openTasks || []).filter(t => !t.parent_task_id || !here.has(t.parent_task_id));
+      };
+      const taskLine = (t, depth) => {
+        const kids = depth ? [] : kidsOf(t.id);
+        const open = !!subsOpen[t.id];
+        const doneKids = kids.filter(k => k.status === 'done').length;
+        return (
+          <div key={t.id} style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '4px 0', paddingLeft: depth * 18 }}>
+            {depth ? <i className="ti ti-corner-down-right" style={{ fontSize: 11, color: sub, flexShrink: 0 }} /> : null}
+            <span style={{ fontFamily: J, fontSize: depth ? 12.5 : 13, color: t.status === 'done' ? sub : ink, flex: 1, minWidth: 0, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+            {kids.length ? (
+              <span onClick={() => setSubsOpen(s => ({ ...s, [t.id]: !s[t.id] }))}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0, cursor: 'pointer', fontFamily: J, fontSize: 11, color: gold, userSelect: 'none' }}
+                title={open ? 'Hide subtasks' : 'Show subtasks'}>
+                <i className={'ti ti-chevron-' + (open ? 'down' : 'right')} style={{ fontSize: 11 }} />
+                <i className="ti ti-subtask" style={{ fontSize: 11 }} />{doneKids}/{kids.length}
+              </span>
+            ) : null}
+            {t.context && <span style={{ fontFamily: J, fontSize: 11, color: sub, flexShrink: 0 }}>{t.context}</span>}
+            <span style={{ fontFamily: J, fontSize: 11.5, color: t.status === 'done' ? green : sub, flexShrink: 0, width: 96, textAlign: 'right' }}>
+              {t.status === 'done'
+                ? (t.completed_at ? 'Done ' + new Date(t.completed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'Done')
+                : (t.due_at ? 'Due ' + new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'No date')}
+            </span>
+          </div>
+        );
+      };
+
       // Same rule as group assign: a login with no access tags isn't a person.
       const people = (team || []).filter(m => (!m.status || m.status === 'active') && (m.access || []).length);
 
+      const TCOLS = 'id,title,status,due_at,completed_at,context,parent_task_id';
+
       async function togglePerson(uid) {
-        if (openId === uid) { setOpenId(null); setOpenTasks(null); return; }
-        setOpenId(uid); setOpenTasks(null);
+        if (openId === uid) { setOpenId(null); setOpenTasks(null); setOpenKids(null); return; }
+        setOpenId(uid); setOpenTasks(null); setOpenKids(null); setSubsOpen({});
         const c = window.SupabaseAuth && window.SupabaseAuth._client; if (!c) return;
         const { data: tp } = await c.from('task_people').select('task_id')
           .eq('user_id', uid).eq('role', 'assignee')
           .gte('assigned_at', weekKey).lt('assigned_at', isoD(addDays(weekStart, 7)));
         const ids = [...new Set((tp || []).map(r => r.task_id))];
-        if (!ids.length) { setOpenTasks([]); return; }
-        const { data: ts } = await c.from('tasks').select('id,title,status,due_at,completed_at,context').in('id', ids);
+        if (!ids.length) { setOpenTasks([]); setOpenKids([]); return; }
+        const { data: ts } = await c.from('tasks').select(TCOLS).in('id', ids);
+        const parentIds = (ts || []).map(t => t.id);
+        const { data: kids } = parentIds.length
+          ? await c.from('tasks').select(TCOLS).in('parent_task_id', parentIds)
+          : { data: [] };
+        // Both at once — setting the parents first would paint a round of
+        // subtask counts computed before the children had arrived.
+        setOpenKids(kids || []);
         setOpenTasks(ts || []);
       }
 
@@ -5748,16 +6151,11 @@ Rules:
                         <div style={{ padding: '8px 10px 12px 22px', borderBottom: `1px solid ${bord}` }}>
                           {openTasks === null ? <span style={{ fontFamily: J, fontSize: 12.5, color: sub }}>Loading…</span>
                             : !openTasks.length ? <span style={{ fontFamily: J, fontSize: 12.5, color: sub }}>Nothing was assigned to {m.name} that week.</span>
-                            : openTasks.map(t => (
-                              <div key={t.id} style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '4px 0' }}>
-                                <span style={{ fontFamily: J, fontSize: 13, color: t.status === 'done' ? sub : ink, flex: 1, minWidth: 0, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
-                                {t.context && <span style={{ fontFamily: J, fontSize: 11, color: sub, flexShrink: 0 }}>{t.context}</span>}
-                                <span style={{ fontFamily: J, fontSize: 11.5, color: t.status === 'done' ? green : sub, flexShrink: 0, width: 96, textAlign: 'right' }}>
-                                  {t.status === 'done'
-                                    ? (t.completed_at ? 'Done ' + new Date(t.completed_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'Done')
-                                    : (t.due_at ? 'Due ' + new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'No date')}
-                                </span>
-                              </div>
+                            : topTasks().map(t => (
+                              <React.Fragment key={t.id}>
+                                {taskLine(t, 0)}
+                                {subsOpen[t.id] && kidsOf(t.id).map(k => taskLine(k, 1))}
+                              </React.Fragment>
                             ))}
                         </div>
                       )}
@@ -6904,7 +7302,7 @@ Rules:
                           {routeNoticeBar}
                           {loading ? <div style={{ color: sub, fontSize: '0.82rem', padding: 20, fontFamily: C.fontSans }}>Loading…</div>
                             : data.tasks.length === 0 ? <div style={{ color: sub, fontSize: '0.82rem', padding: 24, textAlign: 'center', fontFamily: C.fontSans }}>No tasks yet. Tap <b>New</b> to add one.</div>
-                            : viewMode === 'kanban' ? <TaskBoard items={filteredTasks} dark={dark} onOpen={(t) => { setCurrent(t); setView('detail'); }} onContextMenu={openCtx} onDrop={boardDrop} showSource linksByTask={linksByTask} />
+                            : viewMode === 'kanban' ? <TaskBoard items={filteredTasks} dark={dark} onOpen={(t) => { setCurrent(t); setView('detail'); }} onContextMenu={openCtx} onDrop={boardDrop} showSource linksByTask={linksByTask} kidsByTask={data.childrenByTask} />
                             : viewMode === 'timeline' ? <TaskTimeline items={filteredTasks} dark={dark} onOpen={(t) => { setCurrent(t); setView('detail'); }} />
                             : (
                               <React.Fragment>

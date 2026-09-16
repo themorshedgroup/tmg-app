@@ -10178,6 +10178,255 @@ function ProjectsSurface({
       on = false;
     };
   }, [current && current.id, isCtc]);
+  // ─── Parties on the deal behind this CTC file ────────────────────
+  //  "Parties" is Zoho's Participants module, attached to a deal through a
+  //  many-to-many linking module: the same closer or inspector is ONE party
+  //  record that appears on several deals. That shape is the whole reason
+  //  the add form searches before it creates — typing "Kara Killion" on a
+  //  second deal should attach the existing Kara, not mint a second one
+  //  whose history is split from the first.
+  //
+  //  Prefer the file's explicit zoho_deal_id over the name-matched deal:
+  //  the link is a decision someone made, the name match is a guess.
+  const PARTY_ROLES = ['Seller', 'Buyer', 'Agent (Other Side)', 'Agent TC (Other Side)', 'Closer', 'Closer Assistant', 'Lender', 'Attorney', 'Inspector', 'Surveyor', 'Closer (Other Side)'];
+  const partyDealId = current && current.zoho_deal_id || deal && deal.id || null;
+  const [parties, setParties] = useState(null); // null = not loaded yet
+  const [partiesBusy, setPartiesBusy] = useState(false);
+  const [partiesErr, setPartiesErr] = useState('');
+  const [addOpen, setAddOpen] = useState(false);
+  const [pForm, setPForm] = useState({
+    name: '',
+    role: '',
+    company: '',
+    email: '',
+    phone: ''
+  });
+  const [pPicked, setPPicked] = useState(null); // an existing party chosen from the dropdown
+  const [pSug, setPSug] = useState([]);
+  const [pSugOpen, setPSugOpen] = useState(false);
+  const [pSaving, setPSaving] = useState(false);
+  const [pErr, setPErr] = useState('');
+  const [pRemoving, setPRemoving] = useState(null); // link id mid-removal
+  const [pSugErr, setPSugErr] = useState(false); // the lookup itself failed
+
+  //  Reading from a name-matched deal is a reasonable guess. WRITING to one
+  //  is not: adding a party is a permanent change to a Zoho transaction, and
+  //  "the deal whose name looks like this file" is not good enough evidence
+  //  that it is the right transaction. So the table renders either way, but
+  //  the add form and the remove buttons need the file's explicit link.
+  const partyWritable = !!(current && current.zoho_deal_id);
+
+  //  Reading a deal's parties is a two-hop Zoho call, so it routinely takes
+  //  seconds and two of them can land out of order. Every load takes a
+  //  ticket; only the newest ticket is allowed to write to the screen.
+  //  Without this, opening file A and then file B before A returns paints
+  //  A's parties under B's name -- and each row's "take off this deal" X
+  //  carries A's link id, so clicking it would detach someone from a
+  //  transaction nobody is looking at.
+  const partyGen = React.useRef(0);
+  const loadParties = React.useCallback(async dealId => {
+    if (!dealId) {
+      setParties(null);
+      return;
+    }
+    const gen = ++partyGen.current;
+    setPartiesBusy(true);
+    setPartiesErr('');
+    try {
+      const {
+        ok,
+        data
+      } = await callZoho({
+        action: 'deal_parties',
+        deal_id: dealId
+      });
+      if (gen !== partyGen.current) return; // a newer load has taken over
+      if (ok) setParties(data.parties || []);else {
+        setParties([]);
+        setPartiesErr(data.error || 'Could not read the parties.');
+      }
+    } catch (e) {
+      if (gen !== partyGen.current) return;
+      setParties([]);
+      setPartiesErr('Could not reach the server.');
+    }
+    setPartiesBusy(false);
+  }, []);
+  useEffect(() => {
+    // Bump the ticket first: whatever is already in flight for the file we
+    // just left must not be allowed to land on this one.
+    partyGen.current++;
+    setParties(null);
+    setAddOpen(false);
+    setPartiesErr('');
+    setPRemoving(null);
+    if (!isCtc || !partyDealId) return;
+    loadParties(partyDealId);
+  }, [partyDealId, isCtc]);
+
+  // Autocomplete: search what already exists as the name is typed. Held
+  // back 250ms so a five-letter name is one request, not five.
+  //  Read through a ref, not the dep array: depending on `parties` would
+  //  re-fire this search every time the table refreshes and re-open a
+  //  dropdown the user had already dismissed.
+  const partiesRef = React.useRef(parties);
+  partiesRef.current = parties;
+  useEffect(() => {
+    const q = (pForm.name || '').trim();
+    if (pPicked || !addOpen || q.length < 2) {
+      setPSug([]);
+      setPSugErr(false);
+      return;
+    }
+    let on = true;
+    const t = setTimeout(async () => {
+      try {
+        const {
+          ok,
+          data
+        } = await callZoho({
+          action: 'search_parties',
+          query: q
+        });
+        if (!on) return;
+        const already = new Set((partiesRef.current || []).map(p => String(p.id)));
+        // Someone already on this deal is not a useful suggestion — offering
+        // them only leads to the "already on this deal" error.
+        setPSug(ok ? (data.parties || []).filter(p => !already.has(String(p.id))).slice(0, 6) : []);
+        // An empty list because the lookup FAILED looks identical to "this
+        // person is new" -- and that is the difference between attaching
+        // Kara and minting a second Kara. Say which one happened.
+        setPSugErr(!ok);
+        setPSugOpen(true);
+      } catch (e) {
+        if (on) {
+          setPSug([]);
+          setPSugErr(true);
+        }
+      }
+    }, 250);
+    return () => {
+      on = false;
+      clearTimeout(t);
+    };
+  }, [pForm.name, pPicked, addOpen]);
+  const resetPartyForm = () => {
+    setPForm({
+      name: '',
+      role: '',
+      company: '',
+      email: '',
+      phone: ''
+    });
+    setPPicked(null);
+    setPSug([]);
+    setPSugOpen(false);
+    setPErr('');
+    setPSugErr(false);
+  };
+  //  Typing over a picked name means "not that person after all". The other
+  //  fields were filled FROM that person, so they have to go too -- keeping
+  //  them would create a brand-new record carrying Kara Killion's email and
+  //  phone number under somebody else's name.
+  const editPartyName = value => {
+    setPForm(f => pPicked ? {
+      name: value,
+      role: '',
+      company: '',
+      email: '',
+      phone: ''
+    } : {
+      ...f,
+      name: value
+    });
+    setPPicked(null);
+  };
+  // Choosing a suggestion fills the form from the existing record and locks
+  // it: those values live on the party, and editing them here would imply
+  // this deal can hold its own copy of Kara Killion's phone number.
+  const pickParty = p => {
+    setPPicked(p);
+    setPForm({
+      name: p.name || '',
+      role: p.role || '',
+      company: p.company || '',
+      email: p.email || '',
+      phone: p.phone || ''
+    });
+    setPSug([]);
+    setPSugOpen(false);
+  };
+  async function saveParty() {
+    if (!partyDealId) return;
+    const name = (pForm.name || '').trim();
+    if (!pPicked && !name) {
+      setPErr('Give the party a name.');
+      return;
+    }
+    setPSaving(true);
+    setPErr('');
+    const payload = pPicked ? {
+      action: 'add_party',
+      deal_id: partyDealId,
+      party_id: pPicked.id
+    } : {
+      action: 'add_party',
+      deal_id: partyDealId,
+      party: {
+        name,
+        role: pForm.role,
+        company: pForm.company,
+        email: pForm.email,
+        phone: pForm.phone
+      }
+    };
+    try {
+      const {
+        ok,
+        data
+      } = await callZoho(payload);
+      if (!ok) {
+        setPErr(data.error || 'Zoho refused that party.');
+        setPSaving(false);
+        return;
+      }
+      resetPartyForm();
+      setAddOpen(false);
+      setPSaving(false);
+      await loadParties(partyDealId);
+    } catch (e) {
+      // The request died in transit, which is NOT the same as "it failed".
+      // Zoho may well have created the person already, so a blind retry is
+      // how you end up with two of them. Reload and let the table answer it.
+      setPSaving(false);
+      setPErr('The connection dropped before Zoho answered. Check the list below — if ' + (name || 'the party') + ' is already there, it worked; only try again if it is not.');
+      loadParties(partyDealId);
+    }
+  }
+  async function removeParty(linkId, name) {
+    if (!linkId || !partyWritable || pRemoving) return;
+    if (!window.confirm(`Take ${name || 'this party'} off this deal?\n\nThe party record itself stays in Zoho — this only removes them from this transaction.`)) return;
+    setPRemoving(linkId);
+    setPartiesErr('');
+    // Held, not set: loadParties clears partiesErr on the way in, so an
+    // error set before the reload would be wiped before anyone saw it.
+    let failed = '';
+    try {
+      const {
+        ok,
+        data
+      } = await callZoho({
+        action: 'remove_party',
+        link_id: linkId
+      });
+      if (!ok) failed = data.error || 'Could not remove that party.';
+    } catch (e) {
+      failed = 'Could not reach the server.';
+    }
+    await loadParties(partyDealId);
+    setPRemoving(null);
+    if (failed) setPartiesErr(failed);
+  }
   // Reset on record change — but honour a routed sub-tab (#ctc/<id>/board).
   // PENDING_ROUTE is consumed here rather than read in the router, because
   // this effect runs a render AFTER setCurrent and would otherwise clobber
@@ -12626,7 +12875,506 @@ function ProjectsSurface({
         marginTop: 6
       }
     }, "From Zoho CRM \xB7 matched on the property address")) : null;
-    const tasksBlock = /*#__PURE__*/React.createElement(React.Fragment, null, dealBlock, updates.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+
+    // Parties table + the add form. Rendered only for a CTC file that
+    // resolves to a deal — with no deal there is nothing to attach to.
+    const pInput = {
+      fontFamily: C.fontSans,
+      fontSize: 13,
+      padding: '8px 10px',
+      borderRadius: 6,
+      border: `1px solid ${bord}`,
+      background: dark ? 'rgba(255,255,255,.04)' : '#fff',
+      color: ink,
+      outline: 'none',
+      width: '100%',
+      boxSizing: 'border-box'
+    };
+    const cellStyle = {
+      padding: '9px 10px 9px 0',
+      fontSize: 13,
+      color: ink,
+      fontFamily: C.fontSans,
+      verticalAlign: 'top',
+      wordBreak: 'break-word'
+    };
+    const headStyle = {
+      padding: '0 10px 6px 0',
+      fontSize: 10.5,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase',
+      color: sub,
+      fontWeight: 600,
+      fontFamily: C.fontSans,
+      textAlign: 'left',
+      whiteSpace: 'nowrap'
+    };
+    const partiesBlock = isCtc && partyDealId ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        margin: '22px 0 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: sub,
+        fontWeight: 600
+      }
+    }, "Parties", parties && parties.length ? ' · ' + parties.length : ''), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }), !addOpen && partyWritable && /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        resetPartyForm();
+        setAddOpen(true);
+      },
+      style: {
+        fontSize: 12,
+        padding: '5px 10px',
+        borderRadius: 6,
+        border: `1px solid ${bord}`,
+        color: sub,
+        background: 'none',
+        cursor: 'pointer',
+        fontFamily: C.fontSans,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-plus",
+      style: {
+        fontSize: 13,
+        color: gold
+      }
+    }), "Add a party")), partiesErr && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        color: dark ? '#F08A8A' : '#9B1C1C',
+        fontFamily: C.fontSans,
+        marginBottom: 8
+      }
+    }, partiesErr), !partyWritable && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: sub,
+        fontFamily: C.fontSans,
+        marginBottom: 8,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-info-circle",
+      style: {
+        fontSize: 13
+      }
+    }), "Read-only \u2014 this file was matched to a Zoho deal by name. Set its Zoho deal in Edit to add or remove parties."), parties === null ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: sub,
+        fontFamily: C.fontSans,
+        padding: '6px 0'
+      }
+    }, partiesBusy ? 'Loading parties…' : '') : parties.length === 0 ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: sub,
+        fontFamily: C.fontSans,
+        padding: '6px 0'
+      }
+    }, "No parties on this deal yet.") : wide ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        overflowX: 'auto'
+      }
+    }, /*#__PURE__*/React.createElement("table", {
+      style: {
+        width: '100%',
+        borderCollapse: 'collapse'
+      }
+    }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+      style: {
+        borderBottom: `1px solid ${bord}`
+      }
+    }, /*#__PURE__*/React.createElement("th", {
+      style: headStyle
+    }, "Role"), /*#__PURE__*/React.createElement("th", {
+      style: headStyle
+    }, "Name"), /*#__PURE__*/React.createElement("th", {
+      style: headStyle
+    }, "Company"), /*#__PURE__*/React.createElement("th", {
+      style: headStyle
+    }, "Email"), /*#__PURE__*/React.createElement("th", {
+      style: headStyle
+    }, "Phone"), /*#__PURE__*/React.createElement("th", {
+      style: {
+        ...headStyle,
+        width: 28
+      }
+    }))), /*#__PURE__*/React.createElement("tbody", null, parties.map(p => /*#__PURE__*/React.createElement("tr", {
+      key: p.link_id || p.id,
+      style: {
+        borderBottom: `1px solid ${bord}`
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...cellStyle,
+        color: sub,
+        whiteSpace: 'nowrap'
+      }
+    }, p.role || '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...cellStyle,
+        fontWeight: 500
+      }
+    }, p.name || '—'), /*#__PURE__*/React.createElement("td", {
+      style: cellStyle
+    }, p.company || '—'), /*#__PURE__*/React.createElement("td", {
+      style: cellStyle
+    }, p.email ? /*#__PURE__*/React.createElement("a", {
+      href: 'mailto:' + p.email,
+      style: {
+        color: gold,
+        textDecoration: 'none'
+      }
+    }, p.email) : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...cellStyle,
+        whiteSpace: 'nowrap'
+      }
+    }, p.phone ? /*#__PURE__*/React.createElement("a", {
+      href: 'tel:' + String(p.phone).replace(/[^0-9+]/g, ''),
+      style: {
+        color: ink,
+        textDecoration: 'none'
+      }
+    }, p.phone) : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...cellStyle,
+        textAlign: 'right'
+      }
+    }, partyWritable && /*#__PURE__*/React.createElement("button", {
+      title: "Take off this deal",
+      disabled: !!pRemoving,
+      onClick: () => removeParty(p.link_id, p.name),
+      style: {
+        border: 'none',
+        background: 'none',
+        cursor: pRemoving ? 'default' : 'pointer',
+        color: sub,
+        padding: 2,
+        lineHeight: 1,
+        opacity: pRemoving && pRemoving !== p.link_id ? 0.35 : 1
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: pRemoving === p.link_id ? 'ti ti-loader-2' : 'ti ti-x',
+      style: {
+        fontSize: 13,
+        animation: pRemoving === p.link_id ? 'spin 1s linear infinite' : 'none'
+      }
+    })))))))) :
+    /*#__PURE__*/
+    /* Narrow: a five-column table would be unreadable, so each party
+       becomes a stacked card carrying the same fields. */
+    React.createElement("div", {
+      style: {
+        borderTop: `1px solid ${bord}`
+      }
+    }, parties.map(p => /*#__PURE__*/React.createElement("div", {
+      key: p.link_id || p.id,
+      style: {
+        padding: '10px 0',
+        borderBottom: `1px solid ${bord}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 8
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 13.5,
+        fontWeight: 500,
+        color: ink,
+        fontFamily: C.fontSans,
+        flex: 1
+      }
+    }, p.name || '—'), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10.5,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        color: sub,
+        fontFamily: C.fontSans
+      }
+    }, p.role || ''), partyWritable && /*#__PURE__*/React.createElement("button", {
+      title: "Take off this deal",
+      disabled: !!pRemoving,
+      onClick: () => removeParty(p.link_id, p.name),
+      style: {
+        border: 'none',
+        background: 'none',
+        cursor: pRemoving ? 'default' : 'pointer',
+        color: sub,
+        padding: 2,
+        lineHeight: 1,
+        opacity: pRemoving && pRemoving !== p.link_id ? 0.35 : 1
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: pRemoving === p.link_id ? 'ti ti-loader-2' : 'ti ti-x',
+      style: {
+        fontSize: 13,
+        animation: pRemoving === p.link_id ? 'spin 1s linear infinite' : 'none'
+      }
+    }))), p.company && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        color: sub,
+        fontFamily: C.fontSans,
+        marginTop: 2
+      }
+    }, p.company), p.email && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        marginTop: 2
+      }
+    }, /*#__PURE__*/React.createElement("a", {
+      href: 'mailto:' + p.email,
+      style: {
+        color: gold,
+        textDecoration: 'none',
+        fontFamily: C.fontSans
+      }
+    }, p.email)), p.phone && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        marginTop: 2
+      }
+    }, /*#__PURE__*/React.createElement("a", {
+      href: 'tel:' + String(p.phone).replace(/[^0-9+]/g, ''),
+      style: {
+        color: ink,
+        textDecoration: 'none',
+        fontFamily: C.fontSans
+      }
+    }, p.phone))))), addOpen && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 12,
+        padding: 12,
+        borderRadius: 8,
+        border: `1px solid ${bord}`,
+        background: dark ? 'rgba(255,255,255,.03)' : '#FAF8F4'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'relative',
+        marginBottom: 8
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      autoFocus: true,
+      value: pForm.name,
+      placeholder: "Name \u2014 start typing to find someone already in Zoho",
+      onChange: e => editPartyName(e.target.value),
+      onFocus: () => pSug.length && setPSugOpen(true)
+      /* Delayed: a plain onBlur fires BEFORE the suggestion's own
+         click handler, so closing immediately would swallow every
+         pick. */,
+      onBlur: () => setTimeout(() => setPSugOpen(false), 150),
+      style: pInput
+    }), pSugOpen && pSug.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        zIndex: 30,
+        top: '100%',
+        left: 0,
+        right: 0,
+        marginTop: 3,
+        borderRadius: 7,
+        border: `1px solid ${bord}`,
+        background: dark ? '#1C2333' : '#fff',
+        boxShadow: '0 10px 28px rgba(0,26,74,.16)',
+        overflow: 'hidden'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10.5,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        color: sub,
+        fontFamily: C.fontSans,
+        padding: '7px 10px 4px'
+      }
+    }, "Already in Zoho"), pSug.map(s => /*#__PURE__*/React.createElement("button", {
+      key: s.id,
+      onClick: () => pickParty(s),
+      style: {
+        display: 'block',
+        width: '100%',
+        textAlign: 'left',
+        padding: '8px 10px',
+        border: 'none',
+        borderTop: `1px solid ${bord}`,
+        background: 'none',
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: ink,
+        fontWeight: 500
+      }
+    }, s.name), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11.5,
+        color: sub,
+        marginTop: 1
+      }
+    }, [s.role, s.company, s.email].filter(Boolean).join(' · ') || 'No other details'))))), pPicked ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        fontSize: 12.5,
+        color: sub,
+        fontFamily: C.fontSans,
+        padding: '2px 0 10px'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-link",
+      style: {
+        fontSize: 14,
+        color: gold
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }, "Attaching the existing party \u2014 ", [pPicked.role, pPicked.company].filter(Boolean).join(' · ') || 'no other details on file'), /*#__PURE__*/React.createElement("button", {
+      onClick: resetPartyForm,
+      style: {
+        border: 'none',
+        background: 'none',
+        color: gold,
+        cursor: 'pointer',
+        fontFamily: C.fontSans,
+        fontSize: 12.5
+      }
+    }, "Use a new person instead")) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'grid',
+        gridTemplateColumns: wide ? '1fr 1fr' : '1fr',
+        gap: 8,
+        marginBottom: 9
+      }
+    }, /*#__PURE__*/React.createElement("select", {
+      value: pForm.role,
+      onChange: e => setPForm(f => ({
+        ...f,
+        role: e.target.value
+      })),
+      style: pInput
+    }, /*#__PURE__*/React.createElement("option", {
+      value: ""
+    }, "Role \u2014 optional"), PARTY_ROLES.map(r => /*#__PURE__*/React.createElement("option", {
+      key: r,
+      value: r
+    }, r))), /*#__PURE__*/React.createElement("input", {
+      value: pForm.company,
+      onChange: e => setPForm(f => ({
+        ...f,
+        company: e.target.value
+      })),
+      placeholder: "Company",
+      style: pInput
+    }), /*#__PURE__*/React.createElement("input", {
+      value: pForm.email,
+      onChange: e => setPForm(f => ({
+        ...f,
+        email: e.target.value
+      })),
+      placeholder: "Email",
+      style: pInput
+    }), /*#__PURE__*/React.createElement("input", {
+      value: pForm.phone,
+      onChange: e => setPForm(f => ({
+        ...f,
+        phone: e.target.value
+      })),
+      placeholder: "Phone",
+      style: pInput
+    })), pSugErr && !pPicked && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: dark ? '#E0B25A' : '#8A6A16',
+        fontFamily: C.fontSans,
+        marginBottom: 8,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-alert-triangle",
+      style: {
+        fontSize: 13
+      }
+    }), "Couldn't check Zoho for someone with this name \u2014 saving now may create a second copy of an existing person."), pErr && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        color: dark ? '#F08A8A' : '#9B1C1C',
+        fontFamily: C.fontSans,
+        marginBottom: 8
+      }
+    }, pErr), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center'
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: saveParty,
+      disabled: pSaving || !pPicked && !(pForm.name || '').trim(),
+      style: {
+        fontSize: 12.5,
+        fontWeight: 500,
+        padding: '8px 14px',
+        borderRadius: 6,
+        border: 'none',
+        background: gold,
+        color: '#fff',
+        cursor: pSaving || !pPicked && !(pForm.name || '').trim() ? 'default' : 'pointer',
+        opacity: pSaving || !pPicked && !(pForm.name || '').trim() ? 0.5 : 1,
+        fontFamily: C.fontSans
+      }
+    }, pSaving ? 'Adding…' : pPicked ? 'Attach to this deal' : 'Create and attach'), /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        resetPartyForm();
+        setAddOpen(false);
+      },
+      style: {
+        fontSize: 12.5,
+        padding: '8px 12px',
+        borderRadius: 6,
+        border: `1px solid ${bord}`,
+        background: 'none',
+        color: sub,
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, "Cancel"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5,
+        color: sub,
+        fontFamily: C.fontSans
+      }
+    }, "Saved to Zoho")))) : null;
+    const tasksBlock = /*#__PURE__*/React.createElement(React.Fragment, null, dealBlock, partiesBlock, updates.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         letterSpacing: '0.14em',

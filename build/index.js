@@ -13550,6 +13550,80 @@ function fetchContactBrief(contactId) {
   BRIEF_MEMO.set(contactId, p);
   return p;
 }
+// One fixture, two consumers: the brief's prospect section and the pop-out
+// both read this in dev, so what the preview shows is the shape the server
+// actually returns.
+function devProspect() {
+  return {
+    prospect_label: 'Prospect Form Type',
+    prospect_api: 'Prospect_Form_Type',
+    types: ['Buyer Form'],
+    sections_read: true,
+    batches_failed: 0,
+    groups: [{
+      title: 'Buyer Form',
+      source: 'section',
+      fields: [{
+        api: 'Budget_Max',
+        label: 'Budget',
+        type: 'currency',
+        value: '650000',
+        options: null,
+        read_only: false
+      }, {
+        api: 'Buyer_Timeline',
+        label: 'Timeline',
+        type: 'picklist',
+        value: '3-6 months',
+        options: ['0-3 months', '3-6 months', '6-12 months'],
+        read_only: false
+      }, {
+        api: 'Areas',
+        label: 'Areas of interest',
+        type: 'multiselectpicklist',
+        value: 'Montrose, Heights',
+        options: ['Montrose', 'Heights', 'Rice Village'],
+        read_only: false
+      }, {
+        api: 'Pre_Approved',
+        label: 'Pre-approved',
+        type: 'boolean',
+        value: 'Yes',
+        options: null,
+        read_only: false
+      }, {
+        api: 'Lender',
+        label: 'Lender',
+        type: 'text',
+        value: 'Cadence Bank',
+        options: null,
+        read_only: false
+      }],
+      empty: [{
+        api: 'Beds_Min',
+        label: 'Minimum beds',
+        type: 'integer',
+        value: '',
+        options: null,
+        read_only: false
+      }, {
+        api: 'Notes_Buyer',
+        label: 'Buyer notes',
+        type: 'textarea',
+        value: '',
+        options: null,
+        read_only: false
+      }, {
+        api: 'Target_Move',
+        label: 'Target move date',
+        type: 'date',
+        value: '',
+        options: null,
+        read_only: false
+      }]
+    }]
+  };
+}
 async function briefRequest(contactId) {
   if (callsIsDev()) {
     // One fixture per state the server can actually return, keyed off the
@@ -13593,6 +13667,7 @@ async function briefRequest(contactId) {
         state: 'searched',
         threads: 1
       }],
+      prospect: devProspect(),
       generated_at: new Date().toISOString()
     }, over || {});
     const fail = (code, ownerName) => {
@@ -14692,6 +14767,17 @@ function ProspectSheet({
     let dead = false;
     setState('loading');
     setErr('');
+    if (callsIsDev()) {
+      setTimeout(() => {
+        if (!dead) {
+          setData(devProspect());
+          setState('ready');
+        }
+      }, 400);
+      return () => {
+        dead = true;
+      };
+    }
     callZoho({
       action: 'prospect_form',
       contact_id: contactId
@@ -14740,13 +14826,17 @@ function ProspectSheet({
       if (byApi[a]) record[a] = outbound(byApi[a], edits[a]);
     });
     try {
-      const r = await callZoho({
-        action: 'update_record',
-        module: 'Contacts',
-        id: contactId,
-        record
-      });
-      if (!r.ok) throw new Error(r.data && r.data.error || 'Zoho refused the update.');
+      if (callsIsDev()) {
+        await new Promise(r => setTimeout(r, 400));
+      } else {
+        const r = await callZoho({
+          action: 'update_record',
+          module: 'Contacts',
+          id: contactId,
+          record
+        });
+        if (!r.ok) throw new Error(r.data && r.data.error || 'Zoho refused the update.');
+      }
       // Fold the saved values into the loaded copy so the window shows what
       // Zoho now holds, without a second read.
       setData(d => {

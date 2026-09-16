@@ -5683,6 +5683,200 @@ Rules:
       return out;
     }
 
+    // ── The prospect form, in a window of its own ─────────────────
+    //  A prospect form type is "what kind of client is this" — buyer, seller,
+    //  renter — and each type has its own set of fields in Zoho. Zoho shows
+    //  and hides those fields with a LAYOUT RULE, and it will not tell any API
+    //  what that rule says (their own words: "API support is currently not
+    //  extended to these rules"). So the grouping is worked out server-side,
+    //  either from a layout section named after the type or, failing that,
+    //  from which fields actually carry a value. `source` says which happened,
+    //  and the footer says so in plain words rather than pretending.
+    //
+    //  Edits go straight to Zoho. Only changed fields are sent, so a field
+    //  this window never showed cannot be blanked by saving.
+    function ProspectSheet({ dark, contactId, contactName, label, onClose }) {
+      const J = "'Jost', sans-serif";
+      const headTitle = dark ? '#FFFFFF' : '#001A4A';
+      const mutedCol  = dark ? 'rgba(255,255,255,0.45)' : '#8E897C';
+      const faintCol  = dark ? 'rgba(255,255,255,0.28)' : '#BBB6AA';
+      const lineCol   = dark ? '#122A4E' : '#E7E3D9';
+      const inputBg   = dark ? '#071226' : '#FBFAF7';
+      const redCol    = dark ? '#FF8A8A' : '#B4453C';
+
+      const [state, setState] = useState('loading');   // loading | ready | error
+      const [err, setErr] = useState('');
+      const [data, setData] = useState(null);
+      const [edits, setEdits] = useState({});          // api -> new value, only what was touched
+      const [showEmpty, setShowEmpty] = useState({});  // group index -> bool
+      const [saving, setSaving] = useState(false);
+      const [saveErr, setSaveErr] = useState('');
+      const [saved, setSaved] = useState(false);
+
+      useEffect(() => {
+        let dead = false;
+        setState('loading'); setErr('');
+        callZoho({ action: 'prospect_form', contact_id: contactId }).then(r => {
+          if (dead) return;
+          if (!r.ok) { setErr((r.data && r.data.error) || 'Couldn’t read the prospect form.'); setState('error'); return; }
+          setData(r.data); setState('ready');
+        }).catch(e => { if (!dead) { setErr((e && e.message) || String(e)); setState('error'); } });
+        return () => { dead = true; };
+      }, [contactId]);
+
+      const groups = (data && data.groups) || [];
+      const dirty = Object.keys(edits);
+
+      // Zoho wants the field's own shape back, not the string we displayed.
+      // Multi-selects are the one that bites: sending "A, B" as a string is a
+      // silent no-op on some layouts, so it goes back as an array.
+      function outbound(f, v) {
+        if (f.type === 'boolean') return !!v;
+        if (f.type === 'multiselectpicklist') return String(v || '').split(',').map(x => x.trim()).filter(Boolean);
+        if (v === '') return null;
+        return v;
+      }
+
+      async function save() {
+        if (!dirty.length || saving) return;
+        setSaving(true); setSaveErr(''); setSaved(false);
+        const byApi = {};
+        groups.forEach(g => (g.fields || []).concat(g.empty || []).forEach(f => { byApi[f.api] = f; }));
+        const record = {};
+        dirty.forEach(a => { if (byApi[a]) record[a] = outbound(byApi[a], edits[a]); });
+        try {
+          const r = await callZoho({ action: 'update_record', module: 'Contacts', id: contactId, record });
+          if (!r.ok) throw new Error((r.data && r.data.error) || 'Zoho refused the update.');
+          // Fold the saved values into the loaded copy so the window shows what
+          // Zoho now holds, without a second read.
+          setData(d => {
+            if (!d) return d;
+            const patch = f => (Object.prototype.hasOwnProperty.call(edits, f.api) ? { ...f, value: String(edits[f.api] === true ? 'Yes' : edits[f.api] === false ? '' : (edits[f.api] || '')) } : f);
+            return { ...d, groups: (d.groups || []).map(g => {
+              const all = (g.fields || []).concat(g.empty || []).map(patch);
+              return { ...g, fields: all.filter(f => !!f.value), empty: all.filter(f => !f.value && !f.read_only) };
+            }) };
+          });
+          setEdits({}); setSaved(true);
+        } catch (e) {
+          setSaveErr((e && e.message) || String(e));
+        } finally { setSaving(false); }
+      }
+
+      const inputStyle = {
+        width: '100%', boxSizing: 'border-box', fontFamily: J, fontSize: 13, fontWeight: 300,
+        color: headTitle, background: inputBg, border: `1px solid ${lineCol}`, borderRadius: 8,
+        padding: '7px 9px', outline: 'none',
+      };
+
+      function field(f) {
+        const touched = Object.prototype.hasOwnProperty.call(edits, f.api);
+        const val = touched ? edits[f.api] : (f.type === 'boolean' ? /^(true|yes)$/i.test(f.value) : f.value);
+        const set = v => { setSaved(false); setEdits(e => ({ ...e, [f.api]: v })); };
+        let control;
+        if (f.read_only) {
+          control = <div style={{ fontFamily: J, fontSize: 13, fontWeight: 300, color: mutedCol, padding: '7px 0' }}>{f.value || '—'}</div>;
+        } else if (f.type === 'boolean') {
+          control = (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '5px 0' }}>
+              <input type="checkbox" checked={!!val} onChange={e => set(e.target.checked)} style={{ width: 16, height: 16, accentColor: '#C9A45A' }} />
+              <span style={{ fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle }}>{val ? 'Yes' : 'No'}</span>
+            </label>
+          );
+        } else if (f.options && f.options.length && f.type !== 'multiselectpicklist') {
+          control = (
+            <select value={val || ''} onChange={e => set(e.target.value)} style={inputStyle}>
+              <option value="">—</option>
+              {f.options.map((o, i) => <option key={i} value={o}>{o}</option>)}
+            </select>
+          );
+        } else if (f.type === 'textarea') {
+          control = <textarea value={val || ''} onChange={e => set(e.target.value)} rows={3} style={{ ...inputStyle, resize: 'vertical' }} />;
+        } else {
+          const t = f.type === 'date' ? 'date' : (f.type === 'integer' || f.type === 'double' || f.type === 'currency' || f.type === 'bigint') ? 'number' : 'text';
+          control = <input type={t} value={val || ''} onChange={e => set(e.target.value)} style={inputStyle}
+            placeholder={f.type === 'multiselectpicklist' ? 'Separate with commas' : ''} />;
+        }
+        return (
+          <div key={f.api} style={{ marginBottom: 10 }}>
+            <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: touched ? '#C9A45A' : faintCol, marginBottom: 3 }}>
+              {f.label}{touched ? ' · edited' : ''}
+            </div>
+            {control}
+          </div>
+        );
+      }
+
+      return (
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(10,20,45,0.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, maxHeight: '88vh', overflowY: 'auto', background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: '20px 20px calc(26px + env(safe-area-inset-bottom))' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 2 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: J, fontSize: 17, fontWeight: 600, color: headTitle }}>{label || 'Prospect form'}</div>
+                <div style={{ fontFamily: J, fontSize: 11.5, fontWeight: 300, color: mutedCol }}>{contactName}</div>
+              </div>
+              <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: faintCol, padding: 0 }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
+            </div>
+
+            {state === 'loading' && (
+              <div style={{ fontFamily: J, fontSize: 12.5, fontWeight: 300, color: mutedCol, margin: '16px 0' }}>Reading the form from Zoho…</div>
+            )}
+
+            {state === 'error' && (
+              <div style={{ fontFamily: J, fontSize: 12.5, fontWeight: 300, color: redCol, margin: '16px 0', lineHeight: 1.55 }}>{err}</div>
+            )}
+
+            {state === 'ready' && !groups.length && (
+              <div style={{ fontFamily: J, fontSize: 12.5, fontWeight: 300, color: mutedCol, margin: '16px 0', lineHeight: 1.55 }}>
+                No prospect-form fields are filled in on this contact.
+              </div>
+            )}
+
+            {state === 'ready' && groups.map((g, gi) => (
+              <div key={gi} style={{ marginTop: 16 }}>
+                <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#C9A45A', marginBottom: 9, paddingBottom: 6, borderBottom: `1px solid ${lineCol}` }}>{g.title}</div>
+                {(g.fields || []).map(field)}
+                {!(g.fields || []).length && (
+                  <div style={{ fontFamily: J, fontSize: 12.5, fontWeight: 300, color: mutedCol, marginBottom: 10 }}>Nothing filled in yet.</div>
+                )}
+                {(g.empty || []).length > 0 && !showEmpty[gi] && (
+                  <button onClick={() => setShowEmpty(m => ({ ...m, [gi]: true }))}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: J, fontSize: 11.5, fontWeight: 600, color: mutedCol }}>
+                    + {(g.empty || []).length} blank {(g.empty || []).length === 1 ? 'field' : 'fields'}
+                  </button>
+                )}
+                {showEmpty[gi] && (g.empty || []).map(field)}
+              </div>
+            ))}
+
+            {state === 'ready' && (
+              <React.Fragment>
+                {saveErr && <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: redCol, marginTop: 12, lineHeight: 1.5 }}>{saveErr}</div>}
+                {saved && !dirty.length && <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, marginTop: 12 }}>Saved to Zoho.</div>}
+                <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+                  <button onClick={save} disabled={!dirty.length || saving}
+                    style={{ flex: 1, fontFamily: J, fontSize: 13, fontWeight: 600, padding: '10px 0', borderRadius: 10, border: 'none',
+                      cursor: (!dirty.length || saving) ? 'default' : 'pointer',
+                      background: (!dirty.length || saving) ? (dark ? '#122A4E' : '#EFECE4') : '#C9A45A',
+                      color: (!dirty.length || saving) ? mutedCol : '#FFFFFF' }}>
+                    {saving ? 'Saving…' : dirty.length ? `Save ${dirty.length} ${dirty.length === 1 ? 'change' : 'changes'}` : 'No changes'}
+                  </button>
+                </div>
+                {/* Honesty about where the grouping came from. If an admin edits
+                    the layout rule in Zoho, the "section" case follows along on
+                    its own; the "filled" case cannot, and says so. */}
+                <div style={{ fontFamily: J, fontSize: 10, fontWeight: 300, color: faintCol, marginTop: 10, lineHeight: 1.5 }}>
+                  {groups.some(g => g.source === 'filled')
+                    ? 'Zoho’s API can’t say which fields belong to this form type, so these are the fields that have something in them.'
+                    : 'Grouped by this contact’s Zoho layout.'}
+                </div>
+              </React.Fragment>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     function CallsTab({ dark, ownerName, ownerEmail, isAdmin }) {
       const J = "'Jost', sans-serif";
       const [view, setView] = useState('list');       // 'list' | 'capacity' — a button now, not a tab
@@ -5699,6 +5893,7 @@ Rules:
       // field" — resolveProspectField tells those apart internally, and either
       // way the second chip simply doesn't render.
       const [pfield, setPfield] = useState(null);
+      const [pformFor, setPformFor] = useState(null);   // contact whose prospect form is open — { id, name }
       useEffect(() => { let dead = false; resolveProspectField().then(f => { if (!dead) setPfield(f); }); return () => { dead = true; }; }, []);
       // The brief behind the (i). `null` until a sheet is open.
       //   { id, state: 'loading' | 'ready' | 'error', data, code, ownerName }
@@ -6369,10 +6564,17 @@ Rules:
       );
 
       // A chip, in the two shapes this row uses.
-      const chip = (text, title, muted) => (
+      const chip = (text, title, muted, onClick) => (
         <span title={title}
+          role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined}
+          onClick={onClick ? (e => { e.stopPropagation(); onClick(); }) : undefined}
+          onKeyDown={onClick ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onClick(); } }) : undefined}
           style={{ fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.04em', lineHeight: 1.4, padding: '2px 6px', borderRadius: 5, flexShrink: 0,
             background: muted ? trackBg : creamBg, color: muted ? mutedCol : creamTx,
+            cursor: onClick ? 'pointer' : undefined,
+            textDecoration: onClick ? 'underline' : undefined,
+            textDecorationStyle: onClick ? 'dotted' : undefined,
+            textUnderlineOffset: onClick ? 2 : undefined,
             border: muted ? `1px solid ${lineCol}` : 'none' }}>{text}</span>
       );
 
@@ -6416,7 +6618,7 @@ Rules:
                   ? chip(b.gradeFromSubject + '?', 'Read off the task subject while the contact record loads — it may not match the record', true)
                   : chip('…', 'Reading this contact’s classification from Zoho', true))}
             {b.eo && chip('EO', 'This task is an EO touch call — a kind of call, not a client classification', true)}
-            {b.pform && chip(b.pform, (pfield && pfield.label ? pfield.label : 'Prospect form') + ': ' + b.pform, true)}
+            {b.pform && chip(b.pform, (pfield && pfield.label ? pfield.label : 'Prospect form') + ': ' + b.pform + ' — tap to see and edit the form', true, () => setPformFor({ id: b.cid, name: b.cname }))}
             {/* Every tag on the record, not the first few. A contact tagged
                 "Do Not Call" behind a "…+3" would be exactly the one that
                 got hidden. */}
@@ -6716,6 +6918,12 @@ Rules:
           {/* The AI mark beside a name. Generated on press from the contact record,
               its deals, its call history and a live search of the OWNING
               AGENT's mail and their TC's. Nothing here is stored. */}
+          {pformFor && (
+            <ProspectSheet dark={dark} contactId={pformFor.id} contactName={pformFor.name}
+              label={pfield && pfield.label ? pfield.label : 'Prospect form'}
+              onClose={() => setPformFor(null)} />
+          )}
+
           {infoFor && (
             <div onClick={closeInfo} style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'rgba(10,20,45,0.42)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
               <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, background: dark ? '#0A1730' : '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: '20px 20px calc(26px + env(safe-area-inset-bottom))' }}>
@@ -6761,6 +6969,35 @@ Rules:
                         </div>
                       );
                     })()}
+                    {/* The prospect form, one section per type they carry.
+                        Printed field by field from Zoho rather than summarised
+                        by the model: these are budgets, dates and addresses,
+                        and a paraphrased number is a wrong number. Tapping the
+                        heading opens the same window the row chip opens. */}
+                    {((brief.data.prospect && brief.data.prospect.groups) || []).filter(g => (g.fields || []).length).map((g, gi) => (
+                      <div key={'pf' + gi} style={{ marginBottom: 14 }}>
+                        <div role="button" tabIndex={0}
+                          onClick={() => setPformFor({ id: infoFor.id, name: infoFor.name })}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setPformFor({ id: infoFor.id, name: infoFor.name }); } }}
+                          style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5, cursor: 'pointer' }}>
+                          <i className="ti ti-clipboard-text" style={{ fontSize: 12, color: '#C9A45A', flexShrink: 0 }} />
+                          <span style={{ fontFamily: J, fontSize: 9.5, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: faintCol }}>{g.title}</span>
+                          <i className="ti ti-pencil" style={{ fontSize: 10, color: faintCol, flexShrink: 0 }} />
+                        </div>
+                        {(g.fields || []).slice(0, 12).map((f, j) => (
+                          <div key={j} style={{ display: 'flex', gap: 7, fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle, lineHeight: 1.55, marginBottom: 3 }}>
+                            <span style={{ color: mutedCol, flexShrink: 0 }}>•</span>
+                            <span style={{ minWidth: 0 }}><span style={{ color: mutedCol }}>{f.label + ': '}</span>{f.value}</span>
+                          </div>
+                        ))}
+                        {(g.fields || []).length > 12 && (
+                          <div style={{ fontFamily: J, fontSize: 10.5, fontWeight: 300, color: mutedCol, marginTop: 4, paddingLeft: 14 }}>
+                            {((g.fields || []).length - 12) + ' more — tap the heading to see them all'}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+
                     {/* What was and wasn't read. A brief that quietly skipped a
                         mailbox reads as "there's nothing there", which is a
                         different and much more expensive mistake. */}

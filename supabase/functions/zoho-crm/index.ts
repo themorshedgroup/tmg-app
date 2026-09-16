@@ -2317,6 +2317,167 @@ Deno.serve(async (req) => {
       }, 200);
     }
 
+    // ── A contact's prospect-form fields, grouped [read-only] ──────
+    //  TMG drives its prospect forms with a Zoho LAYOUT RULE: pick a Prospect
+    //  Form Type and that type's fields appear. Zoho does not expose layout
+    //  rules through any API version -- their own Kaizen #63 says "API support
+    //  is currently not extended to these rules" -- so the mapping of type to
+    //  fields cannot be read, only mirrored.
+    //
+    //  Mirroring it in code would be a lie with a shelf life: the day an admin
+    //  edits the rule in Zoho, this silently shows the wrong fields and nothing
+    //  reports it. So the mapping is DERIVED, two ways, and which one was used
+    //  is always reported back:
+    //
+    //    section  — the layout has a section whose name matches the type
+    //               ("Buyer Form"). That IS the rule's shape, read live from
+    //               Zoho, so it stays correct on its own. Preferred.
+    //    filled   — no such section. Fall back to every custom field on the
+    //               record that actually has a value. Not as clean, but it
+    //               leans on the same truth the rule does: a buyer only has
+    //               buyer fields filled in.
+    //
+    //  Nothing here is cached and nothing is written.
+    if (action === "prospect_form") {
+      const cid = String(body.contact_id || "").trim();
+      if (!cid) return json({ error: "Missing contact id." }, 400);
+
+      const conn = await loadConnection(sb);
+      const accessToken = await getZohoToken(sb, conn);
+      const apiDomain = conn.api_domain || "www.zohoapis.com";
+      const get = (u: string) => zohoFetch(sb, conn, accessToken, u, {});
+
+      // 1 — field metadata. Labels, types and picklist options; needed to
+      //     render an editable form rather than a wall of text boxes.
+      const fr = await get(`https://${apiDomain}/crm/v6/settings/fields?module=Contacts`);
+      if (!fr.ok) return json({ error: "Couldn’t read the Contacts field list." }, 400);
+      const fd = await fr.json().catch(() => ({}));
+      const allFields = Array.isArray(fd?.fields) ? fd.fields : [];
+      const meta = new Map<string, any>();
+      for (const f of allFields) if (f?.api_name) meta.set(f.api_name, f);
+
+      const PROSPECT_LABEL = /(prospect.*(form|type))|((form|type).*prospect)/i;
+      const pf = allFields.filter((f: any) => PROSPECT_LABEL.test(String(f.field_label || "")));
+      const prospectApi = pf.length === 1 ? String(pf[0].api_name) : "";
+      const prospectLabel = pf.length === 1 ? String(pf[0].field_label || "Prospect form") : "Prospect form";
+
+      // 2 — layout sections. This is the part Zoho WILL give us, and when the
+      //     org's sections are named after the form types it reproduces the
+      //     rule exactly, for free, forever.
+      const lr = await get(`https://${apiDomain}/crm/v6/settings/layouts?module=Contacts`);
+      const ld = lr.ok ? await lr.json().catch(() => ({})) : {};
+      const sections: Array<{ name: string; fields: string[] }> = [];
+      for (const lay of (Array.isArray(ld?.layouts) ? ld.layouts : [])) {
+        for (const sec of (Array.isArray(lay?.sections) ? lay.sections : [])) {
+          sections.push({
+            name: String(sec?.display_label || sec?.name || "").trim(),
+            fields: (Array.isArray(sec?.fields) ? sec.fields : []).map((f: any) => String(f?.api_name || "")).filter(Boolean),
+          });
+        }
+      }
+
+      // 3 — the record. Zoho caps `fields` at 50 per call, so custom fields are
+      //     asked for in batches. A batch that 400s is dropped rather than
+      //     taking the whole read down with it: one bad api name must not cost
+      //     the agent every other answer on the page.
+      const wanted = allFields
+        .filter((f: any) => f?.api_name && f?.data_type !== "subform" && String(f.data_type) !== "profileimage")
+        .map((f: any) => String(f.api_name));
+      const values: Record<string, any> = {};
+      let readFailed = 0;
+      for (let i = 0; i < wanted.length; i += 45) {
+        const batch = wanted.slice(i, i + 45);
+        try {
+          const rr = await get(`https://${apiDomain}/crm/v6/Contacts/${cid}?fields=${encodeURIComponent(batch.join(","))}`);
+          if (!rr.ok) { readFailed++; try { await rr.body?.cancel(); } catch { /* drained */ } continue; }
+          const rd = await rr.json().catch(() => ({}));
+          const rec = rd?.data?.[0];
+          if (rec) for (const k of Object.keys(rec)) values[k] = rec[k];
+        } catch { readFailed++; }
+      }
+      if (!Object.keys(values).length) return json({ error: "Couldn’t read that contact." }, 404);
+
+      // Flatten Zoho's shapes to something printable. A lookup is an object, a
+      // multi-select is an array, and "-None-" is Zoho's way of writing empty.
+      const flat = (v: any): string => {
+        if (v === null || v === undefined || v === "") return "";
+        if (Array.isArray(v)) return v.map(flat).filter(Boolean).join(", ");
+        if (typeof v === "object") return String(v.name ?? v.display_value ?? "").trim();
+        const t = String(v).trim();
+        return /^-?\s*none\s*-?$/i.test(t) ? "" : t;
+      };
+
+      const types = prospectApi
+        ? (Array.isArray(values[prospectApi]) ? values[prospectApi].map(flat) : [flat(values[prospectApi])]).filter(Boolean)
+        : [];
+
+      // Everything the sheet already shows by other means, plus Zoho's own
+      // plumbing. Repeating these under a "Buyer Form" heading would be noise.
+      const SKIP = new Set([
+        "id", "Owner", "Created_By", "Modified_By", "Created_Time", "Modified_Time",
+        "Last_Activity_Time", "Tag", "First_Name", "Last_Name", "Full_Name", "Email",
+        "Phone", "Mobile", "Other_Phone", "Home_Phone", "Fax", "Account_Name",
+        "Mailing_City", "Mailing_State", "Mailing_Street", "Mailing_Zip", "Mailing_Country",
+        "Client_Classification", "Lead_Source", "Description", "Email_Opt_Out",
+        "Record_Image", "Unsubscribed_Mode", "Unsubscribed_Time", "Change_Log_Time__s",
+        "Locked__s", "Enrich_Status__s", "Last_Enriched_Time__s", prospectApi,
+      ].filter(Boolean) as string[]);
+
+      const entry = (api: string) => {
+        const m = meta.get(api) || {};
+        return {
+          api,
+          label: String(m.field_label || api),
+          type: String(m.data_type || "text"),
+          read_only: !!(m.read_only || m.field_read_only),
+          options: Array.isArray(m.pick_list_values)
+            ? m.pick_list_values.filter((p: any) => p?.type !== "deleted_value").map((p: any) => String(p.display_value))
+            : null,
+          value: flat(values[api]),
+          raw: values[api] ?? null,
+        };
+      };
+      const norm = (v: string) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+      // `fields` are the ones with a value -- that is the at-a-glance summary.
+      // `empty` are the rest of the same candidate set, kept apart rather than
+      // dropped: the pop-out has to let someone FILL a blank field, not only
+      // change a filled one, and a field it never returned is a field nobody
+      // can ever complete from this app.
+      const split = (apis: string[], source: string, title: string) => {
+        const all = apis.filter(a => !SKIP.has(a)).map(entry);
+        return {
+          title, source,
+          fields: all.filter(f => !!f.value),
+          empty: all.filter(f => !f.value && !f.read_only).slice(0, 40),
+        };
+      };
+
+      const groups: any[] = [];
+      for (const t of types) {
+        const sec = sections.filter(x => x.name && norm(x.name) === norm(t))[0];
+        if (sec) groups.push(split(sec.fields, "section", t));
+      }
+      // No section is named after the form type -- fall back to the custom
+      // fields, which is the same truth the layout rule leans on: a buyer only
+      // has buyer fields filled in.
+      if (!groups.length) {
+        const custom = wanted.filter(a => meta.get(a)?.custom_field);
+        const g = split(custom, "filled", types.join(" · ") || prospectLabel);
+        if (g.fields.length || types.length) groups.push(g);
+      }
+
+      return json({
+        contact_id: cid,
+        prospect_label: prospectLabel,
+        prospect_api: prospectApi || null,
+        types,
+        groups,
+        sections_read: lr.ok,
+        batches_failed: readFailed,
+      }, 200);
+    }
+
     // ── Re-grant the org's Zoho authorization [admin] ──────────────
     //  Adding a scope to a Zoho grant is not an edit — Zoho mints a whole new
     //  refresh token against the new scope list and the old one keeps working

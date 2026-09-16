@@ -850,6 +850,24 @@ Deno.serve(async (req) => {
       if (!zd.found || !zd.contact) return json({ error: "contact_not_found" }, 404);
       const contact = zd.contact;
 
+      // The contact's prospect-form fields, grouped by form type. Deliberately
+      // NOT summarised by the model: these are already structured, and a
+      // "Budget: $650k" the model paraphrased is a number it could get wrong.
+      // The client prints them verbatim. The model still SEES them below, so
+      // the deals and touch lines can read as though it knows the client.
+      let prospect: any = null;
+      try {
+        const pr = await fetch(Deno.env.get("SUPABASE_URL") + "/functions/v1/zoho-crm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: req.headers.get("Authorization") || "" },
+          body: JSON.stringify({ action: "prospect_form", contact_id: contactId }),
+        });
+        if (pr.ok) {
+          const pd = await pr.json().catch(() => ({}));
+          if (pd && Array.isArray(pd.groups)) prospect = pd;
+        } else { try { await pr.body?.cancel(); } catch { /* drained */ } }
+      } catch { /* a missing prospect form must never cost the whole brief */ }
+
       // (4) Zoho Owner id → TMG profile, by STORED ID only. Never by name: the
       //     loose bidirectional substring match used to shade the capacity grid
       //     is right there and wrong here — it would pick a mailbox. Migration
@@ -1027,6 +1045,15 @@ Deno.serve(async (req) => {
               ? "EMAIL ON THE ZOHO CONTACT RECORD: none on file."
               : "EMAIL ON THE ZOHO CONTACT RECORD: could not be read."),
         ...zohoMail,
+        "",
+        // Context only. The client renders these itself, field by field, so
+        // the model must not spend a section repeating them back.
+        ...(prospect && prospect.groups && prospect.groups.length
+          ? prospect.groups.flatMap((g: any) => [
+              `PROSPECT FORM — ${g.title} (background. Do NOT give this its own section; use it to make the other lines specific):`,
+              ...(g.fields || []).slice(0, 25).map((f: any) => `- ${f.label}: ${f.value}`),
+            ])
+          : []),
       ].join("\n");
       // Belt and braces. The caps above should already keep this near 6k, but a
       // silent overrun would hit ai-chat's 413 and show the wrong error entirely.
@@ -1101,6 +1128,10 @@ Deno.serve(async (req) => {
         // { first, last } as plain YYYY-MM-DD, or null when Zoho's dates were
         // not in a readable format. Null WITH a non-zero count is the tell.
         zoho_email_span: emailSpan,
+        // { types[], groups[{title, source, fields[{api,label,type,value,options,read_only}]}] }
+        // `source` is "section" when Zoho's own layout supplied the grouping and
+        // "filled" when it was inferred from which fields carry a value.
+        prospect,
         // null = the tag lookup was dropped, [] = read and there are none.
         tags: Array.isArray(contact.tags) ? contact.tags : null,
         threads_read: threadsRead,

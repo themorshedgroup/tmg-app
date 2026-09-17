@@ -3004,6 +3004,59 @@ Rules:
       );
     }
 
+    // Live suggestions as a KPI person's name is typed, from the same Zoho
+    // Contacts search the Review step already uses (searchZohoContacts /
+    // search_contacts). Picking one just fills in that exact name — it does
+    // NOT lock the field or set a contact_id; the real match-or-create still
+    // happens on Review (KpiSummary), so a name typed with no match is still
+    // fine to carry forward as a brand-new contact.
+    function KpiNameAutocomplete({ value, onChange, dark, style, placeholder }) {
+      const [open, setOpen] = useState(false);
+      const [results, setResults] = useState(null); // null = not searched yet
+      const [busy, setBusy] = useState(false);
+      const tRef = useRef(null);
+      useEffect(() => () => { if (tRef.current) clearTimeout(tRef.current); }, []);
+
+      function handleChange(text) {
+        onChange(text);
+        setOpen(true);
+        if (tRef.current) clearTimeout(tRef.current);
+        const q = text.trim();
+        if (q.length < 2) { setResults(null); setBusy(false); return; }
+        setBusy(true);
+        tRef.current = setTimeout(async () => {
+          try { setResults(await searchZohoContacts(q)); }
+          catch (e) { setResults([]); }
+          finally { setBusy(false); }
+        }, 300);
+      }
+      function pick(c) { onChange(c.full_name); setResults(null); setOpen(false); }
+
+      const bord = dark ? '#152545' : C.border;
+      const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+      const showDropdown = open && value.trim().length >= 2;
+
+      return (
+        <div style={{ position: 'relative' }}>
+          <input type="text" value={value} onChange={e => handleChange(e.target.value)}
+            onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)}
+            style={style} placeholder={placeholder} />
+          {showDropdown && (
+            <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, background: dark ? '#0B1B33' : '#fff', border: `1px solid ${bord}`, borderRadius: 10, boxShadow: '0 12px 30px rgba(0,26,74,.14)', zIndex: 5, maxHeight: 190, overflowY: 'auto' }}>
+              {busy && <div style={{ padding: '10px 12px', fontSize: '0.78rem', color: sub, fontFamily: C.fontSans }}>Searching…</div>}
+              {!busy && results && results.length === 0 && <div style={{ padding: '10px 12px', fontSize: '0.78rem', color: sub, fontFamily: C.fontSans }}>No matches — a new contact can be created on Review.</div>}
+              {!busy && results && results.map(c => (
+                <button key={c.id} type="button" onMouseDown={e => { e.preventDefault(); pick(c); }}
+                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', background: 'transparent', border: 'none', borderBottom: `1px solid ${bord}`, cursor: 'pointer', fontSize: '0.82rem', color: dark ? '#fff' : C.navy, fontFamily: C.fontSans }}>
+                  {c.full_name}{c.email ? <span style={{ color: sub, fontWeight: 400 }}> · {c.email}</span> : null}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // The expanding inline form (form path). Starts compact (date, CTC, Person 1); grows via the buttons.
     function KpiInlineForm({ dark, ownerName, initial, onReview, onCancel }) {
       const seed = initial || {};
@@ -3086,7 +3139,7 @@ Rules:
                 <div style={{ flex: 1, fontSize: '0.68rem', fontWeight: 700, color: sub, letterSpacing: '0.05em', fontFamily: C.fontSans }}>PERSON {i + 1}</div>
                 {persons.length > 1 && <button onClick={() => removePerson(i)} style={removeBtn}><i className="ti ti-trash" /></button>}
               </div>
-              <input type="text" value={p.name} onChange={e => updatePerson(i, 'name', e.target.value)} style={{ ...inp, marginBottom: 9 }} placeholder="Contact name" />
+              <KpiNameAutocomplete value={p.name} onChange={v => updatePerson(i, 'name', v)} dark={dark} style={{ ...inp, marginBottom: 9 }} placeholder="Contact name" />
               <div style={{ ...lbl, marginBottom: 6 }}>Applicable KPIs</div>
               <KpiChips selected={p.kpis} onToggle={(opt) => toggleKpi(i, opt)} dark={dark} />
               {p.kpis.includes('Hotzone Action/s') && (

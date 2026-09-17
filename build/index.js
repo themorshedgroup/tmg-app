@@ -7848,6 +7848,123 @@ function KpiChips({
   }));
 }
 
+// Live suggestions as a KPI person's name is typed, from the same Zoho
+// Contacts search the Review step already uses (searchZohoContacts /
+// search_contacts). Picking one just fills in that exact name — it does
+// NOT lock the field or set a contact_id; the real match-or-create still
+// happens on Review (KpiSummary), so a name typed with no match is still
+// fine to carry forward as a brand-new contact.
+function KpiNameAutocomplete({
+  value,
+  onChange,
+  dark,
+  style,
+  placeholder
+}) {
+  const [open, setOpen] = useState(false);
+  const [results, setResults] = useState(null); // null = not searched yet
+  const [busy, setBusy] = useState(false);
+  const tRef = useRef(null);
+  useEffect(() => () => {
+    if (tRef.current) clearTimeout(tRef.current);
+  }, []);
+  function handleChange(text) {
+    onChange(text);
+    setOpen(true);
+    if (tRef.current) clearTimeout(tRef.current);
+    const q = text.trim();
+    if (q.length < 2) {
+      setResults(null);
+      setBusy(false);
+      return;
+    }
+    setBusy(true);
+    tRef.current = setTimeout(async () => {
+      try {
+        setResults(await searchZohoContacts(q));
+      } catch (e) {
+        setResults([]);
+      } finally {
+        setBusy(false);
+      }
+    }, 300);
+  }
+  function pick(c) {
+    onChange(c.full_name);
+    setResults(null);
+    setOpen(false);
+  }
+  const bord = dark ? '#152545' : C.border;
+  const sub = dark ? 'rgba(255,255,255,0.55)' : C.textSecondary;
+  const showDropdown = open && value.trim().length >= 2;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    value: value,
+    onChange: e => handleChange(e.target.value),
+    onFocus: () => setOpen(true),
+    onBlur: () => setTimeout(() => setOpen(false), 150),
+    style: style,
+    placeholder: placeholder
+  }), showDropdown && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: 'calc(100% + 4px)',
+      left: 0,
+      right: 0,
+      background: dark ? '#0B1B33' : '#fff',
+      border: `1px solid ${bord}`,
+      borderRadius: 10,
+      boxShadow: '0 12px 30px rgba(0,26,74,.14)',
+      zIndex: 5,
+      maxHeight: 190,
+      overflowY: 'auto'
+    }
+  }, busy && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '10px 12px',
+      fontSize: '0.78rem',
+      color: sub,
+      fontFamily: C.fontSans
+    }
+  }, "Searching\u2026"), !busy && results && results.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '10px 12px',
+      fontSize: '0.78rem',
+      color: sub,
+      fontFamily: C.fontSans
+    }
+  }, "No matches \u2014 a new contact can be created on Review."), !busy && results && results.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.id,
+    type: "button",
+    onMouseDown: e => {
+      e.preventDefault();
+      pick(c);
+    },
+    style: {
+      display: 'block',
+      width: '100%',
+      textAlign: 'left',
+      padding: '8px 12px',
+      background: 'transparent',
+      border: 'none',
+      borderBottom: `1px solid ${bord}`,
+      cursor: 'pointer',
+      fontSize: '0.82rem',
+      color: dark ? '#fff' : C.navy,
+      fontFamily: C.fontSans
+    }
+  }, c.full_name, c.email ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: sub,
+      fontWeight: 400
+    }
+  }, " \xB7 ", c.email) : null))));
+}
+
 // The expanding inline form (form path). Starts compact (date, CTC, Person 1); grows via the buttons.
 function KpiInlineForm({
   dark,
@@ -8083,10 +8200,10 @@ function KpiInlineForm({
     style: removeBtn
   }, /*#__PURE__*/React.createElement("i", {
     className: "ti ti-trash"
-  }))), /*#__PURE__*/React.createElement("input", {
-    type: "text",
+  }))), /*#__PURE__*/React.createElement(KpiNameAutocomplete, {
     value: p.name,
-    onChange: e => updatePerson(i, 'name', e.target.value),
+    onChange: v => updatePerson(i, 'name', v),
+    dark: dark,
     style: {
       ...inp,
       marginBottom: 9

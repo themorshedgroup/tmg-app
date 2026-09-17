@@ -7567,6 +7567,19 @@ Rules:
 
       useEffect(() => { resolveTaskTypes().then(setMeta).catch(e => setErr((e && e.message) || String(e))); }, []);
 
+      // Live search as the contact name is typed, same debounce as the AI
+      // chat's Enter KPI form (KpiNameAutocomplete) — runSearch still handles
+      // the actual fetch (incl. its dev-mode fixture branch), this just fires
+      // it automatically instead of waiting for Enter/Find.
+      const searchTimer = useRef(null);
+      useEffect(() => {
+        if (searchTimer.current) clearTimeout(searchTimer.current);
+        if (q.trim().length < 2) { setHits(null); return; }
+        searchTimer.current = setTimeout(() => { runSearch(); }, 300);
+        return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [q]);
+
       // Same prompt and ACTION-block parsing as the chat tab's "paste your
       // notes" path (see KPI_NOTE_INSTRUCTION) — kept self-contained here so
       // the credited agent is this sheet's ownerName, never the logged-in user.

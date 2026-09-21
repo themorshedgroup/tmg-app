@@ -973,12 +973,26 @@ function devContactIndex() {
     phones[id] = i !== 2; // one of the three is unreachable, so the skip path is exercised
   });
   const out = {};
-  Object.keys(meta).forEach(id => {
+  // Every third contact is a referral locally, plus one of the three
+  // never-called fixtures, so both the day-fill slot and the queue jump
+  // have something to show without a live Zoho.
+  Object.keys(meta).forEach((id, i) => {
     out[id] = {
       phone: phones[id] !== false,
+      referral: i % 3 === 0,
       ...meta[id]
     };
   });
+  out['dev-miss-2'].referral = true;
+  out['dev-ref-unclassified'] = {
+    phone: true,
+    name: 'Referral, No Class',
+    owner: 'Tarek Morshed',
+    ownerId: 'dev-u-tarek',
+    cls: null,
+    referral: true
+  };
+  CONTACT_TAGS_OK = true;
   return out;
 }
 // The real pairing source: each contact's own Spouse lookup field (found
@@ -1044,9 +1058,60 @@ async function fetchSpouseLinksFor(keys) {
 // (the unreachable-call check) and their classification + owner (the
 // missing-cadence check). Both need the whole Contacts module, and paging
 // it twice doubled an already slow read — so it is fetched once and shared.
-let CONTACT_INDEX = null; // contact id -> { phone, cls, owner, ownerId, name }
+// ── Referral tag ────────────────────────────────────────────────
+// "Contact Tags" is a custom field an admin fills in, NOT Zoho's built-in
+// Tag. Its api_name differs per org, so it is found by LABEL and never
+// hardcoded — the same rule index.jsx follows. Exactly one label match
+// counts; two would make "which one" a guess.
+const CONTACT_TAGS_LABEL = /^\s*contact\s*tags?\s*$/i;
+let CONTACT_TAGS_FIELD; // undefined = not looked up yet, null = no such field
+let CONTACT_TAGS_OK = false; // did the sweep actually come back carrying tags?
+function contactTagsWereRead() {
+  return CONTACT_TAGS_OK;
+}
+async function contactTagsField() {
+  if (CONTACT_TAGS_FIELD !== undefined) return CONTACT_TAGS_FIELD;
+  if (isDev()) {
+    CONTACT_TAGS_FIELD = 'Contact_Tags';
+    return CONTACT_TAGS_FIELD;
+  }
+  const {
+    ok,
+    data
+  } = await callZoho({
+    action: 'get_fields',
+    module: 'Contacts'
+  });
+  // A failed read is NOT cached — retrying is cheap, and caching a failure
+  // would silently turn referral priority off for the rest of the session.
+  if (!ok || !data || !Array.isArray(data.fields)) return null;
+  const hits = data.fields.filter(f => CONTACT_TAGS_LABEL.test(f.field_label || ''));
+  CONTACT_TAGS_FIELD = hits.length === 1 && hits[0].api_name ? hits[0].api_name : null;
+  return CONTACT_TAGS_FIELD;
+}
+// The field holds several tags at once — a multiselect comes back as an
+// array, a text field as a comma list. "Referral" has to be a whole tag,
+// not a substring, so "Referral Partner" counts and "No Referrals" does not.
+function hasReferralTag(v) {
+  if (!v) return false;
+  // Zoho hands the same field back in three shapes depending on how it was
+  // built: a comma string (text), an array of strings (multiselect
+  // picklist), or an array of {id,name} / {display_value} objects
+  // (multi-lookup). String(obj) is "[object Object]", so the object shapes
+  // have to be unwrapped or every referral reads as false.
+  const nameOf = x => x && typeof x === 'object' ? String(x.name || x.display_value || x.value || x.label || '') : String(x == null ? '' : x);
+  const parts = Array.isArray(v) ? v : nameOf(v).split(/[,;|]/);
+  return parts.some(x => /^\s*referrals?\b/i.test(nameOf(x)));
+}
+let CONTACT_INDEX = null; // contact id -> { phone, cls, owner, ownerId, name, referral }
+// Clears the field lookup TOO. A get_fields blip leaves CONTACT_TAGS_FIELD
+// unresolved and the sweep runs tag-blind; if only the rows were dropped,
+// the retry would re-page 11 pages of Contacts and still come back without
+// referrals, and there would be no way back short of a hard reload.
 function clearContactPhonesCache() {
   CONTACT_INDEX = null;
+  CONTACT_TAGS_FIELD = undefined;
+  CONTACT_TAGS_OK = false;
 }
 async function fetchContactIndex() {
   if (CONTACT_INDEX) return CONTACT_INDEX;
@@ -1055,31 +1120,66 @@ async function fetchContactIndex() {
     return CONTACT_INDEX;
   }
   const has = v => !!(v && String(v).trim());
+  const BASE = ['Phone', 'Mobile', 'Other_Phone', 'Full_Name', 'Owner', CONTACT_CLASS_FIELD];
+  const tagField = await contactTagsField();
+  // Zoho's ?fields= is all-or-nothing: ONE api_name it doesn't recognise
+  // 400s the whole request. This sweep's failure mode is a DELETE list, so
+  // the tag is treated as strictly optional — if asking for it fails, drop
+  // it and re-ask for the base fields, which is exactly the sweep that
+  // worked before referrals existed. Probed on the first page only; by the
+  // second page the name is already proven good.
+  let useTags = !!tagField;
+  // Asking for the field and being given it are different things. Zoho can
+  // accept the request and still answer without the key, which would read
+  // as "nobody is a referral" — indistinguishable from a real answer.
+  let sawTagKey = false,
+    sawRows = false;
   const map = {};
   let page = 1,
     token = null,
     more = true,
     guard = 0;
   while (more && guard++ < 60) {
+    const fields = useTags ? BASE.concat([tagField]) : BASE.slice();
     const args = {
       action: 'list_tasks',
       module: 'Contacts',
-      fields: ['Phone', 'Mobile', 'Other_Phone', 'Full_Name', 'Owner', CONTACT_CLASS_FIELD],
+      fields,
       per_page: 200
     };
     if (token) args.page_token = token;else args.page = page;
-    const {
+    let {
       ok,
+      status,
       data
     } = await callZoho(args);
+    // ONLY a 400 means "I don't recognise one of those field names". A 401,
+    // 429 or 500 is the connection, not the field — retrying without the
+    // tag would turn that into a successful sweep with referral priority
+    // silently switched off for the rest of the session, which looks
+    // identical to a clinic with no referrals in it.
+    if (!ok && status === 400 && useTags && page === 1 && !token) {
+      useTags = false;
+      ({
+        ok,
+        status,
+        data
+      } = await callZoho({
+        ...args,
+        fields: BASE.slice()
+      }));
+    }
     if (!ok) return null;
     (data.tasks || []).forEach(c => {
+      sawRows = true;
+      if (useTags && Object.prototype.hasOwnProperty.call(c, tagField)) sawTagKey = true;
       map[c.id] = {
         phone: has(c.Phone) || has(c.Mobile) || has(c.Other_Phone),
         cls: c[CONTACT_CLASS_FIELD] || null,
         owner: c.Owner && c.Owner.name || '',
         ownerId: c.Owner && c.Owner.id || null,
-        name: c.Full_Name || ''
+        name: c.Full_Name || '',
+        referral: useTags ? hasReferralTag(c[tagField]) : false
       };
     });
     more = !!(data.info && data.info.more_records);
@@ -1087,6 +1187,7 @@ async function fetchContactIndex() {
     if (more && !token && page >= 10) break;
     page++;
   }
+  CONTACT_TAGS_OK = useTags && (sawTagKey || !sawRows);
   CONTACT_INDEX = map;
   return map;
 }
@@ -2687,6 +2788,16 @@ function isEOTask(t) {
   if (callTier(t.Subject) === 'EO') return true;
   return /\bEO\b|EO Member/i.test(t.Description || '');
 }
+// Referral priority reads the CONTACT, never the task subject. A subject
+// only ever carries A/B/C/EO — the parser accepts nothing else, and an
+// unrecognised subject lands the task on a bulk DELETE list — so the tag
+// must never be written into one. `contacts` is the index from
+// fetchContactIndex; no index (or tags unreadable) means no referral
+// priority at all, which is the old behaviour, not a wrong one.
+function isReferralTask(t, contacts) {
+  const cid = t && t.Who_Id && t.Who_Id.id;
+  return !!(cid && contacts && contacts[cid] && contacts[cid].referral);
+}
 // A call whose subject carries no A/B/C tier prefix and isn't EO has no
 // client classification at all — it can't be placed in any cadence math
 // (there's no interval to measure it against), so it's excluded from
@@ -2799,6 +2910,12 @@ function inScopeCalls({
       const k = (t.Owner?.name || 'Unassigned') + '|' + String(t.Due_Date).slice(0, 10);
       (byOwnerDate[k] = byOwnerDate[k] || []).push(t);
     });
+    // Referral tags deliberately do NOT rank here. Being picked as an
+    // over-capacity victim is not a demotion: the victim goes into the
+    // pool that packOverdue re-dates from `start`, so a call bumped off a
+    // day three months out gets called SOONER, not later. Protecting
+    // referrals from eviction would pin them to that distant date and pull
+    // a non-referral forward in their place.
     const tierRank = {
       A: 3,
       B: 2,
@@ -2884,7 +3001,8 @@ function packOverdue({
   owner,
   spouseLinks,
   extraCompleted,
-  projLoad
+  projLoad,
+  contacts
 }) {
   const pool = inScopeCalls({
     tasks,
@@ -2954,6 +3072,14 @@ function packOverdue({
     (bucket[tier] || bucket.C).push(t);
   });
   const eoPool = pool.filter(isEOTask);
+  // Referrals are HALF the business's closings but sit an average of 132
+  // days before anyone rings them. They get one guaranteed slot a day
+  // ahead of the class mix, and first refusal on every leftover slot —
+  // one, not two, because at 5 a day two would leave the mix with no room
+  // for C-tier at all, and the whole point is to jump the queue without
+  // changing anyone's interval. A referral stays in its own A/B/C bucket
+  // too, so taking this slot still counts toward the day's tier mix.
+  const refPool = pool.filter(t => isReferralTask(t, contacts));
   const placed = new Set();
   const firstFree = arr => arr.find(t => !placed.has(t.id));
   const days = [];
@@ -2978,12 +3104,15 @@ function packOverdue({
 
     // Slot 5 first: the weekly EO floor supersedes the class mix until met.
     if ((eoByWeek[wk] || 0) < eoPerWeek && takeIfRoom(firstFree(eoPool))) eoByWeek[wk] = (eoByWeek[wk] || 0) + 1;
+    // Then the referral slot, before any tier gets a look in.
+    takeIfRoom(firstFree(refPool));
     while (tierCount('A') < 2 && takeIfRoom(firstFree(bucket.A))) {}
     if (!tierCount('B')) takeIfRoom(firstFree(bucket.B));
     if (!tierCount('C')) takeIfRoom(firstFree(bucket.C));
-    // Backfill to capacity once a class runs dry (A first — it's the deepest queue).
+    // Backfill to capacity once a class runs dry — referrals first, then
+    // A (the deepest queue), then B, then C.
     while (roomLeft() > 0) {
-      if (!takeIfRoom(firstFree(bucket.A)) && !takeIfRoom(firstFree(bucket.B)) && !takeIfRoom(firstFree(bucket.C))) break;
+      if (!takeIfRoom(firstFree(refPool)) && !takeIfRoom(firstFree(bucket.A)) && !takeIfRoom(firstFree(bucket.B)) && !takeIfRoom(firstFree(bucket.C))) break;
     }
     // Spouses ride along even if it pushes the day over capacity — same
     // exception whether that capacity is today's placements or the
@@ -3293,8 +3422,31 @@ function findMissingCadenceCalls({
     cls: contacts[id].cls,
     owner: contacts[id].owner || '—',
     ownerId: contacts[id].ownerId,
-    phone: contacts[id].phone
-  })).sort((a, b) => CADENCE_TIERS.indexOf(a.cls) - CADENCE_TIERS.indexOf(b.cls) || a.name.localeCompare(b.name));
+    phone: contacts[id].phone,
+    referral: !!contacts[id].referral
+  }))
+  // Referrals lead the list. This is the DISPLAY order only — the filter
+  // above still decides who is in it, and a referral with no A/B/C class
+  // is not in it at all (see findUnclassifiedReferrals).
+  .sort((a, b) => (b.referral ? 1 : 0) - (a.referral ? 1 : 0) || CADENCE_TIERS.indexOf(a.cls) - CADENCE_TIERS.indexOf(b.cls) || a.name.localeCompare(b.name));
+}
+
+// Referral-tagged contacts with NO A/B/C classification. They are left OUT
+// of the seeding above on purpose: a classification is the cadence, so
+// there is no interval to date their calls from and nothing here can
+// invent one. They are surfaced instead — the fix is to classify them in
+// Zoho, after which they seed like everyone else on the next reopen.
+function findUnclassifiedReferrals({
+  contacts,
+  owner
+}) {
+  if (!contacts) return [];
+  return Object.keys(contacts).filter(id => contacts[id].referral && !CADENCE_TIERS.includes(contacts[id].cls)).filter(id => !owner || contacts[id].owner === owner).map(id => ({
+    cid: id,
+    name: contacts[id].name || id,
+    cls: contacts[id].cls || null,
+    owner: contacts[id].owner || '—'
+  })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // Who among them can actually be rung — the SAME reachability rule Step 1
@@ -3375,7 +3527,14 @@ function packMissingCalls({
       target: want && want > floor ? want : floor
     };
   });
-  const ordered = withTarget.slice().sort((a, b) => String(a.target).localeCompare(String(b.target)) || CADENCE_TIERS.indexOf(a.cls) - CADENCE_TIERS.indexOf(b.cls) || a.name.localeCompare(b.name));
+
+  // Target date first, ALWAYS — a referral term ahead of it would backdate
+  // someone's next touch and change their interval, which is the one thing
+  // this must not do. Within a single target date, referrals go first,
+  // then tier. A referral never called before has no cadence date to work
+  // from, so their target is already the floor: that is how a brand-new
+  // referral ends up at the very front without any special casing.
+  const ordered = withTarget.slice().sort((a, b) => String(a.target).localeCompare(String(b.target)) || (b.referral ? 1 : 0) - (a.referral ? 1 : 0) || CADENCE_TIERS.indexOf(a.cls) - CADENCE_TIERS.indexOf(b.cls) || a.name.localeCompare(b.name));
   const byDate = {};
   let placed = 0;
   ordered.forEach(m => {
@@ -3603,6 +3762,16 @@ function CadenceHealth({
   const [contactIdx, setContactIdx] = useState(null);
   const [phonesLoading, setPhonesLoading] = useState(true);
   const [phonesFailed, setPhonesFailed] = useState(false);
+  // Bumping the nonce is the only way back into this sweep: the index is
+  // cached module-wide for the life of the page, so a blip that cost us
+  // the Contact Tags field would otherwise stick until a hard reload.
+  const [contactsNonce, setContactsNonce] = useState(0);
+  function retryContacts() {
+    clearContactPhonesCache();
+    setContactIdx(null);
+    setPhonesFailed(false);
+    setContactsNonce(n => n + 1);
+  }
   useEffect(() => {
     let cancelled = false;
     setPhonesLoading(true);
@@ -3615,7 +3784,7 @@ function CadenceHealth({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [contactsNonce]);
   const phones = useMemo(() => {
     if (!contactIdx) return null;
     const out = {};
@@ -3956,9 +4125,15 @@ function CadenceHealth({
     owner,
     spouseLinks: backlogLinks,
     extraCompleted: backlogExtraCompleted,
-    projLoad
-  }), [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, backlogLinks, backlogExtraCompleted, projLoad]);
-  const backlogBusyLoading = backlogLinksLoading || backlogCompletedLoading;
+    projLoad,
+    contacts: contactIdx
+  }), [tasks, colMap, cutoff, start, perDay, eoPerWeek, owner, backlogLinks, backlogExtraCompleted, projLoad, contactIdx]);
+  // phonesLoading is in here because `plan` now depends on contactIdx: the
+  // Contacts sweep decides who is a referral, and a plan built before it
+  // lands is ordered by A/B/C alone. Apply writes Due_Dates in bulk, so
+  // showing that plan as finished would let an agent commit the wrong
+  // dates a second before the right ones were available.
+  const backlogBusyLoading = backlogLinksLoading || backlogCompletedLoading || phonesLoading;
   // Fixed scope, independent of the tab's adjustable cutoff field — this is
   // what the later steps gate against, so it can't be fooled by someone
   // narrowing the cutoff just to unlock them.
@@ -4078,6 +4253,19 @@ function CadenceHealth({
     extraCompleted: missingExtra,
     projLoad
   }), [tasks, colMap, missingReach, owner, perDay, start, missingExtra, projLoad]);
+  // Referral-tagged contacts this agent owns who carry no A/B/C class.
+  // Not seeded, just shown — there is no interval to date a call from.
+  const unclassifiedRefs = useMemo(() => findUnclassifiedReferrals({
+    contacts: contactIdx,
+    owner
+  }), [contactIdx, owner]);
+  const [refsOpen, setRefsOpen] = useState(false);
+  // Referral priority is off whenever the Contacts sweep didn't answer at
+  // all, or answered without the Contact Tags field. Both steps rank by
+  // referral now, so both have to say when they aren't.
+  const refPriorityOff = !contactIdx || !contactTagsWereRead();
+  const missingRefCount = useMemo(() => missingReach.filter(m => m.referral).length, [missingReach]);
+  const backlogRefCount = useMemo(() => plan.days.reduce((n, d) => n + d.tasks.filter(t => isReferralTask(t, contactIdx)).length, 0), [plan, contactIdx]);
   const missingByTier = useMemo(() => {
     const m = {
       A: 0,
@@ -4259,6 +4447,45 @@ function CadenceHealth({
     color: eo ? '#fff' : C.navy,
     background: eo ? C.gold : tier === 'A' ? C.goldSoft + '44' : tier === 'B' ? C.blue + '22' : C.border
   });
+  const RefOffNotice = () => /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      borderColor: C.amber,
+      color: C.amber,
+      fontSize: '0.76rem',
+      marginBottom: 12,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1
+    }
+  }, "Zoho didn\u2019t return the Contact Tags field, so referral priority is off and everything below is ordered by A/B/C alone. Nothing is wrong with the plan \u2014 it is just the ordering we used before referrals."), /*#__PURE__*/React.createElement("button", {
+    onClick: retryContacts,
+    style: {
+      ...iconBtnStatic,
+      color: C.amber,
+      borderColor: C.amber + '66',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-refresh",
+    style: {
+      fontSize: 14
+    }
+  }), " Try again"));
+  const refPill = {
+    fontSize: '0.58rem',
+    fontWeight: 800,
+    letterSpacing: '.06em',
+    borderRadius: 20,
+    padding: '1px 6px',
+    flexShrink: 0,
+    color: '#fff',
+    background: C.navy
+  };
   const tabBtn = (key, active, locked, label) => /*#__PURE__*/React.createElement("button", {
     key: key,
     onClick: () => switchTab(key),
@@ -4778,12 +5005,90 @@ function CadenceHealth({
       marginBottom: 10,
       lineHeight: 1.5
     }
-  }, owner || '—', " \xB7 ", missingReach.length, " classified contact", missingReach.length === 1 ? '' : 's', " with no open call at all", ' (', [missingByTier.A ? missingByTier.A + ' A' : '', missingByTier.B ? missingByTier.B + ' B' : '', missingByTier.C ? missingByTier.C + ' C' : ''].filter(Boolean).join(', ') || 'none', ')', ' · ', missingPlan.days.length, " business day", missingPlan.days.length === 1 ? '' : 's', missingPlan.neverCalled ? ' · ' + missingPlan.neverCalled + ' never called before' : '', missingPlan.placed < missingReach.length ? ' · ⚠ only ' + missingPlan.placed + ' could be placed — raise Per day' : '', missingDropped ? /*#__PURE__*/React.createElement("span", {
+  }, owner || '—', " \xB7 ", missingReach.length, " classified contact", missingReach.length === 1 ? '' : 's', " with no open call at all", ' (', [missingByTier.A ? missingByTier.A + ' A' : '', missingByTier.B ? missingByTier.B + ' B' : '', missingByTier.C ? missingByTier.C + ' C' : ''].filter(Boolean).join(', ') || 'none', ')', ' · ', missingPlan.days.length, " business day", missingPlan.days.length === 1 ? '' : 's', missingPlan.neverCalled ? ' · ' + missingPlan.neverCalled + ' never called before' : '', missingPlan.placed < missingReach.length ? ' · ⚠ only ' + missingPlan.placed + ' could be placed — raise Per day' : '', missingRefCount ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'block',
+      marginTop: 2,
+      color: C.navy,
+      fontWeight: 600
+    }
+  }, missingRefCount, " of them are referrals. Anyone never called before starts as soon as there is room; a referral already in cadence keeps their own date and goes first on that day \u2014 their interval is never shortened.") : null, missingDropped ? /*#__PURE__*/React.createElement("span", {
     style: {
       display: 'block',
       marginTop: 2
     }
-  }, missingDropped, " more left out \u2014 no number for them or their spouse, so the call couldn\u2019t be made. Add a number in Zoho and reopen.") : null), /*#__PURE__*/React.createElement("div", {
+  }, missingDropped, " more left out \u2014 no number for them or their spouse, so the call couldn\u2019t be made. Add a number in Zoho and reopen.") : null), !phonesLoading && refPriorityOff && /*#__PURE__*/React.createElement(RefOffNotice, null), unclassifiedRefs.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      borderColor: C.navy + '55',
+      marginBottom: 12,
+      padding: '10px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setRefsOpen(o => !o),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: refPill
+  }, "REF"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.78rem',
+      fontWeight: 700,
+      color: C.navy,
+      flex: 1
+    }
+  }, unclassifiedRefs.length, " referral", unclassifiedRefs.length === 1 ? '' : 's', " with no A/B/C classification"), /*#__PURE__*/React.createElement("i", {
+    className: 'ti ti-chevron-' + (refsOpen ? 'up' : 'down'),
+    style: {
+      fontSize: 15,
+      color: C.textMuted
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.7rem',
+      color: C.textMuted,
+      lineHeight: 1.45,
+      marginTop: 6
+    }
+  }, "A classification IS the cadence. Without one there is no interval to date a call from, so nothing here can schedule them \u2014 and when their current call is completed, Zoho won\u2019t create the next one either. Classify them in Zoho and they join the cadence like everyone else. This list is every referral of this agent\u2019s with no class, whether or not they have a call open right now."), refsOpen && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gap: 3,
+      marginTop: 8
+    }
+  }, unclassifiedRefs.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.cid,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '5px 9px',
+      border: '1px solid ' + C.border,
+      borderRadius: 6,
+      background: C.surface
+    }
+  }, /*#__PURE__*/React.createElement(ZohoLink, {
+    module: "Contacts",
+    id: r.cid,
+    style: {
+      fontSize: '0.78rem',
+      flex: 1,
+      minWidth: 0,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, r.name), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.68rem',
+      color: C.textMuted,
+      flexShrink: 0
+    }
+  }, r.cls ? 'class: ' + r.cls : 'no classification'))))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 14,
@@ -4820,7 +5125,7 @@ function CadenceHealth({
       lineHeight: 1.45,
       flex: '1 1 240px'
     }
-  }, "A client classification IS the cadence \u2014 the A/B/C tier is what sets the call interval. A classified contact with no open call has dropped out of it silently, and nothing will put them back: Zoho only writes the next touch when the previous one is completed. This runs after the backlog on purpose \u2014 overdue calls have the older claim on the next free days. Each new call is dated from that contact\u2019s own last completed call plus their tier\u2019s interval; anyone never called before starts as soon as there\u2019s room. Same per-day cap, weekend/holiday skip and A-before-C ordering as the backlog, and the agent\u2019s existing and projected calls count as load. Anyone with no reachable number is left out entirely.")), missingBusyLoading && /*#__PURE__*/React.createElement("div", {
+  }, "A client classification IS the cadence \u2014 the A/B/C tier is what sets the call interval. A classified contact with no open call has dropped out of it silently, and nothing will put them back: Zoho only writes the next touch when the previous one is completed. This runs after the backlog on purpose \u2014 overdue calls have the older claim on the next free days. Each new call is dated from that contact\u2019s own last completed call plus their tier\u2019s interval; anyone never called before starts as soon as there\u2019s room. Same per-day cap, weekend/holiday skip and A-before-C ordering as the backlog, and the agent\u2019s existing and projected calls count as load. Referral-tagged contacts go first in the queue for any given target date \u2014 the date itself is never moved earlier for them, so no one\u2019s interval changes; a referral never called before has no cadence date at all, so they already start as soon as there is room. A contact pushed off a full earlier day still lands wherever there is space, so a day is not strictly referrals-first top to bottom. Anyone with no reachable number is left out entirely.")), missingBusyLoading && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 40,
       textAlign: 'center'
@@ -4887,7 +5192,10 @@ function CadenceHealth({
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: tierPill(c.cls, false)
-    }, c.cls), /*#__PURE__*/React.createElement(ZohoLink, {
+    }, c.cls), c.referral && /*#__PURE__*/React.createElement("span", {
+      style: refPill,
+      title: "Contact Tags: Referral \u2014 ranked ahead of A/B/C"
+    }, "REF"), /*#__PURE__*/React.createElement(ZohoLink, {
       module: "Contacts",
       id: c.cid,
       style: {
@@ -4942,7 +5250,7 @@ function CadenceHealth({
     style: {
       fontSize: 15
     }
-  }), " Back to Step 1")), tab === 'backlog' && !backlogGate && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }), " Back to Step 1")), tab === 'backlog' && !backlogGate && /*#__PURE__*/React.createElement(React.Fragment, null, !phonesLoading && refPriorityOff && /*#__PURE__*/React.createElement(RefOffNotice, null), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: '0.78rem',
       color: C.textMuted,
@@ -5025,7 +5333,7 @@ function CadenceHealth({
       lineHeight: 1.45,
       flex: '1 1 200px'
     }
-  }, "One agent at a time \u2014 each works their own day. Four things share ONE calendar fill: overdue calls, calls sitting on a weekend or holiday, calls with no prior cadence, and calls stuck on an already-overloaded day. Overdue and weekend/holiday calls are placed first; A-tier always gets the next open slot, so C-tier is what slides when a day can't fit everything. 2 A + 1 B + 1 C + 1 EO per day. Weekends and federal holidays (incl. Labor Day) skipped. With \u201Ccount projected cadence\u201D on, a day is also treated as occupied by the next touches the cadence is already heading for \u2014 that's what stops the backlog being re-stacked onto the same weekday it came off. The count next to each date is the full projected total: existing calls, projected touches, and what's placed here.")), backlogBusyLoading && /*#__PURE__*/React.createElement("div", {
+  }, "One agent at a time \u2014 each works their own day. Four things share ONE calendar fill: overdue calls, calls sitting on a weekend or holiday, calls with no prior cadence, and calls stuck on an already-overloaded day. Overdue and weekend/holiday calls are placed first. Referral-tagged contacts outrank every tier. Each day fills in this order: the weekly EO floor, then one referral, then 2 A, 1 B, 1 C \u2014 and any slot still open after that goes to another referral before anyone else. One referral slot, not two: it comes out of the day's cap rather than on top of it, and at five a day two would leave nothing for C. After the referral, A-tier gets the next open slot, so C-tier is what slides when a day can't fit everything. Nobody's call interval changes \u2014 a referral is called sooner, not more often. Weekends and federal holidays (incl. Labor Day) skipped. With \u201Ccount projected cadence\u201D on, a day is also treated as occupied by the next touches the cadence is already heading for \u2014 that's what stops the backlog being re-stacked onto the same weekday it came off. The count next to each date is the full projected total: existing calls, projected touches, and what's placed here.")), backlogBusyLoading && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 40,
       textAlign: 'center'
@@ -5074,14 +5382,21 @@ function CadenceHealth({
         fontSize: '0.68rem',
         color: C.textMuted
       }
-    }, "(", [d.tasks.length + ' new', d.booked ? d.booked + ' booked' : '', d.proj ? d.proj + ' projected' : ''].filter(Boolean).join(' · '), d.tasks.length > perDay ? ' · spouse overflow' : '', ")")), /*#__PURE__*/React.createElement("div", {
+    }, "(", [d.tasks.length + ' new', d.booked ? d.booked + ' booked' : '', d.proj ? d.proj + ' projected' : ''].filter(Boolean).join(' · '), d.tasks.length > perDay ? ' · spouse overflow' : '', ")"), backlogRefCount && d === plan.days[0] ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.68rem',
+        color: C.navy,
+        fontWeight: 700
+      }
+    }, backlogRefCount, " referral", backlogRefCount === 1 ? '' : 's', " in this plan") : null), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'grid',
         gap: 4
       }
     }, d.tasks.map(t => {
       const tier = callTier(t.Subject),
-        eo = isEOTask(t);
+        eo = isEOTask(t),
+        isRef = isReferralTask(t, contactIdx);
       return /*#__PURE__*/React.createElement("div", {
         key: t.id,
         style: {
@@ -5095,7 +5410,10 @@ function CadenceHealth({
         }
       }, /*#__PURE__*/React.createElement("span", {
         style: tierPill(tier, eo)
-      }, eo ? 'EO' : tier), t.Who_Id?.name ? /*#__PURE__*/React.createElement(ZohoLink, {
+      }, eo ? 'EO' : tier), isRef && /*#__PURE__*/React.createElement("span", {
+        style: refPill,
+        title: "Contact Tags: Referral \u2014 ranked ahead of A/B/C"
+      }, "REF"), t.Who_Id?.name ? /*#__PURE__*/React.createElement(ZohoLink, {
         module: "Contacts",
         id: t.Who_Id?.id,
         style: {

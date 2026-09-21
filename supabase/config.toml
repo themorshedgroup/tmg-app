@@ -427,6 +427,9 @@ verify_jwt = false
 verify_jwt = false
 [functions.sffu-send]
 verify_jwt = false
+[functions.mcc-approval]
+# public: the emailed Approve link carries its own token; POSTs need X-MCC-Secret
+verify_jwt = false
 [functions.zoho-crm]
 verify_jwt = true
 [functions.tasks-ai]

@@ -145,7 +145,8 @@ const DEV_META = {
     label: 'Client Classification',
     dataType: 'picklist',
     options: ['A', 'B', 'C', 'EO', 'D']
-  }
+  },
+  taskType: 'Task_Type'
 };
 const DEV_CONTACTS = [{
   id: '101',
@@ -305,6 +306,62 @@ const DEV_CALLS = {
     subject: 'A Touch Call: Wendy Sato'
   }
 };
+// Raw related-task shapes, so the dev harness runs the same reducer the
+// live page runs on Zoho's own payload.
+const DEV_TASKS = {
+  '101': [{
+    id: 'd1',
+    Subject: 'A Touch Call: Molly Kinney',
+    Status: 'Completed',
+    Task_Type: 'Call',
+    Due_Date: '2026-08-04',
+    Closed_Time: '2026-08-05T14:02:00-04:00'
+  }, {
+    id: 'd2',
+    Subject: 'Dropped off a pie',
+    Status: 'Completed',
+    Task_Type: 'Pop By',
+    Due_Date: '2026-06-11',
+    Closed_Time: '2026-06-11T18:20:00-04:00'
+  }, {
+    id: 'd3',
+    Subject: 'Handwritten note',
+    Status: 'Completed',
+    Task_Type: 'Note',
+    Due_Date: '2026-03-02',
+    Closed_Time: ''
+  }, {
+    id: 't1',
+    Subject: 'C Touch Call: Molly Kinney',
+    Status: 'Not Started',
+    Task_Type: 'Call',
+    Due_Date: '2026-09-25',
+    Closed_Time: ''
+  }],
+  '103': [{
+    id: 'd4',
+    Subject: 'B Touch Call: Rashad Rahman',
+    Status: 'Completed',
+    Task_Type: 'Call',
+    Due_Date: '2026-05-19',
+    Closed_Time: '2026-05-19T11:00:00-04:00'
+  }, {
+    id: 'd5',
+    Subject: 'Lunch at Via Carota',
+    Status: 'Completed',
+    Task_Type: 'Lunch',
+    Due_Date: '2026-02-14',
+    Closed_Time: '2026-02-14T13:30:00-05:00'
+  }],
+  '106': [{
+    id: 'd6',
+    Subject: 'Emailed the market update',
+    Status: 'Completed',
+    Task_Type: 'Email',
+    Due_Date: '2026-09-08',
+    Closed_Time: '2026-09-08T09:15:00-04:00'
+  }]
+};
 
 // ─── Field discovery ──────────────────────────────────────────────
 // Spouse and the prospect form are CUSTOM fields, so their api names
@@ -333,6 +390,18 @@ async function discoverFields() {
   // Only an UNAMBIGUOUS match is used. Two fields both labelled like a
   // prospect form means picking one would silently edit the wrong column.
   const prospects = fields.filter(f => PROSPECT_LABEL.test(String(f.field_label || '')));
+  // The Tasks module's own "Task Type" is a custom field too, and the Last
+  // touches column groups by it. Same label rule /crm-tasks uses and the
+  // same fallback, so the two pages always read the same column.
+  let taskType = 'Task_Type';
+  const tf = await callZoho({
+    action: 'get_fields',
+    module: 'Tasks'
+  });
+  if (tf.ok) {
+    const hit = (Array.isArray(tf.data.fields) ? tf.data.fields : []).find(f => /task\s*type/i.test(f.field_label || ''));
+    if (hit && hit.api_name) taskType = hit.api_name;
+  }
   return {
     spouse: spouse ? {
       api: spouse.api_name,
@@ -344,7 +413,8 @@ async function discoverFields() {
       label: 'Client Classification',
       dataType: 'picklist',
       options: null
-    }
+    },
+    taskType
   };
 }
 
@@ -467,6 +537,63 @@ async function fetchNextCalls() {
   };
 }
 
+// ─── Last touches ─────────────────────────────────────────────────
+// A "last touch" is the most recent FINISHED task of each type: the last
+// call, the last note, the last pop-by, one line each. That history is
+// only worth pulling for the handful of contacts actually on screen, so
+// it is fetched per batch of 5/10/20, not for the whole database.
+//
+// Zoho's related-records endpoint caps at 50 tasks per contact, so a
+// contact with a very long history can be missing an old, rarely-used
+// type. The recent ones, which are what this page is for, are always in.
+function reduceTouches(list, typeField) {
+  const byType = {};
+  (Array.isArray(list) ? list : []).forEach(t => {
+    if (!/complete/i.test(txt(t.Status))) return;
+    const type = txt(t[typeField]).trim() || 'Other';
+    // Closed_Time is when it actually happened; Due_Date is the fallback
+    // for tasks closed before that field was filled in.
+    const when = txt(t.Closed_Time).slice(0, 10) || txt(t.Due_Date);
+    if (!when) return;
+    const cur = byType[type];
+    if (!cur || when > cur.date) byType[type] = {
+      id: t.id,
+      type,
+      date: when,
+      subject: txt(t.Subject)
+    };
+  });
+  return Object.keys(byType).map(k => byType[k]).sort((a, b) => b.date.localeCompare(a.date));
+}
+async function fetchTouches(ids, typeField) {
+  if (!ids || !ids.length) return {};
+  const field = typeField || 'Task_Type';
+  let byContact;
+  if (isDev()) {
+    await new Promise(r => setTimeout(r, 250));
+    byContact = {};
+    ids.forEach(id => {
+      byContact[id] = DEV_TASKS[id] || [];
+    });
+  } else {
+    const {
+      ok,
+      data
+    } = await callZoho({
+      action: 'tasks_for_contacts',
+      contact_ids: ids,
+      type_field: field
+    });
+    if (!ok) return null;
+    byContact = data.tasks_by_contact || {};
+  }
+  const out = {};
+  ids.forEach(id => {
+    out[id] = reduceTouches(byContact[id], field);
+  });
+  return out;
+}
+
 // ─── Cache ────────────────────────────────────────────────────────
 // A full sweep is thousands of records and tens of round trips, so it is
 // never paid twice without asking. No expiry: only Refresh re-fetches,
@@ -490,6 +617,31 @@ function saveCache(payload) {
       cachedAt: Date.now()
     }));
   } catch (e) {/* quota: skip caching, the page still works */}
+}
+
+// A cleanup pass runs over thousands of contacts across several sittings,
+// so Keep has to survive a reload: a kept contact stays out of the list
+// until it is reset on purpose. Only keeps are stored -- a deleted contact
+// is gone from Zoho and never comes back to be filtered.
+const KEEP_KEY = 'tmg_contacts_cleanup_kept_v1';
+function loadKept() {
+  try {
+    const raw = localStorage.getItem(KEEP_KEY);
+    const ids = raw ? JSON.parse(raw) : null;
+    if (!Array.isArray(ids)) return {};
+    const m = {};
+    ids.forEach(id => {
+      if (id) m[id] = 'kept';
+    });
+    return m;
+  } catch (e) {
+    return {};
+  }
+}
+function saveKept(map) {
+  try {
+    localStorage.setItem(KEEP_KEY, JSON.stringify(Object.keys(map).filter(id => map[id] === 'kept')));
+  } catch (e) {/* quota: the pass still works, it just restarts on reload */}
 }
 
 // ─── Value helpers ────────────────────────────────────────────────
@@ -769,6 +921,13 @@ const th = {
   zIndex: 2,
   whiteSpace: 'nowrap'
 };
+const flab = {
+  fontSize: '0.64rem',
+  fontWeight: 700,
+  letterSpacing: '.08em',
+  textTransform: 'uppercase',
+  color: C.textMuted
+};
 const td = {
   padding: '9px 12px',
   fontSize: '0.8rem',
@@ -925,7 +1084,19 @@ function App({
   const [agent, setAgent] = useState('');
   const [cls, setCls] = useState('');
   const [q, setQ] = useState('');
-  const [shown, setShown] = useState(150);
+  const [pageSize, setPageSize] = useState(10);
+
+  // The batch is the 5/10/20 contacts on screen right now, and it is
+  // frozen on purpose: as each one is kept or deleted its row goes and
+  // nothing slides up to take its place, so the batch empties and Next
+  // brings the following set. `seen` is everything already handed out, so
+  // Next never doubles back over a contact that was skipped.
+  const [batchIds, setBatchIds] = useState([]);
+  const [seen, setSeen] = useState({});
+  const [decided, setDecided] = useState(loadKept);
+  const [touches, setTouches] = useState({});
+  const [touchBusy, setTouchBusy] = useState(false);
+  const [touchErr, setTouchErr] = useState(false);
   const [editId, setEditId] = useState(null);
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -936,6 +1107,9 @@ function App({
   async function load(force) {
     setErr('');
     setNotice('');
+    setBatchIds([]);
+    setSeen({});
+    setTouches({});
     if (!force) {
       const cached = loadCache();
       if (cached) {
@@ -1028,9 +1202,102 @@ function App({
       return true;
     }).sort((a, b) => txt(a.Full_Name).localeCompare(txt(b.Full_Name)));
   }, [contacts, agent, cls, q]);
+
+  // Changing a filter starts the pass over inside the new filter.
   useEffect(() => {
-    setShown(150);
-  }, [agent, cls, q]);
+    setBatchIds([]);
+    setSeen({});
+  }, [agent, cls, q, pageSize]);
+  const byId = useMemo(() => {
+    const m = {};
+    contacts.forEach(c => {
+      m[c.id] = c;
+    });
+    return m;
+  }, [contacts]);
+
+  // Hands out the next `n` contacts this filter has not shown yet.
+  function takeIds(n) {
+    const out = [];
+    for (let i = 0; i < filtered.length && out.length < n; i++) {
+      const c = filtered[i];
+      if (decided[c.id] || seen[c.id]) continue;
+      out.push(c.id);
+    }
+    return out;
+  }
+  function serve(ids) {
+    setBatchIds(ids);
+    setSeen(sn => {
+      const n = {
+        ...sn
+      };
+      ids.forEach(id => {
+        n[id] = 1;
+      });
+      return n;
+    });
+  }
+  function nextBatch() {
+    serve(takeIds(pageSize));
+  }
+  const remaining = useMemo(() => filtered.reduce((n, c) => n + (decided[c.id] || seen[c.id] ? 0 : 1), 0), [filtered, decided, seen]);
+
+  // Seeds the first batch of a filter. It only ever fires on an EMPTY
+  // batchIds, so working through a batch never pulls the next one in
+  // behind you.
+  useEffect(() => {
+    if (loading || batchIds.length || !filtered.length) return;
+    const ids = takeIds(pageSize);
+    if (ids.length) serve(ids);
+    // `decided`/`seen` are in here so Start over refills the table at
+    // once instead of parking on an empty batch. Deciding a contact
+    // inside a live batch also re-runs this, and leaves on the first
+    // line: batchIds still holds that batch, so nothing refills behind
+    // the row you just cleared.
+  }, [loading, filtered, batchIds.length, pageSize, decided, seen]);
+  const batch = useMemo(() => batchIds.map(id => byId[id]).filter(c => c && !decided[c.id]), [batchIds, byId, decided]);
+
+  // Last touches are pulled for the batch on screen, one round trip.
+  useEffect(() => {
+    if (!batchIds.length) {
+      setTouches({});
+      setTouchErr(false);
+      return;
+    }
+    let dead = false;
+    setTouchBusy(true);
+    setTouchErr(false);
+    fetchTouches(batchIds, meta && meta.taskType).then(got => {
+      if (dead) return;
+      if (got) setTouches(got);else {
+        setTouchErr(true);
+        setTouches({});
+      }
+      setTouchBusy(false);
+    });
+    return () => {
+      dead = true;
+    };
+  }, [batchIds, meta]);
+  useEffect(() => {
+    saveKept(decided);
+  }, [decided]);
+  function keepContact(c) {
+    if (editId === c.id) cancelEdit();
+    setDecided(d => ({
+      ...d,
+      [c.id]: 'kept'
+    }));
+  }
+  function resetKept() {
+    setDecided({});
+    try {
+      localStorage.removeItem(KEEP_KEY);
+    } catch (e) {}
+    setBatchIds([]);
+    setSeen({});
+  }
   function beginEdit(c) {
     setRowError('');
     setEditId(c.id);
@@ -1150,7 +1417,7 @@ function App({
     if (editId === c.id) cancelEdit();
   }
   const today = todayISO();
-  const rows = filtered.slice(0, shown);
+  const keptCount = useMemo(() => Object.keys(decided).filter(id => decided[id] === 'kept').length, [decided]);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       height: '100%',
@@ -1161,7 +1428,109 @@ function App({
     }
   }, /*#__PURE__*/React.createElement("style", null, `@keyframes cc-spin { to { transform: rotate(360deg); } }`), /*#__PURE__*/React.createElement("header", {
     style: {
-      padding: '16px 22px 12px',
+      flexShrink: 0,
+      background: C.navy,
+      color: '#fff',
+      padding: '0 20px',
+      height: 58,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("a", {
+    href: "index.html",
+    title: "Back to TMG App",
+    style: {
+      color: 'rgba(255,255,255,.7)',
+      textDecoration: 'none',
+      display: 'flex',
+      alignItems: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-left",
+    style: {
+      fontSize: 18
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      letterSpacing: '.18em',
+      fontSize: '0.95rem'
+    }
+  }, "TMG CRM"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.62rem',
+      fontWeight: 600,
+      letterSpacing: '.1em',
+      textTransform: 'uppercase',
+      color: C.goldSoft,
+      border: '1px solid rgba(201,164,90,.4)',
+      padding: '2px 8px',
+      borderRadius: 20
+    }
+  }, "Contacts")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("a", {
+    href: "crm-tasks.html",
+    style: {
+      fontSize: '0.74rem',
+      color: 'rgba(255,255,255,.65)',
+      textDecoration: 'none',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-checkbox",
+    style: {
+      fontSize: 14
+    }
+  }), "Tasks"), /*#__PURE__*/React.createElement("a", {
+    href: "crm.html",
+    style: {
+      fontSize: '0.74rem',
+      color: 'rgba(255,255,255,.65)',
+      textDecoration: 'none',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-table",
+    style: {
+      fontSize: 14
+    }
+  }), "Schema"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: '0.78rem',
+      color: 'rgba(255,255,255,.7)'
+    }
+  }, profile && profile.email || user && user.email), /*#__PURE__*/React.createElement("button", {
+    onClick: () => window.SupabaseAuth.signOut(),
+    style: {
+      background: 'transparent',
+      border: '1px solid rgba(255,255,255,.2)',
+      color: 'rgba(255,255,255,.8)',
+      fontSize: '0.72rem',
+      padding: '6px 12px',
+      borderRadius: 8,
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, "Sign out"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flexShrink: 0,
+      padding: '14px 22px 12px',
       borderBottom: '1px solid ' + C.border,
       background: C.surface
     }
@@ -1176,7 +1545,7 @@ function App({
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontFamily: C.fontDisplay,
-      fontSize: '1.6rem',
+      fontSize: '1.5rem',
       color: C.navy,
       lineHeight: 1.1
     }
@@ -1186,21 +1555,22 @@ function App({
       color: C.textMuted,
       marginTop: 3
     }
-  }, "Edit a contact here and it saves straight to Zoho.", lastUpdated ? /*#__PURE__*/React.createElement(React.Fragment, null, " Loaded ", agoLabel(lastUpdated), ".") : null)), /*#__PURE__*/React.createElement("div", {
+  }, "Edits save straight to Zoho. Keep or delete a contact and it leaves the list.", lastUpdated ? /*#__PURE__*/React.createElement(React.Fragment, null, " Loaded ", agoLabel(lastUpdated), ".") : null)), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',
       gap: 8
     }
-  }, /*#__PURE__*/React.createElement("a", {
-    href: "index.html",
+  }, keptCount > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: resetKept,
+    title: "Put the contacts you kept back into the list",
     style: {
       ...btn,
-      textDecoration: 'none'
+      color: C.textMuted
     }
   }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-arrow-left"
-  }), " App"), /*#__PURE__*/React.createElement("button", {
+    className: "ti ti-arrow-back-up"
+  }), " ", keptCount, " kept"), /*#__PURE__*/React.createElement("button", {
     onClick: () => load(true),
     disabled: loading,
     style: {
@@ -1220,12 +1590,26 @@ function App({
       flexWrap: 'wrap'
     }
   }, /*#__PURE__*/React.createElement("label", {
+    style: flab
+  }, "# of Contacts"), /*#__PURE__*/React.createElement("select", {
+    value: pageSize,
+    onChange: e => setPageSize(Number(e.target.value)),
     style: {
-      fontSize: '0.64rem',
-      fontWeight: 700,
-      letterSpacing: '.08em',
-      textTransform: 'uppercase',
-      color: C.textMuted
+      ...inp,
+      width: 'auto',
+      minWidth: 66,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: 5
+  }, "5"), /*#__PURE__*/React.createElement("option", {
+    value: 10
+  }, "10"), /*#__PURE__*/React.createElement("option", {
+    value: 20
+  }, "20")), /*#__PURE__*/React.createElement("label", {
+    style: {
+      ...flab,
+      marginLeft: 4
     }
   }, "Agent"), /*#__PURE__*/React.createElement("select", {
     value: agent,
@@ -1243,11 +1627,7 @@ function App({
     value: a.name
   }, a.name, " (", a.n, ")"))), /*#__PURE__*/React.createElement("label", {
     style: {
-      fontSize: '0.64rem',
-      fontWeight: 700,
-      letterSpacing: '.08em',
-      textTransform: 'uppercase',
-      color: C.textMuted,
+      ...flab,
       marginLeft: 4
     }
   }, "Classification"), /*#__PURE__*/React.createElement("select", {
@@ -1315,7 +1695,7 @@ function App({
       color: C.textMuted,
       fontSize: '0.88rem'
     }
-  }, contacts.length ? 'No contacts match these filters.' : 'No contacts loaded.') : /*#__PURE__*/React.createElement("table", {
+  }, contacts.length ? 'No contacts match these filters.' : 'No contacts loaded.') : /*#__PURE__*/React.createElement(React.Fragment, null, batch.length > 0 && /*#__PURE__*/React.createElement("table", {
     style: {
       width: '100%',
       borderCollapse: 'collapse',
@@ -1325,7 +1705,7 @@ function App({
     style: th
   }, "Name"), /*#__PURE__*/React.createElement("th", {
     style: th
-  }, "Agent"), /*#__PURE__*/React.createElement("th", {
+  }, "Last touches"), /*#__PURE__*/React.createElement("th", {
     style: th
   }, "Class"), /*#__PURE__*/React.createElement("th", {
     style: th
@@ -1347,11 +1727,12 @@ function App({
       zIndex: 3,
       textAlign: 'right'
     }
-  }, "Actions"))), /*#__PURE__*/React.createElement("tbody", null, rows.map(c => {
+  }, "Actions"))), /*#__PURE__*/React.createElement("tbody", null, batch.map(c => {
     const editing = editId === c.id;
     const sp = spouseOf(c, meta);
     const call = nextCalls[c.id];
     const overdue = call && call.date < today;
+    const touch = touches[c.id];
     return /*#__PURE__*/React.createElement("tr", {
       key: c.id,
       style: {
@@ -1394,13 +1775,51 @@ function App({
     }, c.Full_Name || '(no name)')), /*#__PURE__*/React.createElement("td", {
       style: {
         ...td,
+        minWidth: 180
+      }
+    }, touchBusy ? /*#__PURE__*/React.createElement(Spinner, {
+      size: 11
+    }) : touchErr ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.textMuted,
+        fontSize: '0.72rem'
+      }
+    }, "unavailable") : touch && touch.length ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2
+      }
+    }, touch.map(t => /*#__PURE__*/React.createElement("div", {
+      key: t.type,
+      style: {
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 7,
         whiteSpace: 'nowrap'
       }
-    }, c.Owner && c.Owner.name || /*#__PURE__*/React.createElement("span", {
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.6rem',
+        fontWeight: 700,
+        letterSpacing: '.05em',
+        textTransform: 'uppercase',
+        color: C.textMuted,
+        minWidth: 52
+      }
+    }, t.type), /*#__PURE__*/React.createElement(ZohoLink, {
+      module: "Tasks",
+      id: t.id,
+      title: t.subject,
+      style: {
+        fontSize: '0.76rem',
+        color: C.textSecondary
+      }
+    }, fmtDate(t.date))))) : /*#__PURE__*/React.createElement("span", {
       style: {
         color: C.textMuted
       }
-    }, "\u2014")), /*#__PURE__*/React.createElement("td", {
+    }, "no touches")), /*#__PURE__*/React.createElement("td", {
       style: td
     }, editing ? /*#__PURE__*/React.createElement("select", {
       value: draft.cls,
@@ -1529,8 +1948,8 @@ function App({
         flexWrap: 'wrap',
         gap: 4
       }
-    }, prospectOf(c, meta).map(p => /*#__PURE__*/React.createElement("span", {
-      key: p,
+    }, prospectOf(c, meta).map(pv => /*#__PURE__*/React.createElement("span", {
+      key: pv,
       style: {
         fontSize: '0.66rem',
         fontWeight: 600,
@@ -1540,7 +1959,7 @@ function App({
         border: '1px solid ' + C.border,
         color: C.textSecondary
       }
-    }, p))) : /*#__PURE__*/React.createElement("span", {
+    }, pv))) : /*#__PURE__*/React.createElement("span", {
       style: {
         color: C.textMuted
       }
@@ -1624,6 +2043,17 @@ function App({
     }, /*#__PURE__*/React.createElement("i", {
       className: "ti ti-pencil"
     }), " Edit"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => keepContact(c),
+      title: "Keep this contact and take it off the list",
+      style: {
+        ...btn,
+        padding: '6px 9px',
+        color: C.green,
+        borderColor: C.green + '55'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-check"
+    }), " Keep"), /*#__PURE__*/React.createElement("button", {
       onClick: () => {
         setDelError('');
         setConfirmDel(c);
@@ -1633,20 +2063,66 @@ function App({
         ...btn,
         padding: '6px 9px',
         color: C.red,
-        borderColor: C.border
+        borderColor: C.red + '55'
       }
     }, /*#__PURE__*/React.createElement("i", {
       className: "ti ti-trash"
-    })))));
-  }))), filtered.length > rows.length && /*#__PURE__*/React.createElement("div", {
+    }), " Delete"))));
+  }))), !loading && /*#__PURE__*/React.createElement("div", {
     style: {
-      padding: '16px 22px',
+      padding: '20px 22px 30px',
       textAlign: 'center'
     }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setShown(s => s + 250),
+  }, batch.length === 0 ? remaining > 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.84rem',
+      color: C.textSecondary,
+      marginBottom: 11
+    }
+  }, "That batch is clear. ", remaining, " contact", remaining === 1 ? '' : 's', " left in this filter."), /*#__PURE__*/React.createElement("button", {
+    onClick: nextBatch,
+    style: {
+      ...btn,
+      background: C.navy,
+      borderColor: C.navy,
+      color: '#fff',
+      padding: '10px 20px',
+      fontSize: '0.8rem'
+    }
+  }, "Next ", pageSize, " contacts ", /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-right"
+  }))) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: '0.84rem',
+      color: C.textSecondary,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 9,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-circle-check",
+    style: {
+      color: C.green,
+      marginRight: 6
+    }
+  }), "You have been through every contact in this filter."), keptCount > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: resetKept,
     style: btn
-  }, "Show more (", filtered.length - rows.length, " left)"))), /*#__PURE__*/React.createElement("footer", {
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-back-up"
+  }), " Start over (", keptCount, " kept)")) : /*#__PURE__*/React.createElement("button", {
+    onClick: nextBatch,
+    disabled: remaining === 0,
+    style: {
+      ...btn,
+      opacity: remaining === 0 ? .45 : 1,
+      cursor: remaining === 0 ? 'default' : 'pointer'
+    }
+  }, "Skip to next ", pageSize, " ", /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-right"
+  }))))), /*#__PURE__*/React.createElement("footer", {
     style: {
       padding: '9px 22px',
       borderTop: '1px solid ' + C.border,
@@ -1657,7 +2133,7 @@ function App({
       justifyContent: 'space-between',
       gap: 10
     }
-  }, /*#__PURE__*/React.createElement("span", null, "Showing ", rows.length, " of ", filtered.length, filtered.length !== contacts.length ? ` (filtered from ${contacts.length})` : ''), /*#__PURE__*/React.createElement("span", null, agent || 'All agents', " \xB7 ", cls === '__none' ? 'No classification' : cls || 'All classifications')), confirmDel && /*#__PURE__*/React.createElement(DeleteModal, {
+  }, /*#__PURE__*/React.createElement("span", null, batch.length, " on screen \xB7 ", remaining, " left in this filter", keptCount ? ' · ' + keptCount + ' kept' : ''), /*#__PURE__*/React.createElement("span", null, pageSize, " at a time \xB7 ", agent || 'All agents', " \xB7 ", cls === '__none' ? 'No classification' : cls || 'All classifications')), confirmDel && /*#__PURE__*/React.createElement(DeleteModal, {
     contact: confirmDel,
     busy: deleting,
     error: delError,

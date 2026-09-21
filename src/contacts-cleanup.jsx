@@ -76,6 +76,7 @@
       prospect: { api:'Prospect_Form_Type', label:'Prospect Form Type', dataType:'multiselectpicklist',
                   options:['Buyer','Seller','Investor','Renter','Referral Partner'] },
       cls:      { api:CLS_FIELD, label:'Client Classification', dataType:'picklist', options:['A','B','C','EO','D'] },
+      taskType: 'Task_Type',
     };
     const DEV_CONTACTS = [
       { id:'101', First_Name:'Molly', Last_Name:'Kinney', Full_Name:'Molly Kinney', Email:'molly@example.com', Mobile:'512-555-0111', Phone:'', Other_Phone:'', Client_Classification:'A', Owner:{ id:'1', name:'Brett Silverman' }, Spouse:{ id:'102', name:'Dean Kinney' }, Prospect_Form_Type:['Buyer'] },
@@ -91,6 +92,23 @@
       '101': { id:'t1', date:'2026-09-25', subject:'C Touch Call: Molly Kinney' },
       '103': { id:'t2', date:'2026-08-14', subject:'B Touch Call: Rashad Rahman' },
       '106': { id:'t3', date:'2026-10-02', subject:'A Touch Call: Wendy Sato' },
+    };
+    // Raw related-task shapes, so the dev harness runs the same reducer the
+    // live page runs on Zoho's own payload.
+    const DEV_TASKS = {
+      '101': [
+        { id:'d1', Subject:'A Touch Call: Molly Kinney', Status:'Completed',   Task_Type:'Call',   Due_Date:'2026-08-04', Closed_Time:'2026-08-05T14:02:00-04:00' },
+        { id:'d2', Subject:'Dropped off a pie',          Status:'Completed',   Task_Type:'Pop By', Due_Date:'2026-06-11', Closed_Time:'2026-06-11T18:20:00-04:00' },
+        { id:'d3', Subject:'Handwritten note',           Status:'Completed',   Task_Type:'Note',   Due_Date:'2026-03-02', Closed_Time:'' },
+        { id:'t1', Subject:'C Touch Call: Molly Kinney', Status:'Not Started', Task_Type:'Call',   Due_Date:'2026-09-25', Closed_Time:'' },
+      ],
+      '103': [
+        { id:'d4', Subject:'B Touch Call: Rashad Rahman', Status:'Completed', Task_Type:'Call',  Due_Date:'2026-05-19', Closed_Time:'2026-05-19T11:00:00-04:00' },
+        { id:'d5', Subject:'Lunch at Via Carota',         Status:'Completed', Task_Type:'Lunch', Due_Date:'2026-02-14', Closed_Time:'2026-02-14T13:30:00-05:00' },
+      ],
+      '106': [
+        { id:'d6', Subject:'Emailed the market update', Status:'Completed', Task_Type:'Email', Due_Date:'2026-09-08', Closed_Time:'2026-09-08T09:15:00-04:00' },
+      ],
     };
 
     // ─── Field discovery ──────────────────────────────────────────────
@@ -112,10 +130,20 @@
       // Only an UNAMBIGUOUS match is used. Two fields both labelled like a
       // prospect form means picking one would silently edit the wrong column.
       const prospects = fields.filter(f => PROSPECT_LABEL.test(String(f.field_label || '')));
+      // The Tasks module's own "Task Type" is a custom field too, and the Last
+      // touches column groups by it. Same label rule /crm-tasks uses and the
+      // same fallback, so the two pages always read the same column.
+      let taskType = 'Task_Type';
+      const tf = await callZoho({ action:'get_fields', module:'Tasks' });
+      if (tf.ok) {
+        const hit = (Array.isArray(tf.data.fields) ? tf.data.fields : []).find(f => /task\s*type/i.test(f.field_label || ''));
+        if (hit && hit.api_name) taskType = hit.api_name;
+      }
       return {
         spouse: spouse ? { api:spouse.api_name, label:spouse.field_label } : null,
         prospect: prospects.length === 1 ? pick(prospects[0]) : null,
         cls: pick(fields.find(f => f.api_name === CLS_FIELD)) || { api:CLS_FIELD, label:'Client Classification', dataType:'picklist', options:null },
+        taskType,
       };
     }
 
@@ -181,6 +209,47 @@
       return { ok:true, map };
     }
 
+    // ─── Last touches ─────────────────────────────────────────────────
+    // A "last touch" is the most recent FINISHED task of each type: the last
+    // call, the last note, the last pop-by, one line each. That history is
+    // only worth pulling for the handful of contacts actually on screen, so
+    // it is fetched per batch of 5/10/20, not for the whole database.
+    //
+    // Zoho's related-records endpoint caps at 50 tasks per contact, so a
+    // contact with a very long history can be missing an old, rarely-used
+    // type. The recent ones, which are what this page is for, are always in.
+    function reduceTouches(list, typeField) {
+      const byType = {};
+      (Array.isArray(list) ? list : []).forEach(t => {
+        if (!/complete/i.test(txt(t.Status))) return;
+        const type = txt(t[typeField]).trim() || 'Other';
+        // Closed_Time is when it actually happened; Due_Date is the fallback
+        // for tasks closed before that field was filled in.
+        const when = txt(t.Closed_Time).slice(0, 10) || txt(t.Due_Date);
+        if (!when) return;
+        const cur = byType[type];
+        if (!cur || when > cur.date) byType[type] = { id:t.id, type, date:when, subject:txt(t.Subject) };
+      });
+      return Object.keys(byType).map(k => byType[k]).sort((a, b) => b.date.localeCompare(a.date));
+    }
+    async function fetchTouches(ids, typeField) {
+      if (!ids || !ids.length) return {};
+      const field = typeField || 'Task_Type';
+      let byContact;
+      if (isDev()) {
+        await new Promise(r => setTimeout(r, 250));
+        byContact = {};
+        ids.forEach(id => { byContact[id] = DEV_TASKS[id] || []; });
+      } else {
+        const { ok, data } = await callZoho({ action:'tasks_for_contacts', contact_ids:ids, type_field:field });
+        if (!ok) return null;
+        byContact = data.tasks_by_contact || {};
+      }
+      const out = {};
+      ids.forEach(id => { out[id] = reduceTouches(byContact[id], field); });
+      return out;
+    }
+
     // ─── Cache ────────────────────────────────────────────────────────
     // A full sweep is thousands of records and tens of round trips, so it is
     // never paid twice without asking. No expiry: only Refresh re-fetches,
@@ -198,6 +267,26 @@
     function saveCache(payload) {
       try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ...payload, cachedAt:Date.now() })); }
       catch (e) { /* quota: skip caching, the page still works */ }
+    }
+
+    // A cleanup pass runs over thousands of contacts across several sittings,
+    // so Keep has to survive a reload: a kept contact stays out of the list
+    // until it is reset on purpose. Only keeps are stored -- a deleted contact
+    // is gone from Zoho and never comes back to be filtered.
+    const KEEP_KEY = 'tmg_contacts_cleanup_kept_v1';
+    function loadKept() {
+      try {
+        const raw = localStorage.getItem(KEEP_KEY);
+        const ids = raw ? JSON.parse(raw) : null;
+        if (!Array.isArray(ids)) return {};
+        const m = {};
+        ids.forEach(id => { if (id) m[id] = 'kept'; });
+        return m;
+      } catch (e) { return {}; }
+    }
+    function saveKept(map) {
+      try { localStorage.setItem(KEEP_KEY, JSON.stringify(Object.keys(map).filter(id => map[id] === 'kept'))); }
+      catch (e) { /* quota: the pass still works, it just restarts on reload */ }
     }
 
     // ─── Value helpers ────────────────────────────────────────────────
@@ -339,6 +428,7 @@
       textTransform:'uppercase', color:C.textMuted, borderBottom:'1px solid '+C.border,
       background:C.surfaceAlt, position:'sticky', top:0, zIndex:2, whiteSpace:'nowrap',
     };
+    const flab = { fontSize:'0.64rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.textMuted };
     const td = { padding:'9px 12px', fontSize:'0.8rem', color:C.textSecondary, borderBottom:'1px solid '+C.border, verticalAlign:'middle' };
 
     // ─── Classification pill ──────────────────────────────────────────
@@ -395,7 +485,19 @@
       const [agent, setAgent] = useState('');
       const [cls, setCls] = useState('');
       const [q, setQ] = useState('');
-      const [shown, setShown] = useState(150);
+      const [pageSize, setPageSize] = useState(10);
+
+      // The batch is the 5/10/20 contacts on screen right now, and it is
+      // frozen on purpose: as each one is kept or deleted its row goes and
+      // nothing slides up to take its place, so the batch empties and Next
+      // brings the following set. `seen` is everything already handed out, so
+      // Next never doubles back over a contact that was skipped.
+      const [batchIds, setBatchIds] = useState([]);
+      const [seen, setSeen] = useState({});
+      const [decided, setDecided] = useState(loadKept);
+      const [touches, setTouches] = useState({});
+      const [touchBusy, setTouchBusy] = useState(false);
+      const [touchErr, setTouchErr] = useState(false);
 
       const [editId, setEditId] = useState(null);
       const [draft, setDraft] = useState(null);
@@ -407,6 +509,7 @@
 
       async function load(force) {
         setErr(''); setNotice('');
+        setBatchIds([]); setSeen({}); setTouches({});
         if (!force) {
           const cached = loadCache();
           if (cached) {
@@ -465,7 +568,78 @@
         }).sort((a, b) => txt(a.Full_Name).localeCompare(txt(b.Full_Name)));
       }, [contacts, agent, cls, q]);
 
-      useEffect(() => { setShown(150); }, [agent, cls, q]);
+      // Changing a filter starts the pass over inside the new filter.
+      useEffect(() => { setBatchIds([]); setSeen({}); }, [agent, cls, q, pageSize]);
+
+      const byId = useMemo(() => {
+        const m = {};
+        contacts.forEach(c => { m[c.id] = c; });
+        return m;
+      }, [contacts]);
+
+      // Hands out the next `n` contacts this filter has not shown yet.
+      function takeIds(n) {
+        const out = [];
+        for (let i = 0; i < filtered.length && out.length < n; i++) {
+          const c = filtered[i];
+          if (decided[c.id] || seen[c.id]) continue;
+          out.push(c.id);
+        }
+        return out;
+      }
+      function serve(ids) {
+        setBatchIds(ids);
+        setSeen(sn => { const n = { ...sn }; ids.forEach(id => { n[id] = 1; }); return n; });
+      }
+      function nextBatch() { serve(takeIds(pageSize)); }
+      const remaining = useMemo(
+        () => filtered.reduce((n, c) => n + ((decided[c.id] || seen[c.id]) ? 0 : 1), 0),
+        [filtered, decided, seen]
+      );
+
+      // Seeds the first batch of a filter. It only ever fires on an EMPTY
+      // batchIds, so working through a batch never pulls the next one in
+      // behind you.
+      useEffect(() => {
+        if (loading || batchIds.length || !filtered.length) return;
+        const ids = takeIds(pageSize);
+        if (ids.length) serve(ids);
+        // `decided`/`seen` are in here so Start over refills the table at
+        // once instead of parking on an empty batch. Deciding a contact
+        // inside a live batch also re-runs this, and leaves on the first
+        // line: batchIds still holds that batch, so nothing refills behind
+        // the row you just cleared.
+      }, [loading, filtered, batchIds.length, pageSize, decided, seen]);
+
+      const batch = useMemo(
+        () => batchIds.map(id => byId[id]).filter(c => c && !decided[c.id]),
+        [batchIds, byId, decided]
+      );
+
+      // Last touches are pulled for the batch on screen, one round trip.
+      useEffect(() => {
+        if (!batchIds.length) { setTouches({}); setTouchErr(false); return; }
+        let dead = false;
+        setTouchBusy(true); setTouchErr(false);
+        fetchTouches(batchIds, meta && meta.taskType).then(got => {
+          if (dead) return;
+          if (got) setTouches(got); else { setTouchErr(true); setTouches({}); }
+          setTouchBusy(false);
+        });
+        return () => { dead = true; };
+      }, [batchIds, meta]);
+
+      useEffect(() => { saveKept(decided); }, [decided]);
+
+      function keepContact(c) {
+        if (editId === c.id) cancelEdit();
+        setDecided(d => ({ ...d, [c.id]:'kept' }));
+      }
+      function resetKept() {
+        setDecided({});
+        try { localStorage.removeItem(KEEP_KEY); } catch (e) {}
+        setBatchIds([]); setSeen({});
+      }
 
       function beginEdit(c) {
         setRowError('');
@@ -542,24 +716,42 @@
       }
 
       const today = todayISO();
-      const rows = filtered.slice(0, shown);
+      const keptCount = useMemo(() => Object.keys(decided).filter(id => decided[id] === 'kept').length, [decided]);
 
       return (
         <div style={{ height:'100%', display:'flex', flexDirection:'column', background:C.bg, fontFamily:C.fontSans }}>
           <style>{`@keyframes cc-spin { to { transform: rotate(360deg); } }`}</style>
 
-          {/* Header */}
-          <header style={{ padding:'16px 22px 12px', borderBottom:'1px solid '+C.border, background:C.surface }}>
+          {/* Header -- same bar as /crm-tasks */}
+          <header style={{ flexShrink:0, background:C.navy, color:'#fff', padding:'0 20px', height:58, display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+              <a href="index.html" title="Back to TMG App" style={{ color:'rgba(255,255,255,.7)', textDecoration:'none', display:'flex', alignItems:'center' }}><i className="ti ti-arrow-left" style={{ fontSize:18 }} /></a>
+              <div style={{ fontWeight:600, letterSpacing:'.18em', fontSize:'0.95rem' }}>TMG CRM</div>
+              <span style={{ fontSize:'0.62rem', fontWeight:600, letterSpacing:'.1em', textTransform:'uppercase', color:C.goldSoft, border:'1px solid rgba(201,164,90,.4)', padding:'2px 8px', borderRadius:20 }}>Contacts</span>
+            </div>
+            <div style={{ display:'flex', alignItems:'center', gap:14 }}>
+              <a href="crm-tasks.html" style={{ fontSize:'0.74rem', color:'rgba(255,255,255,.65)', textDecoration:'none', display:'flex', alignItems:'center', gap:5 }}><i className="ti ti-checkbox" style={{ fontSize:14 }} />Tasks</a>
+              <a href="crm.html" style={{ fontSize:'0.74rem', color:'rgba(255,255,255,.65)', textDecoration:'none', display:'flex', alignItems:'center', gap:5 }}><i className="ti ti-table" style={{ fontSize:14 }} />Schema</a>
+              <span style={{ fontSize:'0.78rem', color:'rgba(255,255,255,.7)' }}>{(profile && profile.email) || (user && user.email)}</span>
+              <button onClick={() => window.SupabaseAuth.signOut()} style={{ background:'transparent', border:'1px solid rgba(255,255,255,.2)', color:'rgba(255,255,255,.8)', fontSize:'0.72rem', padding:'6px 12px', borderRadius:8, cursor:'pointer', fontFamily:C.fontSans }}>Sign out</button>
+            </div>
+          </header>
+
+          {/* Title + filters */}
+          <div style={{ flexShrink:0, padding:'14px 22px 12px', borderBottom:'1px solid '+C.border, background:C.surface }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap' }}>
               <div>
-                <div style={{ fontFamily:C.fontDisplay, fontSize:'1.6rem', color:C.navy, lineHeight:1.1 }}>Contacts Cleanup</div>
+                <div style={{ fontFamily:C.fontDisplay, fontSize:'1.5rem', color:C.navy, lineHeight:1.1 }}>Contacts Cleanup</div>
                 <div style={{ fontSize:'0.74rem', color:C.textMuted, marginTop:3 }}>
-                  Edit a contact here and it saves straight to Zoho.
+                  Edits save straight to Zoho. Keep or delete a contact and it leaves the list.
                   {lastUpdated ? <> Loaded {agoLabel(lastUpdated)}.</> : null}
                 </div>
               </div>
               <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                <a href="index.html" style={{ ...btn, textDecoration:'none' }}><i className="ti ti-arrow-left" /> App</a>
+                {keptCount > 0 && (
+                  <button onClick={resetKept} title="Put the contacts you kept back into the list"
+                    style={{ ...btn, color:C.textMuted }}><i className="ti ti-arrow-back-up" /> {keptCount} kept</button>
+                )}
                 <button onClick={() => load(true)} disabled={loading} style={{ ...btn, opacity:loading ? .5 : 1 }}>
                   {loading ? <><Spinner size={12} /> Loading…</> : <><i className="ti ti-refresh" /> Refresh</>}
                 </button>
@@ -568,13 +760,20 @@
 
             {/* Filters */}
             <div style={{ display:'flex', alignItems:'center', gap:10, marginTop:14, flexWrap:'wrap' }}>
-              <label style={{ fontSize:'0.64rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.textMuted }}>Agent</label>
+              <label style={flab}># of Contacts</label>
+              <select value={pageSize} onChange={e => setPageSize(Number(e.target.value))} style={{ ...inp, width:'auto', minWidth:66, cursor:'pointer' }}>
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+              </select>
+
+              <label style={{ ...flab, marginLeft:4 }}>Agent</label>
               <select value={agent} onChange={e => setAgent(e.target.value)} style={{ ...inp, width:'auto', minWidth:190, cursor:'pointer' }}>
                 <option value="">All agents ({contacts.length})</option>
                 {agents.map(a => <option key={a.name} value={a.name}>{a.name} ({a.n})</option>)}
               </select>
 
-              <label style={{ fontSize:'0.64rem', fontWeight:700, letterSpacing:'.08em', textTransform:'uppercase', color:C.textMuted, marginLeft:4 }}>Classification</label>
+              <label style={{ ...flab, marginLeft:4 }}>Classification</label>
               <select value={cls} onChange={e => setCls(e.target.value)} style={{ ...inp, width:'auto', minWidth:150, cursor:'pointer' }}>
                 <option value="">All classifications</option>
                 {classes.map(v => <option key={v} value={v}>{v}</option>)}
@@ -587,7 +786,7 @@
                   style={{ ...inp, width:250, paddingLeft:28 }} />
               </div>
             </div>
-          </header>
+          </div>
 
           {/* Status strip */}
           {(err || notice || loading) && (
@@ -605,143 +804,184 @@
                 {contacts.length ? 'No contacts match these filters.' : 'No contacts loaded.'}
               </div>
             ) : (
-              <table style={{ width:'100%', borderCollapse:'collapse', background:C.surface }}>
-                <thead>
-                  <tr>
-                    <th style={th}>Name</th>
-                    <th style={th}>Agent</th>
-                    <th style={th}>Class</th>
-                    <th style={th}>Mobile</th>
-                    <th style={th}>Phone</th>
-                    <th style={th}>Email</th>
-                    <th style={th}>Linked spouse</th>
-                    {meta?.prospect && <th style={th}>{meta.prospect.label}</th>}
-                    <th style={th}>Next call</th>
-                    <th style={{ ...th, position:'sticky', right:0, zIndex:3, textAlign:'right' }}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map(c => {
-                    const editing = editId === c.id;
-                    const sp = spouseOf(c, meta);
-                    const call = nextCalls[c.id];
-                    const overdue = call && call.date < today;
-                    return (
-                      <tr key={c.id} style={{ background: editing ? C.surfaceAlt : 'transparent' }}>
-                        <td style={{ ...td, minWidth:170 }}>
-                          {editing ? (
-                            <div style={{ display:'flex', gap:5 }}>
-                              <input value={draft.First_Name} placeholder="First" onChange={e => setDraft(d => ({ ...d, First_Name:e.target.value }))} style={inp} />
-                              <input value={draft.Last_Name} placeholder="Last" onChange={e => setDraft(d => ({ ...d, Last_Name:e.target.value }))} style={inp} />
-                            </div>
-                          ) : (
-                            <ZohoLink module="Contacts" id={c.id} style={{ fontWeight:600, fontSize:'0.82rem', color:C.navy }}>
-                              {c.Full_Name || '(no name)'}
-                            </ZohoLink>
-                          )}
-                        </td>
-                        <td style={{ ...td, whiteSpace:'nowrap' }}>{(c.Owner && c.Owner.name) || <span style={{ color:C.textMuted }}>—</span>}</td>
-                        <td style={td}>
-                          {editing ? (
-                            <select value={draft.cls} onChange={e => setDraft(d => ({ ...d, cls:e.target.value }))} style={{ ...inp, minWidth:80, cursor:'pointer' }}>
-                              <option value="">—</option>
-                              {classes.map(v => <option key={v} value={v}>{v}</option>)}
-                            </select>
-                          ) : <ClsPill value={clsOf(c)} />}
-                        </td>
-                        <td style={{ ...td, whiteSpace:'nowrap' }}>
-                          {editing ? <input value={draft.Mobile} onChange={e => setDraft(d => ({ ...d, Mobile:e.target.value }))} style={inp} />
-                            : (txt(c.Mobile) || <span style={{ color:C.textMuted }}>—</span>)}
-                        </td>
-                        <td style={{ ...td, whiteSpace:'nowrap' }}>
-                          {editing ? <input value={draft.Phone} onChange={e => setDraft(d => ({ ...d, Phone:e.target.value }))} style={inp} />
-                            : (txt(c.Phone) || <span style={{ color:C.textMuted }}>—</span>)}
-                        </td>
-                        <td style={{ ...td, minWidth:150 }}>
-                          {editing ? <input value={draft.Email} onChange={e => setDraft(d => ({ ...d, Email:e.target.value }))} style={inp} />
-                            : (txt(c.Email) || <span style={{ color:C.textMuted }}>—</span>)}
-                        </td>
-                        <td style={{ ...td, minWidth:150 }}>
-                          {editing ? (
-                            meta?.spouse
-                              ? <SpousePicker value={draft.spouse} selfId={c.id} onChange={v => setDraft(d => ({ ...d, spouse:v }))} />
-                              : <span style={{ color:C.textMuted, fontSize:'0.74rem' }}>no spouse field</span>
-                          ) : (sp
-                              ? <ZohoLink module="Contacts" id={sp.id} style={{ fontSize:'0.8rem', color:C.navy }}>{sp.name || 'Linked'}</ZohoLink>
-                              : <span style={{ color:C.textMuted }}>—</span>)}
-                        </td>
-                        {meta?.prospect && (
-                          <td style={{ ...td, minWidth:160 }}>
-                            {editing ? (
-                              meta.prospect.dataType === 'multiselectpicklist'
-                                ? <MultiPick value={draft.prospect} options={meta.prospect.options} onChange={v => setDraft(d => ({ ...d, prospect:v }))} />
-                                : (
-                                  <select value={(draft.prospect && draft.prospect[0]) || ''} onChange={e => setDraft(d => ({ ...d, prospect:e.target.value ? [e.target.value] : [] }))} style={{ ...inp, cursor:'pointer' }}>
-                                    <option value="">—</option>
-                                    {(meta.prospect.options || []).map(o => <option key={o} value={o}>{o}</option>)}
-                                  </select>
-                                )
-                            ) : (
-                              prospectOf(c, meta).length
-                                ? <div style={{ display:'flex', flexWrap:'wrap', gap:4 }}>
-                                    {prospectOf(c, meta).map(p => (
-                                      <span key={p} style={{ fontSize:'0.66rem', fontWeight:600, padding:'2px 8px', borderRadius:20,
-                                        background:C.surfaceAlt, border:'1px solid '+C.border, color:C.textSecondary }}>{p}</span>
+              <>
+                {batch.length > 0 && (
+                  <table style={{ width:'100%', borderCollapse:'collapse', background:C.surface }}>
+                    <thead>
+                      <tr>
+                        <th style={th}>Name</th>
+                        <th style={th}>Last touches</th>
+                        <th style={th}>Class</th>
+                        <th style={th}>Mobile</th>
+                        <th style={th}>Phone</th>
+                        <th style={th}>Email</th>
+                        <th style={th}>Linked spouse</th>
+                        {meta?.prospect && <th style={th}>{meta.prospect.label}</th>}
+                        <th style={th}>Next call</th>
+                        <th style={{ ...th, position:'sticky', right:0, zIndex:3, textAlign:'right' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {batch.map(c => {
+                        const editing = editId === c.id;
+                        const sp = spouseOf(c, meta);
+                        const call = nextCalls[c.id];
+                        const overdue = call && call.date < today;
+                        const touch = touches[c.id];
+                        return (
+                          <tr key={c.id} style={{ background: editing ? C.surfaceAlt : 'transparent' }}>
+                            <td style={{ ...td, minWidth:170 }}>
+                              {editing ? (
+                                <div style={{ display:'flex', gap:5 }}>
+                                  <input value={draft.First_Name} placeholder="First" onChange={e => setDraft(d => ({ ...d, First_Name:e.target.value }))} style={inp} />
+                                  <input value={draft.Last_Name} placeholder="Last" onChange={e => setDraft(d => ({ ...d, Last_Name:e.target.value }))} style={inp} />
+                                </div>
+                              ) : (
+                                <ZohoLink module="Contacts" id={c.id} style={{ fontWeight:600, fontSize:'0.82rem', color:C.navy }}>
+                                  {c.Full_Name || '(no name)'}
+                                </ZohoLink>
+                              )}
+                            </td>
+                            <td style={{ ...td, minWidth:180 }}>
+                              {touchBusy ? <Spinner size={11} />
+                                : touchErr ? <span style={{ color:C.textMuted, fontSize:'0.72rem' }}>unavailable</span>
+                                : (touch && touch.length) ? (
+                                  <div style={{ display:'flex', flexDirection:'column', gap:2 }}>
+                                    {touch.map(t => (
+                                      <div key={t.type} style={{ display:'flex', alignItems:'baseline', gap:7, whiteSpace:'nowrap' }}>
+                                        <span style={{ fontSize:'0.6rem', fontWeight:700, letterSpacing:'.05em', textTransform:'uppercase', color:C.textMuted, minWidth:52 }}>{t.type}</span>
+                                        <ZohoLink module="Tasks" id={t.id} title={t.subject} style={{ fontSize:'0.76rem', color:C.textSecondary }}>{fmtDate(t.date)}</ZohoLink>
+                                      </div>
                                     ))}
                                   </div>
-                                : <span style={{ color:C.textMuted }}>—</span>
+                                ) : <span style={{ color:C.textMuted }}>no touches</span>}
+                            </td>
+                            <td style={td}>
+                              {editing ? (
+                                <select value={draft.cls} onChange={e => setDraft(d => ({ ...d, cls:e.target.value }))} style={{ ...inp, minWidth:80, cursor:'pointer' }}>
+                                  <option value="">—</option>
+                                  {classes.map(v => <option key={v} value={v}>{v}</option>)}
+                                </select>
+                              ) : <ClsPill value={clsOf(c)} />}
+                            </td>
+                            <td style={{ ...td, whiteSpace:'nowrap' }}>
+                              {editing ? <input value={draft.Mobile} onChange={e => setDraft(d => ({ ...d, Mobile:e.target.value }))} style={inp} />
+                                : (txt(c.Mobile) || <span style={{ color:C.textMuted }}>—</span>)}
+                            </td>
+                            <td style={{ ...td, whiteSpace:'nowrap' }}>
+                              {editing ? <input value={draft.Phone} onChange={e => setDraft(d => ({ ...d, Phone:e.target.value }))} style={inp} />
+                                : (txt(c.Phone) || <span style={{ color:C.textMuted }}>—</span>)}
+                            </td>
+                            <td style={{ ...td, minWidth:150 }}>
+                              {editing ? <input value={draft.Email} onChange={e => setDraft(d => ({ ...d, Email:e.target.value }))} style={inp} />
+                                : (txt(c.Email) || <span style={{ color:C.textMuted }}>—</span>)}
+                            </td>
+                            <td style={{ ...td, minWidth:150 }}>
+                              {editing ? (
+                                meta?.spouse
+                                  ? <SpousePicker value={draft.spouse} selfId={c.id} onChange={v => setDraft(d => ({ ...d, spouse:v }))} />
+                                  : <span style={{ color:C.textMuted, fontSize:'0.74rem' }}>no spouse field</span>
+                              ) : (sp
+                                  ? <ZohoLink module="Contacts" id={sp.id} style={{ fontSize:'0.8rem', color:C.navy }}>{sp.name || 'Linked'}</ZohoLink>
+                                  : <span style={{ color:C.textMuted }}>—</span>)}
+                            </td>
+                            {meta?.prospect && (
+                              <td style={{ ...td, minWidth:160 }}>
+                                {editing ? (
+                                  meta.prospect.dataType === 'multiselectpicklist'
+                                    ? <MultiPick value={draft.prospect} options={meta.prospect.options} onChange={v => setDraft(d => ({ ...d, prospect:v }))} />
+                                    : (
+                                      <select value={(draft.prospect && draft.prospect[0]) || ''} onChange={e => setDraft(d => ({ ...d, prospect:e.target.value ? [e.target.value] : [] }))} style={{ ...inp, cursor:'pointer' }}>
+                                        <option value="">—</option>
+                                        {(meta.prospect.options || []).map(o => <option key={o} value={o}>{o}</option>)}
+                                      </select>
+                                    )
+                                ) : (
+                                  prospectOf(c, meta).length
+                                    ? <div style={{ display:'flex', flexWrap:'wrap', gap:4 }}>
+                                        {prospectOf(c, meta).map(pv => (
+                                          <span key={pv} style={{ fontSize:'0.66rem', fontWeight:600, padding:'2px 8px', borderRadius:20,
+                                            background:C.surfaceAlt, border:'1px solid '+C.border, color:C.textSecondary }}>{pv}</span>
+                                        ))}
+                                      </div>
+                                    : <span style={{ color:C.textMuted }}>—</span>
+                                )}
+                              </td>
                             )}
-                          </td>
-                        )}
-                        <td style={{ ...td, whiteSpace:'nowrap' }}>
-                          {call ? (
-                            <ZohoLink module="Tasks" id={call.id} title={call.subject}
-                              style={{ fontSize:'0.8rem', color: overdue ? C.red : C.textPrimary, fontWeight: overdue ? 600 : 400 }}>
-                              {fmtDate(call.date)}{overdue ? ' (overdue)' : ''}
-                            </ZohoLink>
-                          ) : <span style={{ color:C.textMuted }}>none</span>}
-                        </td>
-                        <td style={{ ...td, position:'sticky', right:0, background: editing ? C.surfaceAlt : C.surface,
-                          borderLeft:'1px solid '+C.border, textAlign:'right', whiteSpace:'nowrap' }}>
-                          {editing ? (
-                            <div style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
-                              {rowError && <span style={{ fontSize:'0.7rem', color:C.red, maxWidth:160, whiteSpace:'normal', textAlign:'left' }}>{rowError}</span>}
-                              <button onClick={cancelEdit} disabled={saving} style={{ ...btn, padding:'6px 10px', opacity:saving ? .5 : 1 }}>Cancel</button>
-                              <button onClick={() => saveEdit(c)} disabled={saving}
-                                style={{ ...btn, padding:'6px 10px', background:C.navy, borderColor:C.navy, color:'#fff', opacity:saving ? .6 : 1 }}>
-                                {saving ? <><Spinner size={11} color="#fff" /> Saving…</> : 'Save'}
-                              </button>
-                            </div>
-                          ) : (
-                            <div style={{ display:'inline-flex', alignItems:'center', gap:4 }}>
-                              <button onClick={() => beginEdit(c)} title="Edit this contact"
-                                style={{ ...btn, padding:'6px 9px' }}><i className="ti ti-pencil" /> Edit</button>
-                              <button onClick={() => { setDelError(''); setConfirmDel(c); }} title="Delete this contact from Zoho"
-                                style={{ ...btn, padding:'6px 9px', color:C.red, borderColor:C.border }}><i className="ti ti-trash" /></button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
+                            <td style={{ ...td, whiteSpace:'nowrap' }}>
+                              {call ? (
+                                <ZohoLink module="Tasks" id={call.id} title={call.subject}
+                                  style={{ fontSize:'0.8rem', color: overdue ? C.red : C.textPrimary, fontWeight: overdue ? 600 : 400 }}>
+                                  {fmtDate(call.date)}{overdue ? ' (overdue)' : ''}
+                                </ZohoLink>
+                              ) : <span style={{ color:C.textMuted }}>none</span>}
+                            </td>
+                            <td style={{ ...td, position:'sticky', right:0, background: editing ? C.surfaceAlt : C.surface,
+                              borderLeft:'1px solid '+C.border, textAlign:'right', whiteSpace:'nowrap' }}>
+                              {editing ? (
+                                <div style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+                                  {rowError && <span style={{ fontSize:'0.7rem', color:C.red, maxWidth:160, whiteSpace:'normal', textAlign:'left' }}>{rowError}</span>}
+                                  <button onClick={cancelEdit} disabled={saving} style={{ ...btn, padding:'6px 10px', opacity:saving ? .5 : 1 }}>Cancel</button>
+                                  <button onClick={() => saveEdit(c)} disabled={saving}
+                                    style={{ ...btn, padding:'6px 10px', background:C.navy, borderColor:C.navy, color:'#fff', opacity:saving ? .6 : 1 }}>
+                                    {saving ? <><Spinner size={11} color="#fff" /> Saving…</> : 'Save'}
+                                  </button>
+                                </div>
+                              ) : (
+                                <div style={{ display:'inline-flex', alignItems:'center', gap:4 }}>
+                                  <button onClick={() => beginEdit(c)} title="Edit this contact"
+                                    style={{ ...btn, padding:'6px 9px' }}><i className="ti ti-pencil" /> Edit</button>
+                                  <button onClick={() => keepContact(c)} title="Keep this contact and take it off the list"
+                                    style={{ ...btn, padding:'6px 9px', color:C.green, borderColor:C.green+'55' }}><i className="ti ti-check" /> Keep</button>
+                                  <button onClick={() => { setDelError(''); setConfirmDel(c); }} title="Delete this contact from Zoho"
+                                    style={{ ...btn, padding:'6px 9px', color:C.red, borderColor:C.red+'55' }}><i className="ti ti-trash" /> Delete</button>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
 
-            {filtered.length > rows.length && (
-              <div style={{ padding:'16px 22px', textAlign:'center' }}>
-                <button onClick={() => setShown(s => s + 250)} style={btn}>
-                  Show more ({filtered.length - rows.length} left)
-                </button>
-              </div>
+                {/* Batch control -- Next only matters once the batch is clear */}
+                {!loading && (
+                  <div style={{ padding:'20px 22px 30px', textAlign:'center' }}>
+                    {batch.length === 0 ? (
+                      remaining > 0 ? (
+                        <>
+                          <div style={{ fontSize:'0.84rem', color:C.textSecondary, marginBottom:11 }}>
+                            That batch is clear. {remaining} contact{remaining === 1 ? '' : 's'} left in this filter.
+                          </div>
+                          <button onClick={nextBatch}
+                            style={{ ...btn, background:C.navy, borderColor:C.navy, color:'#fff', padding:'10px 20px', fontSize:'0.8rem' }}>
+                            Next {pageSize} contacts <i className="ti ti-arrow-right" />
+                          </button>
+                        </>
+                      ) : (
+                        <div style={{ fontSize:'0.84rem', color:C.textSecondary, display:'flex', alignItems:'center', justifyContent:'center', gap:9, flexWrap:'wrap' }}>
+                          <span><i className="ti ti-circle-check" style={{ color:C.green, marginRight:6 }} />You have been through every contact in this filter.</span>
+                          {keptCount > 0 && <button onClick={resetKept} style={btn}><i className="ti ti-arrow-back-up" /> Start over ({keptCount} kept)</button>}
+                        </div>
+                      )
+                    ) : (
+                      <button onClick={nextBatch} disabled={remaining === 0}
+                        style={{ ...btn, opacity:remaining === 0 ? .45 : 1, cursor:remaining === 0 ? 'default' : 'pointer' }}>
+                        Skip to next {pageSize} <i className="ti ti-arrow-right" />
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </main>
 
           {/* Footer count */}
           <footer style={{ padding:'9px 22px', borderTop:'1px solid '+C.border, background:C.surface,
             fontSize:'0.74rem', color:C.textMuted, display:'flex', justifyContent:'space-between', gap:10 }}>
-            <span>Showing {rows.length} of {filtered.length}{filtered.length !== contacts.length ? ` (filtered from ${contacts.length})` : ''}</span>
-            <span>{agent || 'All agents'} · {cls === '__none' ? 'No classification' : (cls || 'All classifications')}</span>
+            <span>{batch.length} on screen · {remaining} left in this filter{keptCount ? ' · ' + keptCount + ' kept' : ''}</span>
+            <span>{pageSize} at a time · {agent || 'All agents'} · {cls === '__none' ? 'No classification' : (cls || 'All classifications')}</span>
           </footer>
 
           {confirmDel && (

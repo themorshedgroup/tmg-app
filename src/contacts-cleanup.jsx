@@ -235,18 +235,31 @@
     async function fetchTouches(ids, typeField) {
       if (!ids || !ids.length) return {};
       const field = typeField || 'Task_Type';
-      let byContact;
+      const out = {};
       if (isDev()) {
         await new Promise(r => setTimeout(r, 250));
-        byContact = {};
-        ids.forEach(id => { byContact[id] = DEV_TASKS[id] || []; });
-      } else {
-        const { ok, data } = await callZoho({ action:'tasks_for_contacts', contact_ids:ids, type_field:field });
-        if (!ok) return null;
-        byContact = data.tasks_by_contact || {};
+        ids.forEach(id => { out[id] = reduceTouches(DEV_TASKS[id] || [], field); });
+        return out;
       }
-      const out = {};
-      ids.forEach(id => { out[id] = reduceTouches(byContact[id], field); });
+      // One search per contact, six at a time. NOT the Contacts -> Tasks
+      // related list: that list comes back with OPEN tasks only, so it can
+      // never see a finished call and would report every contact as untouched.
+      // /crm-tasks hit exactly this against live data and moved to the search
+      // route -- see the note above its lastCompletedCall.
+      const B = 6;
+      for (let i = 0; i < ids.length; i += B) {
+        const res = await Promise.all(ids.slice(i, i + B).map(async cid => {
+          try {
+            const { ok, data } = await callZoho({ action:'search_tasks', type_field:'Who_Id', type:cid,
+              status:'Completed', per_page:200, extra_fields:[field] });
+            // null, never [], when Zoho did not answer. "We could not look" and
+            // "this contact has never been touched" sit next to a permanent
+            // Delete button, so they must not render as the same thing.
+            return [cid, ok ? reduceTouches(data.tasks || [], field) : null];
+          } catch (e) { return [cid, null]; }
+        }));
+        res.forEach(pair => { out[pair[0]] = pair[1]; });
+      }
       return out;
     }
 
@@ -485,6 +498,12 @@
       const [agent, setAgent] = useState('');
       const [cls, setCls] = useState('');
       const [q, setQ] = useState('');
+      // Debounced, because the search term resets the batch and every new
+      // batch is a Zoho round trip per contact on screen. Typing six letters
+      // must not buy six sweeps. The input itself still tracks `q`, so it
+      // stays instant.
+      const [qDeb, setQDeb] = useState('');
+      useEffect(() => { const t = setTimeout(() => setQDeb(q), 320); return () => clearTimeout(t); }, [q]);
       const [pageSize, setPageSize] = useState(10);
 
       // The batch is the 5/10/20 contacts on screen right now, and it is
@@ -555,7 +574,7 @@
       }, [contacts, meta]);
 
       const filtered = useMemo(() => {
-        const term = q.trim().toLowerCase();
+        const term = qDeb.trim().toLowerCase();
         return contacts.filter(c => {
           if (agent && ((c.Owner && c.Owner.name) || '') !== agent) return false;
           if (cls === '__none') { if (clsOf(c)) return false; }
@@ -566,10 +585,10 @@
           }
           return true;
         }).sort((a, b) => txt(a.Full_Name).localeCompare(txt(b.Full_Name)));
-      }, [contacts, agent, cls, q]);
+      }, [contacts, agent, cls, qDeb]);
 
       // Changing a filter starts the pass over inside the new filter.
-      useEffect(() => { setBatchIds([]); setSeen({}); }, [agent, cls, q, pageSize]);
+      useEffect(() => { setBatchIds([]); setSeen({}); }, [agent, cls, qDeb, pageSize]);
 
       const byId = useMemo(() => {
         const m = {};
@@ -618,13 +637,19 @@
 
       // Last touches are pulled for the batch on screen, one round trip.
       useEffect(() => {
-        if (!batchIds.length) { setTouches({}); setTouchErr(false); return; }
+        if (!batchIds.length) { setTouches({}); setTouchErr(false); setTouchBusy(false); return; }
         let dead = false;
         setTouchBusy(true); setTouchErr(false);
         fetchTouches(batchIds, meta && meta.taskType).then(got => {
           if (dead) return;
           if (got) setTouches(got); else { setTouchErr(true); setTouches({}); }
           setTouchBusy(false);
+        }).catch(() => {
+          // fetch REJECTS on a dropped connection or a sleeping laptop, which
+          // is routine in an hour-long pass. Without this the column spins for
+          // ever and the "unavailable" fallback is unreachable.
+          if (dead) return;
+          setTouchErr(true); setTouches({}); setTouchBusy(false);
         });
         return () => { dead = true; };
       }, [batchIds, meta]);
@@ -799,7 +824,7 @@
 
           {/* Table */}
           <main style={{ flex:1, overflow:'auto' }}>
-            {!loading && !filtered.length ? (
+            {!loading && !filtered.length && !batch.length ? (
               <div style={{ padding:60, textAlign:'center', color:C.textMuted, fontSize:'0.88rem' }}>
                 {contacts.length ? 'No contacts match these filters.' : 'No contacts loaded.'}
               </div>
@@ -828,6 +853,11 @@
                         const call = nextCalls[c.id];
                         const overdue = call && call.date < today;
                         const touch = touches[c.id];
+                        // touch == null covers both "Zoho did not answer for
+                        // this one" and "not fetched yet". Either way its
+                        // history is unknown, and an unknown history is not a
+                        // safe thing to delete on.
+                        const unknown = touchErr || touch == null;
                         return (
                           <tr key={c.id} style={{ background: editing ? C.surfaceAlt : 'transparent' }}>
                             <td style={{ ...td, minWidth:170 }}>
@@ -844,8 +874,9 @@
                             </td>
                             <td style={{ ...td, minWidth:180 }}>
                               {touchBusy ? <Spinner size={11} />
-                                : touchErr ? <span style={{ color:C.textMuted, fontSize:'0.72rem' }}>unavailable</span>
-                                : (touch && touch.length) ? (
+                                : unknown ? <span title="Zoho did not answer for this contact. Refresh before deciding."
+                                    style={{ color:C.amber, fontSize:'0.72rem', fontWeight:600 }}>unavailable</span>
+                                : touch.length ? (
                                   <div style={{ display:'flex', flexDirection:'column', gap:2 }}>
                                     {touch.map(t => (
                                       <div key={t.type} style={{ display:'flex', alignItems:'baseline', gap:7, whiteSpace:'nowrap' }}>
@@ -933,8 +964,10 @@
                                     style={{ ...btn, padding:'6px 9px' }}><i className="ti ti-pencil" /> Edit</button>
                                   <button onClick={() => keepContact(c)} title="Keep this contact and take it off the list"
                                     style={{ ...btn, padding:'6px 9px', color:C.green, borderColor:C.green+'55' }}><i className="ti ti-check" /> Keep</button>
-                                  <button onClick={() => { setDelError(''); setConfirmDel(c); }} title="Delete this contact from Zoho"
-                                    style={{ ...btn, padding:'6px 9px', color:C.red, borderColor:C.red+'55' }}><i className="ti ti-trash" /> Delete</button>
+                                  <button onClick={() => { setDelError(''); setConfirmDel(c); }} disabled={unknown}
+                                    title={unknown ? 'This contact\u2019s task history did not load, so there is nothing to judge it on. Refresh, then delete.' : 'Delete this contact from Zoho'}
+                                    style={{ ...btn, padding:'6px 9px', color:C.red, borderColor:C.red+'55',
+                                      opacity:unknown ? .38 : 1, cursor:unknown ? 'default' : 'pointer' }}><i className="ti ti-trash" /> Delete</button>
                                 </div>
                               )}
                             </td>

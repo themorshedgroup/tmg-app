@@ -6505,6 +6505,24 @@ Rules:
         saveDayCache(daySig, { buckets, overdue, clipped }, dataAt);
       }, [buckets, overdue, clipped, daySig, busy, dataAt]);
 
+      // Until now the list loaded once and then sat there: no interval, no
+      // visibility hook, and nothing on screen saying how old it was. Leave the
+      // tab open, complete a call on a phone or in Zoho, and this screen kept
+      // showing the pre-tick row indefinitely -- which is exactly the "he is
+      // already called, why is he not marked" report. Coming back to the tab
+      // refetches, but only once the fetch is older than the cache's own TTL,
+      // so flicking between tabs costs nothing.
+      useEffect(() => {
+        const stale = () => !!dataAt && (Date.now() - dataAt) > CALL_DAY_TTL;
+        const onBack = () => { if (!document.hidden && !busy && stale()) load(true); };
+        document.addEventListener('visibilitychange', onBack);
+        window.addEventListener('focus', onBack);
+        return () => {
+          document.removeEventListener('visibilitychange', onBack);
+          window.removeEventListener('focus', onBack);
+        };
+      }, [busy, dataAt, daySig]);
+
       const ownerOf = (t) => (t.Owner && t.Owner.name) || 'Unassigned';
 
       // The agent's own Zoho USER id, learned from their own call tasks. There
@@ -6830,6 +6848,39 @@ Rules:
           setRowErr(er => ({ ...er, [t.id]: (e && e.message) || String(e) }));
         } finally {
           setRowBusy(b => { const n = { ...b }; delete n[t.id]; return n; });
+        }
+      }
+
+      // Logging a call used to CREATE a second completed task while the row's
+      // own task stayed open, so an agent had to do both and Zoho Reports
+      // counted one phone call twice. A logged call now CLOSES the open task it
+      // belongs to and creates one fewer.
+      //
+      // Matched by SUBJECT, not just by contact: Touch Call and Follow Up Call
+      // are both Task Type "Call" and the subject line is the only thing that
+      // tells them apart, so completing a touch task because someone logged a
+      // follow-up would claim a touch call that never happened.
+      const openCallFor = (contactId, kind) => {
+        if (!contactId) return null;
+        const want = kind === 'Touch Call' ? /touch\s*call/i : /follow\s*up/i;
+        // Overdue first: the oldest open obligation is the one to retire.
+        return [].concat(
+          (overdue && overdue.list) || [],
+          (buckets && buckets.yesterday) || [],
+          (buckets && buckets.today) || [],
+          (buckets && buckets.tomorrow) || []
+        ).find(t => t && t.Who_Id && t.Who_Id.id === contactId
+          && !/completed/i.test(t.Status || '')
+          && want.test(t.Subject || '')) || null;
+      };
+
+      // Writes the adopted calls closed and moves the rows on screen. Throws,
+      // so a sheet that called it can report the failure rather than closing
+      // over a call Zoho never actually marked.
+      async function completeAdopted(tasks) {
+        for (const t of tasks) {
+          await setTaskStatus(t.id, 'Completed', t);
+          patchTask(t, 'Completed');
         }
       }
 
@@ -7519,6 +7570,8 @@ Rules:
               ownerId={logOwnerId}
               ownerName={logOwnerName}
               ownerEmail={logOwner.email}
+              adopt={openCallFor}
+              onAdopted={completeAdopted}
               dateIso={(listView === 'week' ? weekday : dates[day]) || cIso(new Date())}
               onDone={(name, items) => {
                 setKpiToast('Logged for ' + name + ': ' + items.map(i => i.count + ' × ' + (i.subject || i.type)).join(', '));
@@ -7537,6 +7590,7 @@ Rules:
               contact={sheet.contact}
               ownerId={(sheet.task.Owner && sheet.task.Owner.id) || null}
               dateIso={(sheet.task.Due_Date || '').slice(0, 10) || cIso(new Date())}
+              onCompleted={() => completeAdopted([sheet.task])}
               onLogged={(items) => onLogged(sheet.task, items)}
               onError={(msg) => setRowErr(e => ({ ...e, [sheet.task.id]: msg }))}
               onClose={() => setSheet(null)}
@@ -7567,7 +7621,7 @@ Rules:
     //
     //  So this sheet does the two things that one can't: pick any contact, and
     //  show the cadence facts BEFORE the choice is made.
-    function AddKpiSheet({ dark, ownerId, ownerName, ownerEmail, dateIso, onDone, onClose }) {
+    function AddKpiSheet({ dark, ownerId, ownerName, ownerEmail, dateIso, adopt, onAdopted, onDone, onClose }) {
       const J = "'Jost', sans-serif";
       const [meta, setMeta] = useState(null);
       const [q, setQ] = useState('');
@@ -7743,7 +7797,7 @@ Rules:
       const callPicks = filled.filter(o => CALL_KPI_LABELS.includes(o.key));
       const otherPicks = filled.filter(o => !CALL_KPI_LABELS.includes(o.key));
       const items = callPicks.map(o => ({
-        type: callType, count: Number(sel[o.key]),
+        type: callType, count: Number(sel[o.key]), kind: o.key,
         subject: o.key === 'Touch Call'
           ? (tier ? tier + ' ' : '') + 'Touch Call: ' + (contact ? contact.name : '')
           : 'Follow Up Call : ' + (contact ? contact.name : ''),
@@ -7771,7 +7825,20 @@ Rules:
           const when = dateIso || cIso(new Date());
           const done = [];
           if (items.length) {
-            await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: when, ownerId });
+            // One of each kind of call can be satisfied by the open task that
+            // is already on the list; only the surplus becomes a new record.
+            // Closing comes BEFORE creating: if the create then fails, the one
+            // real call is recorded once and the error says what is missing,
+            // which beats the old outcome of a duplicate plus a task still open.
+            const adopted = [], surplus = [];
+            items.forEach(it => {
+              let count = it.count;
+              const t = (typeof adopt === 'function' && count > 0) ? adopt(contact.id, it.kind) : null;
+              if (t && !adopted.some(a => a.id === t.id)) { adopted.push(t); count -= 1; }
+              if (count > 0) surplus.push({ type: it.type, count, subject: it.subject });
+            });
+            if (adopted.length && typeof onAdopted === 'function') await onAdopted(adopted);
+            if (surplus.length) await createActivityTasks({ items: surplus, typeField: meta && meta.api, contact, dateIso: when, ownerId });
             items.forEach(it => done.push({ count: it.count, subject: it.subject }));
           }
           if (otherPicks.length) {
@@ -7988,7 +8055,7 @@ Rules:
       } catch (e) {}
       return null;
     }
-    function LogActivitySheet({ dark, task, contact, ownerId, dateIso, onLogged, onError, onClose }) {
+    function LogActivitySheet({ dark, task, contact, ownerId, dateIso, onCompleted, onLogged, onError, onClose }) {
       const J = "'Jost', sans-serif";
       const [meta, setMeta] = useState(readCachedTaskTypes); // seeded from cache — null only on a genuine cold fetch
       const [loadErr, setLoadErr] = useState('');
@@ -8018,19 +8085,28 @@ Rules:
       // Each offered activity paired with the real picklist string Zoho will
       // store. Call types can never appear here anyway — the row IS the call.
       const picklist = ((meta && meta.options) || []).filter(o => !/call/i.test(o));
-      const offered = LOG_ACTIVITIES
-        .map(a => ({ ...a, type: picklist.find(o => a.match.test(o)) }))
-        .filter(a => a.type);
+      // The row IS a call, so logging one here CLOSES it rather than filing a
+      // second completed task beside it. Every call type used to be stripped
+      // out of this sheet entirely, so an agent who had just phoned tapped
+      // "+", found no Call option at all, and left the row hollow with the
+      // call unrecorded. This entry is not a Zoho picklist value and never
+      // reaches createActivityTasks -- it is recognised by its key.
+      const canCloseCall = typeof onCompleted === 'function' && !/completed/i.test((task && task.Status) || '');
+      const offered = (canCloseCall ? [{ key: 'call', label: 'Call', match: /^(?!)/, requireCount: false, type: 'Call' }] : [])
+        .concat(LOG_ACTIVITIES
+          .map(a => ({ ...a, type: picklist.find(o => a.match.test(o)) }))
+          .filter(a => a.type));
       const absent = LOG_ACTIVITIES.filter(a => !picklist.some(o => a.match.test(o)));
 
       const chosen = offered.filter(a => sel[a.type] !== undefined);
       // A required-count row sits at '' until a number is typed — checked, but
       // not yet loggable.
       const unfilled = chosen.filter(a => !(Number(sel[a.type]) > 0));
-      const items = chosen.filter(a => Number(sel[a.type]) > 0).map(a => ({ type: a.type, count: Number(sel[a.type]) }));
+      const closingCall = chosen.some(a => a.key === 'call');
+      const items = chosen.filter(a => a.key !== 'call' && Number(sel[a.type]) > 0).map(a => ({ type: a.type, count: Number(sel[a.type]) }));
       const total = items.reduce((n, it) => n + it.count, 0);
       const overCap = total > LOG_MAX_TASKS;
-      const canAdd = !!items.length && !unfilled.length && !overCap;
+      const canAdd = (!!items.length || closingCall) && !unfilled.length && !overCap;
 
       function toggle(a) {
         setSel(s => {
@@ -8053,8 +8129,16 @@ Rules:
         if (busy || !canAdd) return;   // double-submit guard, and no writing a half-filled row
         setBusy(true); setErr('');
         try {
-          const res = await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: dateIso || cIso(new Date()), ownerId });
-          onLogged((res.byType && res.byType.length) ? res.byType : items);
+          let res = { byType: [] };
+          if (items.length) {
+            res = await createActivityTasks({ items, typeField: meta && meta.api, contact, dateIso: dateIso || cIso(new Date()), ownerId });
+          }
+          // Closing the call last: the activity writes above throw on failure,
+          // and a call marked done beside rows that never landed would be the
+          // wrong half of the job to keep.
+          if (closingCall) await onCompleted();
+          const landed = (res.byType && res.byType.length) ? res.byType : items;
+          if (landed.length) onLogged(landed);
           onClose();
         } catch (e) {
           // Whatever DID land is recorded on the row and subtracted from the
@@ -8137,6 +8221,12 @@ Rules:
             {/* Exactly what will be written, before it is written — the one
                 thing that makes a wrong Task Type or subject visible up front
                 instead of a week later in the report. */}
+            {closingCall && (
+              <div style={{ marginTop: 12, fontFamily: J, fontSize: 9, color: addCol, lineHeight: 1.5 }}>
+                This call gets marked complete on the list. No extra task is created for it, so it is still counted once.
+              </div>
+            )}
+
             {items.length > 0 && (
               <div style={{ marginTop: 12, padding: '9px 11px', borderRadius: 10, background: fieldBg, border: `1px solid ${bord}` }}>
                 <div style={{ fontFamily: J, fontSize: 8, letterSpacing: '0.12em', textTransform: 'uppercase', color: mutedCol, marginBottom: 5 }}>Will create {total} task{total === 1 ? '' : 's'}</div>

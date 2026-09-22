@@ -14648,9 +14648,13 @@ const trimTask = t => ({
   Subject: t.Subject || '',
   Status: t.Status || '',
   Due_Date: t.Due_Date || null,
+  // email travels too: it is the ONLY thing that decides who a KPI logged
+  // from this tab is credited to, and dropping it here meant a cached list
+  // could not name the agent it was showing.
   Owner: t.Owner ? {
     id: t.Owner.id || null,
-    name: t.Owner.name || null
+    name: t.Owner.name || null,
+    email: t.Owner.email || null
   } : null,
   Who_Id: t.Who_Id ? {
     id: t.Who_Id.id || null,
@@ -16325,16 +16329,48 @@ function CallsTab({
   // off that agent's own tasks. Null means "nobody identifiable", and the
   // Add KPI button is disabled rather than writing an unowned task that
   // Zoho would quietly credit to the API connection.
-  const logOwnerId = useMemo(() => {
-    if (!team) return myOwnerId;
-    if (!agent) return null;
-    const counts = {};
+  //
+  // The EMAIL is what actually decides the owner. createAgentKpi sends
+  // owner_email and nothing else: the edge function resolves it to a Zoho
+  // user and sets Owner from it, while the name travelling beside it is
+  // never written to any field. Sending the signed-in user's own email
+  // while an admin had somebody else picked therefore credited every one
+  // of those KPIs to the admin, silently, with the right name on screen
+  // the whole time. Id and email now both come off the SAME agent.
+  const logOwner = useMemo(() => {
+    if (!team) return {
+      id: myOwnerId,
+      email: ownerEmail || null,
+      name: myOwner
+    };
+    if (!agent) return {
+      id: null,
+      email: null,
+      name: null
+    };
+    const ids = {},
+      mails = {};
     [].concat(buckets && buckets.yesterday || [], buckets && buckets.today || [], buckets && buckets.tomorrow || [], overdue && overdue.list || []).forEach(t => {
-      if (ownerOf(t) === agent && t.Owner && t.Owner.id) counts[t.Owner.id] = (counts[t.Owner.id] || 0) + 1;
+      if (ownerOf(t) !== agent || !t.Owner) return;
+      if (t.Owner.id) ids[t.Owner.id] = (ids[t.Owner.id] || 0) + 1;
+      if (t.Owner.email) mails[t.Owner.email] = (mails[t.Owner.email] || 0) + 1;
     });
-    return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
-  }, [team, agent, myOwnerId, buckets, overdue]);
-  const logOwnerName = team ? agent : myOwner;
+    const top = o => Object.keys(o).sort((a, b) => o[b] - o[a])[0] || null;
+    return {
+      id: top(ids),
+      email: top(mails),
+      name: agent
+    };
+  }, [team, agent, myOwnerId, myOwner, ownerEmail, buckets, overdue]);
+  const logOwnerId = logOwner.id;
+  const logOwnerName = logOwner.name;
+  // No email means no provable owner, so the button goes grey instead of
+  // filing the entry under whoever happens to be signed in. That is the
+  // same stance the id check above already takes, for the same reason.
+  // Only DELEGATION needs a provable email. Logging for yourself resolves
+  // server-side from your own profile, so gating that on an email would
+  // grey the button out for anyone whose profile has none.
+  const canLogKpi = !!logOwnerId && (!team || !!logOwner.email);
 
   // The agent picker is built from the people who actually own calls in
   // Zoho — not from the TMG staff list — so the names always match what
@@ -17545,17 +17581,17 @@ function CallsTab({
       opacity: 0.7
     }
   }, "\u203A")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => logOwnerId && setAddKpi(true),
-    disabled: !logOwnerId,
-    title: logOwnerId ? 'Log a KPI for any contact, on or off this list' : 'Pick a single agent first — a KPI has to be credited to somebody',
+    onClick: () => canLogKpi && setAddKpi(true),
+    disabled: !canLogKpi,
+    title: canLogKpi ? 'Log a KPI for any contact, on or off this list. It will be credited to ' + logOwnerName + '.' : !logOwnerId ? 'Pick a single agent first, a KPI has to be credited to somebody' : 'No Zoho email found for ' + logOwnerName + ', so this KPI cannot be proved to be theirs. Refresh the list, or log it from their own account.',
     style: {
       ...pill,
       background: surfaceBg,
       border: `1px solid ${lineCol}`,
       color: addCol,
       fontWeight: 600,
-      opacity: logOwnerId ? 1 : 0.45,
-      cursor: logOwnerId ? 'pointer' : 'default'
+      opacity: canLogKpi ? 1 : 0.45,
+      cursor: canLogKpi ? 'pointer' : 'default'
     }
   }, /*#__PURE__*/React.createElement("i", {
     className: "ti ti-plus",
@@ -18154,7 +18190,7 @@ function CallsTab({
     dark: dark,
     ownerId: logOwnerId,
     ownerName: logOwnerName,
-    ownerEmail: ownerEmail,
+    ownerEmail: logOwner.email,
     dateIso: (listView === 'week' ? weekday : dates[day]) || cIso(new Date()),
     onDone: (name, items) => {
       setKpiToast('Logged for ' + name + ': ' + items.map(i => i.count + ' × ' + (i.subject || i.type)).join(', '));

@@ -319,6 +319,32 @@ async function ownerForCaller(
       if (data) callerName = [data.first_name, data.last_name].filter(Boolean).join(" ") || null;
     } catch (_) { /* fall through to the other strategies */ }
   }
+  // Filing for somebody else is an ADMIN action, and "somebody else" means an
+  // address that is not the caller's own, not merely "an address was sent".
+  // Symon's app login (manager@) differs from his Zoho user (symon@), so
+  // treating any supplied email as delegation would stop him filing for
+  // himself. A non-admin always gets their own account no matter what the page
+  // asked for, so a page cannot quietly attribute work to a colleague.
+  //
+  // This has to run BEFORE the stored-id shortcut below. Without it the
+  // caller's own Zoho id won every single time, so an admin logging a KPI for
+  // another agent filed it under the admin: the right name on screen, the wrong
+  // name in Zoho, discovered only when the numbers were counted. Same rule and
+  // same order as the Health Goals path in create_record, deliberately, so the
+  // create paths cannot drift apart again.
+  let callerEmail = "";
+  if (sb && auth?.userId && auth.userId !== "service") {
+    try {
+      const { data: cp } = await sb.from("profiles")
+        .select("email").eq("id", auth.userId).maybeSingle();
+      callerEmail = String(cp?.email || "").toLowerCase();
+    } catch (_) { /* no caller email -> cannot be delegating, fall through */ }
+  }
+  const target = (ownerEmail || "").trim().toLowerCase();
+  if (target && callerEmail && target !== callerEmail && (auth as any)?.isAdmin === true) {
+    return { owner: { email: ownerEmail }, warning: null, callerName };
+  }
+
   const storedZohoId = await zohoIdFromProfile(sb, auth?.userId || null);
   if (storedZohoId) return { owner: { id: storedZohoId }, warning: null, callerName };
   if (ownerEmail) return { owner: { email: ownerEmail }, warning: null, callerName };

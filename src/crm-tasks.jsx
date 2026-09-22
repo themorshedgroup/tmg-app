@@ -2092,7 +2092,17 @@
         () => noPhoneReady ? findNoPhoneCalls({ tasks, colMap, phones, spouseLinks: noPhoneLinks }).filter(n => n.owner === owner) : [],
         [noPhoneReady, tasks, colMap, phones, noPhoneLinks, owner]);
 
-      const removeAll = fixable.flatMap(g => g.removeIds).concat(unclassified.map(u => u.id)).concat(noPhone.map(n => n.id));
+      // Three independent lists, and one task can sit on two of them: an
+      // unreachable contact with two open calls puts BOTH ids in noPhone,
+      // including the one the duplicate branch chose to keep. Which calls go
+      // is deliberately unchanged: "cannot be dialled" outranks "keep the
+      // earliest", and the row is on screen either way, but the id is sent
+      // once. A repeat is a second DELETE that 404s, and runBatched counts
+      // that as a failure, so a clean sweep used to report "Some deletes
+      // failed" and there was no way to tell a real failure from this.
+      const removeAll = Array.from(new Set(
+        fixable.flatMap(g => g.removeIds).concat(unclassified.map(u => u.id)).concat(noPhone.map(n => n.id))
+      ));
       const dupesBusyLoading = dupeLinksLoading || completedLoading;
 
       async function applyDupes() {
@@ -2742,9 +2752,14 @@ A classification IS the cadence. Without one there is no interval to date a call
               </div>
               <div style={{ display:'flex', gap:10 }}>
                 <button onClick={onClose} style={{ ...iconBtnStatic, color:C.navy }}>Close</button>
+                {/* The delete button waits for every list to land. removeAll
+                    grows as the spouse, history and phone lookups resolve, so a
+                    click before they finish deletes a partial set, and done.ok
+                    then disables the button for the rest of the session: the
+                    step cannot be finished without closing and reopening. */}
                 {tab === 'dupes' && (
-                  <button onClick={applyDupes} disabled={busy || !removeAll.length || (done && done.ok)}
-                    style={{ ...iconBtnStatic, color:'#fff', background:C.red, borderColor:C.red, fontWeight:600, opacity:(busy || !removeAll.length || (done && done.ok)) ? .5 : 1 }}>
+                  <button onClick={applyDupes} disabled={busy || dupesBusyLoading || !noPhoneReady || !removeAll.length || (done && done.ok)}
+                    style={{ ...iconBtnStatic, color:'#fff', background:C.red, borderColor:C.red, fontWeight:600, opacity:(busy || dupesBusyLoading || !noPhoneReady || !removeAll.length || (done && done.ok)) ? .5 : 1 }}>
                     {busy ? 'Deleting…' : `Delete ${removeAll.length} call${removeAll.length===1?'':'s'}`}
                   </button>
                 )}
@@ -2924,7 +2939,9 @@ A classification IS the cadence. Without one there is no interval to date a call
         const action = mode === 'create' ? 'create_record' : 'update_record';
         const res = await callZoho({ action, module:'Tasks', id, record });
         if (res.ok && !skipReload) await load(true); // force — the cache would otherwise hide this exact change for up to 10 min
-        return { ok:res.ok, error: res.data?.error };
+        // owner_warning is surfaced, never swallowed. A record saved under
+        // the wrong name looks identical to one saved correctly.
+        return { ok:res.ok, error: res.data?.error, warning: res.data?.owner_warning };
       }
       async function removeTask(id, skipReload) {
         if (isDev()) {
@@ -2976,8 +2993,21 @@ A classification IS the cadence. Without one there is no interval to date a call
       // signed in — the edge function only fills an owner in when the record
       // arrives without one.
       async function bulkCreateCalls(items) {
-        const clean = Array.isArray(items) ? items.filter(it => it && it.cid && it.due_date && it.cls && it.name) : [];
-        if (!clean.length) return { ok:false, error:'No calls specified.' };
+        const all = Array.isArray(items) ? items.filter(it => it && it.cid && it.due_date && it.cls && it.name) : [];
+        if (!all.length) return { ok:false, error:'No calls specified.' };
+        // The Owner guard below fails OPEN: a contact with no owner id sends a
+        // record with no Owner, and the edge function then fills it with the
+        // signed-in user (ownerForCaller), so running this for one agent could
+        // file their client's call under the operator's own name. It returns
+        // owner_warning for exactly this, and writeTask used to drop it, so the
+        // screen said "N calls created" and nothing said whose. Named and
+        // skipped instead: the call belongs to the agent or it is not written.
+        const clean = all.filter(it => it.ownerId);
+        const orphans = all.filter(it => !it.ownerId);
+        const orphanNote = orphans.length
+          ? `no Contact Owner in Zoho for ${orphans.length} contact${orphans.length===1?'':'s'} (${orphans.slice(0,3).map(o => o.name).join(', ')}${orphans.length>3?', …':''}). Set it in Zoho, then reopen.`
+          : null;
+        if (!clean.length) return { ok:false, error: orphanNote || 'No calls specified.' };
         // Which shape this org's Tasks module takes for the Who_Id lookup —
         // { id } or a bare id string — has never been settled; the Enter-KPI
         // writer probes it the same way. Object first, and if Zoho REFUSES the
@@ -3009,7 +3039,9 @@ A classification IS the cadence. Without one there is no interval to date a call
         } catch (e) {
           return { ok:false, count: okN, error: 'Lost connection after ' + okN + ' of ' + clean.length + ' — reopen to see what landed.' };
         }
-        return { ok: errN === 0, count: okN, error: errN ? (errN + ' failed' + (firstError ? ' — ' + firstError : '')) : undefined };
+        return { ok: errN === 0 && !orphans.length, count: okN,
+                 error: [errN ? (errN + ' failed' + (firstError ? ' — ' + firstError : '')) : null, orphanNote]
+                          .filter(Boolean).join('; ') || undefined };
       }
 
       function clickSort(key) {

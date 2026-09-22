@@ -853,12 +853,17 @@ Rules:
       return { ok: res.ok, status: res.status, data };
     }
     async function searchZohoContacts(query) {
+      if (callsIsDev()) { await new Promise(r => setTimeout(r, 200)); return devContactHits(query); }
       const { ok, data } = await callZoho({ action: 'search_contacts', query });
       if (!ok) throw new Error(data.error || 'Contact search failed');
       return data.contacts || [];
     }
     // Fuzzy-match a typed name against Zoho Contacts → ranked candidates [{id, full_name, email, score}].
     async function matchZohoContacts(name) {
+      if (callsIsDev()) {
+        await new Promise(r => setTimeout(r, 200));
+        return devContactHits(name).map(c => ({ ...c, score: 100 }));
+      }
       const { ok, data } = await callZoho({ action: 'match_contacts', name });
       if (!ok) throw new Error(data.error || 'Contact match failed');
       return data.matches || [];
@@ -905,7 +910,23 @@ Rules:
 
     // Writes every call on a KPI payload straight to Tasks. Returns what landed
     // so the confirmation can say so honestly.
-    async function writeCallKpisAsTasks(payload) {
+    //
+    // `hooks` is optional and only the Calls tab passes it:
+    //   adopt(contactId, kpiLabel) -> the OPEN call task on the list that this
+    //     logged call actually satisfies, or null
+    //   onAdopted(tasks)           -> writes those tasks Completed
+    //   ownerId                    -> a Zoho user id the caller already knows
+    //
+    // Adoption is what stops one phone call being counted twice. Zoho Reports
+    // tallies the Tasks module by Task Type, so the old behaviour (tick the row
+    // AND log the KPI) filed a second completed Call beside a task that was
+    // still open. Closing the existing one and creating one fewer records the
+    // call exactly once, and the row moves on screen without a second gesture.
+    async function writeCallKpisAsTasks(payload, hooks) {
+      const adopt = hooks && hooks.adopt, onAdopted = hooks && hooks.onAdopted;
+      // Both halves or neither: an adopted call whose writer is missing would
+      // be dropped silently, which is worse than the duplicate it replaces.
+      const canAdopt = typeof adopt === 'function' && typeof onAdopted === 'function';
       const rows = [];
       (payload.persons || []).forEach(p => {
         const calls = (p.kpis || []).filter(k => CALL_KPI_LABELS.includes(k));
@@ -916,7 +937,10 @@ Rules:
       const opts = (meta && meta.options) || [];
       const callType = opts.find(o => /^call$/i.test(o)) || opts.find(o => /call/i.test(o));
       if (!callType) return { made: 0, failed: ['Zoho has no "Call" task type.'], skipped: rows.length };
-      const ownerId = await resolveZohoUserIdByName(payload.owner);
+      // The Calls tab reads the agent's Zoho user id straight off the tasks it
+      // is already showing, which is both cheaper and surer than a name lookup
+      // on a grant that has no users.READ scope.
+      const ownerId = (hooks && hooks.ownerId) || await resolveZohoUserIdByName(payload.owner);
       const dateIso = payload.kpi_date || kpiTodayStr();
       let made = 0; const failed = [];
       for (const r of rows) {
@@ -924,15 +948,28 @@ Rules:
         // other cadence task in this org reads: "B Touch Call: Jane Doe".
         let tier = null;
         try { const h = await lastCallFor(r.person.contact_id); tier = (h && h.tier) || null; } catch (e) {}
-        const items = r.calls.map(k => ({
-          type: callType, count: 1,
-          subject: k === 'Touch Call'
+        // Matched by SUBJECT, not just by contact: Touch Call and Follow Up
+        // Call are both Task Type "Call" and the subject line is the only thing
+        // that tells them apart, so closing a touch task because somebody
+        // logged a follow-up would claim a touch call that never happened.
+        const adopted = [], items = [];
+        r.calls.forEach(k => {
+          const subject = k === 'Touch Call'
             ? (tier ? tier + ' ' : '') + 'Touch Call: ' + r.person.name
-            : 'Follow Up Call : ' + r.person.name,
-        }));
+            : 'Follow Up Call : ' + r.person.name;
+          const open = canAdopt ? adopt(r.person.contact_id, k) : null;
+          if (open && !adopted.some(a => a.id === open.id)) { adopted.push(open); return; }
+          items.push({ type: callType, count: 1, subject });
+        });
         try {
-          const res = await createActivityTasks({ items, typeField: meta.api, contact: { id: r.person.contact_id, name: r.person.name }, dateIso, ownerId });
-          made += res.made || 0;
+          // Closing comes first: if the create then fails, the one real call is
+          // still recorded once and the error says what is missing, which beats
+          // a duplicate plus a task left open.
+          if (adopted.length) { await onAdopted(adopted); made += adopted.length; }
+          if (items.length) {
+            const res = await createActivityTasks({ items, typeField: meta.api, contact: { id: r.person.contact_id, name: r.person.name }, dateIso, ownerId });
+            made += res.made || 0;
+          }
         } catch (e) {
           const part = e && e.partial;
           if (part && part.made) made += part.made;
@@ -3363,7 +3400,7 @@ Rules:
           <div style={{ width: '92%', maxWidth: 440, background: panelBg, border: `1px solid ${bord}`, borderRadius: 16, borderBottomLeftRadius: 4, padding: 15, boxShadow: '0 1px 2px rgba(0,26,74,0.05)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
               <i className={`ti ${icon}`} style={{ fontSize: 18, color: dark ? C.goldSoft : C.gold }} />
-              <div style={{ flex: 1, fontFamily: C.fontSans, fontSize: '0.95rem', fontWeight: 600, color: txt }}>Enter KPI</div>
+              <div style={{ flex: 1, fontFamily: C.fontSans, fontSize: '0.95rem', fontWeight: 600, color: txt }}>Add KPIs</div>
               <button onClick={onCancel} style={{ background: 'none', border: 'none', cursor: 'pointer', color: sub, fontSize: 18, display: 'flex' }}><i className="ti ti-x" /></button>
             </div>
             {flow.step === 'choice' && (
@@ -5389,6 +5426,18 @@ Rules:
     };
     const devPerson = (id) => DEV_PEOPLE[devPersonIndex(id)] || null;
 
+    // The preview has no Zoho and no login, so both contact lookups answer from
+    // the SAME roster the call list is built from, carrying the SAME contact
+    // ids. That is what makes a call logged in the preview able to find and
+    // close the open task on the row -- without it the whole adopt path is
+    // unreachable outside production.
+    function devContactHits(term) {
+      const q = String(term || '').trim().toLowerCase();
+      return DEV_PEOPLE
+        .map((p, k) => ({ id: devContactId(k), full_name: p.name, email: p.email ? 'contact' + k + '@example.com' : '' }))
+        .filter(c => !q || c.full_name.toLowerCase().indexOf(q) !== -1);
+    }
+
     function devCalls(iso, n, seed) {
       return Array.from({ length: n }, (_, i) => {
         const k = (seed + i) % DEV_PEOPLE.length;
@@ -5593,8 +5642,23 @@ Rules:
       } catch (e) {}
     }
 
+    // Preview-only memory of what has been ticked. The fixtures are generated
+    // fresh on every load, so a refetch forgot every tick and a completed call
+    // sprang back to Not Started -- which made the tick, the adopt-on-log path
+    // and the come-back-to-the-tab refetch all untestable outside production.
+    // Keyed by the FINAL row id, which is why it is applied after the owner
+    // stamp and the overdue prefix rather than inside devCalls.
+    const DEV_TASK_STATUS = new Map();
+    const devApplyStatus = (list) => list.map(t => (
+      DEV_TASK_STATUS.has(t.id) ? { ...t, Status: DEV_TASK_STATUS.get(t.id) } : t
+    ));
+
     async function setTaskStatus(id, status, task) {
-      if (callsIsDev()) { await new Promise(r => setTimeout(r, 260)); return; }
+      if (callsIsDev()) {
+        await new Promise(r => setTimeout(r, 260));
+        DEV_TASK_STATUS.set(String(id), status);
+        return;
+      }
       const { ok, data } = await safeZoho({ action: 'update_record', module: 'Tasks', id, record: { Status: status } });
       if (!ok) throw new Error((data && data.error) || 'Zoho would not update that task.');
       bustCrmTaskCaches();
@@ -6379,13 +6443,18 @@ Rules:
           // Seeds chosen so the three day tabs plus the two owners between
           // them reach every one of the 22 roster contacts. A test contact
           // nothing ever lists is a test contact that was never tested.
-          setBuckets({ yesterday: spread(dates.yesterday, 11, 0), today: spread(dates.today, 11, 7), tomorrow: spread(dates.tomorrow, 10, 14) });
+          setBuckets({
+            yesterday: devApplyStatus(spread(dates.yesterday, 11, 0)),
+            today: devApplyStatus(spread(dates.today, 11, 7)),
+            tomorrow: devApplyStatus(spread(dates.tomorrow, 10, 14)),
+          });
           // Own id namespace. The overdue list and the Yesterday bucket come
           // off the same generator on the same date, so without this they hand
           // out identical ids for DIFFERENT people -- ticking a Yesterday row
           // struck a stranger off the overdue count and the preview contradicted
           // itself. Real Zoho ids are unique; this makes the fixture behave.
-          const od = spread(dates.yesterday, 8, 2).map(t => ({ ...t, id: 'od-' + t.id }));
+          const od = devApplyStatus(spread(dates.yesterday, 8, 2).map(t => ({ ...t, id: 'od-' + t.id })))
+            .filter(t => !/completed/i.test(t.Status || ''));
           setOverdue({ list: od, count: od.length, capped: false });
           setBusy(false);
           return;
@@ -7621,48 +7690,36 @@ Rules:
     //
     //  So this sheet does the two things that one can't: pick any contact, and
     //  show the cadence facts BEFORE the choice is made.
+    // The Calls tab's "Add KPIs", which is now the SAME flow as the AI tab's
+    // pill: choose a form or a pasted note, fill it in, review each person
+    // against Zoho, confirm. It used to carry a form of its own -- a "Search a
+    // contact..." box followed by a checkbox list -- which took exactly one
+    // person per entry, could not record a second, and looked nothing like the
+    // form agents are actually taught. Two forms for one job is what made the
+    // two screens two different products.
+    //
+    // The one thing this sheet keeps that the chat card does not is WHO the
+    // entry is credited to: a manager filing from a list filtered to one agent
+    // logs it for THAT agent, so ownerName/ownerEmail ride along here while the
+    // chat flow's "always the logged-in user" rule does not apply.
     function AddKpiSheet({ dark, ownerId, ownerName, ownerEmail, dateIso, adopt, onAdopted, onDone, onClose }) {
       const J = "'Jost', sans-serif";
-      const [meta, setMeta] = useState(null);
-      const [q, setQ] = useState('');
-      const [hits, setHits] = useState(null);       // null = not searched yet
-      const [searching, setSearching] = useState(false);
-      const [contact, setContact] = useState(null); // { id, name }
-      const [creating, setCreating] = useState(null); // { first, last, mobile, classification } | null
-      const [saving, setSaving] = useState(false);
-      const [hist, setHist] = useState('loading');  // 'loading' | { iso, tier } | null
-      const [sel, setSel] = useState({});
-      const [busy, setBusy] = useState(false);
-      const [err, setErr] = useState('');
-
-      // Same choice AI chat's "Enter KPI" opens with — but this sheet keeps its
-      // own agent-crediting (ownerName/ownerEmail below), which the chat flow
-      // deliberately does not offer (there it is always the logged-in user).
-      const [mode, setMode] = useState(null);        // null (choice) | 'form' | 'notes'
-      const [noteMsgs, setNoteMsgs] = useState([]);   // {role, content}[] with the AI, mirrors chat's note flow
+      const [mode, setMode] = useState(null);           // null (choice) | 'form' | 'notes'
+      // formSeed is what the form opens with, and it is REPLACED by every
+      // review, so "Back to edit" returns to what was typed instead of a blank
+      // form with today's date.
+      const [formSeed, setFormSeed] = useState(() => ({ kpi_date: dateIso || kpiTodayStr() }));
+      const [formPayload, setFormPayload] = useState(null); // set once the form has been reviewed
+      const [noteMsgs, setNoteMsgs] = useState([]);     // {role, content}[] with the AI, mirrors chat's note flow
       const [noteInput, setNoteInput] = useState('');
       const [noteBusy, setNoteBusy] = useState(false);
       const [noteErr, setNoteErr] = useState('');
       const [notePayload, setNotePayload] = useState(null); // set once the AI has a complete KPI payload
-      const [noteSubmitErr, setNoteSubmitErr] = useState('');
-
-      useEffect(() => { resolveTaskTypes().then(setMeta).catch(e => setErr((e && e.message) || String(e))); }, []);
-
-      // Live search as the contact name is typed, same debounce as the AI
-      // chat's Enter KPI form (KpiNameAutocomplete) — runSearch still handles
-      // the actual fetch (incl. its dev-mode fixture branch), this just fires
-      // it automatically instead of waiting for Enter/Find.
-      const searchTimer = useRef(null);
-      useEffect(() => {
-        if (searchTimer.current) clearTimeout(searchTimer.current);
-        if (q.trim().length < 2) { setHits(null); return; }
-        searchTimer.current = setTimeout(() => { runSearch(); }, 300);
-        return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [q]);
+      const [submitErr, setSubmitErr] = useState('');
+      const [busy, setBusy] = useState(false);
 
       // Same prompt and ACTION-block parsing as the chat tab's "paste your
-      // notes" path (see KPI_NOTE_INSTRUCTION) — kept self-contained here so
+      // notes" path (see KPI_NOTE_INSTRUCTION) -- kept self-contained here so
       // the credited agent is this sheet's ownerName, never the logged-in user.
       async function sendNote() {
         const text = noteInput.trim();
@@ -7673,7 +7730,7 @@ Rules:
           let opts = [];
           try { opts = await fetchOtherKpiOptions(); } catch (e) {}
           const sys = KPI_NOTE_INSTRUCTION.replace('{{OTHER_KPI_OPTIONS}}',
-            opts.length ? opts.map(o => '- ' + o).join('\n') : '(could not load the list from Zoho — do NOT output any "others"; mention them in your reply instead)')
+            opts.length ? opts.map(o => '- ' + o).join('\n') : '(could not load the list from Zoho -- do NOT output any "others"; mention them in your reply instead)')
             + '\n\nToday is ' + kpiTodayStr() + '.';
           const reply = await callAI(next, sys, 'kpi');
           let display = reply;
@@ -7683,7 +7740,7 @@ Rules:
             try {
               const parsed = JSON.parse(mm[1]);
               if (parsed && String(parsed.type).toUpperCase() === 'KPI' && parsed.payload) {
-                setNoteMsgs([...next, { role: 'assistant', content: display || 'Got it — review below.' }]);
+                setNoteMsgs([...next, { role: 'assistant', content: display || 'Got it - review below.' }]);
                 setNotePayload({ ...parsed.payload, owner: ownerName, owner_email: ownerEmail || null });
                 return;
               }
@@ -7695,14 +7752,16 @@ Rules:
         } finally { setNoteBusy(false); }
       }
 
-      // Mirrors the chat tab's submitKpi funnel (writeCallKpisAsTasks +
-      // withoutCallKpis + createAgentKpi) but keeps notePayload.owner as this
-      // sheet's agent instead of overwriting it with the logged-in user.
-      async function submitNotesKpi(resolvedPersons) {
-        const payload = { ...notePayload, persons: resolvedPersons };
-        setBusy(true); setNoteSubmitErr('');
+      // Both entry paths land here. Same funnel as the chat tab's submitKpi
+      // (writeCallKpisAsTasks + withoutCallKpis + createAgentKpi), with the two
+      // differences this sheet exists for: the entry is credited to the agent
+      // the list is filtered to, and the adopt hooks let a logged call close the
+      // open task already sitting on that list instead of filing a second one.
+      async function submitKpi(base, resolvedPersons) {
+        const payload = { ...base, owner: ownerName, owner_email: ownerEmail || null, persons: resolvedPersons };
+        setBusy(true); setSubmitErr('');
         try {
-          const callRes = await writeCallKpisAsTasks(payload);
+          const callRes = await writeCallKpisAsTasks(payload, { adopt, onAdopted, ownerId });
           const rest = withoutCallKpis(payload);
           const needsRecord = (rest.persons || []).length > 0
             || (rest.others || []).length > 0
@@ -7712,154 +7771,14 @@ Rules:
           if (callRes.made) done.push({ count: callRes.made, subject: callRes.made === 1 ? 'call' : 'calls' });
           (rest.persons || []).forEach(p => (p.kpis || []).forEach(k =>
             done.push({ count: k === 'Hotzone Action/s' ? (p.hotzone_count || 1) : 1, subject: k })));
+          // Other KPIs were missing from this ledger, so an entry that was only
+          // Other KPIs came back as "Logged for Jane:" and nothing else.
+          (rest.others || []).forEach(o => done.push({ count: o.count, subject: o.kpi }));
           onDone(resolvedPersons.map(p => p.name).join(', '), done);
           onClose();
         } catch (e) {
-          setNoteSubmitErr((e && e.message) || String(e));
+          setSubmitErr((e && e.message) || String(e));
           throw e; // KpiSummary's own confirm() catches this to reset its spinner
-        } finally { setBusy(false); }
-      }
-
-      async function runSearch() {
-        const term = q.trim();
-        if (term.length < 2 || searching) return;
-        setSearching(true); setErr('');
-        try {
-          if (callsIsDev()) {
-            await new Promise(r => setTimeout(r, 250));
-            setHits(['Ariana Hall', 'Jeremy Bell', 'Michael Beeler']
-              .filter(n => n.toLowerCase().includes(term.toLowerCase()))
-              .map((n, i) => ({ id: '5500000000000' + (i * 2), full_name: n, email: n.split(' ')[0].toLowerCase() + '@example.com' })));
-            setSearching(false); return;
-          }
-          const r = await callZoho({ action: 'match_contacts', name: term });
-          setHits(r.ok ? (r.data.matches || []) : []);
-          if (!r.ok) setErr((r.data && r.data.error) || 'Contact search failed.');
-        } catch (e) { setErr((e && e.message) || String(e)); setHits([]); }
-        finally { setSearching(false); }
-      }
-
-      function pick(c) {
-        const picked = { id: c.id, name: c.full_name || c.name || 'Unknown' };
-        setContact(picked); setHits(null); setSel({}); setCreating(null); setHist('loading');
-        lastCallFor(picked.id).then(h => setHist(h));
-      }
-
-      function startCreate() {
-        const parts = q.trim().split(/\s+/).filter(Boolean);
-        setCreating({ first: parts.length > 1 ? parts[0] : '', last: parts.length > 1 ? parts.slice(1).join(' ') : (parts[0] || ''), mobile: '', classification: '' });
-        setErr('');
-      }
-      async function saveNewContact() {
-        if (saving) return;
-        setSaving(true); setErr('');
-        try {
-          const c = await createZohoContact(creating);
-          setContact({ id: c.id, name: c.full_name });
-          setHits(null); setSel({}); setCreating(null);
-          // A contact made seconds ago has no past tasks, so lastCallFor would
-          // return null and the touch-call subject would go out with no letter.
-          // Seeding the tier from what was just entered is what makes the very
-          // first task read "B Touch Call: Jane Doe".
-          setHist({ iso: null, tier: c.classification });
-        } catch (e) { setErr((e && e.message) || String(e)); }
-        finally { setSaving(false); }
-      }
-
-      // The cadence read, in plain terms, plus which option it points at. This
-      // is the whole reason the sheet exists — an agent who can see "12 days
-      // ago, cadence is 60" does not need anyone to validate the answer.
-      const tier = (hist && hist !== 'loading' && hist.tier) || null;
-      // Tarek's cadence is longer than everyone else's, and this number drives
-      // a warning whose entire job is being right — so it reads the same
-      // owner-bucketed table the CRM packer uses, not the default column.
-      const cadenceBucket = /tarek/i.test(ownerName || '') ? 'tarek' : 'other';
-      const interval = tier ? ((CALL_INTERVALS[cadenceBucket] || CALL_INTERVALS.other)[tier] || null) : null;
-      const gapDays = (hist && hist !== 'loading' && hist.iso)
-        ? Math.round((new Date(cIso(new Date())) - new Date(hist.iso)) / 86400000) : null;
-      const dueForTouch = (interval == null || gapDays == null) ? null : gapDays >= interval * 0.8;
-
-      const picklist = (meta && meta.options) || [];
-      const callType = picklist.find(o => /^call$/i.test(o)) || picklist.find(o => /call/i.test(o));
-      // Call options are subject-driven: both are Task Type "Call", and only
-      // the subject separates a touch from a follow-up.
-      // The chat form's six, verbatim — KPI_OPTIONS holds the Agent_KPIs
-      // picklist strings, so the two screens speak one vocabulary instead of
-      // the Tasks Task_Type names this sheet used to mix in.
-      const options = KPI_OPTIONS.map(k => ({ key: k, label: k, requireCount: /hotzone/i.test(k) }));
-
-      const chosen = options.filter(o => sel[o.key] !== undefined);
-      const unfilled = chosen.filter(o => !(Number(sel[o.key]) > 0));
-      const filled = chosen.filter(o => Number(sel[o.key]) > 0);
-      // Calls are written straight to Tasks; everything else goes on an
-      // Agent_KPI record, which is what raises its own Note / Hotzone / Pop-by
-      // / Lunch tasks. Splitting is what keeps each one counted exactly once.
-      const callPicks = filled.filter(o => CALL_KPI_LABELS.includes(o.key));
-      const otherPicks = filled.filter(o => !CALL_KPI_LABELS.includes(o.key));
-      const items = callPicks.map(o => ({
-        type: callType, count: Number(sel[o.key]), kind: o.key,
-        subject: o.key === 'Touch Call'
-          ? (tier ? tier + ' ' : '') + 'Touch Call: ' + (contact ? contact.name : '')
-          : 'Follow Up Call : ' + (contact ? contact.name : ''),
-      }));
-      const total = filled.reduce((n, o) => n + Number(sel[o.key]), 0);
-      const canAdd = !!contact && !!filled.length && !unfilled.length && total <= LOG_MAX_TASKS && !busy;
-      // Claiming a touch call the cadence does not support is exactly what the
-      // validation queue exists to catch — so it is called out here, before it
-      // is written, rather than by somebody else a week later.
-      const claimingEarlyTouch = sel['Touch Call'] !== undefined && dueForTouch === false;
-
-      function toggle(o) {
-        setSel(s => { const n = { ...s }; if (n[o.key] !== undefined) delete n[o.key]; else n[o.key] = o.requireCount ? '' : 1; return n; });
-      }
-      function setCount(o, v) {
-        const d = String(v == null ? '' : v).replace(/[^\d]/g, '');
-        if (!d) { setSel(s => ({ ...s, [o.key]: o.requireCount ? '' : 1 })); return; }
-        setSel(s => ({ ...s, [o.key]: Math.max(1, Math.min(LOG_MAX_TASKS, parseInt(d, 10))) }));
-      }
-
-      async function submit() {
-        if (!canAdd) return;
-        setBusy(true); setErr('');
-        try {
-          const when = dateIso || cIso(new Date());
-          const done = [];
-          if (items.length) {
-            // One of each kind of call can be satisfied by the open task that
-            // is already on the list; only the surplus becomes a new record.
-            // Closing comes BEFORE creating: if the create then fails, the one
-            // real call is recorded once and the error says what is missing,
-            // which beats the old outcome of a duplicate plus a task still open.
-            const adopted = [], surplus = [];
-            items.forEach(it => {
-              let count = it.count;
-              const t = (typeof adopt === 'function' && count > 0) ? adopt(contact.id, it.kind) : null;
-              if (t && !adopted.some(a => a.id === t.id)) { adopted.push(t); count -= 1; }
-              if (count > 0) surplus.push({ type: it.type, count, subject: it.subject });
-            });
-            if (adopted.length && typeof onAdopted === 'function') await onAdopted(adopted);
-            if (surplus.length) await createActivityTasks({ items: surplus, typeField: meta && meta.api, contact, dateIso: when, ownerId });
-            items.forEach(it => done.push({ count: it.count, subject: it.subject }));
-          }
-          if (otherPicks.length) {
-            const hz = otherPicks.find(o => /hotzone/i.test(o.key));
-            await createAgentKpi({
-              owner: ownerName, owner_email: ownerEmail || null, kpi_date: when,
-              persons: [{
-                name: contact.name, contact_id: contact.id,
-                kpis: otherPicks.map(o => o.key),
-                hotzone_count: hz ? Number(sel[hz.key]) : null,
-              }],
-              others: [],
-            });
-            otherPicks.forEach(o => done.push({ count: Number(sel[o.key]), subject: o.key }));
-          }
-          onDone(contact.name, done);
-          onClose();
-        } catch (e) {
-          const p = e && e.partial;
-          if (p && p.made) onDone(contact.name, p.byType);
-          setErr((e && e.message) || String(e));
         } finally { setBusy(false); }
       }
 
@@ -7868,8 +7787,6 @@ Rules:
       const bord      = dark ? '#0D1E3A' : '#EDE7DC';
       const panelBg   = dark ? '#0A1730' : '#FFFFFF';
       const fieldBg   = dark ? '#040C1C' : '#FCFBF8';
-      const addBg     = dark ? 'rgba(173,131,47,0.15)' : '#F3EBDA';
-      const addCol    = dark ? '#C9A45A' : '#AD832F';
       const redCol    = dark ? '#F87171' : '#9B1C1C';
       const goBg      = dark ? '#AD832F' : '#001A4A';
       const btn = { flex: 1, padding: '10px 0', borderRadius: 10, border: 'none', fontFamily: J, fontSize: 10, fontWeight: 600, cursor: 'pointer' };
@@ -7894,10 +7811,20 @@ Rules:
               </div>
             )}
 
+            {mode === 'form' && !formPayload && (
+              <div>
+                <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, margin: '6px 0 12px', lineHeight: 1.5 }}>
+                  Everything entered here is credited to <b style={{ color: headTitle }}>{ownerName}</b>.
+                </div>
+                <KpiInlineForm dark={dark} ownerName={ownerName} initial={formSeed}
+                  onReview={(p) => { setFormSeed(p); setFormPayload(p); setSubmitErr(''); }} onCancel={onClose} />
+              </div>
+            )}
+
             {mode === 'notes' && !notePayload && (
               <div>
                 <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 10, lineHeight: 1.5 }}>
-                  Paste a note like <i>6/18 // Sam Smith lunch call // John Doe hotzone 3</i> — this becomes a KPI entry for <b style={{ color: headTitle }}>{ownerName}</b>.
+                  Paste a note like <i>6/18 // Sam Smith lunch call // John Doe hotzone 3</i> - this becomes a KPI entry for <b style={{ color: headTitle }}>{ownerName}</b>.
                 </div>
                 {noteMsgs.map((m, i) => (
                   <div key={i} style={{ marginBottom: 8, textAlign: m.role === 'user' ? 'right' : 'left' }}>
@@ -7906,140 +7833,25 @@ Rules:
                 ))}
                 {noteErr && <div style={{ fontFamily: J, fontSize: 9, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>{noteErr}</div>}
                 <textarea value={noteInput} onChange={e => setNoteInput(e.target.value)} disabled={noteBusy}
-                  placeholder="Paste or type your note…" rows={3} autoFocus
+                  placeholder="Paste or type your note..." rows={3} autoFocus
                   onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendNote(); } }}
                   style={{ width: '100%', resize: 'none', background: fieldBg, border: `1px solid ${bord}`, borderRadius: 10, padding: '9px 11px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <button onClick={onClose} disabled={noteBusy} style={{ ...btn, background: fieldBg, color: mutedCol, border: `1px solid ${bord}` }}>Cancel</button>
                   <button onClick={sendNote} disabled={noteBusy || !noteInput.trim()} style={{ ...btn, background: goBg, color: '#fff', opacity: (noteBusy || !noteInput.trim()) ? 0.5 : 1 }}>
-                    {noteBusy ? 'Thinking…' : 'Send'}
+                    {noteBusy ? 'Thinking...' : 'Send'}
                   </button>
                 </div>
               </div>
             )}
 
-            {mode === 'notes' && notePayload && (
+            {(formPayload || (mode === 'notes' && notePayload)) && (
               <div>
-                {noteSubmitErr && <div style={{ fontFamily: J, fontSize: 9, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>{noteSubmitErr}</div>}
-                <KpiSummary dark={dark} payload={notePayload} onBack={() => setNotePayload(null)} onConfirm={submitNotesKpi} />
+                {submitErr && <div style={{ fontFamily: J, fontSize: 9, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>{submitErr}</div>}
+                <KpiSummary dark={dark} payload={formPayload || notePayload}
+                  onBack={() => { if (formPayload) setFormPayload(null); else setNotePayload(null); }}
+                  onConfirm={(rp) => submitKpi(formPayload || notePayload, rp)} />
               </div>
-            )}
-
-            {mode === 'form' && !contact && (
-              <React.Fragment>
-                <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                  <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') runSearch(); }}
-                    placeholder="Search a contact…" autoFocus
-                    style={{ flex: 1, background: fieldBg, border: `1px solid ${bord}`, borderRadius: 10, padding: '9px 11px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
-                  <button onClick={runSearch} disabled={q.trim().length < 2 || searching}
-                    style={{ ...btn, flex: 'none', width: 64, background: goBg, color: '#fff', opacity: (q.trim().length < 2 || searching) ? 0.5 : 1 }}>
-                    {searching ? '…' : 'Find'}
-                  </button>
-                </div>
-                {hits && hits.length === 0 && !creating && (
-                  <div style={{ padding: '8px 2px' }}>
-                    <div style={{ fontFamily: J, fontSize: 9, color: mutedCol, marginBottom: 6 }}>No contact matched “{q.trim()}”.</div>
-                    <button onClick={startCreate} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: 'none', border: `1px dashed ${addCol}`, borderRadius: 9, padding: '7px 11px', color: addCol, fontFamily: J, fontSize: 9, fontWeight: 600, cursor: 'pointer' }}>
-                      <i className="ti ti-user-plus" style={{ fontSize: 12 }} /> Create “{q.trim()}”
-                    </button>
-                  </div>
-                )}
-                {creating && (
-                  <div style={{ display: 'grid', gap: 6, marginTop: 4 }}>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <input value={creating.first} onChange={e => setCreating(c => ({ ...c, first: e.target.value }))} placeholder="First name"
-                        style={{ flex: 1, minWidth: 0, background: fieldBg, border: `1px solid ${bord}`, borderRadius: 9, padding: '8px 10px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
-                      <input value={creating.last} onChange={e => setCreating(c => ({ ...c, last: e.target.value }))} placeholder="Last name"
-                        style={{ flex: 1, minWidth: 0, background: fieldBg, border: `1px solid ${bord}`, borderRadius: 9, padding: '8px 10px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
-                    </div>
-                    <input value={creating.mobile} onChange={e => setCreating(c => ({ ...c, mobile: e.target.value }))} placeholder="Mobile number (required)" inputMode="tel"
-                      style={{ background: fieldBg, border: `1px solid ${bord}`, borderRadius: 9, padding: '8px 10px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontFamily: J, fontSize: 9, color: mutedCol, flexShrink: 0 }}>Classification</span>
-                      {CONTACT_CLASS_OPTIONS.map(o => (
-                        <button key={o} onClick={() => setCreating(c => ({ ...c, classification: o }))}
-                          style={{ flex: 1, padding: '7px 0', borderRadius: 9, cursor: 'pointer', fontFamily: J, fontSize: 10, fontWeight: 700,
-                            border: `1px solid ${creating.classification === o ? addCol : bord}`,
-                            background: creating.classification === o ? addBg : 'transparent',
-                            color: creating.classification === o ? addCol : headTitle }}>{o}</button>
-                      ))}
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
-                      <button onClick={() => setCreating(null)} disabled={saving} style={{ ...btn, background: fieldBg, color: mutedCol, border: `1px solid ${bord}` }}>Cancel</button>
-                      <button onClick={saveNewContact} disabled={saving} style={{ ...btn, background: goBg, color: '#fff', opacity: saving ? 0.5 : 1 }}>{saving ? 'Saving…' : 'Create contact'}</button>
-                    </div>
-                    {err && <div style={{ fontFamily: J, fontSize: 9, color: redCol, lineHeight: 1.5 }}>{err}</div>}
-                  </div>
-                )}
-                {hits && hits.map(c => (
-                  <button key={c.id} onClick={() => pick(c)}
-                    style={{ display: 'block', width: '100%', textAlign: 'left', background: 'none', border: 'none', borderBottom: `1px solid ${bord}`, padding: '9px 2px', cursor: 'pointer' }}>
-                    <div style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: headTitle }}>{c.full_name || c.name}</div>
-                    {c.email && <div style={{ fontFamily: J, fontSize: 8, color: mutedCol }}>{c.email}</div>}
-                  </button>
-                ))}
-              </React.Fragment>
-            )}
-
-            {mode === 'form' && contact && (
-              <React.Fragment>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: headTitle, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{contact.name}</div>
-                    <div style={{ fontFamily: J, fontSize: 8, color: mutedCol, marginTop: 2 }}>
-                      {hist === 'loading' ? 'Checking call history…'
-                        : !hist ? 'No completed call on record — first touch.'
-                        : gapDays + ' day' + (gapDays === 1 ? '' : 's') + ' since the last call'
-                          + (interval ? ' · ' + tier + ' cadence is ' + interval + ' days' : ' · no tier on file')}
-                    </div>
-                  </div>
-                  <button onClick={() => { setContact(null); setHits(null); setSel({}); }} disabled={busy}
-                    style={{ ...btn, flex: 'none', width: 68, background: fieldBg, color: mutedCol, border: `1px solid ${bord}` }}>Change</button>
-                </div>
-
-                {dueForTouch === false && (
-                  <div style={{ fontFamily: J, fontSize: 8, lineHeight: 1.5, color: addCol, background: addBg, borderRadius: 8, padding: '7px 9px', marginBottom: 8 }}>
-                    Too soon for a touch call — the next one is due in about {Math.max(0, interval - gapDays)} days. Log this as a Follow Up Call unless it really was the cadence touch.
-                  </div>
-                )}
-
-                <div style={{ display: 'grid', gap: 4, marginBottom: 10 }}>
-                  {options.map(o => {
-                    const on = sel[o.key] !== undefined;
-                    return (
-                      <div key={o.key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 9px', borderRadius: 9, border: `1px solid ${on ? addCol : bord}`, background: on ? addBg : 'transparent' }}>
-                        <label style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', minWidth: 0 }}>
-                          <input type="checkbox" checked={on} onChange={() => toggle(o)} style={{ accentColor: goBg, cursor: 'pointer' }} />
-                          <span style={{ fontFamily: J, fontSize: 10, fontWeight: on ? 600 : 500, color: headTitle }}>{o.label}</span>
-                        </label>
-                        {on && o.requireCount && (
-                          <input type="number" inputMode="numeric" min="1" max={LOG_MAX_TASKS} value={sel[o.key]} onChange={e => setCount(o, e.target.value)}
-                            placeholder="how many" style={{ width: 82, background: fieldBg, border: `1px solid ${bord}`, borderRadius: 8, padding: '5px 8px', fontFamily: J, fontSize: 10, color: headTitle, outline: 'none' }} />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {claimingEarlyTouch && (
-                  <div style={{ fontFamily: J, fontSize: 8, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>
-                    You’re logging a touch call {gapDays} days after the last one, against a {interval}-day cadence. This is the case that gets sent for validation.
-                  </div>
-                )}
-                {(items.length > 0 || otherPicks.length > 0) && (
-                  <div style={{ fontFamily: J, fontSize: 8, color: mutedCol, marginBottom: 8, lineHeight: 1.6 }}>
-                    {items.map((it, i) => <div key={'c' + i}>{it.count} × {it.subject}</div>)}
-                    {otherPicks.map(o => <div key={'o' + o.key}>{Number(sel[o.key])} × {o.key} — {contact.name}</div>)}
-                  </div>
-                )}
-                {err && <div style={{ fontFamily: J, fontSize: 9, color: redCol, marginBottom: 8, lineHeight: 1.5 }}>{err}</div>}
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={onClose} disabled={busy} style={{ ...btn, background: fieldBg, color: mutedCol, border: `1px solid ${bord}` }}>Cancel</button>
-                  <button onClick={submit} disabled={!canAdd} style={{ ...btn, background: goBg, color: '#fff', opacity: canAdd ? 1 : 0.5 }}>
-                    {busy ? 'Saving…' : 'Log ' + (total || '') + ' KPI' + (total === 1 ? '' : 's')}
-                  </button>
-                </div>
-              </React.Fragment>
             )}
           </div>
         </div>

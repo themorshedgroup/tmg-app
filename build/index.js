@@ -16094,12 +16094,14 @@ function CallsTab({
       // Namespaced ids: both owners' fixtures come off the same generator,
       // so without this they collide and a write meant for one row patches
       // two. Real Zoho ids are unique.
+      // Fixture owners carry an email so the preview exercises the real delegation path
       const stamp = (list, o) => list.map(t => ({
         ...t,
         id: t.id + '-' + o.split(' ')[0].toLowerCase(),
         Owner: {
           name: o,
-          id: '5500000000009' + String(o.length)
+          id: '5500000000009' + String(o.length),
+          email: o.split(' ')[0].toLowerCase() + '@themorshedgroup.com'
         }
       }));
       const spread = (iso, n, seed) => team ? stamp(devCalls(iso, n, seed), 'Tarek Morshed').concat(stamp(devCalls(iso, Math.max(1, n - 2), seed + 4), 'Kyle Baird')) : stamp(devCalls(iso, n, seed), myOwner || 'Me');
@@ -16240,7 +16242,8 @@ function CallsTab({
         id: t.id + '-w-' + o.split(' ')[0].toLowerCase(),
         Owner: {
           name: o,
-          id: '5500000000009' + String(o.length)
+          id: '5500000000009' + String(o.length),
+          email: o.split(' ')[0].toLowerCase() + '@themorshedgroup.com'
         }
       }));
       const out = [];

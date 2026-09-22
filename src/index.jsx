@@ -6371,7 +6371,8 @@ Rules:
           // Namespaced ids: both owners' fixtures come off the same generator,
           // so without this they collide and a write meant for one row patches
           // two. Real Zoho ids are unique.
-          const stamp = (list, o) => list.map(t => ({ ...t, id: t.id + '-' + o.split(' ')[0].toLowerCase(), Owner: { name: o, id: '5500000000009' + String(o.length) } }));
+          // Fixture owners carry an email so the preview exercises the real delegation path
+          const stamp = (list, o) => list.map(t => ({ ...t, id: t.id + '-' + o.split(' ')[0].toLowerCase(), Owner: { name: o, id: '5500000000009' + String(o.length), email: o.split(' ')[0].toLowerCase() + '@themorshedgroup.com' } }));
           const spread = (iso, n, seed) => team
             ? stamp(devCalls(iso, n, seed), 'Tarek Morshed').concat(stamp(devCalls(iso, Math.max(1, n - 2), seed + 4), 'Kyle Baird'))
             : stamp(devCalls(iso, n, seed), myOwner || 'Me');
@@ -6452,7 +6453,7 @@ Rules:
         setWeekErr('');
         if (callsIsDev()) {
           await new Promise(r => setTimeout(r, 200));
-          const stamp = (list, o) => list.map(t => ({ ...t, id: t.id + '-w-' + o.split(' ')[0].toLowerCase(), Owner: { name: o, id: '5500000000009' + String(o.length) } }));
+          const stamp = (list, o) => list.map(t => ({ ...t, id: t.id + '-w-' + o.split(' ')[0].toLowerCase(), Owner: { name: o, id: '5500000000009' + String(o.length), email: o.split(' ')[0].toLowerCase() + '@themorshedgroup.com' } }));
           const out = [];
           weekDates.forEach((iso, i) => {
             const n = [4, 5, 3, 6, 2, 0, 0][i];

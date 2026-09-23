@@ -1,5 +1,20 @@
     const { useState, useEffect, useRef } = React;
 
+    // Close on outside click. One shared helper so every hand-built dropdown on
+    // this page behaves the same way. Native <select> already does this itself,
+    // and modals deliberately do not, so only the hand-built panels use it.
+    function useCloseOnOutside(open, close) {
+      const ref = useRef(null);
+      const cb = useRef(close); cb.current = close;
+      useEffect(() => {
+        if (!open) return;
+        function onDown(e) { if (ref.current && !ref.current.contains(e.target)) cb.current(); }
+        document.addEventListener('mousedown', onDown);
+        return () => document.removeEventListener('mousedown', onDown);
+      }, [open]);
+      return ref;
+    }
+
     // Embedded inside the TMG app (?embed=1): hide our own top bar; sync theme from the parent.
     const EMBED_PARAMS = new URLSearchParams(location.search);
     const EMBED = EMBED_PARAMS.get('embed') === '1';
@@ -948,6 +963,7 @@
       // editable) instead of typing a follow-up text from scratch.
       const [showTplPicker, setShowTplPicker] = useState(false);
       const [templates,     setTemplates]     = useState(null); // lazy-loaded: [day1, day2, day3, ack]
+      const tplRef = useCloseOnOutside(showTplPicker, () => setShowTplPicker(false));
       function openTplPicker() {
         setShowTplPicker(v => !v);
         if (!templates) DB.loadTemplates().then(setTemplates);
@@ -1177,28 +1193,30 @@
                 <div>
                   <div style={{ fontSize: '0.72rem', color: C.textMuted, marginBottom: 10 }}>{dispOffice}</div>
                   <SmsThread thread={localThread} />
-                  {/* Reply box header — template picker toggle */}
-                  <div style={{ marginTop: 20, paddingTop: 14, borderTop: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span style={{ fontSize: '0.62rem', fontWeight: 600, color: C.navy, letterSpacing: '0.1em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Reply</span>
-                    <button
-                      onClick={openTplPicker}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', color: showTplPicker ? C.gold : C.textMuted, fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: 4, fontFamily: C.fontSans }}
-                    ><i className="ti ti-message-2" style={{ fontSize: 13 }} />Use a template</button>
-                  </div>
-                  {/* Template picker — pre-fills the reply box; still editable before Send */}
-                  {showTplPicker && (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: '8px 0' }}>
-                      {templates
-                        ? SMS_TEMPLATE_DEFAULTS.map((t, i) => (
-                            <button
-                              key={t.touch}
-                              onClick={() => pickTemplate(templates[i])}
-                              style={{ padding: '5px 10px', borderRadius: 20, border: `1px solid ${C.border}`, background: C.surfaceHover, color: C.textPrimary, fontSize: '0.72rem', cursor: 'pointer', fontFamily: C.fontSans }}
-                            >{t.label}</button>
-                          ))
-                        : <span style={{ fontSize: '0.72rem', color: C.textMuted, padding: '5px 0' }}>Loading templates…</span>}
+                  <div ref={tplRef}>
+                    {/* Reply box header — template picker toggle */}
+                    <div style={{ marginTop: 20, paddingTop: 14, borderTop: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '0.62rem', fontWeight: 600, color: C.navy, letterSpacing: '0.1em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Reply</span>
+                      <button
+                        onClick={openTplPicker}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', color: showTplPicker ? C.gold : C.textMuted, fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: 4, fontFamily: C.fontSans }}
+                      ><i className="ti ti-message-2" style={{ fontSize: 13 }} />Use a template</button>
                     </div>
-                  )}
+                    {/* Template picker — pre-fills the reply box; still editable before Send */}
+                    {showTplPicker && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: '8px 0' }}>
+                        {templates
+                          ? SMS_TEMPLATE_DEFAULTS.map((t, i) => (
+                              <button
+                                key={t.touch}
+                                onClick={() => pickTemplate(templates[i])}
+                                style={{ padding: '5px 10px', borderRadius: 20, border: `1px solid ${C.border}`, background: C.surfaceHover, color: C.textPrimary, fontSize: '0.72rem', cursor: 'pointer', fontFamily: C.fontSans }}
+                              >{t.label}</button>
+                            ))
+                          : <span style={{ fontSize: '0.72rem', color: C.textMuted, padding: '5px 0' }}>Loading templates…</span>}
+                      </div>
+                    )}
+                  </div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
                     <textarea
                       rows={2}

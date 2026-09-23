@@ -1,5 +1,20 @@
     const { useState, useEffect, useMemo, useRef } = React;
 
+    // Close on outside click. One shared helper so every hand-built dropdown on
+    // this page behaves the same way. Native <select> already does this itself,
+    // and modals deliberately do not, so only the hand-built panels use it.
+    function useCloseOnOutside(open, close) {
+      const ref = useRef(null);
+      const cb = useRef(close); cb.current = close;
+      useEffect(() => {
+        if (!open) return;
+        function onDown(e) { if (ref.current && !ref.current.contains(e.target)) cb.current(); }
+        document.addEventListener('mousedown', onDown);
+        return () => document.removeEventListener('mousedown', onDown);
+      }, [open]);
+      return ref;
+    }
+
     // ─── Design tokens (TMG Brand — editorial dialect, matches crm.html) ──
     const C = {
       bg:'#FCFBF8', surface:'#FFFFFF', surfaceHover:'#F3EBDA', surfaceAlt:'#FAF8F3', border:'#E4DFD4',
@@ -559,6 +574,7 @@
       const [open, setOpen] = useState(false);
       const [busy, setBusy] = useState(false);
       const tRef = useRef(null);
+      const boxRef = useCloseOnOutside(open, () => setOpen(false));
 
       function search(text) {
         setQ(text); setOpen(true);
@@ -588,7 +604,7 @@
         );
       }
       return (
-        <div style={{ position:'relative' }}>
+        <div ref={boxRef} style={{ position:'relative' }}>
           <input value={q} onChange={e => search(e.target.value)} onFocus={() => setOpen(true)} placeholder="Search a contact…"
             style={{ width:'100%', fontFamily:C.fontSans, fontSize:'0.84rem', padding:'9px 12px', border:'1px solid '+C.border, borderRadius:9, background:C.surface, color:C.textPrimary, outline:'none' }} />
           {open && q.trim().length >= 2 && (
@@ -2803,6 +2819,7 @@ A classification IS the cadence. Without one there is no interval to date a call
       const [q, setQ] = useState('');
       const [sel, setSel] = useState({});            // filters
       const [showFilter, setShowFilter] = useState(false);
+      const filterRef = useCloseOnOutside(showFilter, () => setShowFilter(false));
       const [sortKey, setSortKey] = useState('due');
       const [sortDir, setSortDir] = useState('desc');
       const [drawer, setDrawer] = useState(null);    // { mode:'create'|'edit', task? } | null
@@ -3131,7 +3148,7 @@ A classification IS the cadence. Without one there is no interval to date a call
                 <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search subject, contact, notes…"
                   style={{ width:'100%', fontFamily:C.fontSans, fontSize:'0.82rem', padding:'9px 12px 9px 34px', border:'1px solid '+C.border, borderRadius:9, background:C.surface, color:C.textPrimary, outline:'none' }} />
               </div>
-              <div style={{ position:'relative' }}>
+              <div ref={filterRef} style={{ position:'relative' }}>
                 <button onClick={() => setShowFilter(s => !s)} style={{ ...iconBtn, color:activeFilters?C.gold:C.navy, borderColor:activeFilters?C.gold:C.border }}>
                   <i className="ti ti-filter" style={{ fontSize:15 }} /> Filter
                   {activeFilters > 0 && <span style={{ fontSize:'0.66rem', fontWeight:700, color:'#fff', background:C.gold, borderRadius:20, padding:'1px 7px' }}>{activeFilters}</span>}

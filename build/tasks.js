@@ -7,6 +7,24 @@ const {
   useCallback
 } = React;
 
+// Close on outside click. One shared helper so every hand-built dropdown on
+// this page behaves the same way. Native <select> already does this itself,
+// and modals deliberately do not, so only the hand-built panels use it.
+function useCloseOnOutside(open, close) {
+  const ref = useRef(null);
+  const cb = useRef(close);
+  cb.current = close;
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e) {
+      if (ref.current && !ref.current.contains(e.target)) cb.current();
+    }
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+  return ref;
+}
+
 // Standalone Tasks app (served at /tasks). Boots straight into the Tasks screen.
 const TASKS_STANDALONE = true;
 const TASKS_EMBED = (() => {
@@ -64,6 +82,23 @@ const DTAB_DEFAULT = {
 };
 const defaultDtab = kind => DTAB_DEFAULT[kind] || 'overview';
 const ROUTE_ID_RE = /^[0-9a-f-]{36}$/i;
+
+// Surface labels live here, not inside TasksScreen: the on-screen title,
+// the switcher menu and the browser tab title must never disagree, and the
+// tab title is written from two different components (see docTitle).
+const surfaceLabel = {
+  my: 'My Tasks',
+  ctc: 'CTC Files',
+  projects: 'Projects',
+  rocks: 'Rocks',
+  accountability: 'My Accountabilities'
+};
+// The house title shape, in one place: one label, then ' - TMG App'. Never
+// a breadcrumb, never a pipe (matches src/index.jsx and every static title
+// in this repo).
+const docTitle = label => {
+  document.title = label ? label + ' - TMG App' : 'TMG App';
+};
 
 // hash -> route, or null when it isn't ours (a tab token, #calendar,
 // #decisions, the OAuth #access_token=... hash, or empty).
@@ -3700,6 +3735,27 @@ const OrderDB = {
     }
   }
 };
+
+// ── Which tasklist belongs to which person ──
+// Zoho's per-person tasklists are named freehand ("Alexa (TC)",
+// "Symon (O.M.)", "Gustavo ( Finance Controller & Bookkeeper)"), so the
+// LEADING word is the only part that names anybody. What follows it can
+// name someone else entirely: "Luciana (E.A. to Tarek)" is Luciana's list,
+// not Tarek's, and matching the whole string files her work under him.
+const leadWord = str => (str || '').toLowerCase().replace(/[^a-z]+/g, ' ').trim().split(' ')[0] || '';
+// Either side may be the short form of the other ("Alexa" / "Alexandra"),
+// and three letters is the floor because two would match half the team.
+const leadWordHit = (a, b) => a.length >= 3 && b.length >= 3 && (a.startsWith(b) || b.startsWith(a));
+// The mirror of TaskDB.tasklistForAssignee: here the list is known and the
+// person is not. Returns null on no match AND on an ambiguous one. A task
+// created unassigned in the right list is something anyone can pick up; one
+// silently handed to the wrong person is the bug this path exists to stop.
+function memberForTasklistName(name, team) {
+  const w = leadWord(name);
+  if (w.length < 3) return null;
+  const hits = (team || []).filter(m => (!m.status || m.status === 'active') && leadWordHit(leadWord(m.name), w));
+  return hits.length === 1 ? hits[0] : null;
+}
 const TaskDB = {
   client() {
     return window.SupabaseAuth?._client || null;
@@ -3874,7 +3930,12 @@ const TaskDB = {
       decision_question: fields.decision_question || null,
       recurrence: fields.recurrence || 'none',
       parent_task_id: fields.parent_task_id || null,
-      created_by: user?.id || null
+      created_by: user?.id || null,
+      // Written on the row rather than waited for from Zoho: the List tab
+      // groups on these two, so a task added from a tasklist header has to
+      // already be in that group when the container re-hydrates.
+      zoho_tasklist_id: fields.zoho_tasklist_id || null,
+      zoho_tasklist_name: fields.zoho_tasklist_name || null
     };
     // is_milestone lives in wd (not base) so the column-fallback below still
     // strips it — "Add a milestone…" used to create a plain task because
@@ -3904,7 +3965,11 @@ const TaskDB = {
       console.error('[TaskDB] create:', error.message);
       throw error;
     }
-    await this.setPeople(data.id, people || {});
+    // Skip setPeople's own Zoho push: the create below is this task's one
+    // and only. Both calls read zoho_task_id as null and both took the
+    // create branch, so every new task on a synced project landed in Zoho
+    // twice, and only one of the two ever got its id written back.
+    await this.setPeople(data.id, people || {}, true);
     await this.addActivity(data.id, 'system', fields.parent_task_id ? 'Subtask created' : 'Task created', user);
     // Google Tasks is no longer pushed from here. The old version wrote to
     // whoever CREATED the task, which is the wrong person the moment you
@@ -3913,6 +3978,39 @@ const TaskDB = {
     // directions, for the person the task is actually assigned to.
     this.syncToZohoProjects(data, null, user);
     return data;
+  },
+  // Which Zoho tasklist a new task belongs in, when the project keeps one
+  // list per person. The poller's own rows carry no assignee at all, so a
+  // person's list can only be recognised by its NAME. Returns null when
+  // nothing matches, and the caller falls back to the project default.
+  async tasklistForAssignee(projectId, profs) {
+    const c = this.client();
+    if (!c || !projectId || !profs || !profs.length) return null;
+    const {
+      data: rows
+    } = await c.from('tasks').select('zoho_tasklist_id,zoho_tasklist_name').eq('project_id', projectId).not('zoho_tasklist_id', 'is', null);
+    if (!rows || !rows.length) return null;
+    const lists = {};
+    rows.forEach(r => {
+      const k = r.zoho_tasklist_id;
+      if (!k) return;
+      (lists[k] = lists[k] || {
+        id: k,
+        name: r.zoho_tasklist_name || '',
+        n: 0
+      }).n++;
+    });
+    // Leading word only, via the shared matcher above.
+    for (const p of profs) {
+      const fn = leadWord(p.first_name) || leadWord((p.email || '').split('@')[0]);
+      if (fn.length < 3) continue;
+      const hits = Object.keys(lists).map(k => lists[k]).filter(l => leadWordHit(leadWord(l.name), fn));
+      // One person with two lists ("Symon (O.M.)" and "Symon 2") is normal
+      // and the busier one is the live one. The id tiebreak stops the
+      // answer wobbling between saves.
+      if (hits.length) return hits.sort((a, b) => b.n - a.n || (a.id < b.id ? -1 : 1))[0].id;
+    }
+    return null;
   },
   // Push a task's synced fields (plan §2.1: title/description/due_at/
   // priority/status only) to its linked Zoho Projects project — but ONLY
@@ -3937,18 +4035,29 @@ const TaskDB = {
       // the edge function resolves this list against a cached portal
       // roster (2026-09-11 fix). No TMG assignee means Zoho ownership is
       // left exactly as-is rather than cleared.
-      let assigneeEmails = [];
+      let assigneeEmails = [],
+        assigneeProfiles = [];
       const {
         data: assignees
       } = await c.from('task_people').select('user_id').eq('task_id', task.id).eq('role', 'assignee');
       if (assignees && assignees.length) {
         const {
           data: profs
-        } = await c.from('profiles').select('email').in('id', assignees.map(a => a.user_id));
-        assigneeEmails = (profs || []).map(p => p.email).filter(Boolean);
+        } = await c.from('profiles').select('email,first_name').in('id', assignees.map(a => a.user_id));
+        assigneeProfiles = profs || [];
+        assigneeEmails = assigneeProfiles.map(p => p.email).filter(Boolean);
       }
       if (!task.zoho_task_id) {
-        if (!proj.zoho_tasklist_id) {
+        // Zoho files a task into exactly one tasklist, and a project's
+        // default list is one person's list, so it is only ever right for
+        // that one person. Projects like Accountabilities keep a list per
+        // person, and every task created here went into the default
+        // regardless of who it was assigned to (Alexa's task filed under
+        // "Tarek", 2026-09-23). Ask the assignee's own list first.
+        // An id already on the task was chosen on purpose (the plus on a
+        // tasklist header), so it outranks both the guess and the default.
+        const tasklistId = task.zoho_tasklist_id || (await this.tasklistForAssignee(task.project_id, assigneeProfiles)) || proj.zoho_tasklist_id;
+        if (!tasklistId) {
           await this.addActivity(task.id, 'system', 'Zoho Projects sync skipped — this CTC file has no default tasklist configured yet.', user);
           return;
         }
@@ -3958,7 +4067,7 @@ const TaskDB = {
         } = await callZohoProjects({
           action: 'create_task',
           project_id: proj.zoho_project_id,
-          tasklist_id: proj.zoho_tasklist_id,
+          tasklist_id: tasklistId,
           title: task.title,
           description: task.description || null,
           due_at: task.due_at || null,
@@ -4031,7 +4140,7 @@ const TaskDB = {
       }).eq('id', task.id);
     } catch (e) {/* fire-and-forget — a poll cycle will reconcile eventually */}
   },
-  async update(id, oldTask, fields, user) {
+  async update(id, oldTask, fields, user, skipZohoSync) {
     const c = this.client();
     if (!c) return;
     const patch = {
@@ -4108,7 +4217,15 @@ const TaskDB = {
         id
       }, user);
     }
-    this.syncToZohoProjects({
+    // This line is unconditional on purpose: update() has no short-circuit
+    // of its own, so whoever calls it knows a sync always follows unless
+    // they say otherwise. skipZohoSync is for the form-save path, which
+    // calls setPeople straight after us. setPeople fires its own sync, and
+    // ours would go first and read task_people BEFORE that rewrite, so a
+    // save that only changed the assignees would tell Zoho the OLD owner.
+    // Suppressing the LATER sync would have been the wrong half to drop.
+    // The caller only passes the flag when it knows setPeople will run.
+    if (!skipZohoSync) this.syncToZohoProjects({
       ...oldTask,
       ...fields,
       id
@@ -4284,7 +4401,7 @@ const TaskDB = {
       assignee: me
     } : p;
   },
-  async setPeople(taskId, people) {
+  async setPeople(taskId, people, skipZohoSync) {
     // { assignee:[ids], assigner:[ids], decision_maker:[ids] }
     const c = this.client();
     if (!c) return;
@@ -4315,7 +4432,10 @@ const TaskDB = {
     // Zoho Projects sync so a change made only through this method (no
     // other field edited) still reaches Zoho. Instant no-op for tasks
     // with no linked Zoho file (2026-09-11 fix).
-    if ('assignee' in people) {
+    // skipZohoSync is create()'s: it fires its own create straight after
+    // this one and two creates mean two Zoho tasks. Reassignment on an
+    // existing task never passes it, so that path is untouched.
+    if ('assignee' in people && !skipZohoSync) {
       const {
         data: t
       } = await c.from('tasks').select('*').eq('id', taskId).single();
@@ -6078,6 +6198,7 @@ function DateField({
   const navy = '#001A4A';
   const J = C.fontSans;
   const [open, setOpen] = useState(false);
+  const ddRef = useCloseOnOutside(open, () => setOpen(false));
   const parse = v => {
     if (!v) return null;
     const p = String(v).split('-');
@@ -6135,6 +6256,7 @@ function DateField({
     year: 'numeric'
   }) : placeholder || 'Select date';
   return /*#__PURE__*/React.createElement("div", {
+    ref: ddRef,
     style: {
       flex: '1 1 150px',
       minWidth: 0
@@ -6382,8 +6504,8 @@ function CopyLinkBtn({
 }
 
 // Multi-select dropdown for team pickers (Assignees / Assigned by) — same
-// click-to-open-panel convention as DateField above (no outside-click
-// handling anywhere in this codebase, so this doesn't add it either).
+// click-to-open-panel convention as DateField above, including its
+// close-on-outside-click behaviour.
 function PeopleDropdown({
   dark,
   team,
@@ -6394,6 +6516,7 @@ function PeopleDropdown({
   const gold = dark ? '#C9A45A' : '#AD832F';
   const J = C.fontSans;
   const [open, setOpen] = useState(false);
+  const ddRef = useCloseOnOutside(open, () => setOpen(false));
   const bord = dark ? '#152545' : '#E4DFD4',
     ink = dark ? '#fff' : '#001A4A',
     sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B';
@@ -6412,7 +6535,9 @@ function PeopleDropdown({
   const nameOf = id => (team.find(m => m.id === id) || {}).name || '—';
   const display = arr.length ? arr.map(nameOf).join(', ') : placeholder || 'Select…';
   const toggle = id => set(arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]);
-  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  return /*#__PURE__*/React.createElement("div", {
+    ref: ddRef
+  }, /*#__PURE__*/React.createElement("div", {
     onClick: () => setOpen(o => !o),
     style: {
       ...inp,
@@ -6545,6 +6670,7 @@ function TaskForm({
   const [newProjMode, setNewProjMode] = useState(false);
   const [priority, setPriority] = useState(t.priority || 'medium');
   const [status, setStatus] = useState(t.status || 'todo');
+  const [isMilestone, setIsMilestone] = useState(!!t.is_milestone);
   const [myLabels, setMyLabels] = useState([]);
   const [labelInput, setLabelInput] = useState('');
   // Seed people from `_people` (raw task_people rows) when the explicit
@@ -6753,6 +6879,7 @@ function TaskForm({
         project,
         priority,
         status,
+        is_milestone: isMilestone,
         assignees,
         assigners,
         working_url: workingUrl.trim(),
@@ -7075,7 +7202,32 @@ function TaskForm({
     style: {
       flex: 1
     }
-  }, field('Priority', sel(priority, setPriority, TASK_PRIORITY)))), field('Project', /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("select", {
+  }, field('Priority', sel(priority, setPriority, TASK_PRIORITY)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setIsMilestone(v => !v),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7,
+      padding: '8px 12px',
+      borderRadius: 14,
+      border: `1px solid ${isMilestone ? C.navy : bord}`,
+      background: isMilestone ? C.navy : dark ? '#06101F' : '#fff',
+      color: isMilestone ? '#fff' : sub,
+      fontSize: '0.76rem',
+      cursor: 'pointer',
+      fontFamily: C.fontSans
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-flag-3",
+    style: {
+      fontSize: 13
+    }
+  }), isMilestone ? '✓ Milestone' : 'Mark as a milestone')), field('Project', /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("select", {
     value: newProjMode ? '__new__' : project || '',
     onChange: e => {
       const v = e.target.value;
@@ -10146,8 +10298,6 @@ function ProjectsSurface({
   const [searchOpen, setSearchOpen] = useState(false);
   const [groupOpen, setGroupOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
-  const [addTask, setAddTask] = useState('');
-  const [addMs, setAddMs] = useState('');
   // Container detail: Overview/List/Board tabs, and the task opened from
   // any of them (fixes tasks-inside-a-project being unopenable — they now
   // reuse the exact same TaskDetail/TaskForm as everywhere else).
@@ -10158,7 +10308,11 @@ function ProjectsSurface({
   // nothing else — no description, no due date, no assignee — because the
   // full form was only ever wired to open on an EXISTING task. This opens
   // it for a new one, with the file already filled in.
-  const [newTaskOpen, setNewTaskOpen] = useState(null); // null | seed title
+  const [newTaskOpen, setNewTaskOpen] = useState(null); // null | seed object for TaskForm
+  const [tlAdd, setTlAdd] = useState(null); // null | { key: tasklist id, val, err }, the inline add under one tasklist header
+  // A ref, not state: the second Enter of a fast double-tap arrives before
+  // any re-render, so a state flag would still be false when it lands.
+  const tlAddBusy = useRef(false);
   const [subsOpen, setSubsOpen] = useState({}); // parent id -> subtasks shown
   // A reorder that fails must say so. A silent snap-back looks like the
   // app losing your work.
@@ -10338,6 +10492,7 @@ function ProjectsSurface({
   const [pErr, setPErr] = useState('');
   const [pRemoving, setPRemoving] = useState(null); // link id mid-removal
   const [pSugErr, setPSugErr] = useState(false); // the lookup itself failed
+  const pSugRef = useCloseOnOutside(pSugOpen, () => setPSugOpen(false));
 
   //  Reading a deal's parties is a two-hop Zoho call, so it routinely takes
   //  seconds and two of them can land out of order. Every load takes a
@@ -10619,6 +10774,18 @@ function ProjectsSurface({
     // nothing else here, so the hash kept the previous surface's token and
     // a refresh landed on the wrong surface (audit C2).
   }, [kind, current && current.id, dtab, pview, ctcTab, openId, routeMiss]);
+
+  // Tab title, on the same split as the hash writer above: while this
+  // surface is mounted it owns the tab, list and record alike. The label is
+  // the most specific thing on screen (the open record's own name, else the
+  // surface's label from the SAME map the on-screen title reads, so the two
+  // cannot disagree). Skipped in the iframe: a title written in there never
+  // reaches the tab and only fights the parent page.
+  useEffect(() => {
+    if (TASKS_EMBED) return;
+    const rec = pview === 'detail' && current ? current : null;
+    docTitle(rec && rec.name || surfaceLabel[ROUTE_SURFACE_BY_SEG[ROUTE_SEG_BY_KIND[kind]]]);
+  }, [kind, pview, current && current.id, current && current.name]);
   const wide = useWide(700);
   useEffect(() => {
     localStorage.setItem(gKey, group);
@@ -10824,7 +10991,8 @@ function ProjectsSurface({
       weekly_priority: pl.wp || null,
       weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null,
       daily_priority: pl.dp || null,
-      daily_rank: pl.dr ? parseInt(pl.dr, 10) : null
+      daily_rank: pl.dr ? parseInt(pl.dr, 10) : null,
+      is_milestone: !!form.is_milestone
     };
     const people = {
       assignee: form.assignees,
@@ -10833,9 +11001,13 @@ function ProjectsSurface({
     };
     let taskId;
     if (openTask && openTask.id) {
-      await TaskDB.update(openTask.id, openTask, fields, user);
       let known = openTask._people;
-      if (!known) known = await TaskDB.loadPeopleFor(openTask.id); // the pre-fetch failed — one more try before skipping
+      if (!known) known = await TaskDB.loadPeopleFor(openTask.id); // the pre-fetch failed, one more try before skipping
+      // Exactly one Zoho push per save. setPeople runs last and so is the
+      // only one that sees the assignees this save just wrote, which makes
+      // it the one to keep. When people could not be read we skip setPeople
+      // entirely, and then update has to keep its own or nothing goes out.
+      await TaskDB.update(openTask.id, openTask, fields, user, !!known);
       if (known) await TaskDB.setPeople(openTask.id, people);
       taskId = openTask.id;
     } else if (form.bulkGroup) {
@@ -10861,6 +11033,57 @@ function ProjectsSurface({
     }
     setTaskEditing(false);
     await refreshContainer(taskId, true);
+  }
+
+  // Add straight into one Zoho tasklist, from the plus on its own header.
+  // The id is passed explicitly rather than guessed: the header already
+  // answers which list this is, and the project default (which is one
+  // person's list) would otherwise capture it, which is how a task assigned
+  // to Alexandra ended up filed under "Tarek".
+  async function addToTasklist(tasklistId, tasklistName) {
+    const g = tlAdd;
+    if (!g) return;
+    const title = (g.val || '').trim();
+    if (!title) return;
+    if (tlAddBusy.current) return;
+    tlAddBusy.current = true;
+    // No match means nobody, never a guess. An unassigned task in the right
+    // list is something anyone can pick up; the wrong name on it is not.
+    const who = memberForTasklistName(tasklistName, team);
+    try {
+      const made = await TaskDB.create({
+        title,
+        status: 'todo',
+        priority: 'medium',
+        project_id: current ? current.id : null,
+        zoho_tasklist_id: tasklistId,
+        zoho_tasklist_name: tasklistName
+      }, who ? {
+        assignee: [who.id]
+      } : {}, user);
+      // create() throws on a failed insert but RETURNS NULL when there is no
+      // client at all (signed out, or a cold tab before auth attaches). The
+      // null read as success and cleared the box with nothing saved.
+      if (!made) throw new Error('not connected, check you are still signed in');
+    }
+    // Leave what they typed where it is, and say so right under the box:
+    // the reorder bar at the top of this list is off-screen on a file with
+    // a dozen headers, which is exactly when this box gets used.
+    catch (e) {
+      setTlAdd(x => x && x.key === g.key ? {
+        ...x,
+        err: 'Could not add this: ' + (e && e.message || 'the save failed') + '. It is still here, try again.'
+      } : x);
+      return;
+    } finally {
+      tlAddBusy.current = false;
+    }
+    setTlAdd(x => x && x.key === g.key ? {
+      ...x,
+      val: '',
+      err: null
+    } : x);
+    await refreshContainer(null, false);
   }
   const nameOf = id => (team.find(m => m.id === id) || {}).name || '';
   const initialsOf = id => {
@@ -11225,7 +11448,10 @@ function ProjectsSurface({
     color: ink,
     background: dark ? 'rgba(201,164,90,.14)' : '#F3EBDA'
   };
+  const groupRef = useCloseOnOutside(groupOpen, () => setGroupOpen(false));
+  const sortRef = useCloseOnOutside(sortOpen, () => setSortOpen(false));
   const groupChip = /*#__PURE__*/React.createElement("div", {
+    ref: groupRef,
     style: {
       position: 'relative'
     }
@@ -11257,6 +11483,7 @@ function ProjectsSurface({
     setGroupOpen(false);
   }, id))));
   const sortChip = /*#__PURE__*/React.createElement("div", {
+    ref: sortRef,
     style: {
       position: 'relative'
     }
@@ -11512,8 +11739,6 @@ function ProjectsSurface({
     onClick: () => {
       setCurrent(p);
       setPview('detail');
-      setAddTask('');
-      setAddMs('');
     },
     style: {
       background: card,
@@ -11620,8 +11845,6 @@ function ProjectsSurface({
     onClick: () => {
       setCurrent(p);
       setPview('detail');
-      setAddTask('');
-      setAddMs('');
     },
     style: {
       display: 'flex',
@@ -11757,8 +11980,6 @@ function ProjectsSurface({
       onClick: () => {
         setCurrent(p);
         setPview('detail');
-        setAddTask('');
-        setAddMs('');
       },
       style: {
         background: card,
@@ -11917,8 +12138,6 @@ function ProjectsSurface({
       onClick: () => {
         setCurrent(p);
         setPview('detail');
-        setAddTask('');
-        setAddMs('');
       },
       style: {
         display: 'flex',
@@ -12106,19 +12325,6 @@ function ProjectsSurface({
   };
 
   // ── DETAIL ──
-  async function quickAdd(title, milestone) {
-    if (!title.trim() || !current) return;
-    await TaskDB.create({
-      title: title.trim(),
-      status: 'todo',
-      priority: 'medium',
-      project_id: current.id,
-      is_milestone: !!milestone
-    }, {}, user);
-    const fresh = await reload();
-    const updated = fresh.find(p => p.id === current.id);
-    if (updated) setCurrent(updated);
-  }
   const spineItem = (p, m, last) => {
     const st = msState(p, m);
     return /*#__PURE__*/React.createElement("div", {
@@ -12208,7 +12414,8 @@ function ProjectsSurface({
   }, /*#__PURE__*/React.createElement(TaskForm, {
     dark: dark,
     task: {
-      title: newTaskOpen || '',
+      title: '',
+      ...(newTaskOpen || {}),
       _projectName: current && current.name || ''
     },
     team: team,
@@ -12471,7 +12678,7 @@ function ProjectsSurface({
       }
     }, kids.map(k => rowFn(k, true))));
   };
-  const detailTaskRow = (t, isChild) => /*#__PURE__*/React.createElement("div", _extends({
+  const detailTaskRow = (t, isChild, guessedList) => /*#__PURE__*/React.createElement("div", _extends({
     key: t.id,
     onClick: () => openTaskFull(t)
   }, isChild ? {} : {
@@ -12536,7 +12743,21 @@ function ProjectsSurface({
       whiteSpace: 'nowrap',
       fontFamily: C.fontSans
     }
-  }, "\u25C6 Milestone"), /*#__PURE__*/React.createElement("span", {
+  }, "\u25C6 Milestone"), guessedList && /*#__PURE__*/React.createElement("span", {
+    title: "Shown under this name because it is assigned to them. It has not reached Zoho yet, so Zoho has not filed it in a list.",
+    style: {
+      color: sub,
+      fontSize: '0.6rem',
+      fontWeight: 600,
+      border: `1px solid ${bord}`,
+      borderRadius: 4,
+      padding: '1px 6px',
+      letterSpacing: '0.04em',
+      flexShrink: 0,
+      whiteSpace: 'nowrap',
+      fontFamily: C.fontSans
+    }
+  }, "Not in Zoho yet"), /*#__PURE__*/React.createElement("span", {
     style: {
       flex: 1,
       minWidth: 0,
@@ -12571,134 +12792,6 @@ function ProjectsSurface({
       fontFamily: C.fontSans
     }
   }, fmtD(t.due_at)));
-  // Matches the prototype's .quickadd (padding 10px 12px, 6px radius).
-  const addInputs = /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 12,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    value: addMs,
-    onChange: e => setAddMs(e.target.value),
-    onKeyDown: e => {
-      if (e.key === 'Enter') {
-        quickAdd(addMs, true);
-        setAddMs('');
-      }
-    },
-    placeholder: "Add a milestone\u2026",
-    style: {
-      flex: 1,
-      padding: '10px 12px',
-      background: dark ? '#06101F' : '#fff',
-      border: `1px solid ${bord}`,
-      borderRadius: 6,
-      color: ink,
-      fontSize: 14,
-      outline: 'none',
-      fontFamily: C.fontSans
-    }
-  }), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      quickAdd(addMs, true);
-      setAddMs('');
-    },
-    disabled: !addMs.trim(),
-    style: {
-      padding: '8px 12px',
-      background: dark ? '#06101F' : '#fff',
-      border: `1px solid ${bord}`,
-      borderRadius: 6,
-      color: gold,
-      fontSize: 12,
-      fontWeight: 500,
-      cursor: 'pointer',
-      fontFamily: C.fontSans,
-      opacity: addMs.trim() ? 1 : 0.5,
-      display: 'flex',
-      alignItems: 'center',
-      gap: 5
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-flag-3",
-    style: {
-      fontSize: 12
-    }
-  }), "Milestone")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    value: addTask,
-    onChange: e => setAddTask(e.target.value),
-    onKeyDown: e => {
-      if (e.key === 'Enter') {
-        quickAdd(addTask, false);
-        setAddTask('');
-      }
-    },
-    placeholder: "Add a task\u2026",
-    style: {
-      flex: 1,
-      padding: '10px 12px',
-      background: dark ? '#06101F' : '#fff',
-      border: `1px solid ${bord}`,
-      borderRadius: 6,
-      color: ink,
-      fontSize: 14,
-      outline: 'none',
-      fontFamily: C.fontSans
-    }
-  }), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      quickAdd(addTask, false);
-      setAddTask('');
-    },
-    disabled: !addTask.trim(),
-    style: {
-      padding: '8px 13px',
-      background: C.navy,
-      color: '#fff',
-      border: 'none',
-      borderRadius: 6,
-      fontSize: 12,
-      fontWeight: 500,
-      cursor: 'pointer',
-      fontFamily: C.fontSans,
-      opacity: addTask.trim() ? 1 : 0.5
-    }
-  }, "Add task")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setNewTaskOpen(addTask.trim());
-      setAddTask('');
-    },
-    style: {
-      alignSelf: 'flex-start',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      background: 'none',
-      border: 'none',
-      padding: '2px 0',
-      color: gold,
-      fontSize: 12,
-      cursor: 'pointer',
-      fontFamily: C.fontSans
-    }
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-plus",
-    style: {
-      fontSize: 12
-    }
-  }), "New task with a description, dates and people"));
   // Relative-time label for "Last synced" (no existing helper in this
   // file covers this — fmtD is absolute-date-only).
   const timeAgo = iso => {
@@ -13082,15 +13175,76 @@ function ProjectsSurface({
   const listTab = p => {
     const tasklistNames = p._tasks.some(t => t.zoho_tasklist_name);
     if (tasklistNames) {
+      // The grouping runs off tasklist names left on old rows, so it still
+      // appears after syncing is paused (or the file is unlinked) and the
+      // plus comes with it. syncToZohoProjects then returns early with no
+      // activity line and no signal, so the task is saved here and nowhere
+      // else. The plus stays: everywhere else on this screen a paused file
+      // keeps its controls and is simply labelled ("Linked · paused", the
+      // amber dot), and hiding the only way to file into a named list would
+      // be a bigger loss than the confusion it saves. The inline row says
+      // plainly where the task will and will not go instead.
+      const zohoOffNote = zohoSyncable && p.zoho_sync_enabled && p.zoho_project_id ? null : zohoSyncable && p.zoho_project_id ? 'Zoho syncing is paused for this file, so this is saved here only. It will not reach Zoho until syncing is resumed.' : 'This file is not linked to Zoho, so this is saved here only.';
+      // A task that has never reached Zoho carries no tasklist, so all of
+      // them piled into "Other tasks" (29 of 52 on Accountabilities, the
+      // meeting-agenda import). Where the file keeps one list per person we
+      // can show them under the person they are assigned to instead.
+      // PRESENTATION ONLY: the guess is never written back, because
+      // zoho_tasklist_id/_name are the record of what Zoho actually did and
+      // a guess stored there would be indistinguishable from a real sync to
+      // both push paths.
+      const listSize = {};
+      const listId = {};
+      p._tasks.forEach(t => {
+        const n = t.zoho_tasklist_name;
+        if (!n) return;
+        listSize[n] = (listSize[n] || 0) + 1;
+        if (t.zoho_tasklist_id && !listId[n]) listId[n] = t.zoho_tasklist_id;
+      });
+      // One list per PERSON, not per name: "Symon (O.M.)" and "Symon 2" are
+      // both Symon, so counting lists would read a one-person file as
+      // per-person. Busiest list wins, and the tasklist ID breaks the tie,
+      // byte for byte the rule TaskDB.tasklistForAssignee uses. Breaking it
+      // on the NAME instead would show a task under one of Symon's lists and
+      // then sync it into the other, which reads as the task moving on its own.
+      const listForMember = {};
+      Object.keys(listSize).forEach(n => {
+        const m = memberForTasklistName(n, team);
+        if (!m) return;
+        const cur = listForMember[m.id];
+        if (!cur || listSize[n] > listSize[cur] || listSize[n] === listSize[cur] && String(listId[n] || n) < String(listId[cur] || cur)) listForMember[m.id] = n;
+      });
+      // Two distinct PEOPLE is the test. A CTC file's lists are stage names
+      // ("Pre-List", "Clear to Close") and match nobody, so it keeps
+      // behaving exactly as it does today.
+      const perPerson = Object.keys(listForMember).length >= 2;
+      const guessed = {}; // task id -> placed by assignee, not by Zoho
       const groups = {};
       p._tasks.filter(t => !isChildHere(t)).forEach(t => {
-        const key = t.zoho_tasklist_name || 'Other tasks';
+        let key = t.zoho_tasklist_name || 'Other tasks';
+        if (!t.zoho_tasklist_name && perPerson) {
+          // No assignee, or an assignee nobody's list matches, stays in
+          // "Other tasks": a wrong home is worse than an honest catch-all.
+          // task_people is paged with no ORDER BY, so taking the first
+          // assignee that resolved made a two-assignee task jump between
+          // two headers on consecutive loads with nobody touching it.
+          const mine = (t._people || []).filter(x => x.role === 'assignee').map(x => listForMember[x.user_id]).filter(Boolean).sort((a, b) => String(listId[a] || a) < String(listId[b] || b) ? -1 : 1)[0];
+          if (mine) {
+            key = mine;
+            guessed[t.id] = true;
+          }
+        }
         (groups[key] = groups[key] || []).push(t);
       });
       const earliest = arr => Math.min(...arr.map(t => t.created_at ? new Date(t.created_at).getTime() : Date.now()));
+      // The header reads off a row Zoho actually filed, never simply the
+      // first row in the group: an optimistically placed row carries no
+      // tasklist id, and landing first it would blank both the order key
+      // and the plus for a list that really does have one.
+      const gsrc = name => groups[name].find(t => t.zoho_tasklist_id) || groups[name][0];
       // Keyed on the Zoho tasklist id where there is one, so renaming a
       // list in Zoho keeps the position somebody set by hand here.
-      const gkey = name => gkeyOf(groups[name][0]);
+      const gkey = name => gkeyOf(gsrc(name));
       const tlo = p._tlOrder || {};
       const order = Object.keys(groups).sort((a, b) => {
         const ra = tlo[gkey(a)],
@@ -13109,34 +13263,117 @@ function ProjectsSurface({
           minWidth: 0,
           overflowY: 'auto'
         }
-      }, orderErrBar, order.map(key => /*#__PURE__*/React.createElement("div", {
-        key: key,
-        style: {
-          marginBottom: 16
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        "data-drag-kind": "tasklist",
-        "data-drag-id": gkey(key),
-        style: {
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          marginBottom: 7,
-          ...dragRowStyle(tlDrag, gkey(key), gold, undefined)
-        }
-      }, dragGrip(tlDrag, 'tasklist', gkey(key), {
-        color: sub,
-        onArrow: d => moveTasklistBy(gkey(key), d)
-      }), /*#__PURE__*/React.createElement("span", {
-        style: {
-          fontSize: '0.64rem',
-          fontWeight: 700,
-          letterSpacing: '0.1em',
-          textTransform: 'uppercase',
+      }, orderErrBar, order.map(key => {
+        // Only a header that names a real Zoho tasklist gets the plus.
+        // "Other tasks" is the catch-all for rows that have none, so
+        // there is no list there to file anything into.
+        const tlId = key === 'Other tasks' ? null : gsrc(key).zoho_tasklist_id;
+        const open = !!(tlId && tlAdd && tlAdd.key === tlId);
+        const who = tlId ? memberForTasklistName(key, team) : null;
+        const hint = who ? 'Add a task for ' + who.name : 'Add a task in ' + key;
+        const toggleTlAdd = () => setTlAdd(g => g && g.key === tlId ? null : {
+          key: tlId,
+          val: ''
+        });
+        return /*#__PURE__*/React.createElement("div", {
+          key: key,
+          style: {
+            marginBottom: 16
+          }
+        }, /*#__PURE__*/React.createElement("div", {
+          "data-drag-kind": "tasklist",
+          "data-drag-id": gkey(key),
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            marginBottom: 7,
+            ...dragRowStyle(tlDrag, gkey(key), gold, undefined)
+          }
+        }, dragGrip(tlDrag, 'tasklist', gkey(key), {
           color: sub,
-          fontFamily: C.fontSans
-        }
-      }, key, " \xB7 ", groups[key].length)), groups[key].map(withSubs(detailTaskRow)))), addInputs);
+          onArrow: d => moveTasklistBy(gkey(key), d)
+        }), /*#__PURE__*/React.createElement("span", {
+          style: {
+            fontSize: '0.64rem',
+            fontWeight: 700,
+            letterSpacing: '0.1em',
+            textTransform: 'uppercase',
+            color: sub,
+            fontFamily: C.fontSans
+          }
+        }, key, " \xB7 ", groups[key].length), tlId && /*#__PURE__*/React.createElement("i", {
+          className: 'ti ti-' + (open ? 'x' : 'plus'),
+          title: hint,
+          "aria-label": hint,
+          role: "button",
+          tabIndex: 0,
+          onClick: e => {
+            e.stopPropagation();
+            toggleTlAdd();
+          },
+          onKeyDown: e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              toggleTlAdd();
+            }
+          },
+          style: {
+            fontSize: 13,
+            color: sub,
+            opacity: open ? 0.9 : 0.4,
+            cursor: 'pointer',
+            flexShrink: 0
+          }
+        })), open && /*#__PURE__*/React.createElement("div", {
+          style: {
+            padding: '0 0 10px'
+          }
+        }, /*#__PURE__*/React.createElement("div", {
+          style: {
+            display: 'flex',
+            gap: 8
+          }
+        }, /*#__PURE__*/React.createElement("input", {
+          autoFocus: true,
+          value: tlAdd.val,
+          onChange: e => setTlAdd(g => g ? {
+            ...g,
+            val: e.target.value,
+            err: null
+          } : g),
+          onKeyDown: e => {
+            if (e.key === 'Enter') addToTasklist(tlId, key);else if (e.key === 'Escape') setTlAdd(null);
+          },
+          placeholder: hint + ' and press Enter…',
+          style: {
+            flex: 1,
+            padding: '9px 12px',
+            background: dark ? '#0A1730' : '#fff',
+            border: `1px solid ${tlAdd.err ? lateColor : bord}`,
+            borderRadius: 6,
+            color: ink,
+            fontSize: 14,
+            outline: 'none',
+            fontFamily: C.fontSans
+          }
+        })), tlAdd.err && /*#__PURE__*/React.createElement("div", {
+          style: {
+            marginTop: 5,
+            fontSize: '0.68rem',
+            color: lateColor,
+            fontFamily: C.fontSans
+          }
+        }, tlAdd.err), zohoOffNote && /*#__PURE__*/React.createElement("div", {
+          style: {
+            marginTop: 5,
+            fontSize: '0.68rem',
+            color: sub,
+            fontFamily: C.fontSans
+          }
+        }, zohoOffNote)), groups[key].map(withSubs((t, isChild) => detailTaskRow(t, isChild, !!guessed[t.id]))));
+      }));
     }
     return /*#__PURE__*/React.createElement("div", {
       style: {
@@ -13189,7 +13426,7 @@ function ProjectsSurface({
           fontFamily: C.fontSans
         }
       }, col.label, " \xB7 ", items.length)), items.map(withSubs(detailTaskRow)));
-    }), addInputs);
+    }));
   };
   const boardTab = p => /*#__PURE__*/React.createElement(TaskBoard, {
     items: p._tasks,
@@ -13224,16 +13461,16 @@ function ProjectsSurface({
         fontFamily: C.fontSans,
         marginBottom: 6
       }
-    }, "No milestones yet. Add one below, or flag any task as a milestone."), /*#__PURE__*/React.createElement("div", {
+    }, "No milestones yet. Tick Milestone on any task, new or existing."), /*#__PURE__*/React.createElement("div", {
       style: {
         paddingLeft: 2
       }
     }, p._milestones.map((m, i) => spineItem(p, m, i === p._milestones.length - 1))));
     // The Open-tasks list used to live here; it's gone from the Overview
     // (the List/Board tabs are the place for tasks, and on a synced CTC
-    // file it was a 100-row wall). addInputs STAYS — it carries the "Add a
-    // milestone" and "Add a task" inputs, which are the only way to add
-    // either from this screen.
+    // file it was a 100-row wall). The quick-add inputs that used to sit
+    // under it are gone too: Add task in the header opens the full form,
+    // which is also the only place the Milestone flag is set now.
     const dealRow = (k, v) => /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
@@ -13672,6 +13909,7 @@ function ProjectsSurface({
         background: dark ? 'rgba(255,255,255,.03)' : '#FAF8F4'
       }
     }, /*#__PURE__*/React.createElement("div", {
+      ref: pSugRef,
       style: {
         position: 'relative',
         marginBottom: 8
@@ -13907,7 +14145,7 @@ function ProjectsSurface({
         fontFamily: C.fontSans,
         marginTop: 3
       }
-    }, u.source === 'email' ? 'From email' : u.source, " \xB7 ", fmtD(u.created_at)))))), addInputs);
+    }, u.source === 'email' ? 'From email' : u.source, " \xB7 ", fmtD(u.created_at)))))));
     const header = /*#__PURE__*/React.createElement("div", {
       style: {
         padding: wide ? '26px 34px 0' : '12px 14px',
@@ -13972,7 +14210,32 @@ function ProjectsSurface({
       dark: dark,
       hash: (ROUTE_SEG_BY_KIND[p.record_type || kind] || 'project') + '/' + p.id + (dtab && dtab !== defaultDtab(p.record_type || kind) ? '/' + dtab : ''),
       title: 'Copy a link straight to this ' + KL.singular.toLowerCase()
-    }), zohoSyncable && (p.zoho_project_id ? /*#__PURE__*/React.createElement(React.Fragment, null, zohoChip('projects', {
+    }), /*#__PURE__*/React.createElement("button", {
+      onClick: () => setNewTaskOpen({}),
+      title: 'Add a task to this ' + KL.singular.toLowerCase(),
+      style: {
+        fontSize: 12,
+        fontWeight: 400,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        color: '#fff',
+        background: C.navy,
+        border: `1px solid ${C.navy}`,
+        borderRadius: 6,
+        padding: '7px 12px',
+        cursor: 'pointer',
+        fontFamily: C.fontSans,
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-plus",
+      style: {
+        fontSize: 13
+      }
+    }), "Add task"), zohoSyncable && (p.zoho_project_id ? /*#__PURE__*/React.createElement(React.Fragment, null, zohoChip('projects', {
       logo: 'zoho-projects.svg',
       alt: 'Zoho Projects',
       href: zohoProjectUrl(portalBase, p.zoho_project_id),
@@ -15489,7 +15752,7 @@ function TaskMailbox({
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
   const [pickerFor, setPickerFor] = useState(null); // threadId with its picker open
-
+  const pickerRef = useCloseOnOutside(pickerFor, () => setPickerFor(null));
   const sub = dark ? 'rgba(255,255,255,0.55)' : '#54607A';
   const ink = dark ? '#fff' : '#12203D';
   const bord = dark ? '#152545' : '#E4DFD4';
@@ -15723,6 +15986,7 @@ function TaskMailbox({
     const linked = linkedTasksFor(th.id);
     return /*#__PURE__*/React.createElement("div", {
       key: th.id,
+      ref: pickerFor === th.id ? pickerRef : null,
       style: {
         padding: '13px 18px',
         borderBottom: `1px solid ${dark ? '#152037' : '#efeee7'}`,
@@ -16668,6 +16932,9 @@ function TasksScreen({
   const [search, setSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [quickAddVal, setQuickAddVal] = useState('');
+  // One header's inline add at a time: { key, val, seed }. A map would let
+  // two inputs sit open sharing one set of keystrokes.
+  const [groupAdd, setGroupAdd] = useState(null);
   const [groupOpen, setGroupOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
   const [colsOpen, setColsOpen] = useState(false);
@@ -16998,7 +17265,8 @@ function TasksScreen({
       weekly_priority: pl.wp || null,
       weekly_rank: pl.wr ? parseInt(pl.wr, 10) : null,
       daily_priority: pl.dp || null,
-      daily_rank: pl.dr ? parseInt(pl.dr, 10) : null
+      daily_rank: pl.dr ? parseInt(pl.dr, 10) : null,
+      is_milestone: !!form.is_milestone
     };
     const people = {
       assignee: form.assignees,
@@ -17007,13 +17275,16 @@ function TasksScreen({
     };
     let taskId;
     if (current && current.id) {
-      await TaskDB.update(current.id, current, fields, user);
       // Never rewrite people the form was never seeded with (the on-demand
-      // Never rewrite people the form was never seeded with — that's a
-      // wipe. If the earlier read failed, try once more here rather than
-      // silently dropping the assignees the user just picked.
+      // read may not have landed), that's a wipe. If the earlier read
+      // failed, try once more here rather than silently dropping the
+      // assignees the user just picked.
       let known = peopleFor(current.id);
       if (known === undefined) known = await TaskDB.loadPeopleFor(current.id);
+      // Same one-sync rule as ProjectsSurface's onTaskSave: setPeople is
+      // the later of the two and the only one that sees the new assignees,
+      // so update's own push stands down whenever setPeople will run.
+      await TaskDB.update(current.id, current, fields, user, !!known);
       if (known) await TaskDB.setPeople(current.id, people);
       taskId = current.id;
     } else if (form.bulkGroup) {
@@ -17098,8 +17369,9 @@ function TasksScreen({
   async function toggleDone(t) {
     await changeStatus(t, t.status === 'done' ? 'todo' : 'done');
   }
-  // Quick-add: type + Enter creates a plain To Do/Medium task and keeps focus,
-  // same pattern as the quick-add already on every Project/CTC File/Rock list.
+  // Quick-add: type + Enter creates a plain To Do/Medium task and keeps
+  // focus. The group headers below use the same shape, seeded with
+  // whatever that group already knows about the task.
   async function quickAddMyTask() {
     const title = quickAddVal.trim();
     if (!title) return;
@@ -17138,6 +17410,36 @@ function TasksScreen({
       fontFamily: C.fontSans
     }
   }));
+  // Add straight into a group. The assignee headers are the point of it:
+  // the task has to land on the person whose plus was clicked, so the
+  // people object goes through untouched. TaskDB.ownedBy would quietly
+  // make it mine the moment an id went missing, which is the misfiling
+  // this button exists to stop.
+  async function addToGroup() {
+    const g = groupAdd;
+    if (!g) return;
+    const title = (g.val || '').trim();
+    if (!title) return;
+    const seed = g.seed || {};
+    const people = seed.assigneeId ? {
+      assignee: [seed.assigneeId]
+    } : TaskDB.ownedBy({}, user);
+    await TaskDB.create({
+      title,
+      status: seed.status || 'todo',
+      priority: seed.priority || 'medium',
+      project_id: seed.projectId || null
+    }, people, user);
+    setGroupAdd(x => x && x.key === g.key ? {
+      ...x,
+      val: ''
+    } : x);
+    // My Tasks lists what is assigned to ME and nothing else, so a task
+    // handed to somebody else saves and is then not here. Say where it
+    // went rather than let it look like the save failed.
+    if (seed.assigneeId && seed.assigneeId !== (user && user.id)) setBulkNote('Created "' + title + '" for ' + (seed.assigneeName || 'them') + '. It is on their list, not yours.');
+    await reload();
+  }
   const back = () => {
     if (view === 'form') setView(current ? 'detail' : 'list');else {
       setView('list');
@@ -17146,30 +17448,95 @@ function TasksScreen({
   };
   const titleText = view === 'form' ? current ? 'Edit task' : 'New task' : view === 'detail' ? 'Task' : view === 'labels' ? 'Manage labels' : 'Tasks';
   const myLabelsFor = id => (data.labelsByTask[id] || []).filter(l => l.user_id === (user && user.id)).map(l => l.label);
-  const groupHead = (color, text) => /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      marginBottom: 7
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      width: 8,
-      height: 8,
-      borderRadius: '50%',
-      background: color
-    }
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: '0.64rem',
-      fontWeight: 700,
-      letterSpacing: '0.1em',
-      textTransform: 'uppercase',
-      color: sub,
-      fontFamily: C.fontSans
-    }
-  }, text));
+  // A third argument turns the header into an add point. The group has
+  // already answered who (or which status, priority or file) the task is
+  // for, so the row underneath only has to ask for a title. Headers that
+  // cannot answer it (due date, label, Unassigned) pass nothing and keep
+  // the plain header they always had.
+  const groupHead = (color, text, add) => {
+    const open = !!(add && groupAdd && groupAdd.key === add.key);
+    const toggleAdd = () => setGroupAdd(g => g && g.key === add.key ? null : {
+      key: add.key,
+      val: '',
+      seed: add
+    });
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        marginBottom: 7
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 8,
+        height: 8,
+        borderRadius: '50%',
+        background: color
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.64rem',
+        fontWeight: 700,
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        color: sub,
+        fontFamily: C.fontSans
+      }
+    }, text), add && /*#__PURE__*/React.createElement("i", {
+      className: 'ti ti-' + (open ? 'x' : 'plus'),
+      onClick: e => {
+        e.stopPropagation();
+        toggleAdd();
+      },
+      role: "button",
+      tabIndex: 0,
+      onKeyDown: e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleAdd();
+        }
+      },
+      title: add.hint,
+      "aria-label": add.hint,
+      style: {
+        fontSize: 13,
+        color: sub,
+        opacity: open ? 0.9 : 0.4,
+        cursor: 'pointer',
+        flexShrink: 0
+      }
+    })), open && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8,
+        padding: '0 0 10px'
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      autoFocus: true,
+      value: groupAdd.val,
+      onChange: e => setGroupAdd(g => g ? {
+        ...g,
+        val: e.target.value
+      } : g),
+      onKeyDown: e => {
+        if (e.key === 'Enter') addToGroup();else if (e.key === 'Escape') setGroupAdd(null);
+      },
+      placeholder: add.hint + ' and press Enter…',
+      style: {
+        flex: 1,
+        padding: '9px 12px',
+        background: dark ? '#0A1730' : '#fff',
+        border: `1px solid ${bord}`,
+        borderRadius: 6,
+        color: ink,
+        fontSize: 14,
+        outline: 'none',
+        fontFamily: C.fontSans
+      }
+    })));
+  };
   const taskRow = (t, showStatus) => {
     const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
     const myLabels = myLabelsFor(t.id);
@@ -17790,7 +18157,10 @@ function TasksScreen({
     color: ink,
     background: dark ? 'rgba(201,164,90,.14)' : '#F3EBDA'
   };
+  const groupRef = useCloseOnOutside(groupOpen, () => setGroupOpen(false));
+  const sortRef = useCloseOnOutside(sortOpen, () => setSortOpen(false));
   const groupChip = /*#__PURE__*/React.createElement("div", {
+    ref: groupRef,
     style: {
       position: 'relative'
     }
@@ -17823,6 +18193,7 @@ function TasksScreen({
     setGroupOpen(false);
   }, id))));
   const sortChip = /*#__PURE__*/React.createElement("div", {
+    ref: sortRef,
     style: {
       position: 'relative'
     }
@@ -18278,23 +18649,33 @@ function TasksScreen({
   // surfaceKind maps a surface id to the record_type ProjectsSurface loads —
   // Rocks are just projects with record_type='rock' ("same under the hood").
   // CTC Files is reached from More — More is the module the user asked to add
-  // it to — not from this switcher; surfaceLabel/surfaceKind below still cover
+  // it to — not from this switcher; surfaceLabel/surfaceKind still cover
   // 'ctc' because the #ctc permalink (opened from More) routes through this
   // same surface state.
-  const SURFACE_OPTS = [['my', 'My Tasks'], ['accountability', 'Accountability'], ['projects', 'Projects'], ['rocks', 'Rocks']];
-  const surfaceLabel = {
-    my: 'My Tasks',
-    ctc: 'CTC Files',
-    projects: 'Projects',
-    rocks: 'Rocks',
-    accountability: 'Accountability'
-  };
+  const SURFACE_OPTS = [['my', 'My Tasks'], ['accountability', 'My Accountabilities'], ['projects', 'Projects'], ['rocks', 'Rocks']];
   const surfaceKind = {
     ctc: 'ctc_file',
     projects: 'project',
     rocks: 'rock'
   };
+  // Tab title, split exactly like the hash writers above: only the surfaces
+  // rendered here are written from here. Every surfaceKind surface is a
+  // ProjectsSurface, which owns its own tab title (list AND record), so the
+  // two writers can never race over one tab.
+  useEffect(() => {
+    if (TASKS_EMBED) return;
+    if (surfaceKind[surface]) return;
+    docTitle(surfaceLabel[surface]);
+  }, [surface]);
+  // Tasks is not the only screen on this page: the top bar swaps in the
+  // Calendar or Decisions, which unmounts this. Hand the tab back to the
+  // page's static default rather than leaving a project's name up there.
+  useEffect(() => () => {
+    if (!TASKS_EMBED) docTitle('Tasks');
+  }, []);
+  const surfaceRef = useCloseOnOutside(surfaceMenuOpen, () => setSurfaceMenuOpen(false));
   const surfaceTitle = fontSize => /*#__PURE__*/React.createElement("div", {
+    ref: surfaceRef,
     style: {
       position: 'relative'
     }
@@ -18520,7 +18901,7 @@ function TasksScreen({
       background: dark ? '#08132A' : '#FCFBF8',
       overflowY: 'auto'
     }
-  }, sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Tasks', true), sbRow('my', 'My Tasks', data.tasks.length), sbRow('accountability', 'Accountability', groupMembers(team, 'all').length))), sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Company'), sbRow('rocks', 'Rocks', rockNavItems.length), rockNavItems.map(sbItemRow), sbAddRow('New rock', () => {
+  }, sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Tasks', true), sbRow('my', 'My Tasks', data.tasks.length), sbRow('accountability', 'My Accountabilities', groupMembers(team, 'all').length))), sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Company'), sbRow('rocks', 'Rocks', rockNavItems.length), rockNavItems.map(sbItemRow), sbAddRow('New rock', () => {
     setSurface('rocks');
     setOpenItemId('new');
   }))), sbGroup( /*#__PURE__*/React.createElement(React.Fragment, null, sbSectionHead('Projects'), sbRow('projects', 'All projects', projNavItems.length), projNavItems.map(sbItemRow), sbAddRow('New project', () => {
@@ -18835,21 +19216,33 @@ function TasksScreen({
         }
       }, groupHead(sub, 'Unlabeled · ' + unlabeled.length), unlabeled.slice().sort(byThen).map(rowFn)));
     } else if (sortBy === 'assignee') {
+      // Keyed on the user id, never the display name. The plus has to hand
+      // the task to a real person, and two teammates sharing a full name
+      // (or two blank names falling back to the same email) would collapse
+      // into one group with one wrong answer between them.
       const groups = {};
       const unassigned = [];
       active.forEach(t => {
-        const names = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
-        if (!names.length) unassigned.push(t);else names.forEach(n => {
-          (groups[n] = groups[n] || []).push(t);
+        const ids = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => p.user_id).filter(id => team.some(m => m.id === id));
+        if (!ids.length) unassigned.push(t);else ids.forEach(id => {
+          (groups[id] = groups[id] || {
+            name: (team.find(m => m.id === id) || {}).name,
+            items: []
+          }).items.push(t);
         });
       });
-      const names = Object.keys(groups).sort((a, b) => a.localeCompare(b));
-      body = /*#__PURE__*/React.createElement(React.Fragment, null, names.map(n => /*#__PURE__*/React.createElement("div", {
-        key: n,
+      const ids = Object.keys(groups).sort((a, b) => groups[a].name.localeCompare(groups[b].name));
+      body = /*#__PURE__*/React.createElement(React.Fragment, null, ids.map(id => /*#__PURE__*/React.createElement("div", {
+        key: id,
         style: {
           marginBottom: 16
         }
-      }, groupHead(dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length), groups[n].slice().sort(byThen).map(rowFn))), unassigned.length > 0 && /*#__PURE__*/React.createElement("div", {
+      }, groupHead(dark ? '#C9A45A' : '#AD832F', groups[id].name + ' · ' + groups[id].items.length, {
+        key: 'assignee:' + id,
+        hint: 'Add a task for ' + groups[id].name,
+        assigneeId: id,
+        assigneeName: groups[id].name
+      }), groups[id].items.slice().sort(byThen).map(rowFn))), unassigned.length > 0 && /*#__PURE__*/React.createElement("div", {
         style: {
           marginBottom: 16
         }
@@ -18863,7 +19256,11 @@ function TasksScreen({
           style: {
             marginBottom: 16
           }
-        }, groupHead(p.color, priorityLabel(p.id) + ' priority · ' + items.length), items.map(rowFn));
+        }, groupHead(p.color, priorityLabel(p.id) + ' priority · ' + items.length, {
+          key: 'priority:' + p.id,
+          hint: 'Add a ' + priorityLabel(p.id).toLowerCase() + ' priority task',
+          priority: p.id
+        }), items.map(rowFn));
       });
     } else if (sortBy === 'project') {
       const groups = {};
@@ -18872,12 +19269,19 @@ function TasksScreen({
         (groups[n] = groups[n] || []).push(t);
       });
       const names = Object.keys(groups).sort((a, b) => (a === 'No project') - (b === 'No project') || a.localeCompare(b));
+      // The group key is the denormalised name, so the id comes off a row
+      // in the group rather than a second lookup that two same-named
+      // projects would get wrong.
       body = names.map(n => /*#__PURE__*/React.createElement("div", {
         key: n,
         style: {
           marginBottom: 16
         }
-      }, groupHead(n === 'No project' ? sub : dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length), groups[n].slice().sort(byThen).map(rowFn)));
+      }, groupHead(n === 'No project' ? sub : dark ? '#C9A45A' : '#AD832F', n + ' · ' + groups[n].length, {
+        key: 'project:' + n,
+        hint: n === 'No project' ? 'Add a task with no project' : 'Add a task in ' + n,
+        projectId: groups[n][0].project_id || null
+      }), groups[n].slice().sort(byThen).map(rowFn)));
     } else {
       body = TASK_STATUS.filter(col => col.id !== 'done').map(col => {
         const items = active.filter(t => t.status === col.id).sort(byThen);
@@ -18887,7 +19291,11 @@ function TasksScreen({
           style: {
             marginBottom: 16
           }
-        }, groupHead(col.color, col.label + ' · ' + items.length), items.map(rowFn));
+        }, groupHead(col.color, col.label + ' · ' + items.length, {
+          key: 'status:' + col.id,
+          hint: 'Add a task in ' + col.label,
+          status: col.id
+        }), items.map(rowFn));
       });
     }
     return /*#__PURE__*/React.createElement(React.Fragment, null, dragOffNote, body, /*#__PURE__*/React.createElement("div", {

@@ -6388,7 +6388,7 @@ Rules:
       const [collapsed, setCollapsed] = useState({}); // owner -> true, in the grouped "all agents" list
       // Shape of the list and the position inside it — all remembered per
       // device (see CALL_VIEW_KEY above).
-      const [listView, setListView] = useState(() => (callPrefGet(CALL_VIEW_KEY, '3day') === 'week' ? 'week' : '3day'));
+      const [listView, setListView] = useState(() => { const v = callPrefGet(CALL_VIEW_KEY, '3day'); return (v === 'week' || v === 'overdue') ? v : '3day'; });
       const [day, setDay] = useState(() => { const d = callPrefGet(CALL_DAYSEG_KEY, 'today'); return ['yesterday', 'today', 'tomorrow'].includes(d) ? d : 'today'; });
       const [weekday, setWeekday] = useState('');     // 'YYYY-MM-DD' inside the shown week; '' until resolved
       const [infoFor, setInfoFor] = useState(null);   // contact behind the (i) — { id, name } while its brief loads
@@ -6541,8 +6541,13 @@ Rules:
           // out identical ids for DIFFERENT people -- ticking a Yesterday row
           // struck a stranger off the overdue count and the preview contradicted
           // itself. Real Zoho ids are unique; this makes the fixture behave.
-          const od = devApplyStatus(spread(dates.yesterday, 8, 2).map(t => ({ ...t, id: 'od-' + t.id })))
+          // Three separate past dates, not one: the Overdue view stacks by
+          // date, and a fixture with a single date can never show that it
+          // groups at all.
+          const back = (n) => { const d = cFromIso(dates.today); d.setDate(d.getDate() - n); return cIso(d); };
+          const odFor = (iso, n, seed) => devApplyStatus(spread(iso, n, seed).map(t => ({ ...t, id: 'od-' + t.id })))
             .filter(t => !/completed/i.test(t.Status || ''));
+          const od = [].concat(odFor(dates.yesterday, 8, 2), odFor(back(6), 5, 9), odFor(back(23), 4, 15));
           setOverdue({ list: od, count: od.length, capped: false });
           setBusy(false);
           return;
@@ -6752,6 +6757,18 @@ Rules:
       const mine = (list) => (agent ? (list || []).filter(t => ownerOf(t) === agent) : (list || []));
       const shown = buckets ? mine(buckets[day] || []) : null;
 
+      // Everything still open from before today, oldest first. The overdue
+      // query already ran for the adopt-the-oldest-task logic, so this view
+      // costs no extra round trip. Sorted ascending because the oldest
+      // obligation is the one to retire, and stacked by date because a day
+      // strip would imply these are somebody else's problem tomorrow.
+      const overdueShown = useMemo(() => {
+        const list = (overdue && overdue.list) || [];
+        return (agent ? list.filter(t => ownerOf(t) === agent) : list.slice())
+          .sort((a, b) => String(a.Due_Date || '').localeCompare(String(b.Due_Date || '')));
+      }, [overdue, agent]);
+      const overdueOpenCount = overdueShown.filter(t => !/completed/i.test(t.Status || '')).length;
+
       // The week, bucketed by date. Every day in the strip gets a key even when
       // it is empty, so the segmented control can show a 0 rather than a gap.
       const weekShown = useMemo(() => {
@@ -6769,7 +6786,9 @@ Rules:
       // through the days doesn't kick off a fresh lookup at each divider.
       const hydrate = listView === 'week'
         ? (weekCalls === null ? null : [].concat.apply([], weekDates.map(iso => weekShown[iso] || [])))
-        : shown;
+        : listView === 'overdue'
+          ? (overdue === null ? null : overdueShown)
+          : shown;
       const shownKey = hydrate ? hydrate.map(t => (t.Who_Id && t.Who_Id.id) || '').join(',') : '';
       useEffect(() => {
         if (!shownKey) return;
@@ -6986,9 +7005,17 @@ Rules:
         setOverdue(o => {
           if (!o) return o;
           const wasOverdue = (task.Due_Date || '').slice(0, 10) < dates.today;
-          let list = (o.list || []).filter(t => t.id !== task.id);
-          if (!/completed/i.test(status) && wasOverdue) list = list.concat([{ ...task, Status: status }]);
-          return { ...o, list, count: list.length };
+          const has = (o.list || []).some(t => t.id === task.id);
+          // A ticked overdue call STAYS on the list, struck through and in
+          // place, so the tick can be undone from the Overdue view itself.
+          // Dropping it was fine while nothing rendered this list; now it
+          // would make the row the agent just touched vanish under them.
+          // `count` is the still-open ones, which is what a badge means by
+          // "overdue".
+          const list = has
+            ? (o.list || []).map(t => (t.id === task.id ? { ...t, Status: status } : t))
+            : (wasOverdue && !/completed/i.test(status) ? (o.list || []).concat([{ ...task, Status: status }]) : (o.list || []));
+          return { ...o, list, count: list.filter(t => !/completed/i.test(t.Status || '')).length };
         });
       }
 
@@ -7365,7 +7392,7 @@ Rules:
         return names.map(o => {
           const list = by[o];
           const shut = !!collapsed[o];
-          const od = overdue ? (overdue.list || []).filter(t => ownerOf(t) === o).length : 0;
+          const od = overdue ? (overdue.list || []).filter(t => ownerOf(t) === o && !/completed/i.test(t.Status || '')).length : 0;
           const rows = shut ? [] : pairSpouses(list);
           return (
             <div key={o}>
@@ -7394,13 +7421,37 @@ Rules:
       };
 
       const capacityOpenable = !!(team || myOwner);
-      const listBusy = listView === 'week' ? weekCalls === null : buckets === null;
+      const listBusy = listView === 'week' ? weekCalls === null : listView === 'overdue' ? overdue === null : buckets === null;
       const listErr = listView === 'week' ? weekErr : err;
       const refreshing = listView === 'week' ? false : busy;
       const refreshAll = () => { if (listView === 'week') loadWeek(true); else if (!busy) load(true); };
 
       // The rows themselves, for whichever shape is picked.
       const listBody = () => {
+        if (listView === 'overdue') {
+          const by = {};
+          overdueShown.forEach(t => { const iso = (t.Due_Date || '').slice(0, 10) || 'unknown'; (by[iso] = by[iso] || []).push(t); });
+          const blocks = Object.keys(by).sort().map(iso => {
+            const rows = pairSpouses(by[iso]);
+            const open = rows.filter(t => !/completed/i.test(t.Status || '')).length;
+            const d = iso === 'unknown' ? null : cFromIso(iso);
+            const late = d ? Math.round((cFromIso(dates.today) - d) / 86400000) : 0;
+            return (
+              <div key={iso}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: wide ? '12px 26px 9px' : '15px 20px 7px', background: wide ? bandBg : surfaceBg, position: wide ? 'static' : 'sticky', top: 0, zIndex: 1 }}>
+                  <span style={{ fontFamily: J, fontSize: 12.5, fontWeight: 600, color: headTitle }}>{d ? CAL_DOW_SHORT[(d.getDay() + 6) % 7] : 'No due date'}</span>
+                  {d && <span style={{ fontFamily: J, fontSize: 12.5, color: mutedCol }}>{CAL_MON_SHORT[d.getMonth()]} {d.getDate()}</span>}
+                  {late > 0 && <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: redCol }}>{late} day{late === 1 ? '' : 's'} late</span>}
+                  <span style={{ fontFamily: J, fontSize: 10, fontWeight: 600, color: addCol, background: creamBg, borderRadius: 9, padding: '2px 8px' }}>{open}</span>
+                  <span style={{ flex: 1, height: 1, background: rowBord }} />
+                </div>
+                {wide ? rows.map(t => deskRow(t)) : <div style={{ padding: '0 20px' }}>{rows.map((t, j) => callRow(t, j === rows.length - 1))}</div>}
+              </div>
+            );
+          });
+          if (!blocks.length) return <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol, lineHeight: 1.6 }}>Nothing overdue{agent ? ' for ' + agent : ''}. Everything due before today is closed.</div>;
+          return blocks;
+        }
         if (listView === 'week') {
           const blocks = weekDates.map((iso, i) => {
             const rows = pairSpouses(weekShown[iso] || []);
@@ -7459,6 +7510,7 @@ Rules:
                 style={{ ...pill, background: trackBg, color: nameCol, fontWeight: 600, paddingRight: 30, appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none' }}>
                 <option value="3day">3-Day</option>
                 <option value="week">Week</option>
+                <option value="overdue">Overdue{overdue ? ' (' + overdueOpenCount + ')' : ''}</option>
               </select>
               <span style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: faintCol, fontSize: 9 }}>▼</span>
             </div>
@@ -7477,7 +7529,10 @@ Rules:
           {kpiToast && (
             <div style={{ margin: wide ? '0 26px 10px' : '0 20px 8px', padding: '9px 11px', borderRadius: 10, background: creamBg, color: creamTx, fontFamily: J, fontSize: 11.5, lineHeight: 1.5 }}>{kpiToast}</div>
           )}
-          {/* Segmented control — one component, both shapes. */}
+          {/* Segmented control — one component, both shapes. Overdue has no
+              strip at all: it is one stack, so there is nothing to navigate
+              between, and a day picker there would only hide half the list. */}
+          {listView !== 'overdue' && (
           <div style={{ margin: wide ? '0 26px 12px' : '0 20px 8px', display: 'flex', background: trackBg, borderRadius: 11, padding: 3, gap: 2, height: wide ? 40 : 44, flexShrink: 0 }}>
             {listView === '3day'
               ? ['yesterday', 'today', 'tomorrow'].map(d => {
@@ -7512,6 +7567,7 @@ Rules:
                   );
                 })}
           </div>
+          )}
           {/* Desktop table header — the columns the rows line up against. */}
           {wide && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '10px 26px', fontFamily: J, fontSize: 9, letterSpacing: '0.16em', textTransform: 'uppercase', color: faintCol, fontWeight: 600, borderBottom: `1px solid ${rowBord}`, flexShrink: 0 }}>
@@ -7526,7 +7582,7 @@ Rules:
             {listErr && <div style={{ padding: '18px 20px', fontFamily: J, fontSize: 12.5, color: redCol, lineHeight: 1.5 }}>{listErr}</div>}
             {!listErr && listBusy && <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol }}>Loading…</div>}
             {!listErr && !listBusy && !team && !myOwner && <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol, lineHeight: 1.6 }}>Add your first and last name in your profile to see your calls.</div>}
-            {!listErr && (listView === 'week' ? weekCapped : clipped[day]) && (
+            {!listErr && (listView === 'week' ? weekCapped : listView === 'overdue' ? !!(overdue && overdue.capped) : clipped[day]) && (
               <div style={{ padding: '9px 20px', fontFamily: J, fontSize: 11, color: redCol, lineHeight: 1.5 }}>Zoho returned a full page, so this list may be incomplete. Check /crm-tasks for the full view.</div>
             )}
             {!listErr && !listBusy && (team || myOwner) && listBody()}
@@ -7729,7 +7785,7 @@ Rules:
               ownerEmail={logOwner.email}
               adopt={openCallFor}
               onAdopted={completeAdopted}
-              dateIso={(listView === 'week' ? weekday : dates[day]) || cIso(new Date())}
+              dateIso={(listView === 'week' ? weekday : listView === 'overdue' ? dates.today : dates[day]) || cIso(new Date())}
               onDone={(name, items) => {
                 setKpiToast('Logged for ' + name + ': ' + items.map(i => i.count + ' × ' + (i.subject || i.type)).join(', '));
                 // The new rows are real tasks, so both shapes of the list have

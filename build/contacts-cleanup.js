@@ -5,24 +5,6 @@ const {
   useRef
 } = React;
 
-// Close on outside click. One shared helper so every hand-built dropdown on
-// this page behaves the same way. Native <select> already does this itself,
-// and modals deliberately do not, so only the hand-built panels use it.
-function useCloseOnOutside(open, close) {
-  const ref = useRef(null);
-  const cb = useRef(close);
-  cb.current = close;
-  useEffect(() => {
-    if (!open) return;
-    function onDown(e) {
-      if (ref.current && !ref.current.contains(e.target)) cb.current();
-    }
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
-  return ref;
-}
-
 // ─── Design tokens (TMG brand, same dialect as crm-tasks) ─────────
 const C = {
   bg: '#FCFBF8',
@@ -725,7 +707,7 @@ function SpousePicker({
   const [busy, setBusy] = useState(false);
   const [hits, setHits] = useState([]);
   const [rect, setRect] = useState(null);
-  const boxRef = useCloseOnOutside(open, () => setOpen(false));
+  const boxRef = useRef(null);
   const reqRef = useRef(0);
   useEffect(() => {
     const term = q.trim();

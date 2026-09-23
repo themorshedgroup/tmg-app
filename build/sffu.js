@@ -4,24 +4,6 @@ const {
   useRef
 } = React;
 
-// Close on outside click. One shared helper so every hand-built dropdown on
-// this page behaves the same way. Native <select> already does this itself,
-// and modals deliberately do not, so only the hand-built panels use it.
-function useCloseOnOutside(open, close) {
-  const ref = useRef(null);
-  const cb = useRef(close);
-  cb.current = close;
-  useEffect(() => {
-    if (!open) return;
-    function onDown(e) {
-      if (ref.current && !ref.current.contains(e.target)) cb.current();
-    }
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
-  return ref;
-}
-
 // Embedded inside the TMG app (?embed=1): hide our own top bar; sync theme from the parent.
 const EMBED_PARAMS = new URLSearchParams(location.search);
 const EMBED = EMBED_PARAMS.get('embed') === '1';
@@ -1816,7 +1798,6 @@ function ShowingRow({
   // editable) instead of typing a follow-up text from scratch.
   const [showTplPicker, setShowTplPicker] = useState(false);
   const [templates, setTemplates] = useState(null); // lazy-loaded: [day1, day2, day3, ack]
-  const tplRef = useCloseOnOutside(showTplPicker, () => setShowTplPicker(false));
   function openTplPicker() {
     setShowTplPicker(v => !v);
     if (!templates) DB.loadTemplates().then(setTemplates);
@@ -2251,8 +2232,6 @@ function ShowingRow({
   }, dispOffice), /*#__PURE__*/React.createElement(SmsThread, {
     thread: localThread
   }), /*#__PURE__*/React.createElement("div", {
-    ref: tplRef
-  }, /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 20,
       paddingTop: 14,
@@ -2315,7 +2294,7 @@ function ShowingRow({
       color: C.textMuted,
       padding: '5px 0'
     }
-  }, "Loading templates\u2026"))), /*#__PURE__*/React.createElement("div", {
+  }, "Loading templates\u2026")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 8,

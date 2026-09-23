@@ -12957,7 +12957,7 @@ function CompanyDirectory({
 // Embeds the standalone SFFU app (same origin + same Supabase login) as a TMG view.
 // The header row drives SFFU's actions via postMessage; SFFU keeps its own settings.
 // Bump SFFU_VERSION when sffu/index.html changes to bust the iframe cache.
-const SFFU_VERSION = '20260702b';
+const SFFU_VERSION = '20260924a';
 function SffuFrame({
   dark,
   onBack
@@ -18466,7 +18466,6 @@ function CallsTab({
     contact: sheet.contact,
     ownerId: sheet.task.Owner && sheet.task.Owner.id || null,
     dateIso: (sheet.task.Due_Date || '').slice(0, 10) || cIso(new Date()),
-    onCompleted: () => completeAdopted([sheet.task]),
     onLogged: items => onLogged(sheet.task, items),
     onError: msg => setRowErr(e => ({
       ...e,
@@ -18906,7 +18905,6 @@ function LogActivitySheet({
   contact,
   ownerId,
   dateIso,
-  onCompleted,
   onLogged,
   onError,
   onClose
@@ -18942,38 +18940,26 @@ function LogActivitySheet({
   const goBg = dark ? '#AD832F' : '#001A4A';
 
   // Each offered activity paired with the real picklist string Zoho will
-  // store. Call types can never appear here anyway — the row IS the call.
+  // store. Call types never appear here: the row IS the call, so it is
+  // logged with the tick, not from this sheet. This sheet is only for the
+  // other things that happened.
   const picklist = (meta && meta.options || []).filter(o => !/call/i.test(o));
-  // The row IS a call, so logging one here CLOSES it rather than filing a
-  // second completed task beside it. Every call type used to be stripped
-  // out of this sheet entirely, so an agent who had just phoned tapped
-  // "+", found no Call option at all, and left the row hollow with the
-  // call unrecorded. This entry is not a Zoho picklist value and never
-  // reaches createActivityTasks -- it is recognised by its key.
-  const canCloseCall = typeof onCompleted === 'function' && !/completed/i.test(task && task.Status || '');
-  const offered = (canCloseCall ? [{
-    key: 'call',
-    label: 'Call',
-    match: /^(?!)/,
-    requireCount: false,
-    type: 'Call'
-  }] : []).concat(LOG_ACTIVITIES.map(a => ({
+  const offered = LOG_ACTIVITIES.map(a => ({
     ...a,
     type: picklist.find(o => a.match.test(o))
-  })).filter(a => a.type));
+  })).filter(a => a.type);
   const absent = LOG_ACTIVITIES.filter(a => !picklist.some(o => a.match.test(o)));
   const chosen = offered.filter(a => sel[a.type] !== undefined);
   // A required-count row sits at '' until a number is typed — checked, but
   // not yet loggable.
   const unfilled = chosen.filter(a => !(Number(sel[a.type]) > 0));
-  const closingCall = chosen.some(a => a.key === 'call');
-  const items = chosen.filter(a => a.key !== 'call' && Number(sel[a.type]) > 0).map(a => ({
+  const items = chosen.filter(a => Number(sel[a.type]) > 0).map(a => ({
     type: a.type,
     count: Number(sel[a.type])
   }));
   const total = items.reduce((n, it) => n + it.count, 0);
   const overCap = total > LOG_MAX_TASKS;
-  const canAdd = (!!items.length || closingCall) && !unfilled.length && !overCap;
+  const canAdd = !!items.length && !unfilled.length && !overCap;
   function toggle(a) {
     setSel(s => {
       const n = {
@@ -19017,10 +19003,6 @@ function LogActivitySheet({
           ownerId
         });
       }
-      // Closing the call last: the activity writes above throw on failure,
-      // and a call marked done beside rows that never landed would be the
-      // wrong half of the job to keep.
-      if (closingCall) await onCompleted();
       const landed = res.byType && res.byType.length ? res.byType : items;
       if (landed.length) onLogged(landed);
       onClose();
@@ -19247,15 +19229,7 @@ function LogActivitySheet({
       lineHeight: 1.5,
       marginTop: 2
     }
-  }, "Not in Zoho's Task Type list, so ", absent.length === 1 ? 'it is' : 'they are', " not offered: ", absent.map(a => a.label).join(', '), ". Add ", absent.length === 1 ? 'it' : 'them', " in Zoho Setup and ", absent.length === 1 ? 'it' : 'they', " will appear here.")), closingCall && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 12,
-      fontFamily: J,
-      fontSize: 9,
-      color: addCol,
-      lineHeight: 1.5
-    }
-  }, "This call gets marked complete on the list. No extra task is created for it, so it is still counted once."), items.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Not in Zoho's Task Type list, so ", absent.length === 1 ? 'it is' : 'they are', " not offered: ", absent.map(a => a.label).join(', '), ". Add ", absent.length === 1 ? 'it' : 'them', " in Zoho Setup and ", absent.length === 1 ? 'it' : 'they', " will appear here.")), items.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 12,
       padding: '9px 11px',

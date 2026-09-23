@@ -8470,17 +8470,79 @@ function KpiSummary({
       alive = false;
     };
   }, []);
+
+  // cad/cadFor are cleared alongside every contact change, so a cadence
+  // answer can never be left over from the person who was linked before it.
   const pick = (i, m) => setOne(i, {
     chosenId: m.id,
     chosenLabel: m.full_name,
     mode: 'match',
-    error: ''
+    error: '',
+    cad: null,
+    cadFor: null
   });
   const clearPick = i => setOne(i, {
     chosenId: null,
     chosenLabel: '',
-    mode: null
+    mode: null,
+    cad: null,
+    cadFor: null
   });
+
+  // Touch Call is the cadence call, and whether one is due can only be
+  // answered once the person has a CONTACT -- which happens here, not in the
+  // form. So the check lives here, which also means both entry points get it
+  // for nothing: the AI tab's Add KPIs and the Calls tab's both end on this
+  // same review card, and the pasted-notes path lands here too.
+  //
+  // A touch claimed too early is switched to a Follow Up Call, said out loud
+  // on this screen before anything is sent, and filed that way. The call is
+  // not lost and the agent is not accused of anything: it still counts, it
+  // just counts as what it actually was.
+  const wantsTouch = i => (persons[i] && persons[i].kpis || []).indexOf('Touch Call') !== -1;
+  const cadKey = res.map(x => x && x.chosenId || '').join(',');
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      for (let i = 0; i < persons.length; i++) {
+        const st = res[i];
+        if (!st || !st.chosenId || !wantsTouch(i)) continue;
+        if (st.cadFor === st.chosenId) continue; // already answered for this contact
+        setOne(i, {
+          cadBusy: true
+        });
+        let cad = null;
+        try {
+          cad = await touchCallCadence(payload.owner, st.chosenId);
+        } catch (e) {
+          cad = null;
+        }
+        if (!alive) return;
+        setOne(i, {
+          cadBusy: false,
+          cad,
+          cadFor: st.chosenId
+        });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cadKey]);
+
+  // What will ACTUALLY be sent for this person. Rendered from the same
+  // function the submit uses, so the chips on screen cannot disagree with
+  // what lands in Zoho. If Follow Up Call was already ticked the switch
+  // leaves two of them, which is right: two calls were made.
+  const switched = i => {
+    const st = res[i] || {};
+    return !!(st.cad && st.cad.tooSoon && wantsTouch(i));
+  };
+  const effectiveKpis = i => {
+    const ks = persons[i] && persons[i].kpis || [];
+    return switched(i) ? ks.map(k => k === 'Touch Call' ? 'Follow Up Call' : k) : ks;
+  };
   // Opens the create form rather than creating on the spot — a contact
   // needs a mobile number and a client classification, and neither can be
   // guessed from the name the agent typed.
@@ -8528,13 +8590,14 @@ function KpiSummary({
       });
     }
   }
-  const anyBusy = res.some(x => x.status === 'loading' || x.creating);
+  const anyBusy = res.some(x => x.status === 'loading' || x.creating || x.cadBusy);
   const allResolved = res.length > 0 && res.every(x => x.chosenId);
   async function confirm() {
     if (!allResolved || submitting) return;
     setSubmitting(true);
     const resolved = persons.map((p, i) => ({
       ...p,
+      kpis: effectiveKpis(i),
       contact_id: res[i].chosenId,
       name: res[i].chosenLabel || p.name
     }));
@@ -8632,8 +8695,8 @@ function KpiSummary({
         gap: 5,
         marginBottom: 7
       }
-    }, (p.kpis || []).map(k => /*#__PURE__*/React.createElement("span", {
-      key: k,
+    }, effectiveKpis(i).map((k, n) => /*#__PURE__*/React.createElement("span", {
+      key: k + '-' + n,
       style: {
         fontSize: '0.72rem',
         fontWeight: 600,
@@ -8643,7 +8706,25 @@ function KpiSummary({
         padding: '3px 9px',
         fontFamily: C.fontSans
       }
-    }, k === 'Hotzone Action/s' ? 'Hotzone × ' + (p.hotzone_count || 0) : k))), st.status === 'loading' && /*#__PURE__*/React.createElement("div", {
+    }, k === 'Hotzone Action/s' ? 'Hotzone × ' + (p.hotzone_count || 0) : k))), st.cadBusy && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.72rem',
+        color: sub,
+        fontFamily: C.fontSans,
+        marginBottom: 7
+      }
+    }, "Checking the call cadence\u2026"), switched(i) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.72rem',
+        lineHeight: 1.5,
+        marginBottom: 7,
+        fontFamily: C.fontSans,
+        borderRadius: 8,
+        padding: '7px 9px',
+        color: dark ? C.goldSoft : C.gold,
+        background: dark ? 'rgba(173,131,47,0.16)' : '#F3EBDA'
+      }
+    }, "Too soon for a touch call, so this is going in as a ", /*#__PURE__*/React.createElement("b", null, "Follow Up Call"), ". They were last called ", st.cad.gapDays, " day", st.cad.gapDays === 1 ? '' : 's', " ago and the ", st.cad.tier, " cadence is ", st.cad.interval, " days", st.cad.dueIso ? ', so the next touch is due ' + st.cad.dueIso : '', "."), st.status === 'loading' && /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: '0.76rem',
         color: sub,
@@ -8951,17 +9032,17 @@ function KpiSummary({
     }
   }), "Back to edit"), /*#__PURE__*/React.createElement("button", {
     onClick: confirm,
-    disabled: !allResolved || submitting,
+    disabled: !allResolved || submitting || anyBusy,
     style: {
       flex: 1,
       padding: 11,
-      background: !allResolved || submitting ? dark ? '#23344f' : '#C9C3B4' : dark ? C.gold : C.navy,
+      background: !allResolved || submitting || anyBusy ? dark ? '#23344f' : '#C9C3B4' : dark ? C.gold : C.navy,
       color: '#fff',
       border: 'none',
       borderRadius: 10,
       fontSize: '0.88rem',
       fontWeight: 600,
-      cursor: !allResolved || submitting ? 'not-allowed' : 'pointer',
+      cursor: !allResolved || submitting || anyBusy ? 'not-allowed' : 'pointer',
       fontFamily: C.fontSans,
       display: 'inline-flex',
       alignItems: 'center',
@@ -8973,7 +9054,7 @@ function KpiSummary({
     style: {
       fontSize: 16
     }
-  }), submitting ? 'Sending…' : 'Confirm' + (KPI_LIVE ? ' & send' : ''))));
+  }), submitting ? 'Sending…' : anyBusy ? 'Checking…' : 'Confirm' + (KPI_LIVE ? ' & send' : ''))));
 }
 
 // Wrapper card that hosts the Enter KPI flow inline in the chat thread. flow = { step, payload }.
@@ -15102,10 +15183,16 @@ async function lastCallFor(contactId) {
   if (!contactId) return null;
   if (LAST_CALL_CACHE.has(contactId)) return LAST_CALL_CACHE.get(contactId);
   if (callsIsDev()) {
-    const v = /[02468]$/.test(String(contactId)) ? {
-      iso: cIso(new Date(Date.now() - 17 * 86400000)),
+    // Three shapes, because the touch-call cadence check has three answers
+    // and one fixture shape can only ever prove half of it: recently called
+    // (a touch gets switched to a follow-up), called long ago (the touch
+    // stands), and never called (a first touch is always real).
+    const last = String(contactId).slice(-1);
+    const days = /[02]$/.test(last) ? 17 : /[468]$/.test(last) ? 95 : null;
+    const v = days === null ? null : {
+      iso: cIso(new Date(Date.now() - days * 86400000)),
       tier: 'B'
-    } : null;
+    };
     LAST_CALL_CACHE.set(contactId, v);
     return v;
   }
@@ -15159,6 +15246,47 @@ const CALL_INTERVALS = {
     C: 90
   }
 };
+
+// A touch call IS the cadence call. Claiming one a fortnight after the last
+// conversation inflates the single number the whole cadence system is
+// measured on, which is exactly why Zoho raises a "Validate <tier> Touch
+// Call" chore for a human every time one is filed. The agent filing it
+// could never see the last-call date; this app can, so the question is
+// answerable here instead of by somebody else a week later.
+//
+// Returns null when the question does not apply: no contact, no
+// classification, or no completed call on record. A first touch is always a
+// real touch.
+//
+// 0.8 of the interval rather than the whole of it, because cadence dates
+// are snapped off weekends and holidays and a call made a few days early on
+// purpose is still the cadence touch.
+const TOUCH_EARLY_FACTOR = 0.8;
+async function touchCallCadence(ownerName, contactId) {
+  if (!contactId) return null;
+  let h = null;
+  try {
+    h = await lastCallFor(contactId);
+  } catch (e) {
+    return null;
+  }
+  if (!h || !h.iso || !h.tier) return null;
+  // Tarek's cadence is longer than everyone else's, so this reads the same
+  // owner-bucketed table the CRM packer and Cadence Health both read.
+  const bucket = /tarek/i.test(ownerName || '') ? 'tarek' : 'other';
+  const interval = (CALL_INTERVALS[bucket] || CALL_INTERVALS.other)[h.tier];
+  if (!interval) return null;
+  const gapDays = Math.round((new Date(cIso(new Date())) - new Date(h.iso)) / 86400000);
+  if (!isFinite(gapDays)) return null;
+  return {
+    tier: h.tier,
+    interval,
+    gapDays,
+    lastIso: h.iso,
+    dueIso: cCadenceDate(h.iso, interval),
+    tooSoon: gapDays < Math.round(interval * TOUCH_EARLY_FACTOR)
+  };
+}
 const cParse = s => {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || '');
   return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;

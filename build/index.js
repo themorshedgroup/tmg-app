@@ -14851,6 +14851,11 @@ function saveDayCache(sig, payload, at) {
 //  segments is picked, and which weekday inside the week. All three are
 //  remembered per device: an agent who works the week view should not be
 //  put back on 3-Day/Today every time the tab is reopened.
+// The written guide is a static page, not a second copy of these words
+// inside the bundle: one file to update when the tab changes, and it is a
+// real URL, so it can be opened in its own tab or sent to somebody.
+// Relative on purpose, so it resolves the same on localhost and on Pages.
+const CALLS_GUIDE_URL = 'guide/calls.html';
 const CALL_VIEW_KEY = 'tmg-calllist-view';
 const CALL_DAYSEG_KEY = 'tmg-calllist-day';
 const CALL_WEEKDAY_KEY = 'tmg-calllist-weekday';
@@ -16085,6 +16090,7 @@ function CallsTab({
   const [view, setView] = useState('list'); // 'list' | 'capacity' — a button now, not a tab
   const [agent, setAgent] = useState(''); // '' = all agents; otherwise an owner name
   const [collapsed, setCollapsed] = useState({}); // owner -> true, in the grouped "all agents" list
+  const [guide, setGuide] = useState(false); // the written guide, over the list
   // Shape of the list and the position inside it — all remembered per
   // device (see CALL_VIEW_KEY above).
   const [listView, setListView] = useState(() => {
@@ -18008,6 +18014,21 @@ function CallsTab({
       fontSize: 9
     }
   }, "\u25BC")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setGuide(true),
+    title: "How to use this tab, with pictures",
+    style: {
+      ...pill,
+      background: trackBg,
+      color: nameCol,
+      fontWeight: 600,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-book",
+    style: {
+      fontSize: 16
+    }
+  }), "Guide"), /*#__PURE__*/React.createElement("button", {
     onClick: refreshAll,
     disabled: refreshing,
     title: "Refresh from Zoho",
@@ -18230,7 +18251,104 @@ function CallsTab({
       } : b);
     },
     onClose: () => setPformFor(null)
-  }), infoFor && /*#__PURE__*/React.createElement("div", {
+  }), guide && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setGuide(false),
+    style: {
+      position: 'fixed',
+      inset: 0,
+      zIndex: 75,
+      background: 'rgba(10,20,45,0.42)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: wide ? 24 : 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      width: '100%',
+      maxWidth: 1180,
+      height: '100%',
+      maxHeight: wide ? '92vh' : '100%',
+      background: surfaceBg,
+      borderRadius: wide ? 16 : 0,
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      padding: '13px 16px',
+      borderBottom: `1px solid ${rowBord}`,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-book",
+    style: {
+      fontSize: 16,
+      color: addCol,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontFamily: J,
+      fontSize: 14,
+      fontWeight: 600,
+      color: headTitle,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, "How to use the Calls tab"), /*#__PURE__*/React.createElement("a", {
+    href: CALLS_GUIDE_URL,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      fontWeight: 600,
+      color: addCol,
+      textDecoration: 'none',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-external-link",
+    style: {
+      fontSize: 14
+    }
+  }), wide ? 'Open in a tab' : ''), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setGuide(false),
+    style: {
+      background: 'none',
+      border: 'none',
+      padding: 0,
+      cursor: 'pointer',
+      color: mutedCol,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x",
+    style: {
+      fontSize: 16
+    }
+  }))), /*#__PURE__*/React.createElement("iframe", {
+    src: CALLS_GUIDE_URL,
+    title: "How to use the Calls tab",
+    style: {
+      flex: 1,
+      width: '100%',
+      border: 'none',
+      background: '#FFFFFF'
+    }
+  }))), infoFor && /*#__PURE__*/React.createElement("div", {
     onClick: closeInfo,
     style: {
       position: 'fixed',

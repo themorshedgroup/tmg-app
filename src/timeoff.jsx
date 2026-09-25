@@ -320,6 +320,17 @@
       const draftFull = mode === 'fullday';
       const draftHours = timeoffClientHours(draftStart, draftEnd, draftFull, hpw);
       const draftValid = mode === 'fullday' ? !!(startDate && endDate && endDate >= startDate) : !!(startDate && endTime > startTime);
+      // Overlap check: the same dates filed twice (e.g. an admin logs a week, then the person
+      // requests it too) put a second OOO on the Team Calendar. Full-day rows end at the START
+      // of their last day, so their range runs to the following midnight.
+      const toRange = (s, e, full) => { const a = timeoffDate(s).getTime(); let b = timeoffDate(e).getTime(); if (full) b += 86400000; return [a, b]; };
+      const draftOwner = (isAdmin && forUserId) ? forUserId : uid;
+      const draftOverlaps = !draftValid ? [] : (() => {
+        const [a, b] = toRange(draftStart, draftEnd, draftFull);
+        const pool = draftOwner === uid ? mine : yearRequests.filter(r => r.user_id === draftOwner);
+        return pool.filter(r => r.id !== editingId && (r.status === 'approved' || r.status === 'pending' || r.status === 'noted'))
+          .filter(r => { const [c, d] = toRange(r.start_at, r.end_at, r.full_day); return a < d && c < b; });
+      })();
 
       const startCreate = () => {
         setEditingId(null); setEditingStatus(null); setEditingCalEvent(null); setForUserId(null);
@@ -360,6 +371,7 @@
       };
       const submit = async () => {
         if (!draftValid || busy) return;
+        if (draftOverlaps.length && !window.confirm('This overlaps time off already on file (' + draftOverlaps.map(r => timeoffWhen(r) + ', ' + ((PILL[r.status] || {}).label || r.status)).join('; ') + '). File it anyway?')) return;
         setBusy(true);
         try {
           if (editingId) {
@@ -549,6 +561,7 @@
                 {draftValid ? <React.Fragment><strong style={{ color: t.text }}>= {hd(draftHours)}</strong></React.Fragment> : <span style={{ color: t.muted }}>Pick a valid date/time range.</span>}
               </div>
               {forBal && forBal.tracked && draftValid && draftHours > forBal.remaining ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ This is more than the {hd(forBal.remaining)} remaining{forUserId ? ' for ' + (people[forUserId] || 'this person') : ''}.</div> : null}
+              {draftOverlaps.length ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ Overlaps time off already on file: {draftOverlaps.map(r => timeoffWhen(r) + ' (' + ((PILL[r.status] || {}).label || r.status) + ')').join(', ')}.</div> : null}
               {editingId && (editingStatus === 'approved' || editingStatus === 'denied') ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ Saving will withdraw this {PILL[editingStatus].label.toLowerCase()} request and send it back for approval.</div> : null}
               <button onClick={submit} disabled={!draftValid || busy} style={{ ...primaryBtn, marginTop: 6, opacity: (!draftValid || busy) ? 0.5 : 1 }}>{busy ? 'Saving…' : (editingId ? 'Save changes' : (forBal && forBal.tracked ? 'Submit request' : 'Log it'))}</button>
             </div>

@@ -583,6 +583,24 @@ function TimeOffTab({
   const draftFull = mode === 'fullday';
   const draftHours = timeoffClientHours(draftStart, draftEnd, draftFull, hpw);
   const draftValid = mode === 'fullday' ? !!(startDate && endDate && endDate >= startDate) : !!(startDate && endTime > startTime);
+  // Overlap check: the same dates filed twice (e.g. an admin logs a week, then the person
+  // requests it too) put a second OOO on the Team Calendar. Full-day rows end at the START
+  // of their last day, so their range runs to the following midnight.
+  const toRange = (s, e, full) => {
+    const a = timeoffDate(s).getTime();
+    let b = timeoffDate(e).getTime();
+    if (full) b += 86400000;
+    return [a, b];
+  };
+  const draftOwner = isAdmin && forUserId ? forUserId : uid;
+  const draftOverlaps = !draftValid ? [] : (() => {
+    const [a, b] = toRange(draftStart, draftEnd, draftFull);
+    const pool = draftOwner === uid ? mine : yearRequests.filter(r => r.user_id === draftOwner);
+    return pool.filter(r => r.id !== editingId && (r.status === 'approved' || r.status === 'pending' || r.status === 'noted')).filter(r => {
+      const [c, d] = toRange(r.start_at, r.end_at, r.full_day);
+      return a < d && c < b;
+    });
+  })();
   const startCreate = () => {
     setEditingId(null);
     setEditingStatus(null);
@@ -636,6 +654,7 @@ function TimeOffTab({
   };
   const submit = async () => {
     if (!draftValid || busy) return;
+    if (draftOverlaps.length && !window.confirm('This overlaps time off already on file (' + draftOverlaps.map(r => timeoffWhen(r) + ', ' + ((PILL[r.status] || {}).label || r.status)).join('; ') + '). File it anyway?')) return;
     setBusy(true);
     try {
       if (editingId) {
@@ -1221,7 +1240,14 @@ function TimeOffTab({
         fontFamily: C.fontSans,
         marginBottom: 10
       }
-    }, "\u26A0 This is more than the ", hd(forBal.remaining), " remaining", forUserId ? ' for ' + (people[forUserId] || 'this person') : '', ".") : null, editingId && (editingStatus === 'approved' || editingStatus === 'denied') ? /*#__PURE__*/React.createElement("div", {
+    }, "\u26A0 This is more than the ", hd(forBal.remaining), " remaining", forUserId ? ' for ' + (people[forUserId] || 'this person') : '', ".") : null, draftOverlaps.length ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: '0.76rem',
+        color: C.amber,
+        fontFamily: C.fontSans,
+        marginBottom: 10
+      }
+    }, "\u26A0 Overlaps time off already on file: ", draftOverlaps.map(r => timeoffWhen(r) + ' (' + ((PILL[r.status] || {}).label || r.status) + ')').join(', '), ".") : null, editingId && (editingStatus === 'approved' || editingStatus === 'denied') ? /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: '0.76rem',
         color: C.amber,

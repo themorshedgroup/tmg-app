@@ -308,6 +308,8 @@
       const forBal = forProfile ? timeoffBalance(policy, forProfile, yearRequests.filter(r => r.user_id === forUserId)) : bal;
       const hpw = policy ? policy.hours_per_workday : 8;
       const daysEq = (h) => Math.round((h / (hpw || 8)) * 10) / 10;
+      // Every hours figure is shown with its day conversion: "2 days (16h)".
+      const hd = (h) => { const d = daysEq(Number(h) || 0); return d + ' day' + (d === 1 ? '' : 's') + ' (' + timeoffFmtHours(Number(h) || 0) + 'h)'; };
       // Approver sees: their reports' requests, or (admin/ops) everyone's. A TRUE admin
       // (access has 'admin') may also approve their OWN — matches the DB self-approval carve-out.
       const isSuper = toRoles(profile && profile.access).indexOf('admin') !== -1;
@@ -418,7 +420,9 @@
       const primaryBtn = { width: '100%', padding: 13, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.92rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans };
 
       const myRow = (r) => {
-        const canCancel = r.status === 'pending' || r.status === 'noted';
+        // Mirrors the DB guard: anyone may cancel their own pending; a non-admin their own
+        // logged; a true admin their own approved (a non-admin's approved needs their manager).
+        const canCancel = r.status === 'pending' || (r.status === 'noted' && !isSuper) || (r.status === 'approved' && isSuper);
         const canEdit = r.status !== 'cancelled';
         const who = r.decided_by && people[r.decided_by];
         return (
@@ -428,7 +432,7 @@
               {pill(r.status)}
             </div>
             <div style={{ fontSize: '0.76rem', color: t.sub, fontFamily: C.fontSans, marginTop: 3 }}>
-              {timeoffFmtHours(r.total_hours)}h{r.tracked ? ' · ' + daysEq(r.total_hours) + ' day' + (daysEq(r.total_hours) === 1 ? '' : 's') : ' · visibility'}
+              {hd(r.total_hours)}{r.tracked ? '' : ' · visibility'}
               {r.reason ? ' · ' + r.reason : ''}
             </div>
             {r.decision_note ? <div style={{ fontSize: '0.74rem', color: t.muted, fontFamily: C.fontSans, marginTop: 3, fontStyle: 'italic' }}>“{r.decision_note}”{who ? ' — ' + who : ''}</div> : null}
@@ -445,7 +449,7 @@
         <div key={r.id} style={{ ...card, marginBottom: 10, padding: 13 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ flex: 1, fontSize: '0.9rem', fontWeight: 700, color: t.text, fontFamily: C.fontSans }}>{people[r.user_id] || 'Someone'}</span>
-            <span style={{ fontSize: '0.76rem', color: t.sub, fontFamily: C.fontSans }}>{timeoffFmtHours(r.total_hours)}h</span>
+            <span style={{ fontSize: '0.76rem', color: t.sub, fontFamily: C.fontSans }}>{hd(r.total_hours)}</span>
           </div>
           <div style={{ fontSize: '0.8rem', color: t.sub, fontFamily: C.fontSans, marginTop: 3 }}>{timeoffWhen(r)}{r.reason ? ' · ' + r.reason : ''}</div>
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
@@ -455,7 +459,15 @@
         </div>
       );
       // Admin-only Team roster: every active profile's balance for the year, side by side.
-      const activeProfiles = profiles.filter(p => !p.status || p.status === 'active');
+      // Real people only: a role-less shared login (e.g. "The Morshed Group Operations")
+      // isn't a person who takes time off. Listed in Symon's fixed order; anyone new
+      // goes after, alphabetically.
+      const TEAM_ORDER = ['tarek', 'brad', 'brett', 'kyle', 'symon', 'angelica', 'alexa', 'gustavo', 'camila'];
+      const teamRank = (p) => { const f = String(p.first_name || '').toLowerCase(); const i = TEAM_ORDER.findIndex(n => f.startsWith(n)); return i === -1 ? TEAM_ORDER.length : i; };
+      const personName = (p) => (((p.first_name || '') + ' ' + (p.last_name || '')).trim()) || p.email || '';
+      const activeProfiles = profiles
+        .filter(p => (!p.status || p.status === 'active') && toRoles(p.access).length)
+        .sort((a, b) => (teamRank(a) - teamRank(b)) || personName(a).localeCompare(personName(b)));
       const rosterRow = (p) => {
         const theirs = yearRequests.filter(r => r.user_id === p.id);
         const b = timeoffBalance(policy, p, theirs);
@@ -472,7 +484,7 @@
             </div>
             {b.tracked ? (
               <div style={{ fontSize: '0.78rem', color: t.sub, fontFamily: C.fontSans, marginTop: 4 }}>
-                <b style={{ color: t.text }}>{daysEq(b.remaining)} day{daysEq(b.remaining) === 1 ? '' : 's'}</b> ({timeoffFmtHours(b.remaining)}h left) · {timeoffFmtHours(b.used)}h used · {timeoffFmtHours(b.pending)}h pending · of {timeoffFmtHours(b.allot)}h
+                <b style={{ color: t.text }}>{daysEq(b.remaining)} day{daysEq(b.remaining) === 1 ? '' : 's'}</b> ({timeoffFmtHours(b.remaining)}h left) · {hd(b.used)} used · {hd(b.pending)} pending · of {hd(b.allot)}
                 {b.proration < 1 ? <span style={{ color: C.gold }}> · prorated ({p.hire_date ? timeoffLocalDateOnly(p.hire_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'started'} start)</span> : null}
               </div>
             ) : null}
@@ -481,7 +493,7 @@
                 {shown.map(r => (
                   <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }}>
                     <span style={{ flex: 1, fontSize: '0.78rem', color: t.text, fontFamily: C.fontSans }}>{timeoffWhen(r)}{r.reason ? <span style={{ color: t.muted }}>{' · ' + r.reason}</span> : null}</span>
-                    <span style={{ fontSize: '0.72rem', color: t.sub, fontFamily: C.fontSans }}>{timeoffFmtHours(Number(r.total_hours) || 0)}h</span>
+                    <span style={{ fontSize: '0.72rem', color: t.sub, fontFamily: C.fontSans }}>{hd(r.total_hours)}</span>
                     {pill(r.status)}
                     {/* "Logged" rows can't be cancelled by an admin yet: the DB guard only lets an
                         admin cancel pending/approved. Hidden rather than shown-then-failing. */}
@@ -534,9 +546,9 @@
               )}
               <div style={{ marginBottom: 14 }}><span style={lbl}>Reason (optional)</span><input type="text" value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. family trip" style={fld} /></div>
               <div style={{ fontSize: '0.82rem', color: t.sub, fontFamily: C.fontSans, marginBottom: 6 }}>
-                {draftValid ? <React.Fragment><strong style={{ color: t.text }}>= {timeoffFmtHours(draftHours)} hours</strong>{forBal && forBal.tracked ? ' (' + daysEq(draftHours) + ' day' + (daysEq(draftHours) === 1 ? '' : 's') + ')' : ''}</React.Fragment> : <span style={{ color: t.muted }}>Pick a valid date/time range.</span>}
+                {draftValid ? <React.Fragment><strong style={{ color: t.text }}>= {hd(draftHours)}</strong></React.Fragment> : <span style={{ color: t.muted }}>Pick a valid date/time range.</span>}
               </div>
-              {forBal && forBal.tracked && draftValid && draftHours > forBal.remaining ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ This is more than {timeoffFmtHours(forBal.remaining)}h remaining{forUserId ? ' for ' + (people[forUserId] || 'this person') : ''}.</div> : null}
+              {forBal && forBal.tracked && draftValid && draftHours > forBal.remaining ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ This is more than the {hd(forBal.remaining)} remaining{forUserId ? ' for ' + (people[forUserId] || 'this person') : ''}.</div> : null}
               {editingId && (editingStatus === 'approved' || editingStatus === 'denied') ? <div style={{ fontSize: '0.76rem', color: C.amber, fontFamily: C.fontSans, marginBottom: 10 }}>⚠ Saving will withdraw this {PILL[editingStatus].label.toLowerCase()} request and send it back for approval.</div> : null}
               <button onClick={submit} disabled={!draftValid || busy} style={{ ...primaryBtn, marginTop: 6, opacity: (!draftValid || busy) ? 0.5 : 1 }}>{busy ? 'Saving…' : (editingId ? 'Save changes' : (forBal && forBal.tracked ? 'Submit request' : 'Log it'))}</button>
             </div>
@@ -584,7 +596,7 @@
                     <span style={{ fontSize: '2.2rem', fontWeight: 400, color: '#fff', fontFamily: C.fontDisplay, fontStyle: 'italic' }}>{daysEq(bal.remaining)} day{daysEq(bal.remaining) === 1 ? '' : 's'}</span>
                     <span style={{ fontSize: '0.9rem', color: dark ? '#C9A45A' : C.goldSoft, fontFamily: C.fontSans }}>({timeoffFmtHours(bal.remaining)}h left)</span>
                   </div>
-                  <div style={{ fontSize: '0.78rem', color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.66)', fontFamily: C.fontSans, marginTop: 4 }}>{timeoffFmtHours(bal.used)}h used · {timeoffFmtHours(bal.pending)}h awaiting · of {timeoffFmtHours(bal.allot)}h ({daysEq(bal.allot)} days){bal.proration < 1 ? <span style={{ color: dark ? '#C9A45A' : C.goldSoft }}> · prorated for your {new Date().getFullYear()} start</span> : null}</div>
+                  <div style={{ fontSize: '0.78rem', color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.66)', fontFamily: C.fontSans, marginTop: 4 }}>{hd(bal.used)} used · {hd(bal.pending)} awaiting · of {hd(bal.allot)}{bal.proration < 1 ? <span style={{ color: dark ? '#C9A45A' : C.goldSoft }}> · prorated for your {new Date().getFullYear()} start</span> : null}</div>
                 </div>
               ) : (
                 <div style={card}>

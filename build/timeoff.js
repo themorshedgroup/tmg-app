@@ -569,6 +569,11 @@ function TimeOffTab({
   const forBal = forProfile ? timeoffBalance(policy, forProfile, yearRequests.filter(r => r.user_id === forUserId)) : bal;
   const hpw = policy ? policy.hours_per_workday : 8;
   const daysEq = h => Math.round(h / (hpw || 8) * 10) / 10;
+  // Every hours figure is shown with its day conversion: "2 days (16h)".
+  const hd = h => {
+    const d = daysEq(Number(h) || 0);
+    return d + ' day' + (d === 1 ? '' : 's') + ' (' + timeoffFmtHours(Number(h) || 0) + 'h)';
+  };
   // Approver sees: their reports' requests, or (admin/ops) everyone's. A TRUE admin
   // (access has 'admin') may also approve their OWN — matches the DB self-approval carve-out.
   const isSuper = toRoles(profile && profile.access).indexOf('admin') !== -1;
@@ -752,7 +757,9 @@ function TimeOffTab({
     fontFamily: C.fontSans
   };
   const myRow = r => {
-    const canCancel = r.status === 'pending' || r.status === 'noted';
+    // Mirrors the DB guard: anyone may cancel their own pending; a non-admin their own
+    // logged; a true admin their own approved (a non-admin's approved needs their manager).
+    const canCancel = r.status === 'pending' || r.status === 'noted' && !isSuper || r.status === 'approved' && isSuper;
     const canEdit = r.status !== 'cancelled';
     const who = r.decided_by && people[r.decided_by];
     return /*#__PURE__*/React.createElement("div", {
@@ -783,7 +790,7 @@ function TimeOffTab({
         fontFamily: C.fontSans,
         marginTop: 3
       }
-    }, timeoffFmtHours(r.total_hours), "h", r.tracked ? ' · ' + daysEq(r.total_hours) + ' day' + (daysEq(r.total_hours) === 1 ? '' : 's') : ' · visibility', r.reason ? ' · ' + r.reason : ''), r.decision_note ? /*#__PURE__*/React.createElement("div", {
+    }, hd(r.total_hours), r.tracked ? '' : ' · visibility', r.reason ? ' · ' + r.reason : ''), r.decision_note ? /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: '0.74rem',
         color: t.muted,
@@ -854,7 +861,7 @@ function TimeOffTab({
       color: t.sub,
       fontFamily: C.fontSans
     }
-  }, timeoffFmtHours(r.total_hours), "h")), /*#__PURE__*/React.createElement("div", {
+  }, hd(r.total_hours))), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: '0.8rem',
       color: t.sub,
@@ -899,7 +906,17 @@ function TimeOffTab({
     }
   }, "Deny")));
   // Admin-only Team roster: every active profile's balance for the year, side by side.
-  const activeProfiles = profiles.filter(p => !p.status || p.status === 'active');
+  // Real people only: a role-less shared login (e.g. "The Morshed Group Operations")
+  // isn't a person who takes time off. Listed in Symon's fixed order; anyone new
+  // goes after, alphabetically.
+  const TEAM_ORDER = ['tarek', 'brad', 'brett', 'kyle', 'symon', 'angelica', 'alexa', 'gustavo', 'camila'];
+  const teamRank = p => {
+    const f = String(p.first_name || '').toLowerCase();
+    const i = TEAM_ORDER.findIndex(n => f.startsWith(n));
+    return i === -1 ? TEAM_ORDER.length : i;
+  };
+  const personName = p => ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || '';
+  const activeProfiles = profiles.filter(p => (!p.status || p.status === 'active') && toRoles(p.access).length).sort((a, b) => teamRank(a) - teamRank(b) || personName(a).localeCompare(personName(b)));
   const rosterRow = p => {
     const theirs = yearRequests.filter(r => r.user_id === p.id);
     const b = timeoffBalance(policy, p, theirs);
@@ -945,7 +962,7 @@ function TimeOffTab({
       style: {
         color: t.text
       }
-    }, daysEq(b.remaining), " day", daysEq(b.remaining) === 1 ? '' : 's'), " (", timeoffFmtHours(b.remaining), "h left) \xB7 ", timeoffFmtHours(b.used), "h used \xB7 ", timeoffFmtHours(b.pending), "h pending \xB7 of ", timeoffFmtHours(b.allot), "h", b.proration < 1 ? /*#__PURE__*/React.createElement("span", {
+    }, daysEq(b.remaining), " day", daysEq(b.remaining) === 1 ? '' : 's'), " (", timeoffFmtHours(b.remaining), "h left) \xB7 ", hd(b.used), " used \xB7 ", hd(b.pending), " pending \xB7 of ", hd(b.allot), b.proration < 1 ? /*#__PURE__*/React.createElement("span", {
       style: {
         color: C.gold
       }
@@ -983,7 +1000,7 @@ function TimeOffTab({
         color: t.sub,
         fontFamily: C.fontSans
       }
-    }, timeoffFmtHours(Number(r.total_hours) || 0), "h"), pill(r.status), r.status === 'noted' ? null : /*#__PURE__*/React.createElement("button", {
+    }, hd(r.total_hours)), pill(r.status), r.status === 'noted' ? null : /*#__PURE__*/React.createElement("button", {
       onClick: () => doRemove(r),
       disabled: busy,
       title: "Remove",
@@ -1193,7 +1210,7 @@ function TimeOffTab({
       style: {
         color: t.text
       }
-    }, "= ", timeoffFmtHours(draftHours), " hours"), forBal && forBal.tracked ? ' (' + daysEq(draftHours) + ' day' + (daysEq(draftHours) === 1 ? '' : 's') + ')' : '') : /*#__PURE__*/React.createElement("span", {
+    }, "= ", hd(draftHours))) : /*#__PURE__*/React.createElement("span", {
       style: {
         color: t.muted
       }
@@ -1204,7 +1221,7 @@ function TimeOffTab({
         fontFamily: C.fontSans,
         marginBottom: 10
       }
-    }, "\u26A0 This is more than ", timeoffFmtHours(forBal.remaining), "h remaining", forUserId ? ' for ' + (people[forUserId] || 'this person') : '', ".") : null, editingId && (editingStatus === 'approved' || editingStatus === 'denied') ? /*#__PURE__*/React.createElement("div", {
+    }, "\u26A0 This is more than the ", hd(forBal.remaining), " remaining", forUserId ? ' for ' + (people[forUserId] || 'this person') : '', ".") : null, editingId && (editingStatus === 'approved' || editingStatus === 'denied') ? /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: '0.76rem',
         color: C.amber,
@@ -1359,7 +1376,7 @@ function TimeOffTab({
       fontFamily: C.fontSans,
       marginTop: 4
     }
-  }, timeoffFmtHours(bal.used), "h used \xB7 ", timeoffFmtHours(bal.pending), "h awaiting \xB7 of ", timeoffFmtHours(bal.allot), "h (", daysEq(bal.allot), " days)", bal.proration < 1 ? /*#__PURE__*/React.createElement("span", {
+  }, hd(bal.used), " used \xB7 ", hd(bal.pending), " awaiting \xB7 of ", hd(bal.allot), bal.proration < 1 ? /*#__PURE__*/React.createElement("span", {
     style: {
       color: dark ? '#C9A45A' : C.goldSoft
     }

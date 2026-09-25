@@ -884,8 +884,12 @@ function TimeOffTab({
   // Admin-only Team roster: every active profile's balance for the year, side by side.
   const activeProfiles = profiles.filter(p => !p.status || p.status === 'active');
   const rosterRow = p => {
-    const b = timeoffBalance(policy, p, yearRequests.filter(r => r.user_id === p.id));
+    const theirs = yearRequests.filter(r => r.user_id === p.id);
+    const b = timeoffBalance(policy, p, theirs);
     const name = ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.email || 'Someone';
+    // The actual dates, not just the totals: approved + logged (+ pending, flagged),
+    // so an admin can see WHEN each person is out, including untracked roles.
+    const shown = theirs.filter(r => r.status === 'approved' || r.status === 'noted' || r.status === 'pending').sort((x, y) => String(x.start_at).localeCompare(String(y.start_at)));
     return /*#__PURE__*/React.createElement("div", {
       key: p.id,
       style: {
@@ -931,7 +935,38 @@ function TimeOffTab({
     }, " \xB7 prorated (", p.hire_date ? timeoffLocalDateOnly(p.hire_date).toLocaleDateString(undefined, {
       month: 'short',
       day: 'numeric'
-    }) : 'started', " start)") : null) : null);
+    }) : 'started', " start)") : null) : null, shown.length ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 8,
+        borderTop: `1px solid ${t.border}`,
+        paddingTop: 8
+      }
+    }, shown.map(r => /*#__PURE__*/React.createElement("div", {
+      key: r.id,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '3px 0'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        fontSize: '0.78rem',
+        color: t.text,
+        fontFamily: C.fontSans
+      }
+    }, timeoffWhen(r), r.reason ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: t.muted
+      }
+    }, ' · ' + r.reason) : null), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.72rem',
+        color: t.sub,
+        fontFamily: C.fontSans
+      }
+    }, timeoffFmtHours(Number(r.total_hours) || 0), "h"), pill(r.status)))) : null);
   };
   if (loading) return /*#__PURE__*/React.createElement("div", {
     style: {

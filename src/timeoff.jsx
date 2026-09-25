@@ -432,9 +432,9 @@
       const primaryBtn = { width: '100%', padding: 13, background: C.navy, color: '#fff', border: 'none', borderRadius: 12, fontSize: '0.92rem', fontWeight: 600, cursor: 'pointer', fontFamily: C.fontSans };
 
       const myRow = (r) => {
-        // Mirrors the DB guard: anyone may cancel their own pending; a non-admin their own
-        // logged; a true admin their own approved (a non-admin's approved needs their manager).
-        const canCancel = r.status === 'pending' || (r.status === 'noted' && !isSuper) || (r.status === 'approved' && isSuper);
+        // Mirrors the DB guard: anyone may cancel their own pending or logged; a true admin
+        // also their own approved (a non-admin's approved needs their manager).
+        const canCancel = r.status === 'pending' || r.status === 'noted' || (r.status === 'approved' && isSuper);
         const canEdit = r.status !== 'cancelled';
         const who = r.decided_by && people[r.decided_by];
         return (
@@ -507,9 +507,7 @@
                     <span style={{ flex: 1, fontSize: '0.78rem', color: t.text, fontFamily: C.fontSans }}>{timeoffWhen(r)}{r.reason ? <span style={{ color: t.muted }}>{' · ' + r.reason}</span> : null}</span>
                     <span style={{ fontSize: '0.72rem', color: t.sub, fontFamily: C.fontSans }}>{hd(r.total_hours)}</span>
                     {pill(r.status)}
-                    {/* "Logged" rows can't be cancelled by an admin yet: the DB guard only lets an
-                        admin cancel pending/approved. Hidden rather than shown-then-failing. */}
-                    {r.status === 'noted' ? null : <button onClick={() => doRemove(r)} disabled={busy} title="Remove" aria-label="Remove" style={{ background: 'none', border: 'none', padding: '2px 4px', cursor: 'pointer', color: t.muted, fontSize: 16, lineHeight: 1 }}><i className="ti ti-trash" /></button>}
+                    <button onClick={() => doRemove(r)} disabled={busy} title="Remove" aria-label="Remove" style={{ background: 'none', border: 'none', padding: '2px 4px', cursor: 'pointer', color: t.muted, fontSize: 16, lineHeight: 1 }}><i className="ti ti-trash" /></button>
                   </div>
                 ))}
               </div>

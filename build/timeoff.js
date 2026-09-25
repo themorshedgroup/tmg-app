@@ -776,9 +776,9 @@ function TimeOffTab({
     fontFamily: C.fontSans
   };
   const myRow = r => {
-    // Mirrors the DB guard: anyone may cancel their own pending; a non-admin their own
-    // logged; a true admin their own approved (a non-admin's approved needs their manager).
-    const canCancel = r.status === 'pending' || r.status === 'noted' && !isSuper || r.status === 'approved' && isSuper;
+    // Mirrors the DB guard: anyone may cancel their own pending or logged; a true admin
+    // also their own approved (a non-admin's approved needs their manager).
+    const canCancel = r.status === 'pending' || r.status === 'noted' || r.status === 'approved' && isSuper;
     const canEdit = r.status !== 'cancelled';
     const who = r.decided_by && people[r.decided_by];
     return /*#__PURE__*/React.createElement("div", {
@@ -1019,7 +1019,7 @@ function TimeOffTab({
         color: t.sub,
         fontFamily: C.fontSans
       }
-    }, hd(r.total_hours)), pill(r.status), r.status === 'noted' ? null : /*#__PURE__*/React.createElement("button", {
+    }, hd(r.total_hours)), pill(r.status), /*#__PURE__*/React.createElement("button", {
       onClick: () => doRemove(r),
       disabled: busy,
       title: "Remove",

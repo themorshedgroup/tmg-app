@@ -271,7 +271,7 @@ async function buildEmail(sb: any, asOf: string) {
 <a href="${APP_ORIGIN}/#timeoff" style="display:block;padding:12px 22px;font-family:${F};font-size:13px;font-weight:600;color:#FFFFFF;text-decoration:none;">Open Time Off</a></td></tr></table>`;
   const text = `Time Off Summary\nBalances as of ${asOfLabel}\n\nBALANCES, ${year}\n${balText}\nCOMING UP\n${up.text}\nTAKEN IN ${lastMonthName.toUpperCase()}\n${taken.text}`
     + (agText ? `\nSALES AGENTS (logged this year)\n${agText}` : "") + `\nOpen Time Off: ${APP_ORIGIN}/#timeoff\n`;
-  return { subject: `Time Off Summary - ${asOfLabel}`, html: shellHtml(body), text, periodKey: asOf.slice(0, 7) };
+  return { subject: `Time Off Summary as of ${asOf.slice(5, 7)}/${asOf.slice(8, 10)}/${asOf.slice(2, 4)}`, html: shellHtml(body), text, periodKey: asOf.slice(0, 7) };
 }
 
 Deno.serve(async (req: Request) => {

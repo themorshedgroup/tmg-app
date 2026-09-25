@@ -378,8 +378,26 @@
       const doCancel = async (r) => {
         if (!window.confirm('Cancel this time-off request?')) return;
         setBusy(true);
-        try { await TimeOffDB.cancel(r.id); await reload(); }
+        try {
+          await TimeOffDB.cancel(r.id);
+          if (r.calendar_event_id) await deleteOOOEvent(r.calendar_event_id, r.calendar_id);
+          await reload();
+        }
         catch (e) { alert('Could not cancel: ' + (e.message || e)); }
+        finally { setBusy(false); }
+      };
+      // Admin "Remove" from the Team roster. A soft remove (status -> cancelled), never a hard
+      // delete: the hours come back to their balance, the OOO event leaves the Team Calendar,
+      // and the audit trail survives. The DB trigger decides which statuses an admin may cancel.
+      const doRemove = async (r) => {
+        if (!window.confirm('Remove ' + (people[r.user_id] || 'this person') + '\u2019s time off on ' + timeoffWhen(r) + '? Their hours go back to their balance.')) return;
+        setBusy(true);
+        try {
+          await TimeOffDB.cancel(r.id);
+          if (r.calendar_event_id) await deleteOOOEvent(r.calendar_event_id, r.calendar_id);
+          await reload();
+        }
+        catch (e) { alert('Could not remove: ' + (e.message || e)); }
         finally { setBusy(false); }
       };
       const doDecide = async (r, status) => {
@@ -454,7 +472,7 @@
             </div>
             {b.tracked ? (
               <div style={{ fontSize: '0.78rem', color: t.sub, fontFamily: C.fontSans, marginTop: 4 }}>
-                <b style={{ color: t.text }}>{timeoffFmtHours(b.remaining)}h</b> left · {timeoffFmtHours(b.used)}h used · {timeoffFmtHours(b.pending)}h pending · of {timeoffFmtHours(b.allot)}h
+                <b style={{ color: t.text }}>{daysEq(b.remaining)} day{daysEq(b.remaining) === 1 ? '' : 's'}</b> ({timeoffFmtHours(b.remaining)}h left) · {timeoffFmtHours(b.used)}h used · {timeoffFmtHours(b.pending)}h pending · of {timeoffFmtHours(b.allot)}h
                 {b.proration < 1 ? <span style={{ color: C.gold }}> · prorated ({p.hire_date ? timeoffLocalDateOnly(p.hire_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'started'} start)</span> : null}
               </div>
             ) : null}
@@ -465,6 +483,9 @@
                     <span style={{ flex: 1, fontSize: '0.78rem', color: t.text, fontFamily: C.fontSans }}>{timeoffWhen(r)}{r.reason ? <span style={{ color: t.muted }}>{' · ' + r.reason}</span> : null}</span>
                     <span style={{ fontSize: '0.72rem', color: t.sub, fontFamily: C.fontSans }}>{timeoffFmtHours(Number(r.total_hours) || 0)}h</span>
                     {pill(r.status)}
+                    {/* "Logged" rows can't be cancelled by an admin yet: the DB guard only lets an
+                        admin cancel pending/approved. Hidden rather than shown-then-failing. */}
+                    {r.status === 'noted' ? null : <button onClick={() => doRemove(r)} disabled={busy} title="Remove" aria-label="Remove" style={{ background: 'none', border: 'none', padding: '2px 4px', cursor: 'pointer', color: t.muted, fontSize: 16, lineHeight: 1 }}><i className="ti ti-trash" /></button>}
                   </div>
                 ))}
               </div>
@@ -560,8 +581,8 @@
                 <div style={{ ...card, background: dark ? '#12203B' : C.navy }}>
                   <div style={{ fontSize: '0.72rem', fontWeight: 600, color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.7)', letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>Time off — {new Date().getFullYear()}</div>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
-                    <span style={{ fontSize: '2.2rem', fontWeight: 400, color: '#fff', fontFamily: C.fontDisplay, fontStyle: 'italic' }}>{timeoffFmtHours(bal.remaining)}h</span>
-                    <span style={{ fontSize: '0.9rem', color: dark ? '#C9A45A' : C.goldSoft, fontFamily: C.fontSans }}>≈ {daysEq(bal.remaining)} days left</span>
+                    <span style={{ fontSize: '2.2rem', fontWeight: 400, color: '#fff', fontFamily: C.fontDisplay, fontStyle: 'italic' }}>{daysEq(bal.remaining)} day{daysEq(bal.remaining) === 1 ? '' : 's'}</span>
+                    <span style={{ fontSize: '0.9rem', color: dark ? '#C9A45A' : C.goldSoft, fontFamily: C.fontSans }}>({timeoffFmtHours(bal.remaining)}h left)</span>
                   </div>
                   <div style={{ fontSize: '0.78rem', color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.66)', fontFamily: C.fontSans, marginTop: 4 }}>{timeoffFmtHours(bal.used)}h used · {timeoffFmtHours(bal.pending)}h awaiting · of {timeoffFmtHours(bal.allot)}h ({daysEq(bal.allot)} days){bal.proration < 1 ? <span style={{ color: dark ? '#C9A45A' : C.goldSoft }}> · prorated for your {new Date().getFullYear()} start</span> : null}</div>
                 </div>

@@ -673,9 +673,26 @@ function TimeOffTab({
     setBusy(true);
     try {
       await TimeOffDB.cancel(r.id);
+      if (r.calendar_event_id) await deleteOOOEvent(r.calendar_event_id, r.calendar_id);
       await reload();
     } catch (e) {
       alert('Could not cancel: ' + (e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  // Admin "Remove" from the Team roster. A soft remove (status -> cancelled), never a hard
+  // delete: the hours come back to their balance, the OOO event leaves the Team Calendar,
+  // and the audit trail survives. The DB trigger decides which statuses an admin may cancel.
+  const doRemove = async r => {
+    if (!window.confirm('Remove ' + (people[r.user_id] || 'this person') + '\u2019s time off on ' + timeoffWhen(r) + '? Their hours go back to their balance.')) return;
+    setBusy(true);
+    try {
+      await TimeOffDB.cancel(r.id);
+      if (r.calendar_event_id) await deleteOOOEvent(r.calendar_event_id, r.calendar_id);
+      await reload();
+    } catch (e) {
+      alert('Could not remove: ' + (e.message || e));
     } finally {
       setBusy(false);
     }
@@ -928,7 +945,7 @@ function TimeOffTab({
       style: {
         color: t.text
       }
-    }, timeoffFmtHours(b.remaining), "h"), " left \xB7 ", timeoffFmtHours(b.used), "h used \xB7 ", timeoffFmtHours(b.pending), "h pending \xB7 of ", timeoffFmtHours(b.allot), "h", b.proration < 1 ? /*#__PURE__*/React.createElement("span", {
+    }, daysEq(b.remaining), " day", daysEq(b.remaining) === 1 ? '' : 's'), " (", timeoffFmtHours(b.remaining), "h left) \xB7 ", timeoffFmtHours(b.used), "h used \xB7 ", timeoffFmtHours(b.pending), "h pending \xB7 of ", timeoffFmtHours(b.allot), "h", b.proration < 1 ? /*#__PURE__*/React.createElement("span", {
       style: {
         color: C.gold
       }
@@ -966,7 +983,23 @@ function TimeOffTab({
         color: t.sub,
         fontFamily: C.fontSans
       }
-    }, timeoffFmtHours(Number(r.total_hours) || 0), "h"), pill(r.status)))) : null);
+    }, timeoffFmtHours(Number(r.total_hours) || 0), "h"), pill(r.status), r.status === 'noted' ? null : /*#__PURE__*/React.createElement("button", {
+      onClick: () => doRemove(r),
+      disabled: busy,
+      title: "Remove",
+      "aria-label": "Remove",
+      style: {
+        background: 'none',
+        border: 'none',
+        padding: '2px 4px',
+        cursor: 'pointer',
+        color: t.muted,
+        fontSize: 16,
+        lineHeight: 1
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-trash"
+    }))))) : null);
   };
   if (loading) return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -1313,13 +1346,13 @@ function TimeOffTab({
       fontFamily: C.fontDisplay,
       fontStyle: 'italic'
     }
-  }, timeoffFmtHours(bal.remaining), "h"), /*#__PURE__*/React.createElement("span", {
+  }, daysEq(bal.remaining), " day", daysEq(bal.remaining) === 1 ? '' : 's'), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: '0.9rem',
       color: dark ? '#C9A45A' : C.goldSoft,
       fontFamily: C.fontSans
     }
-  }, "\u2248 ", daysEq(bal.remaining), " days left")), /*#__PURE__*/React.createElement("div", {
+  }, "(", timeoffFmtHours(bal.remaining), "h left)")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: '0.78rem',
       color: dark ? '#A9B2C4' : 'rgba(255,255,255,0.66)',

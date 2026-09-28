@@ -286,23 +286,248 @@ async function resolveZohoOwnerIds(
   return { ids, missing };
 }
 
-// ── Date conversion: TMG uses ISO timestamptz, Zoho Projects uses MM-DD-YYYY ──
-function isoToZohoDate(iso: string | null | undefined): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return null;
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  return `${mm}-${dd}-${yyyy}`;
+// ── Zoho task owners to TMG profiles ──────────────────────────────────────
+// accountability_weeks counts a person's work strictly through task_people
+// (it joins role = 'assignee'), so a task pulled in with nobody on it is not
+// merely unattributed, it is invisible to the dashboard. Mirrors the poll
+// function's ownerResolver; keep the two in step. Memoised per request,
+// because both rosters behind it are the same for every task in the pull.
+function ownerResolver(sb: any, conn: any, accessToken: string, portalBase: string) {
+  let people: any[] | null = null;
+  let emailForZohoId: Record<string, string> | null = null;
+
+  const loadPeople = async () => {
+    if (!people) {
+      const { data } = await sb.from("profiles").select("id,email,first_name,status");
+      people = (data || []).filter((p: any) => !p.status || p.status === "active");
+    }
+    return people!;
+  };
+  // The inverse of the email -> id cache resolveZohoOwnerIds already keeps on
+  // zoho_projects_connection: the push knows a TMG email and needs Zoho's id,
+  // the pull gets Zoho's id off a task and needs the email. One cache serves
+  // both, so reading owners costs no extra /users/ call.
+  const loadPortalIds = async () => {
+    if (!emailForZohoId) {
+      emailForZohoId = {};
+      let cache = (conn.portal_users_cache || {}) as Record<string, string>;
+      if (!Object.keys(cache).length) {
+        const r = await zohoFetch(sb, conn, accessToken, `${portalBase}/users/`, {});
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) {
+          const fresh: Record<string, string> = {};
+          for (const u of (d.users || d.userlist || [])) {
+            const email = (u.email || "").toLowerCase().trim();
+            const id = u.id_string || (u.id != null ? String(u.id) : "");
+            if (email && id) fresh[email] = id;
+          }
+          cache = fresh;
+          conn.portal_users_cache = fresh;
+          conn.portal_users_cached_at = new Date().toISOString();
+          try {
+            await sb.from("zoho_projects_connection")
+              .update({ portal_users_cache: fresh, portal_users_cached_at: conn.portal_users_cached_at })
+              .eq("refresh_token", conn.refresh_token);
+          } catch (_) { /* cache write is best-effort */ }
+        }
+      }
+      for (const [email, id] of Object.entries(cache)) emailForZohoId[id] = email;
+    }
+    return emailForZohoId!;
+  };
+
+  // Returns the TMG profile ids AND whether every Zoho owner was placed. The
+  // caller needs that second answer before it removes anybody: an owner this
+  // code cannot place (Luciana holds a Zoho tasklist and has no profiles row)
+  // must never be read as "Zoho says this person is off the task".
+  return async (owners: ZOwner[]): Promise<{ ids: string[]; complete: boolean }> => {
+    if (!owners.length) return { ids: [], complete: false };
+    const roster = await loadPeople();
+    const ids = new Set<string>();
+    let unplaced = 0;
+    for (const o of owners) {
+      let email = o.email;
+      if (!email && o.id) email = (await loadPortalIds())[o.id] || "";
+      let hit = email
+        ? roster.find((p: any) => String(p.email || "").toLowerCase().trim() === email)
+        : null;
+      if (!hit && o.name) {
+        // Only an unambiguous single hit counts: filing one person's work
+        // under another is worse than filing it under nobody.
+        const w = leadWord(o.name);
+        const hits = roster.filter((p: any) => leadWordHit(w, leadWord(p.first_name || p.email)));
+        if (hits.length === 1) hit = hits[0];
+      }
+      if (hit) ids.add(hit.id); else unplaced++;
+    }
+    return { ids: Array.from(ids), complete: unplaced === 0 };
+  };
 }
+
+// Upsert, never delete-then-insert: assigned_at is the column
+// accountability_weeks buckets the "assigned" count by, so re-inserting a row
+// that already exists would re-date somebody's whole history into this week.
+//
+// Adding is eager and removing is not. The Zoho owner field is read through a
+// list of candidate names (see zohoOwners) and none of them is confirmed
+// against the live portal, so the two guesses cost very different things: a
+// wrong ADD leaves one name too many, which anybody can see and undo, while a
+// wrong REMOVE erases the only record that a person held the work and the
+// dashboard stops counting it. removalEpochMs is the higher bar, and it is
+// Zoho's own modified time, passed only when it is a real clock reading rather
+// than the content fingerprint, on a task TMG has stamped before. A person
+// then comes off only if that Zoho edit is newer than the moment they were put
+// on here. Kept identical to the poll function's copy.
+async function applyAssignees(
+  sb: any, taskId: string, createdAt: string | null, ids: string[], complete: boolean,
+  removalEpochMs: number | null = null,
+) {
+  if (!ids.length) return;
+  await sb.from("task_people").upsert(
+    ids.map((user_id) => ({
+      task_id: taskId, user_id, role: "assignee",
+      assigned_at: createdAt || new Date().toISOString(),
+    })),
+    { onConflict: "task_id,user_id,role", ignoreDuplicates: true },
+  );
+  // A lookup miss is still not a statement that somebody was removed.
+  if (!complete || removalEpochMs == null) return;
+  const { data: existing } = await sb.from("task_people")
+    .select("user_id,assigned_at").eq("task_id", taskId).eq("role", "assignee");
+  const stale = (existing || []).filter((r: any) => {
+    if (ids.includes(r.user_id)) return false;
+    // No assignment date is no basis either: it would read as the epoch, which
+    // makes every Zoho edit look newer and takes the row off on sight.
+    const at = r.assigned_at ? new Date(r.assigned_at).getTime() : NaN;
+    return !isNaN(at) && removalEpochMs > at + CLOCK_SKEW_MS;
+  });
+  if (!stale.length) return;
+  const userIds = stale.map((r: any) => r.user_id);
+  await sb.from("task_people").delete()
+    .eq("task_id", taskId).eq("role", "assignee").in("user_id", userIds);
+  // Every other change this sync makes leaves a line on the task. A removed
+  // assignee left none, so the one person who needed to know had no way to
+  // find out. Named, so it can be put back.
+  const { data: who } = await sb.from("profiles").select("id,first_name,email").in("id", userIds);
+  const names = (who || []).map((p: any) => p.first_name || p.email).filter(Boolean);
+  await sb.from("task_activity").insert({
+    task_id: taskId, kind: "system",
+    content: names.length
+      ? `Taken off this task in Zoho Projects: ${names.join(", ")}. Zoho is where that came from, so put them back there if it is wrong.`
+      : "An assignee was taken off this task in Zoho Projects.",
+  });
+}
+
+// Does this task already have somebody on it here? One narrow read, asked only
+// on the path that is about to guess an owner from a tasklist NAME, so a
+// project filed by phase and a task Zoho named an owner for never pay for it.
+async function hasAssignee(sb: any, taskId: string): Promise<boolean> {
+  const { data } = await sb.from("task_people")
+    .select("user_id").eq("task_id", taskId).eq("role", "assignee").limit(1);
+  return !!(data && data.length);
+}
+
+// Zoho pages the tasks endpoint and says nothing about there being more, so a
+// full page is the only hint that there is one. Reading page one only is why
+// 23 of the 30 linked projects sit at exactly 100 local tasks and none sits
+// above it: every one has been silently losing its tail.
+const TASK_PAGE = 200;
+async function fetchProjectTasksPaged(
+  doFetch: (url: string) => Promise<Response>,
+  portalBase: string, zohoProjectId: string, sinceMs: number | null, maxPages: number,
+): Promise<{ tasks: any[]; error: any; truncated: boolean }> {
+  const all: any[] = [];
+  let index = 1;
+  for (let page = 0; page < maxPages; page++) {
+    const u = new URL(`${portalBase}/projects/${zohoProjectId}/tasks/`);
+    if (sinceMs != null) u.searchParams.set("last_modified_time", String(sinceMs));
+    u.searchParams.set("index", String(index));
+    u.searchParams.set("range", String(TASK_PAGE));
+    const r = await doFetch(u.toString());
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return { tasks: all, error: d?.error || `HTTP ${r.status}`, truncated: false };
+    const batch = (d.tasks || []) as any[];
+    all.push(...batch);
+    if (batch.length < TASK_PAGE) return { tasks: all, error: null, truncated: false };
+    index += TASK_PAGE;
+  }
+  // Out of pages with a full page behind us, so the tail of this project was
+  // never read. The caller must not move its cursor past what it did not see:
+  // that is the same class of mistake as the ISO-string cursor that deadlocked
+  // the poll, and the poll already guards it the same way.
+  return { tasks: all, error: null, truncated: true };
+}
+
+// See the poll function's note: the insert that creates a task stamps
+// zoho_last_synced_at from JS milliseconds before Postgres evaluates now() for
+// updated_at, so 2804 rows read as locally edited when nobody touched them.
+const CLOCK_SKEW_MS = 2000;
+// The conflict branch can write to Zoho once per task and nothing used to cap
+// it, so a catch-up over a long-stalled project must not fire them all at once.
+const MAX_CONFLICT_PUSH_PER_SYNC = 20;
+
+// ── Date conversion: TMG uses ISO timestamptz, Zoho Projects uses MM-DD-YYYY ──
+// The brokerage's own zone, and the only zone any of this is read through:
+// accountability_weeks buckets on it, and the app reads due_at through it too.
+// Named once rather than written into each call, so the two copies of this
+// file cannot drift apart on the one thing that decides what day a task is due.
+const TMG_TZ = "America/Chicago";
+// Deno runs in UTC, so Date's own getters cannot answer a question about
+// Chicago, and Intl is the only thing here that knows when the clocks move.
+function zoneParts(ms: number, tz: string) {
+  const p = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(new Date(ms));
+  const g = (t: string) => Number(p.find((x) => x.type === t)?.value);
+  // en-US with hour12:false spells midnight as hour 24, so fold it back to 0.
+  return { year: g("year"), month: g("month"), day: g("day"), hour: g("hour") % 24, minute: g("minute"), second: g("second") };
+}
+// How far the zone sits from UTC at that instant, DST included: read the
+// instant as wall clock there, then treat that reading as if it were UTC. The
+// gap between the two is the offset.
+function zoneOffsetMs(ms: number, tz: string): number {
+  const w = zoneParts(ms, tz);
+  return Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second) - ms;
+}
+// Midnight on a calendar date IN that zone, as the UTC instant it really is.
+// Two passes because the offset that applies is the one at the answer, not the
+// one at the first guess, and those two differ on the days the clocks move.
+function zoneMidnightMs(y: number, m: number, d: number, tz: string): number {
+  const naive = Date.UTC(y, m - 1, d);
+  return naive - zoneOffsetMs(naive - zoneOffsetMs(naive, tz), tz);
+}
+// A Zoho end_date is a CALENDAR DATE with no time of day, so the only thing
+// that matters is what day it reads back as. Midnight UTC was the wrong answer
+// to that: the app and accountability_weeks both read due_at through
+// America/Chicago, where midnight UTC lands in the evening of the day BEFORE,
+// so all 1402 dated rows this pull had written were stored, shown and scored a
+// day early. Midnight in this zone is the same instant the app itself stores
+// for a date typed with no time (src/tasks.jsx builds "YYYY-MM-DDT00:00" and
+// lets the browser resolve it), so a Zoho-sourced date and a TMG-sourced date
+// are now the same kind of value and behave the same way in the same view.
 function zohoDateToIso(mmddyyyy: string | null | undefined): string | null {
   if (!mmddyyyy) return null;
-  const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(mmddyyyy.trim());
-  if (!m) return null;
-  const [, mm, dd, yyyy] = m;
-  const d = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
-  return isNaN(d.getTime()) ? null : d.toISOString();
+  const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(mmddyyyy.trim()); if (!m) return null;
+  const ms = zoneMidnightMs(Number(m[3]), Number(m[1]), Number(m[2]), TMG_TZ);
+  return isNaN(ms) ? null : new Date(ms).toISOString();
+}
+// The other half of the round trip, so it has to read the day in the SAME zone
+// or a date pulled out of Zoho would go back into Zoho a day earlier than it
+// came. Reading it in UTC is also what sent a task due at 7pm here to Zoho as
+// the following day.
+// A bare "YYYY-MM-DD" is already a calendar date and goes straight through:
+// zoho-projects pushes project dates in that form, straight off the date
+// columns projects.started_at/target_date, and putting a zone anywhere near a
+// value that has no time of day is how it would move by a day.
+function isoToZohoDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const bare = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso).trim());
+  if (bare) return `${bare[2]}-${bare[3]}-${bare[1]}`;
+  const ms = Date.parse(String(iso)); if (isNaN(ms)) return null;
+  const w = zoneParts(ms, TMG_TZ);
+  return `${String(w.month).padStart(2, "0")}-${String(w.day).padStart(2, "0")}-${w.year}`;
 }
 
 // ── Project custom fields ("Transaction Information" in Zoho's UI) ────────
@@ -643,21 +868,20 @@ Deno.serve(async (req) => {
       return json({ ok: true, id: t ? (t.id_string || String(t.id)) : null }, 200);
     }
 
-    // ── List tasks in a project — this doubles as the poll cursor. `since`
-    // (an ISO timestamp) is meant to filter to tasks changed after that time,
-    // but the exact Zoho query param for this is UNCONFIRMED against live
-    // docs (plan §4 flags this) — passed through as `last_modified_time` as
-    // the best-documented guess; verify against a real sandbox response
-    // during Phase 1 and adjust here if Zoho ignores/rejects it. Falls back
-    // to returning every task in the project (still filtered client-side by
-    // the caller) if the param has no effect, so the poller stays correct
-    // even if this specific param turns out wrong — just less efficient
-    // until confirmed. ──
+    // ── List tasks in a project. `since` is an ISO timestamp from the caller
+    // and Zoho's filter is last_modified_time, which it validates by NAME and
+    // then wants as epoch milliseconds: handing it the ISO string got a 403
+    // "Data type mismatch" on every call. Converted here rather than at the
+    // caller, because the ISO string is this action's published contract and
+    // tasks.jsx passes one. An unparseable value is dropped instead of sent,
+    // since an unfiltered list is merely wasteful while a 403 returns nothing
+    // at all. ──
     if (action === "list_tasks") {
       const projectId = (body.project_id || "").toString().trim();
       if (!projectId) return json({ error: "Missing project_id." }, 400);
       const u = new URL(`${portalBase}/projects/${projectId}/tasks/`);
-      if (body.since) u.searchParams.set("last_modified_time", body.since);
+      const sinceMs = body.since ? Date.parse(String(body.since)) : NaN;
+      if (!isNaN(sinceMs)) u.searchParams.set("last_modified_time", String(sinceMs));
       if (body.index) u.searchParams.set("index", String(body.index));
       if (body.range) u.searchParams.set("range", String(body.range));
       const r = await zohoFetch(sb, conn, accessToken, u.toString(), {});
@@ -819,56 +1043,174 @@ Deno.serve(async (req) => {
         .eq("id", localProjectId).in("record_type", ["ctc_file", "project"]).single();
       if (!proj || !proj.zoho_project_id) return json({ error: "This project isn't linked to a Zoho project." }, 400);
 
-      const u = new URL(`${portalBase}/projects/${proj.zoho_project_id}/tasks/`);
-      if (proj.zoho_last_synced_at) u.searchParams.set("last_modified_time", proj.zoho_last_synced_at);
-      const r = await zohoFetch(sb, conn, accessToken, u.toString(), {});
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) return json({ error: d?.error || "Zoho tasks error", detail: d }, r.status);
+      // An incremental cursor is only honest once TMG actually holds Zoho's
+      // state, and no pull had ever written an owner, a completion date, or a
+      // readable modified timestamp, so every row imported before this change
+      // is a shell. A project with any task still missing its Zoho timestamp
+      // is therefore read in full, and drops back to the cheap incremental
+      // read by itself once the last shell is filled.
+      const { data: shell } = await sb.from("tasks").select("id")
+        .eq("project_id", proj.id).not("zoho_task_id", "is", null)
+        .is("zoho_last_modified_time", null).limit(1);
+      const fullRead = !proj.zoho_last_synced_at || !!shell?.length;
+      // Epoch milliseconds, not the ISO string: see the list_tasks note above.
+      // Sending the timestamptz straight through is what made every poll since
+      // 2026-09-07 return 403 and pull nothing.
+      const sinceRaw = fullRead ? NaN : Date.parse(proj.zoho_last_synced_at);
+      const paged = await fetchProjectTasksPaged(
+        (url) => zohoFetch(sb, conn, accessToken, url, {}),
+        portalBase, proj.zoho_project_id, isNaN(sinceRaw) ? null : sinceRaw, 25,
+      );
+      if (paged.error) return json({ error: paged.error }, 502);
 
-      const zTasks = (d.tasks || []).map(mapZohoTask);
-      let pulled = 0, conflicts = 0, created = 0;
+      const zTasks = paged.tasks.map(mapZohoTask);
+      const resolveOwners = ownerResolver(sb, conn, accessToken, portalBase);
+      let pulled = 0, conflicts = 0, created = 0, conflictPushes = 0, conflictDeferred = 0, unverified = 0;
+      let conflictRowsRejected = 0, conflictRejectWhy = "";
+
+      // The active team, read once for this sync. Two callers want it two
+      // ways: the per-person test asks which names hold a list, the fallback
+      // below needs the profile behind the name it matched.
+      let roster: { id: string; name: string }[] | null = null;
+      const loadRoster = async (): Promise<{ id: string; name: string }[]> => {
+        if (roster) return roster;
+        const { data: team } = await sb.from("profiles").select("id,first_name,email,status");
+        roster = (team || [])
+          .filter((p: any) => !p.status || p.status === "active")
+          .map((p: any) => ({
+            id: p.id,
+            name: String(p.first_name || "").trim() || String(p.email || "").split("@")[0],
+          }))
+          .filter((p: any) => p.name);
+        return roster;
+      };
+      // Zoho's owner field is a guess (see zohoOwners), and when it answers
+      // nobody the tasklist the task sits in is the second source this project
+      // already trusts: Accountabilities files one list per person, which is
+      // how 20260924140000 recovered 18 assignees with no Zoho owner at all.
+      // Read at most once per sync, and only for a project whose lists are
+      // named after PEOPLE: a CTC file's lists are deal phases and matching
+      // those would invent owners rather than recover them.
+      let tasklists: ZTasklist[] | null = null;
+      let tasklistsRead = false;
+      let perPerson = false;
+      const ownerFromTasklist = async (tasklistName: string | null): Promise<string[]> => {
+        if (!tasklistName) return [];
+        // The name test first and the Zoho read second, so a phase-named
+        // project answers here and never spends a call against the
+        // 100-per-2-min ceiling. An ambiguous name settles here too, as nobody.
+        const id = profileForTasklistName(tasklistName, await loadRoster());
+        if (!id) return [];
+        if (!tasklistsRead) {
+          tasklistsRead = true;
+          tasklists = await fetchProjectTasklists(
+            (url) => zohoFetch(sb, conn, accessToken, url, {}), portalBase, proj.zoho_project_id);
+          if (tasklists) {
+            perPerson = distinctPeopleWithLists(
+              tasklists, (await loadRoster()).map((r) => r.name)) >= 2;
+          }
+        }
+        return tasklists && perPerson ? [id] : [];
+      };
 
       for (const zt of zTasks) {
         const { data: local } = await sb.from("tasks").select("*")
           .eq("project_id", proj.id).eq("zoho_task_id", zt.id).maybeSingle();
 
+        const owned = await resolveOwners(zt.owners);
+        // Nobody came back from Zoho's owner field, so ask the tasklist. A
+        // list name is a RECOVERY for a task nobody owns, never a correction
+        // of an assignment a person made here. "Resolve TMG Duplicate Client
+        // Folders" is assigned to Alexandra and sits in the "Tarek" list only
+        // because of the default-tasklist bug the push path now fixes, so
+        // reading the list name there would put Tarek on the task ALONGSIDE
+        // her and accountability_weeks would credit the work to both. It would
+        // recur every time somebody reassigns a task here without also moving
+        // the Zoho list. The one-time backfill (20260924140000) carries this
+        // same guard; this is the permanent version of it. A name off Zoho's
+        // own owner field is a different claim and keeps its behaviour.
+        let assigneeIds = owned.ids;
+        if (!assigneeIds.length) {
+          const fromList = await ownerFromTasklist(zt.tasklist_name);
+          // The read only happens once the list has actually named somebody,
+          // and a row about to be inserted trivially has nobody on it yet.
+          if (fromList.length && (!local || !(await hasAssignee(sb, local.id)))) {
+            assigneeIds = fromList;
+          }
+        }
+        // A fingerprint is not a clock (see MIN_REAL_EPOCH_MS), and only a
+        // clock can support the claim that somebody was taken off a task.
+        const zohoEpochMs = (zt.last_modified_time || 0) >= MIN_REAL_EPOCH_MS ? zt.last_modified_time : null;
+
         if (!local) {
           const { data: inserted } = await sb.from("tasks").insert({
             title: zt.title, description: zt.description, due_at: zt.due_at,
             priority: zt.priority, status: zt.status, project_id: proj.id,
+            completed_at: completionFor(zt, null),
             zoho_task_id: zt.id, zoho_last_synced_at: new Date().toISOString(),
             zoho_last_modified_time: zt.last_modified_time,
             zoho_tasklist_id: zt.tasklist_id, zoho_tasklist_name: zt.tasklist_name,
           }).select().single();
           if (inserted) {
+            // No removalEpochMs: a row created a line ago has nobody on it yet.
+            await applyAssignees(sb, inserted.id, inserted.created_at, assigneeIds, owned.complete);
             await sb.from("task_activity").insert({ task_id: inserted.id, kind: "system", content: "Task created in Zoho Projects" });
             created++;
           }
           continue;
         }
 
+        // A stored null does not mean the two sides agree, it means TMG has
+        // never held a Zoho timestamp for this task: null !== null is false,
+        // so the old test read every imported row as unchanged and skipped it
+        // forever. Treat no-stored-timestamp as CHANGED, which costs one extra
+        // update the first time and then settles.
+        const neverStamped = local.zoho_last_modified_time == null;
+
+        // Applied on every pass, ahead of the change test rather than inside
+        // it: ownership was never written before this change, so the rows that
+        // need an assignee most are the ones Zoho has nothing new to say about.
+        await applyAssignees(
+          sb, local.id, local.created_at, assigneeIds, owned.complete,
+          neverStamped ? null : zohoEpochMs,
+        );
+
         const localChangedSinceSync = local.updated_at && local.zoho_last_synced_at
-          ? new Date(local.updated_at) > new Date(local.zoho_last_synced_at)
+          ? new Date(local.updated_at).getTime() > new Date(local.zoho_last_synced_at).getTime() + CLOCK_SKEW_MS
           : !local.zoho_last_synced_at;
-        const zohoChangedSinceSync = zt.last_modified_time !== local.zoho_last_modified_time;
+        const zohoChangedSinceSync = neverStamped || zt.last_modified_time !== local.zoho_last_modified_time;
         if (!zohoChangedSinceSync) continue;
 
-        if (localChangedSinceSync) {
+        // With no stored Zoho timestamp there is no basis for the claim that
+        // TMG is the newer side, and the conflict branch answers that claim by
+        // POSTing TMG's values over Zoho's, which on a stalled project means
+        // pushing weeks-old status back and reopening finished tasks. Holding
+        // the catch-up to Zoho-wins makes it read-only by construction.
+        // A fingerprint is not a clock: comparing one against updated_at
+        // would hand TMG every conflict and push its values over Zoho's. With
+        // no provable recency, the read-only branch is the honest answer.
+        const provableTime = zohoEpochMs != null;
+        if (localChangedSinceSync && !neverStamped && provableTime) {
           const localMs = local.updated_at ? new Date(local.updated_at).getTime() : 0;
           const zohoMs = zt.last_modified_time || 0;
-          const fields = ["title", "description", "due_at", "priority", "status"];
-          const changedField = fields.find((f) => (local as any)[f] !== (zt as any)[f]) || "title";
+          const changedField = overwrittenFields(local, zt)[0] || "title";
           if (zohoMs > localMs) {
             await sb.from("tasks").update({
               title: zt.title, description: zt.description, due_at: zt.due_at,
               priority: zt.priority, status: zt.status,
+              completed_at: completionFor(zt, local),
               zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: zt.last_modified_time,
               zoho_tasklist_id: zt.tasklist_id, zoho_tasklist_name: zt.tasklist_name,
             }).eq("id", local.id);
             await sb.from("zoho_sync_conflicts").insert({ task_id: local.id, project_id: proj.id, field: changedField, tmg_value: String((local as any)[changedField] ?? ""), zoho_value: String((zt as any)[changedField] ?? ""), resolution: "zoho_won" });
-            await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync conflict on "${changedField}" — Zoho's edit was more recent; Zoho's value was kept.` });
+            await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync conflict on "${changedField}": Zoho's edit was more recent, so Zoho's value was kept.` });
             const moved = dueDateMovedLine(local.due_at, zt.due_at);
             if (moved) await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: moved, field: "due_at" });
+          } else if (conflictPushes >= MAX_CONFLICT_PUSH_PER_SYNC) {
+            // Over the ceiling on conflict write-backs for one sync. Left
+            // untouched, sync stamps included, so the next run resolves it.
+            conflictDeferred++;
+            continue;
           } else {
             const form = new URLSearchParams({
               name: local.title || "", description: local.description || "",
@@ -881,24 +1223,76 @@ Deno.serve(async (req) => {
             await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${proj.zoho_project_id}/tasks/${zt.id}/`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
             await sb.from("tasks").update({ zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: Date.now() }).eq("id", local.id);
             await sb.from("zoho_sync_conflicts").insert({ task_id: local.id, project_id: proj.id, field: changedField, tmg_value: String((local as any)[changedField] ?? ""), zoho_value: String((zt as any)[changedField] ?? ""), resolution: "tmg_won" });
-            await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync conflict on "${changedField}" — TMG's edit was more recent; TMG's value was kept and pushed to Zoho.` });
+            await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync conflict on "${changedField}": TMG's edit was more recent, so TMG's value was kept and pushed to Zoho.` });
+            conflictPushes++;
           }
           conflicts++;
         } else {
+          // localChangedSinceSync here means both sides moved and the branch
+          // above could not prove which moved last, so the update below is
+          // about to replace a real TMG edit. Zoho winning is the policy and
+          // is not what changes; what changes is that the loss stops being
+          // invisible. Read off the local row before the update overwrites it.
+          const overwritten = localChangedSinceSync ? overwrittenFields(local, zt) : [];
           const moved = dueDateMovedLine(local.due_at, zt.due_at);
           await sb.from("tasks").update({
             title: zt.title, description: zt.description, due_at: zt.due_at,
             priority: zt.priority, status: zt.status,
+            completed_at: completionFor(zt, local),
             zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: zt.last_modified_time,
             zoho_tasklist_id: zt.tasklist_id, zoho_tasklist_name: zt.tasklist_name,
           }).eq("id", local.id);
+          if (overwritten.length) {
+            // The task line goes first because it is the one a person reads
+            // and it depends on nothing. The conflict row needs the widened
+            // resolution check from 20260924140000 and is refused by Postgres
+            // until that migration lands, which must not cost the line.
+            await sb.from("task_activity").insert({
+              task_id: local.id, kind: "system", field: overwritten[0],
+              content: unverifiedOverwriteLine(local, zt, overwritten, neverStamped),
+            });
+            // Counted only when the row actually lands. The live CHECK on
+            // resolution still allows two values and 20260924140000 is what
+            // widens it, so a deploy that lands before that migration has
+            // Postgres refusing every one of these inserts. supabase-js hands
+            // a refusal back as { error } instead of throwing, so the old
+            // count reported overwrites_unverified with not one row behind it
+            // for anybody to go and look at.
+            const { error: conflictErr } = await sb.from("zoho_sync_conflicts").insert({
+              task_id: local.id, project_id: proj.id, field: overwritten[0],
+              tmg_value: String((local as any)[overwritten[0]] ?? ""),
+              zoho_value: String((zt as any)[overwritten[0]] ?? ""),
+              resolution: "zoho_won_unverified",
+            });
+            if (conflictErr) {
+              conflictRowsRejected++;
+              // Said once per sync, with the reason, so a refused write is
+              // something a person can find rather than a silent shortfall.
+              if (!conflictRejectWhy) {
+                conflictRejectWhy = String((conflictErr as any).message || conflictErr);
+                console.warn(JSON.stringify({ zoho_projects_sync_now_conflict_row_rejected: { project: proj.name, why: conflictRejectWhy } }));
+              }
+            } else {
+              unverified++;
+            }
+          }
           if (moved) await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: moved, field: "due_at" });
           pulled++;
         }
       }
 
-      await sb.from("projects").update({ zoho_last_synced_at: new Date().toISOString() }).eq("id", proj.id);
-      return json({ ok: true, pulled, created, conflicts }, 200);
+      // This stamp IS the incremental cursor. Moving it past a tail the paged
+      // read never reached would skip those tasks for good, so a truncated
+      // read leaves the cursor where it was and the next sync reads again.
+      if (!paged.truncated) {
+        await sb.from("projects").update({ zoho_last_synced_at: new Date().toISOString() }).eq("id", proj.id);
+      }
+      return json({
+        ok: true, pulled, created, conflicts, conflicts_deferred: conflictDeferred,
+        ...(unverified > 0 ? { overwrites_unverified: unverified } : {}),
+        ...(conflictRowsRejected > 0 ? { conflict_rows_rejected: conflictRowsRejected, conflict_rows_rejected_why: conflictRejectWhy } : {}),
+        ...(paged.truncated ? { pull_truncated: "more tasks than this sync could read, run it again" } : {}),
+      }, 200);
     }
 
     // Ops-only: one-time repair for tasks created BEFORE the 2026-09-11 fix
@@ -962,22 +1356,283 @@ Deno.serve(async (req) => {
 // are made in Zoho's own UI, not in TMG — where the pull loop below used to
 // overwrite due_at silently. Phrased the same way TaskDB.update phrases an
 // in-app edit so both land in one readable timeline on the task.
+// Two sides spell the same moment differently, so text comparison is the
+// wrong question to ask of a date. PostgREST renders a stored timestamptz as
+// "2026-09-14T05:00:00+00:00" and zohoDateToIso hands back
+// "2026-09-14T05:00:00.000Z": not equal as strings, the same instant in fact.
+// Comparing them as strings read every dated task as changed, which on the
+// first catch-up run would have written "Due date moved from Sep 14 to Sep 14"
+// onto 1402 of the 1408 dated tasks, in the history a person reads. Only 6 of
+// them carry a real time of day, so only 6 could have moved at all.
+function sameMoment(a: unknown, b: unknown): boolean {
+  const empty = (v: unknown) => v == null || v === "";
+  if (empty(a) || empty(b)) return empty(a) && empty(b);
+  const x = Date.parse(String(a)), y = Date.parse(String(b));
+  // Unparseable on either side is not a moment, so fall back to the text.
+  return isNaN(x) || isNaN(y) ? String(a) === String(b) : x === y;
+}
+// Two different things reach this function and only one of them is a moment.
+// Midnight UTC is how a Zoho calendar date was spelled BEFORE zohoDateToIso
+// was corrected above, and 1402 stored rows still hold that spelling until the
+// catch-up run rewrites them. Read through America/Chicago those land five
+// hours back in the day before, so printing them in UTC is what says the day
+// Zoho actually means. Everything else here is a real moment and wants the
+// brokerage's own zone (accountability_weeks buckets on 'America/Chicago' for
+// the same reason), which is also where a corrected Zoho date now belongs:
+// this zone's midnight is never exactly midnight UTC, so the two cannot be
+// mistaken for each other.
+// This branch is what keeps the first catch-up run silent. It reads the old
+// spelling and the new one and gets the same day out of both, so
+// dueDateMovedLine has nothing to report on any of the 1402 rows whose stored
+// value it is about to correct, and the fabricated "Due date moved from Sep 14
+// to Sep 14" lines the last pass drove to zero stay at zero.
+// The cost is a TMG task set to exactly 6pm here in winter (7pm in summer),
+// which IS midnight UTC and gets read as a calendar date, printing that one
+// label a day late. That was already true before this change. Once the poll
+// has rewritten the 1402 rows, nothing in the table is midnight UTC except
+// such a task, and this branch can be deleted outright.
+function shortDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  const calendarDate = d.getTime() % 86400000 === 0;
+  return d.toLocaleDateString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+    timeZone: calendarDate ? "UTC" : "America/Chicago",
+  });
+}
 function dueDateMovedLine(oldIso: string | null, newIso: string | null): string | null {
-  if ((oldIso || null) === (newIso || null)) return null;
-  const fmt = (iso: string | null) => {
-    if (!iso) return null;
-    const d = new Date(iso);
-    return isNaN(d.getTime()) ? null
-      // America/Chicago, not UTC: this line has to read the same as the due
-      // date printed on the task row, and TMG is a Central-time brokerage
-      // (accountability_weeks buckets on 'America/Chicago' for the same reason).
-      : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "America/Chicago" });
-  };
-  const a = fmt(oldIso), b = fmt(newIso);
-  if (!a && b) return `Due date set to ${b} — changed in Zoho Projects`;
-  if (a && !b) return `Due date cleared (was ${a}) — changed in Zoho Projects`;
-  if (a && b) return `Due date moved from ${a} to ${b} — changed in Zoho Projects`;
+  if (sameMoment(oldIso, newIso)) return null;
+  const a = shortDate(oldIso), b = shortDate(newIso);
+  // Both ends print the same day, so the line has nothing left to say: it
+  // speaks in days only, and Zoho's end_date cannot carry a time of day at
+  // all, so the 6 dated tasks here that do carry one lose it to the pull and
+  // would each read "Due date moved from Sep 14 to Sep 14" once. A within-day
+  // move is not something this line could ever report, so nothing is lost.
+  if (a && b && a === b) return null;
+  if (!a && b) return `Due date set to ${b} (changed in Zoho Projects)`;
+  if (a && !b) return `Due date cleared (was ${a}), changed in Zoho Projects`;
+  if (a && b) return `Due date moved from ${a} to ${b} (changed in Zoho Projects)`;
   return null;
+}
+
+// ── Recording an overwrite this sync cannot justify ───────────────────────
+// The plain-pull branch takes Zoho's values whenever it cannot prove TMG's are
+// newer. Zoho winning stays the policy; what was missing is any trace of it, so
+// an edit made here and replaced minutes later left no conflict row and no line
+// on the task. Kept identical to the poll function's copy.
+const SYNCED_FIELDS = ["title", "description", "due_at", "priority", "status"];
+const FIELD_LABEL: Record<string, string> = {
+  title: "Title", description: "Description", due_at: "Due date",
+  priority: "Priority", status: "Status",
+};
+// Short on purpose: a description runs to thousands of characters, and this
+// line is meant to be read on the task, not scrolled through.
+function shortValue(field: string, v: unknown): string {
+  if (v == null || v === "") return "(empty)";
+  if (field === "due_at") return shortDate(String(v)) || String(v);
+  const str = String(v);
+  return str.length > 120 ? str.slice(0, 117) + "..." : str;
+}
+// due_at is the one synced field that holds a MOMENT rather than text, and the
+// two sides spell the same moment differently (see sameMoment), so comparing
+// it as text reported an overwrite on every dated task that had not changed.
+// The other four are plain text on both sides, where text comparison is right.
+function overwrittenFields(local: any, zt: any): string[] {
+  return SYNCED_FIELDS.filter((f) => f === "due_at"
+    ? !sameMoment(local[f], zt[f])
+    : (local[f] || null) !== (zt[f] || null));
+}
+function unverifiedOverwriteLine(local: any, zt: any, fields: string[], neverStamped: boolean): string {
+  const why = neverStamped
+    ? "TMG has never held a modified time for this task"
+    : "Zoho sent no modified time for this task";
+  const f = fields[0];
+  const rest = fields.slice(1).map((x) => FIELD_LABEL[x].toLowerCase());
+  return `Edited here and in Zoho Projects since the last sync, and ${why}, so there is no telling which edit came last. Zoho's version was kept. ${FIELD_LABEL[f]} was "${shortValue(f, local[f])}" here and is now "${shortValue(f, zt[f])}".`
+    + (rest.length ? ` Also replaced: ${rest.join(", ")}.` : "");
+}
+
+// ── Three fields Zoho does not spell the way this file assumed ────────────
+// Kept identical to zoho-projects-poll's copies by the self-contained-edge-
+// function convention this file already follows. Each is read through a list
+// of candidate names, because the portal cannot be queried from here and a
+// field that reads null looks exactly like a task nobody has touched, which is
+// how zoho_last_modified_time stayed null on all 2810 imported rows.
+
+// The change cursor. Zoho's QUERY parameter is called last_modified_time, but
+// the task object it returns carries no last_modified_time_long: 2803 rows
+// took their tasklist id and name off the same payload in the same insert and
+// not one got a timestamp, which is what an absent field looks like. The pair
+// Zoho documents on a task is last_updated_time, so try that first and keep
+// the old spelling behind it. Only ever compared, never shown.
+function zohoModifiedMs(t: any): number | null {
+  for (const v of [t.last_updated_time_long, t.last_modified_time_long]) {
+    if (v != null && v !== "" && !isNaN(Number(v))) return Number(v);
+  }
+  for (const v of [t.last_updated_time, t.last_modified_time]) {
+    if (v) { const ms = Date.parse(String(v)); if (!isNaN(ms)) return ms; }
+  }
+  return null;
+}
+
+// When Zoho answers to none of those names, fall back to a fingerprint of the
+// fields this sync actually carries. It is not a time and never pretends to be
+// one. It exists so the change detector can SETTLE: treating a missing
+// timestamp as "changed" is the right fail-safe, but on its own it means every
+// task reads as changed on every tick forever and the job never stops
+// rewriting rows nobody edited. A fingerprint changes exactly when the synced
+// content changes, which is the only question the detector actually asks.
+function zohoFingerprint(t: any): number {
+  const src = [t.name, t.description, t.end_date, t.start_date, t.priority,
+    t.status?.name ?? t.status, t.completed_time, t.tasklist?.name]
+    .map((v) => String(v ?? "")).join("\u0000");
+  let h = 2166136261;
+  for (let i = 0; i < src.length; i++) { h ^= src.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0; // stays far below any real epoch, so the two can be told apart
+}
+// Epoch milliseconds passed this in 2001, and a fingerprint is a 32-bit
+// unsigned int, so it never can. Anything under it is a fingerprint, and a
+// fingerprint must never be compared against a clock to decide who is newer.
+const MIN_REAL_EPOCH_MS = 1e12;
+
+// When the work was finished. accountability_weeks counts completions by the
+// DATE in completed_at, not by status, so a task can read done on the task
+// list and still score zero for the week.
+function zohoCompletedIso(t: any): string | null {
+  let ms: number | null = null;
+  for (const v of [t.completed_time_long, t.closed_time_long]) {
+    if (v != null && v !== "" && !isNaN(Number(v))) { ms = Number(v); break; }
+  }
+  if (ms == null) {
+    for (const v of [t.completed_time, t.closed_time]) {
+      if (v) { const p = Date.parse(String(v)); if (!isNaN(p)) { ms = p; break; } }
+    }
+  }
+  return ms ? new Date(ms).toISOString() : null;
+}
+
+// Who Zoho says the task belongs to. Nested under details.owners on a
+// list_tasks response, repeated at the top level by some endpoints, so read
+// both. Email is the dependable join to a TMG profile but is not always on the
+// payload, hence the id and then the name behind it.
+type ZOwner = { id: string; name: string; email: string };
+function zohoOwners(t: any): ZOwner[] {
+  const raw = (t.details?.owners ?? t.owners ?? []) as any[];
+  return raw
+    .map((o) => ({
+      id: o.id_string || (o.id != null ? String(o.id) : (o.zpuid != null ? String(o.zpuid) : "")),
+      name: String(o.full_name || o.name || "").trim(),
+      email: String(o.email || "").toLowerCase().trim(),
+    }))
+    .filter((o) => o.id || o.name || o.email);
+}
+
+// Zoho's own completion time whenever it gives one. When it does not, stamp
+// now() only on the TRANSITION into done. Never stamp a task that arrives
+// already finished: that is history, and dating it today would credit
+// month-old work to this week. Cleared when Zoho reopens a task.
+function completionFor(zt: any, local: any | null): string | null {
+  if (zt.status !== "done") return null;
+  if (zt.completed_at) return zt.completed_at;
+  if (local?.completed_at) return local.completed_at;
+  return local && local.status !== "done" ? new Date().toISOString() : null;
+}
+
+// Same leading-word rule as tasks.jsx's memberForTasklistName and the poll
+// function's routing: a Zoho display name is freehand ("Gustavo ( Finance
+// Controller & Bookkeeper)") and only its first word names anybody. Three
+// letters is the floor because two would match half the team, and either side
+// may be the short form of the other ("Alexa" / "Alexandra").
+function leadWord(str: string | null | undefined): string {
+  return (str || "").toLowerCase().replace(/[^a-z]+/g, " ").trim().split(" ")[0] || "";
+}
+function leadWordHit(a: string, b: string): boolean {
+  return a.length >= 3 && b.length >= 3 && (a.startsWith(b) || b.startsWith(a));
+}
+
+// Whose list is this? Exactly one active profile, or nobody. Same answer to
+// ambiguity that 20260924140000 gives: two possible people means nobody,
+// because filing one person's work under another is worse than not filing it.
+function profileForTasklistName(name: string | null, roster: { id: string; name: string }[]): string | null {
+  const w = leadWord(name);
+  if (w.length < 3) return null;
+  const hits = roster.filter((p) => leadWordHit(w, leadWord(p.name)));
+  return hits.length === 1 ? hits[0].id : null;
+}
+
+// ── Is this project filed by person, or by phase? ─────────────────────────
+// An ordinary CTC file names its lists after the stages of a deal ("Pre-List",
+// "Option Period", "Clear to Close"). "Accountabilities" names them after
+// PEOPLE. The test is what the lists are NAMED, never how many there are, and
+// the threshold is two DISTINCT people: one is not enough, because a phase name
+// can hit a real first name by accident, and it counts people rather than
+// matching lists because one person often keeps two ("Symon (O.M.)", "Symon
+// 2"). Kept identical to the poll function's copy.
+function distinctPeopleWithLists(lists: ZTasklist[], teamNames: string[]): number {
+  const team = Array.from(new Set(teamNames.map(leadWord).filter((n) => n.length >= 3))).sort();
+  const people = new Set<string>();
+  for (const l of lists) {
+    const w = leadWord(l.name);
+    if (w.length < 3) continue;
+    const who = team.find((m) => leadWordHit(w, m));
+    if (who) people.add(who);
+  }
+  return people.size;
+}
+
+// The project's lists as Zoho has them, not as the already-synced rows imply:
+// a list made for somebody this morning has no local rows yet, and that person
+// is precisely the one whose work gets misfiled. Returns null (not []) when
+// Zoho would not answer, so the caller can tell "no lists" from "we do not
+// know yet". Same endpoint and response shape as the list_tasklists action.
+type ZTasklist = { id: string; name: string };
+async function fetchProjectTasklists(
+  doFetch: (url: string) => Promise<Response>, portalBase: string, zohoProjectId: string,
+): Promise<ZTasklist[] | null> {
+  const r = await doFetch(`${portalBase}/projects/${zohoProjectId}/tasklists/`);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return null;
+  return ((d.tasklists || []) as any[])
+    .map((t) => ({ id: t.id_string || (t.id != null ? String(t.id) : ""), name: t.name ? String(t.name).trim() : "" }))
+    .filter((t) => t.id);
+}
+
+// ── Zoho's text is markup, not display text ───────────────────────────────
+// Zoho hands back tasklist names HTML-ESCAPED, and this file stored what it
+// was given: the portal's "Gustavo ( Finance Controller & Bookkeeper)" arrives
+// as "... &amp; ..." and renders with the escape still in it everywhere TMG
+// shows the name. Nothing downstream un-escapes it, so it has to happen here,
+// or the backfill migration's repair is undone by the next poll five minutes
+// later.
+// The scope is narrow because it was checked against the live table rather
+// than assumed. Tasklist names are escaped: the one name in the portal holding
+// an ampersand holds it as "&amp;". Task titles are NOT: 275 of them hold a
+// bare "&" and not one holds an entity. Descriptions must not be touched at
+// all, because Zoho sends them as whole HTML documents (2163 of them contain
+// tags), where "&amp;" is correct markup and decoding "&lt;" would turn text
+// into tags.
+const NAMED_ENTITIES: Record<string, string> = {
+  "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
+  // A non-breaking space is invisibly different from a space on screen and
+  // silently breaks name matching, so it decodes to the plain one.
+  "&nbsp;": " ",
+};
+// A number that is not a character is not an entity: hand back the literal
+// text rather than throwing the whole pull over one badly typed list name.
+function entityChar(n: number, raw: string): string {
+  const ok = Number.isInteger(n) && n > 0 && n <= 0x10FFFF && (n < 0xD800 || n > 0xDFFF);
+  return ok ? String.fromCodePoint(n) : raw;
+}
+// Ampersand is decoded LAST, or "&amp;lt;" would decode two steps in one pass
+// and come out as "<". Same order, and for the same reason, as section 1 of
+// the backfill migration.
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-fA-F]+);/g, (raw, h) => entityChar(parseInt(h, 16), raw))
+    .replace(/&#(\d+);/g, (raw, n) => entityChar(Number(n), raw))
+    .replace(/&(?:lt|gt|quot|apos|nbsp);/g, (m) => NAMED_ENTITIES[m] ?? m)
+    .replace(/&amp;/g, "&");
 }
 
 function mapZohoTask(t: any) {
@@ -995,9 +1650,12 @@ function mapZohoTask(t: any) {
     start_date: t.start_date || null,
     priority: zohoPriorityToTmg(t.priority),
     status: zohoStatusToTmg(t.status?.name || t.status),
-    last_modified_time: t.last_modified_time_long != null ? Number(t.last_modified_time_long) : null,
+    last_modified_time: zohoModifiedMs(t) ?? zohoFingerprint(t),
+    completed_at: zohoCompletedIso(t),
+    owners: zohoOwners(t),
     tasklist_id: t.tasklist?.id_string || (t.tasklist?.id != null ? String(t.tasklist.id) : null),
-    tasklist_name: t.tasklist?.name ? String(t.tasklist.name).trim() : null,
+    // decodeEntities, not raw: Zoho escapes this one field and TMG shows it.
+    tasklist_name: t.tasklist?.name ? decodeEntities(String(t.tasklist.name)).trim() : null,
   };
 }
 

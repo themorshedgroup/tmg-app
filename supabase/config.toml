@@ -440,6 +440,8 @@ verify_jwt = true
 verify_jwt = true
 [functions.zoho-projects-poll]
 verify_jwt = false
+[functions.google-tasks-sync]
+verify_jwt = false
 [functions.crawl-listings]
 verify_jwt = false
 [functions.import-costar]

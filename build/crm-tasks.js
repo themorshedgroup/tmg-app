@@ -5,6 +5,24 @@ const {
   useRef
 } = React;
 
+// Close on outside click. One shared helper so every hand-built dropdown on
+// this page behaves the same way. Native <select> already does this itself,
+// and modals deliberately do not, so only the hand-built panels use it.
+function useCloseOnOutside(open, close) {
+  const ref = useRef(null);
+  const cb = useRef(close);
+  cb.current = close;
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e) {
+      if (ref.current && !ref.current.contains(e.target)) cb.current();
+    }
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+  return ref;
+}
+
 // ─── Design tokens (TMG Brand — editorial dialect, matches crm.html) ──
 const C = {
   bg: '#FCFBF8',
@@ -1286,6 +1304,7 @@ function ContactPicker({
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const tRef = useRef(null);
+  const boxRef = useCloseOnOutside(open, () => setOpen(false));
   function search(text) {
     setQ(text);
     setOpen(true);
@@ -1359,6 +1378,7 @@ function ContactPicker({
     })));
   }
   return /*#__PURE__*/React.createElement("div", {
+    ref: boxRef,
     style: {
       position: 'relative'
     }
@@ -5700,6 +5720,7 @@ function App({
   const [q, setQ] = useState('');
   const [sel, setSel] = useState({}); // filters
   const [showFilter, setShowFilter] = useState(false);
+  const filterRef = useCloseOnOutside(showFilter, () => setShowFilter(false));
   const [sortKey, setSortKey] = useState('due');
   const [sortDir, setSortDir] = useState('desc');
   const [drawer, setDrawer] = useState(null); // { mode:'create'|'edit', task? } | null
@@ -6396,6 +6417,7 @@ function App({
       outline: 'none'
     }
   })), /*#__PURE__*/React.createElement("div", {
+    ref: filterRef,
     style: {
       position: 'relative'
     }

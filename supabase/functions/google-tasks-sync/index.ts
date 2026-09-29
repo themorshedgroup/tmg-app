@@ -5,8 +5,18 @@
 //
 //   OUT  every TMG task ASSIGNED to someone appears in that person's Google
 //        Tasks, so an agent sees their work on their phone without opening
-//        the app. A task with nobody on it is left alone — a CTC file's
-//        checklist is a shared pool until someone picks an item up.
+//        the app. A task with nobody on it is left alone.
+//
+//        What gets sent, first match wins:
+//          1. the task's own switch      tasks.google_tasks_sync
+//          2. its project's switch       projects.google_tasks_sync
+//          3. neither set: send, except a CTC file's tasks to a Transaction
+//             Coordinator (profiles.access includes 'tc'). A TC owns nearly
+//             every checklist item on every file in Zoho, so without this
+//             their phone gets the whole pool.
+//        When a task stops qualifying, the copy made here is deleted from
+//        that person's Google Tasks. An agenda item is never deleted: it is
+//        the Doc's own task, and deleting it would unassign it in the Doc.
 //   IN   a checklist item assigned to someone inside one of the meeting
 //        agendas is ALREADY a real Google Task; Google Docs makes it. We read
 //        those back and file them under that person's My Tasks.
@@ -59,7 +69,17 @@ const json = (body: unknown, status = 200) =>
 // isn't.
 const MAX_PAGES_PER_LIST = 10;    // 100 tasks a page
 const MAX_PUSH_PER_RUN   = 200;
+// Deleting copies back out of Google when a task stops qualifying. The first
+// run after the TC rule landed has ~765 to take back from one person, so this
+// drains over a few runs instead of spending one run's whole budget on it.
+const MAX_REMOVE_PER_RUN = 200;
 const MAX_PULL_PER_RUN   = 200;
+// Everyone is synced one after another in a single request, and the platform
+// stops a request at 150s. Past this point in a run, no more Google writes
+// start; whatever is left comes through on the next pass, 15 minutes later.
+const WRITE_BUDGET_MS    = 95_000;
+let writeDeadline = Infinity;
+const outOfTime = () => Date.now() > writeDeadline;
 // How far back a finished task is still worth pushing. Without this, turning
 // the sync on would dump years of completed work into someone's phone.
 const DONE_LOOKBACK_DAYS = 30;
@@ -120,14 +140,38 @@ const fromGoogleDue = (due: string | null | undefined) => due ? due.slice(0, 10)
 const toGoogleStatus = (s: string) => (s === "done" ? "completed" : "needsAction");
 const fromGoogleStatus = (s: string) => (s === "completed" ? "done" : "todo");
 
-type SyncResult = { user_id: string; pushed: number; pulled: number; updated: number; skipped?: string; error?: string; sample?: string[]; agenda?: { importable: number; already_done: number; stale: number } };
+type SyncResult = { user_id: string; pushed: number; pulled: number; updated: number; removed: number; skipped?: string; error?: string; sample?: string[]; agenda?: { importable: number; already_done: number; stale: number } };
+
+// Whether a task belongs in this person's Google Tasks; see the header for
+// the order. Only a real boolean counts as a setting; null falls through to
+// the next rule. (The reads below name the column, so the migration that adds
+// it must be applied before this is deployed.)
+function wantsGoogle(t: any, proj: any, isTc: boolean): boolean {
+  if (typeof t.google_tasks_sync === "boolean") return t.google_tasks_sync;
+  if (proj && typeof proj.google_tasks_sync === "boolean") return proj.google_tasks_sync;
+  return !(isTc && proj?.record_type === "ctc_file");
+}
 
 // `dry` reads both sides and reports exactly what a real run would do, without
 // writing a single row here or in anybody's Google account. It exists because
 // the first live run touches real teammates' phones, and "look before you
 // write" is cheap when the read is the same code path.
+// Every row, a page at a time. PostgREST stops a plain read at 1000 rows
+// without saying so, and a Transaction Coordinator is assignee on ~1,900
+// tasks. Null on any failed page, so a short read is never mistaken for the
+// whole list. `q` must build a fresh, ordered query each call.
+async function readAll(q: () => any): Promise<any[] | null> {
+  const rows: any[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await q().range(from, from + 999);
+    if (error) return null;
+    rows.push(...(data || []));
+    if (!data || data.length < 1000) return rows;
+  }
+}
+
 async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>, dry = false): Promise<SyncResult> {
-  const out: SyncResult = { user_id: userId, pushed: 0, pulled: 0, updated: 0 };
+  const out: SyncResult = { user_id: userId, pushed: 0, pulled: 0, updated: 0, removed: 0 };
   const sample: string[] = [];
   // Dry-run only: how the agenda backlog splits, so the size of a first
   // import is a known number rather than a surprise.
@@ -139,9 +183,10 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
   // Respect the per-person off switch. Absent prefs mean on: the sync is
   // meant to just work, and only someone who has deliberately turned it off
   // should be skipped.
-  const { data: prof } = await sb.from("profiles").select("calendar_prefs,status").eq("id", userId).maybeSingle();
+  const { data: prof } = await sb.from("profiles").select("calendar_prefs,status,access").eq("id", userId).maybeSingle();
   if (!prof || prof.status !== "active") { out.skipped = "inactive"; return out; }
   if (prof.calendar_prefs && prof.calendar_prefs.autoSyncTasks === false) { out.skipped = "opted_out"; return out; }
+  const isTc = Array.isArray(prof.access) && prof.access.includes("tc");
 
   let token: string;
   try { token = await googleAccessToken(tok.refresh_token); }
@@ -152,7 +197,14 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
   const runStartedAt = new Date();
 
   // Every link this person already has, indexed both ways.
-  const { data: linkRows } = await sb.from("google_task_links").select("*").eq("user_id", userId);
+  const linkRows = await readAll(() => sb.from("google_task_links").select("*").eq("user_id", userId).order("task_id"));
+  // Without every link, a linked task reads as new and is pushed again.
+  if (!linkRows) {
+    out.error = "link read failed";
+    // Say so on the status panel; the cursor stays where it was.
+    if (!dry) await sb.from("google_tasks_sync_state").upsert({ user_id: userId, last_run_at: new Date().toISOString(), last_error: out.error }, { onConflict: "user_id" });
+    return out;
+  }
   const byGoogleId = new Map<string, any>();
   const byTaskId = new Map<string, any>();
   for (const l of (linkRows || [])) { byGoogleId.set(l.google_task_id, l); byTaskId.set(l.task_id, l); }
@@ -235,6 +287,12 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
           // Provenance without inventing a project: the agenda's name shows on
           // the task, and Working URL opens the document it came from.
           context: doc.name || "Meeting agenda",
+          // The project the agenda's to-dos belong to (agenda_docs.project_id,
+          // added 20260924120000). This is what carries them to Zoho: the
+          // poller only pushes tasks in a project with zoho_sync_enabled, so
+          // before this every imported to-do was stranded in the app. Null is
+          // still allowed: an agenda with no project set behaves as before.
+          project_id: doc.project_id || null,
           working_url: doc.url || null,
           created_by: userId,
           completed_at: gt.status === "completed" ? (gt.completed || new Date().toISOString()) : null,
@@ -258,21 +316,70 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
   }
 
   // ── OUT: every TMG task assigned to this person ────────────────────────
-  const { data: mine } = await sb.from("task_people").select("task_id").eq("user_id", userId).eq("role", "assignee");
+  const mine = await readAll(() => sb.from("task_people").select("task_id").eq("user_id", userId).eq("role", "assignee").order("task_id"));
+  if (!mine) { out.error = "assignee read failed"; truncated = true; }
   const myIds = [...new Set((mine || []).map((r: any) => r.task_id))];
+
+  // Take a copy made here back out of this person's Google Tasks. Attempts
+  // count against the cap, not just successes, so a run that Google is
+  // throttling stops trying instead of burning through the whole backlog.
+  let removeTries = 0;
+  const removeCopy = async (t: any, link: any) => {
+    if (removeTries >= MAX_REMOVE_PER_RUN || outOfTime()) { truncated = true; return; }
+    removeTries++;
+    if (sample.length < 8) sample.push(`remove: ${t.title}`);
+    if (dry) { out.removed++; return; }
+    // The IN pass above already ran, so a tick made on the phone since the
+    // last run is in the app before its copy goes.
+    try {
+      await gfetch(token, `/lists/${encodeURIComponent(link.google_list_id)}/tasks/${encodeURIComponent(link.google_task_id)}`,
+        { method: "DELETE" });
+    } catch (e) {
+      const msg = String((e as any)?.message || e);
+      // Already gone from Google (the person deleted it): only the link is left to clear.
+      if (!/→ (404|410)\b/.test(msg)) { out.error = msg; return; }
+    }
+    const { error: unlinkErr } = await sb.from("google_task_links").delete().eq("task_id", t.id).eq("user_id", userId);
+    // The copy is gone either way; a link left behind is retried next run and
+    // then clears on Google's 404.
+    if (unlinkErr) { out.error = "unlink: " + unlinkErr.message; return; }
+    byTaskId.delete(t.id);
+    byGoogleId.delete(link.google_task_id);
+    out.removed++;
+  };
   const cutoff = new Date(Date.now() - DONE_LOOKBACK_DAYS * 86400000).toISOString();
+  const projById = new Map<string, any>();
   for (let i = 0; i < myIds.length; i += 150) {
-    const { data: batch } = await sb.from("tasks")
-      .select("id,title,status,due_at,updated_at,completed_at")
+    const { data: batch, error: batchErr } = await sb.from("tasks")
+      .select("id,title,status,due_at,updated_at,completed_at,project_id,google_tasks_sync")
       .in("id", myIds.slice(i, i + 150));
+    // A failed read must never look like an empty or a switched-off batch:
+    // the first would silently stop pushes, the second would delete copies.
+    if (batchErr) { out.error = "task read: " + batchErr.message; truncated = true; continue; }
+    const needProj = [...new Set((batch || []).map((t: any) => t.project_id).filter((id: any) => id && !projById.has(id)))];
+    if (needProj.length) {
+      const { data: projs, error: projErr } = await sb.from("projects").select("id,record_type,google_tasks_sync").in("id", needProj);
+      // Same reason, sharper: without the project a CTC task reads as an
+      // ordinary one and would be sent straight back to the TC.
+      if (projErr) { out.error = "project read: " + projErr.message; truncated = true; continue; }
+      for (const pr of (projs || [])) projById.set(pr.id, pr);
+    }
     for (const t of (batch || [])) {
-      // Old finished work stays out of it — see DONE_LOOKBACK_DAYS.
-      if (t.status === "done" && (!t.completed_at || t.completed_at < cutoff)) continue;
       const link = byTaskId.get(t.id);
+      // The switches govern what this sync SENDS. An agenda item came in from
+      // a Doc and is already a Google Task, so it keeps syncing its status
+      // whatever its project says.
+      const fromAgenda = !!link && link.origin === "pull";
+      if (!fromAgenda && !wantsGoogle(t, t.project_id ? projById.get(t.project_id) : null, isTc)) {
+        if (link) await removeCopy(t, link);
+        continue;
+      }
+      // Old finished work stays out of it, see DONE_LOOKBACK_DAYS.
+      if (t.status === "done" && (!t.completed_at || t.completed_at < cutoff)) continue;
       const payload = { title: t.title, status: toGoogleStatus(t.status), due: toGoogleDue(t.due_at) };
 
       if (!link) {
-        if (out.pushed >= MAX_PUSH_PER_RUN) { truncated = true; continue; }
+        if (out.pushed >= MAX_PUSH_PER_RUN || outOfTime()) { truncated = true; continue; }
         if (sample.length < 8) sample.push(`push new: ${t.title}`);
         if (dry) { out.pushed++; continue; }
         try {
@@ -317,6 +424,33 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
         out.error = String((e as any)?.message || e);
       }
     }
+  }
+
+  // Copies made here for tasks no longer assigned to this person (Zoho moved
+  // the owner, say) never pass through the loop above. Judge them by the same
+  // rule, from the task and project themselves: being missing from the list
+  // is never a reason to delete on its own. Skipped when the list read failed.
+  if (mine) {
+    const assigned = new Set(myIds);
+    const strays = [...byTaskId.entries()].filter(([id, l]) => l.origin === "push" && !assigned.has(id)).map(([id]) => id);
+    let i = 0;
+    for (; i < strays.length && removeTries < MAX_REMOVE_PER_RUN && !outOfTime(); i += 150) {
+      const { data: batch, error: batchErr } = await sb.from("tasks")
+        .select("id,title,project_id,google_tasks_sync").in("id", strays.slice(i, i + 150));
+      if (batchErr) { out.error = "task read: " + batchErr.message; truncated = true; continue; }
+      const needProj = [...new Set((batch || []).map((t: any) => t.project_id).filter((id: any) => id && !projById.has(id)))];
+      if (needProj.length) {
+        const { data: projs, error: projErr } = await sb.from("projects").select("id,record_type,google_tasks_sync").in("id", needProj);
+        if (projErr) { out.error = "project read: " + projErr.message; truncated = true; continue; }
+        for (const pr of (projs || [])) projById.set(pr.id, pr);
+      }
+      for (const t of (batch || [])) {
+        const link = byTaskId.get(t.id);
+        if (link && link.origin === "push" && !wantsGoogle(t, t.project_id ? projById.get(t.project_id) : null, isTc)) await removeCopy(t, link);
+      }
+    }
+    // Stopping at the cap or the clock leaves copies behind: a short run.
+    if (i < strays.length) truncated = true;
   }
 
   if (sample.length) out.sample = sample;
@@ -380,6 +514,7 @@ Deno.serve(async (req) => {
 
   if (action === "run_me") {
     if (!callerId) return json({ error: "unauthorized" }, 401);
+    writeDeadline = Date.now() + WRITE_BUDGET_MS;
     const r = await syncUser(sb, callerId, agendaByFile, dry);
     return json({ ok: !r.error, dry, result: r });
   }
@@ -417,11 +552,12 @@ Deno.serve(async (req) => {
     if (!isCron && !callerAccess.some((a) => a === "admin" || a === "operations")) {
       return json({ error: "forbidden" }, 403);
     }
+    writeDeadline = Date.now() + WRITE_BUDGET_MS;
     const { data: connected } = await sb.from("google_tokens").select("user_id");
     const results: SyncResult[] = [];
     for (const row of (connected || [])) {
       try { results.push(await syncUser(sb, row.user_id, agendaByFile, dry)); }
-      catch (e) { results.push({ user_id: row.user_id, pushed: 0, pulled: 0, updated: 0, error: String((e as any)?.message || e) }); }
+      catch (e) { results.push({ user_id: row.user_id, pushed: 0, pulled: 0, updated: 0, removed: 0, error: String((e as any)?.message || e) }); }
     }
     return json({
       ok: true,
@@ -430,6 +566,7 @@ Deno.serve(async (req) => {
       pushed: results.reduce((n, r) => n + r.pushed, 0),
       pulled: results.reduce((n, r) => n + r.pulled, 0),
       updated: results.reduce((n, r) => n + r.updated, 0),
+      removed: results.reduce((n, r) => n + r.removed, 0),
       results,
     });
   }

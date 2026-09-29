@@ -1482,8 +1482,85 @@ Rules:
       return hits.length === 1 ? hits[0] : null;
     }
 
+    // ── Google Tasks ───────────────────────────────────────────────────
+    // Which tasks have a copy in someone's Google Tasks, for the mark after a
+    // task's title. One RPC answers for the whole page (task ids only: the
+    // link table itself is readable by its owner alone, so without it you
+    // would see marks on your own tasks and nobody else's), and every mark
+    // shares that one answer. Asked again when the tab regains focus, at most
+    // every two minutes; the sync itself only runs every 15.
+    const GSync = {
+      ids: null, at: 0, busy: false, hooked: false, subs: new Set(),
+      async load() {
+        const c = window.SupabaseAuth?._client;
+        if (!c || this.busy) return;
+        this.busy = true;
+        try {
+          const { data, error } = await c.rpc('google_synced_task_ids');
+          // Keep what we had on a blip, and show no marks at all on a database
+          // without the function, rather than marks that mean nothing.
+          if (error) { console.warn('[GSync]', error.message); return; }
+          this.ids = new Set(Array.isArray(data) ? data : []);
+          this.at = Date.now();
+          this.subs.forEach(f => f());
+        } finally { this.busy = false; }
+        if (!this.hooked) {
+          this.hooked = true;
+          window.addEventListener('focus', () => { if (Date.now() - this.at > 120000) this.load(); });
+        }
+      },
+    };
+    function GTaskMark({ id, size = 13, inline = false }) {
+      const [, bump] = useState(0);
+      useEffect(() => {
+        const f = () => bump(n => n + 1);
+        GSync.subs.add(f);
+        if (!GSync.ids) GSync.load();
+        return () => { GSync.subs.delete(f); };
+      }, []);
+      if (!id || !GSync.ids || !GSync.ids.has(id)) return null;
+      return <img src="google-tasks.svg" alt="Google Task Synced" title="Google Task Synced" width={size} height={size}
+        style={inline
+          ? { display: 'inline-block', verticalAlign: '-0.14em', marginLeft: 6, width: size, height: size }
+          : { display: 'block', flexShrink: 0, width: size, height: size }} />;
+    }
+    // The Google Tasks switch, on a project or on one task. Stored as a
+    // nullable boolean; empty means "use the next rule down", and the rule
+    // itself lives in the google-tasks-sync function.
+    function GoogleTasksSelect({ value, scope, hasProject, disabled, onChange, dark, ink, bord }) {
+      const [saving, setSaving] = useState(false);
+      const cur = value === true ? 'on' : value === false ? 'off' : '';
+      const autoLabel = scope === 'project' || !hasProject ? 'Automatic' : 'Same as project';
+      const hint = (scope === 'project' || !hasProject
+        ? 'Automatic: every assignee gets these in Google Tasks, except Transaction Coordinators on CTC files.'
+        : 'Same as project: follows this project\'s Google Tasks setting.') + ' Changes reach Google within 15 minutes.';
+      return (
+        <select value={cur} disabled={disabled || saving} title={hint}
+          onChange={async e => {
+            const v = e.target.value === 'on' ? true : e.target.value === 'off' ? false : null;
+            setSaving(true);
+            try { await onChange(v); } finally { setSaving(false); }
+          }}
+          style={{ fontSize: 13, fontFamily: C.fontSans, color: ink, background: dark ? '#06101F' : '#F7F4EE', border: `1px solid ${bord}`, borderRadius: 6, padding: '4px 8px', cursor: disabled || saving ? 'default' : 'pointer', opacity: disabled || saving ? 0.6 : 1, maxWidth: '100%' }}>
+          <option value="">{autoLabel}</option>
+          <option value="on">Always send</option>
+          <option value="off">Never send</option>
+        </select>
+      );
+    }
+
     const TaskDB = {
       client() { return window.SupabaseAuth?._client || null; },
+
+      // The Google Tasks switch on one task. A bare write on purpose, like
+      // OrderDB: update() stamps updated_at, which the Zoho poller reads as an
+      // edit made here and would push back over whatever Zoho holds.
+      async setGoogleTasks(id, val) {
+        const c = this.client(); if (!c) return false;
+        const { error } = await c.from('tasks').update({ google_tasks_sync: val }).eq('id', id);
+        if (error) { console.error('[TaskDB] setGoogleTasks:', error.message); window.alert('Could not save the Google Tasks setting: ' + error.message); return false; }
+        return true;
+      },
 
       // My Tasks means MINE. It used to mean every task in the company, which
       // nobody noticed while that was a few dozen rows — then Zoho sync landed
@@ -2295,6 +2372,15 @@ Rules:
         }
         if (res.error) { console.error('[ProjectDB] create:', res.error.message); throw res.error; }
         return res.data;
+      },
+
+      // The Google Tasks switch for a whole project. Not through update():
+      // that one also pushes the change to Zoho, and Zoho has no such field.
+      async setGoogleTasks(id, val) {
+        const c = this.client(); if (!c) return false;
+        const { error } = await c.from('projects').update({ google_tasks_sync: val }).eq('id', id);
+        if (error) { console.error('[ProjectDB] setGoogleTasks:', error.message); window.alert('Could not save the Google Tasks setting: ' + error.message); return false; }
+        return true;
       },
 
       async update(id, patch) {
@@ -3258,6 +3344,12 @@ Rules:
         onDelete && onDelete();
       }
       const [detTab, setDetTab] = useState('details');   // 'details' | 'thread' | 'email'
+      // Google Tasks switch. Only editable once the full row is here: a light
+      // row has no such key, and saving from it could be overwritten a moment
+      // later by the full row that was already on its way.
+      const gtsKnown = Object.prototype.hasOwnProperty.call(task, 'google_tasks_sync');
+      const [gts, setGts] = useState(typeof task.google_tasks_sync === 'boolean' ? task.google_tasks_sync : null);
+      useEffect(() => { setGts(typeof task.google_tasks_sync === 'boolean' ? task.google_tasks_sync : null); }, [task.id, task.google_tasks_sync]);
       const emLinks = emailLinks || [];
       // Opened from the mailbox or a subject email icon — land on Email, not Details.
       useEffect(() => { if (initialTab) { setDetTab(initialTab); onTabSettled && onTabSettled(); } }, [initialTab]);
@@ -3408,6 +3500,7 @@ Rules:
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
             <div style={{ flex: 1, fontSize: 22, fontWeight: 500, color: ink, fontFamily: C.fontSans, lineHeight: 1.3, display: 'flex', alignItems: 'center', gap: 9 }}>
               {task.title}
+              <GTaskMark id={task.id} size={18} />
               {emLinks.length > 0 && <i className="ti ti-mail" title="Has a linked email — view on the Email tab" onClick={() => setDetTab('email')} style={{ fontSize: 17, color: dark ? '#7FA8DD' : '#185FA5', cursor: 'pointer', flexShrink: 0 }} />}
             </div>
             <CopyLinkBtn dark={dark} hash={'task/' + task.id} title="Copy a link straight to this task" />
@@ -3453,6 +3546,15 @@ Rules:
           {row('Project', task._projectName || '—')}
           {row('Assignees', ppl('assignee'))}
           {row('Assigned by', ppl('assigner'))}
+          {row('Google Tasks', <GoogleTasksSelect value={gts} scope="task" hasProject={!!task.project_id} disabled={!gtsKnown} dark={dark} ink={ink} bord={bord}
+            onChange={async v => {
+              const prev = gts; setGts(v);
+              if (!(await TaskDB.setGoogleTasks(task.id, v))) { setGts(prev); return; }
+              // Lists keep this same row object and do not reload on Back, so
+              // write the new value onto it too; otherwise reopening the task
+              // shows the old setting although the database has the new one.
+              task.google_tasks_sync = v;
+            }} />)}
           {task.working_url ? row('Working URL', <a href={task.working_url} target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>Open ↗</a>) : null}
           {/* New rich model [brief §2.3] takes over this row once a thread's attached;
               falls back to the older plain-URL field for any task that only has that. */}
@@ -4161,6 +4263,21 @@ Rules:
       // A ref, not state: the second Enter of a fast double-tap arrives before
       // any re-render, so a state flag would still be false when it lands.
       const tlAddBusy = useRef(false);
+      // Collapsed lists on a file's List tab: { projectId: { listKey: true } }.
+      // A view preference, so it stays on this device, like the grouping choice.
+      // The key is the same one reordering uses (the Zoho tasklist id where
+      // there is one), so renaming a list in Zoho keeps it folded.
+      const TL_FOLD_KEY = 'tmg-tl-collapsed';
+      const [tlFold, setTlFold] = useState(() => { try { return JSON.parse(localStorage.getItem(TL_FOLD_KEY) || '{}') || {}; } catch (e) { return {}; } });
+      const isFolded = (pid, k) => !!(tlFold[pid] && tlFold[pid][k]);
+      const setFolded = (pid, keys, val) => setTlFold(m => {
+        const cur = { ...(m[pid] || {}) };
+        keys.forEach(k => { if (val) cur[k] = true; else delete cur[k]; });
+        const next = { ...m, [pid]: cur };
+        if (!Object.keys(cur).length) delete next[pid];
+        try { localStorage.setItem(TL_FOLD_KEY, JSON.stringify(next)); } catch (e) {}
+        return next;
+      });
       const [subsOpen, setSubsOpen] = useState({});           // parent id -> subtasks shown
       // A reorder that fails must say so. A silent snap-back looks like the
       // app losing your work.
@@ -5259,7 +5376,7 @@ Rules:
           {/* Without this the guess would hide a real sync failure: the row
               would look filed when Zoho has never seen it. */}
           {guessedList && <span title="Shown under this name because it is assigned to them. It has not reached Zoho yet, so Zoho has not filed it in a list." style={{ color: sub, fontSize: '0.6rem', fontWeight: 600, border: `1px solid ${bord}`, borderRadius: 4, padding: '1px 6px', letterSpacing: '0.04em', flexShrink: 0, whiteSpace: 'nowrap', fontFamily: C.fontSans }}>Not in Zoho yet</span>}
-          <span style={{ flex: 1, minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+          <span style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 5 }}><span style={{ minWidth: 0, fontSize: '0.8rem', color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span><GTaskMark id={t.id} size={13} /></span>
           {subToggle(t)}
           <span style={{ fontSize: '0.62rem', fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: statusBg(t.status), color: statusColor(t.status), fontFamily: C.fontSans, whiteSpace: 'nowrap', flexShrink: 0 }}>{statusLabel(t.status)}</span>
           <span style={{ width: 60, textAlign: 'right', fontSize: '0.68rem', color: isOverdue(t.due_at) && t.status !== 'done' ? lateColor : sub, fontWeight: isOverdue(t.due_at) && t.status !== 'done' ? 600 : 400, flexShrink: 0, fontFamily: C.fontSans }}>{fmtD(t.due_at)}</span>
@@ -5304,6 +5421,14 @@ Rules:
             {fld('Target', <span style={{ color: isOverdue(p.target_date) ? lateColor : ink }}>{fmtD(p.target_date)}</span>)}
             {fld('Tasks', (p._hydrated ? (p._taskCount - p._openTasks.length) : (p._doneCount || 0)) + ' / ' + p._taskCount)}
             {fld('Collaborators', p._collaborators.length ? <span style={{ display: 'flex' }}>{p._collaborators.slice(0, 5).map((id, i) => <span key={id} style={{ marginLeft: i ? -5 : 0 }}>{avatar(id, 18)}</span>)}</span> : '—')}
+            {fld('Google Tasks', <GoogleTasksSelect value={p.google_tasks_sync} scope="project" dark={dark} ink={ink} bord={bord}
+              onChange={async v => {
+                if (!(await ProjectDB.setGoogleTasks(p.id, v))) return;
+                // Same as Pause syncing: refreshContainer re-hydrates from the
+                // row it is given, so update both copies by hand.
+                setCurrent(cur => cur && cur.id === p.id ? { ...cur, google_tasks_sync: v } : cur);
+                setRows(rs => rs.map(r => r.id === p.id ? { ...r, google_tasks_sync: v } : r));
+              }} />)}
             {zohoSyncable && p.zoho_project_id && (
               <React.Fragment>
                 {fld('Zoho Project', (() => {
@@ -5430,6 +5555,30 @@ Rules:
       ) : null;
       const listTab = (p) => {
         const tasklistNames = p._tasks.some(t => t.zoho_tasklist_name);
+        // Fold control for one list header. The name and count toggle too, the
+        // bigger target; dragging only ever starts from the grip, so a click
+        // here never competes with reordering.
+        const foldChevron = (k, label) => {
+          const folded = isFolded(p.id, k);
+          const hint = (folded ? 'Expand ' : 'Collapse ') + label;
+          return <i className={'ti ti-chevron-' + (folded ? 'right' : 'down')} title={hint} aria-label={hint} aria-expanded={!folded}
+            role="button" tabIndex={0}
+            onClick={(e) => { e.stopPropagation(); setFolded(p.id, [k], !folded); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setFolded(p.id, [k], !folded); } }}
+            style={{ fontSize: 14, color: sub, cursor: 'pointer', flexShrink: 0 }} />;
+        };
+        const foldAllBar = (keys) => {
+          if (keys.length < 2) return null;
+          const allFolded = keys.every(k => isFolded(p.id, k));
+          return (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+              <button onClick={() => setFolded(p.id, keys, !allFolded)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', padding: '2px 0', cursor: 'pointer', color: sub, fontSize: '0.68rem', letterSpacing: '0.08em', textTransform: 'uppercase', fontFamily: C.fontSans }}>
+                <i className={'ti ti-chevrons-' + (allFolded ? 'down' : 'up')} style={{ fontSize: 13 }} />{allFolded ? 'Expand all' : 'Collapse all'}
+              </button>
+            </div>
+          );
+        };
         if (tasklistNames) {
           // The grouping runs off tasklist names left on old rows, so it still
           // appears after syncing is paused (or the file is unlinked) and the
@@ -5515,6 +5664,7 @@ Rules:
           return (
             <div style={{ padding: wide ? '14px 20px 24px' : '12px 14px 24px', flex: 1, minWidth: 0, overflowY: 'auto' }}>
               {orderErrBar}
+              {foldAllBar(order.map(k => gkey(k)))}
               {order.map(key => {
                 // Only a header that names a real Zoho tasklist gets the plus.
                 // "Other tasks" is the catch-all for rows that have none, so
@@ -5523,14 +5673,20 @@ Rules:
                 const open = !!(tlId && tlAdd && tlAdd.key === tlId);
                 const who = tlId ? memberForTasklistName(key, team) : null;
                 const hint = who ? ('Add a task for ' + who.name) : ('Add a task in ' + key);
-                const toggleTlAdd = () => setTlAdd(g => (g && g.key === tlId) ? null : { key: tlId, val: '' });
+                const folded = isFolded(p.id, gkey(key));
+                const toggleTlAdd = () => {
+                  // Adding into a folded list opens it, so the new task is seen landing.
+                  if (folded) setFolded(p.id, [gkey(key)], false);
+                  setTlAdd(g => (g && g.key === tlId) ? null : { key: tlId, val: '' });
+                };
                 return (
                 <div key={key} style={{ marginBottom: 16 }}>
                   <div data-drag-kind="tasklist" data-drag-id={gkey(key)}
                     style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7,
                       ...dragRowStyle(tlDrag, gkey(key), gold, undefined) }}>
+                    {foldChevron(gkey(key), key)}
                     {dragGrip(tlDrag, 'tasklist', gkey(key), { color: sub, onArrow: (d) => moveTasklistBy(gkey(key), d) })}
-                    <span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{key} · {groups[key].length}</span>
+                    <span onClick={() => setFolded(p.id, [gkey(key)], !folded)} style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans, cursor: 'pointer' }}>{key} · {groups[key].length}</span>
                     {/* No pointerdown handler: a drag starts on the grip's, so
                         the plus never has to compete with reordering. Focus and
                         Enter/Space match the grip beside it, which has been
@@ -5539,7 +5695,7 @@ Rules:
                       role="button" tabIndex={0}
                       onClick={(e) => { e.stopPropagation(); toggleTlAdd(); }}
                       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleTlAdd(); } }}
-                      style={{ fontSize: 13, color: sub, opacity: open ? 0.9 : 0.4, cursor: 'pointer', flexShrink: 0 }} />}
+                      style={{ fontSize: 14, color: sub, opacity: open ? 0.9 : 0.7, cursor: 'pointer', flexShrink: 0 }} />}
                   </div>
                   {open && (
                     <div style={{ padding: '0 0 10px' }}>
@@ -5553,7 +5709,7 @@ Rules:
                       {zohoOffNote && <div style={{ marginTop: 5, fontSize: '0.68rem', color: sub, fontFamily: C.fontSans }}>{zohoOffNote}</div>}
                     </div>
                   )}
-                  {groups[key].map(withSubs((t, isChild) => detailTaskRow(t, isChild, !!guessed[t.id])))}
+                  {!folded && groups[key].map(withSubs((t, isChild) => detailTaskRow(t, isChild, !!guessed[t.id])))}
                 </div>
                 );
               })}
@@ -5564,19 +5720,26 @@ Rules:
           <div style={{ padding: wide ? '14px 20px 24px' : '12px 14px 24px', flex: 1, minWidth: 0, overflowY: 'auto' }}>
             {orderErrBar}
             {!p._hydrated ? <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans }}>Loading tasks…</div>
-            : p._tasks.length === 0 ? <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans }}>No tasks yet.</div> : TASK_STATUS.map(col => {
-              const items = p._tasks.filter(t => t.status === col.id && !isChildHere(t));
-              if (!items.length) return null;
-              return (
-                <div key={col.id} style={{ marginBottom: 16 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} />
-                    <span style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans }}>{col.label} · {items.length}</span>
-                  </div>
-                  {items.map(withSubs(detailTaskRow))}
-                </div>
-              );
-            })}
+            : p._tasks.length === 0 ? <div style={{ fontSize: '0.8rem', color: sub, fontFamily: C.fontSans }}>No tasks yet.</div> : (
+              <React.Fragment>
+                {foldAllBar(TASK_STATUS.filter(col => p._tasks.some(t => t.status === col.id && !isChildHere(t))).map(col => 'status:' + col.id))}
+                {TASK_STATUS.map(col => {
+                  const items = p._tasks.filter(t => t.status === col.id && !isChildHere(t));
+                  if (!items.length) return null;
+                  const fk = 'status:' + col.id, folded = isFolded(p.id, fk);
+                  return (
+                    <div key={col.id} style={{ marginBottom: 16 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 7 }}>
+                        {foldChevron(fk, col.label)}
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} />
+                        <span onClick={() => setFolded(p.id, [fk], !folded)} style={{ fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: sub, fontFamily: C.fontSans, cursor: 'pointer' }}>{col.label} · {items.length}</span>
+                      </div>
+                      {!folded && items.map(withSubs(detailTaskRow))}
+                    </div>
+                  );
+                })}
+              </React.Fragment>
+            )}
           </div>
         );
       };
@@ -6355,7 +6518,7 @@ Rules:
                       <i className="ti ti-corner-down-right" style={{ fontSize: 11, flexShrink: 0 }} />{parent.title}
                     </div>}
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 9 }}>
-                      <div style={{ flex: 1, minWidth: 0, fontSize: 14, color: ink, fontFamily: C.fontSans, lineHeight: 1.35 }}>{t.title}</div>
+                      <div style={{ flex: 1, minWidth: 0, fontSize: 14, color: ink, fontFamily: C.fontSans, lineHeight: 1.35 }}>{t.title}<GTaskMark id={t.id} size={13} inline /></div>
                       {kids.length > 0 && <span title={kids.length + (kids.length === 1 ? ' subtask' : ' subtasks') + ', ' + kids.filter(k => k.status === 'done').length + ' done'}
                         style={{ display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0, fontSize: 11, color: gold, fontFamily: C.fontSans }}>
                         <i className="ti ti-subtask" style={{ fontSize: 11 }} />{kids.filter(k => k.status === 'done').length}/{kids.length}
@@ -6416,7 +6579,7 @@ Rules:
                 <div key={t.id} style={{ display: 'flex', alignItems: 'center', borderBottom: `1px solid ${bord}` }}>
                   <div onClick={() => onOpen && onOpen(t)} style={{ width: 200, flexShrink: 0, padding: '10px 14px', fontSize: '0.76rem', color: ink, fontFamily: C.fontSans, cursor: onOpen ? 'pointer' : 'default', display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                     {t.is_milestone && <i className="ti ti-flag-3-filled" style={{ fontSize: 11, color: '#AD832F', flexShrink: 0 }} />}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span><GTaskMark id={t.id} size={12} />
                   </div>
                   <div style={{ flex: 1, position: 'relative', height: 38 }}>
                     <div onClick={() => onOpen && onOpen(t)} style={{ position: 'absolute', top: 8, left: leftPct + '%', width: widthPct + '%', height: 22, borderRadius: 5, background: statusColor(t.status), display: 'flex', alignItems: 'center', padding: '0 8px', color: '#fff', fontSize: '0.62rem', fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', cursor: onOpen ? 'pointer' : 'default' }}>{statusLabel(t.status)}</div>
@@ -6663,7 +6826,7 @@ Rules:
         return (
           <div key={t.id} style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '4px 0', paddingLeft: depth * 18 }}>
             {depth ? <i className="ti ti-corner-down-right" style={{ fontSize: 11, color: sub, flexShrink: 0 }} /> : null}
-            <span style={{ fontFamily: J, fontSize: depth ? 12.5 : 13, color: t.status === 'done' ? sub : ink, flex: 1, minWidth: 0, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+            <span style={{ fontFamily: J, fontSize: depth ? 12.5 : 13, color: t.status === 'done' ? sub : ink, flex: 1, minWidth: 0, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}<GTaskMark id={t.id} size={12} inline /></span>
             {kids.length ? (
               <span onClick={() => setSubsOpen(s => ({ ...s, [t.id]: !s[t.id] }))}
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0, cursor: 'pointer', fontFamily: J, fontSize: 11, color: gold, userSelect: 'none' }}
@@ -7303,7 +7466,7 @@ Rules:
             <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: priorityColor(t.priority) }} title={priorityLabel(t.priority)} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                <span style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
+                <span style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span><GTaskMark id={t.id} size={13} />
                 {subToggle(t)}
               </div>
               <div style={{ fontSize: '0.68rem', color: sub, marginTop: 2, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.due_at ? new Date(t.due_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : null, assignees.join(', ')].filter(Boolean).join(' · ') || '—'}</div>
@@ -7723,7 +7886,7 @@ Rules:
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
                 {t.is_milestone && milestoneBadge}
-                <span style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+                <span style={{ fontSize: '0.86rem', fontWeight: 600, color: ink, fontFamily: C.fontSans, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}<GTaskMark id={t.id} size={13} inline /></span>
                 {subToggle(t)}
                 {emailIconMini(t)}
               </div>
@@ -7756,7 +7919,7 @@ Rules:
             {milestoneFlag(t, 14)}
             <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
               {t.is_milestone && milestoneBadge}
-              <span style={{ minWidth: 0, fontSize: 14.5, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span>
+              <span style={{ minWidth: 0, fontSize: 14.5, color: ink, fontFamily: C.fontSans, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.title}</span><GTaskMark id={t.id} size={14} />
               {subToggle(t)}
               {emailIconMini(t)}
             </div>
@@ -8866,7 +9029,7 @@ Rules:
         return (
           <div key={t.id} style={{ borderBottom: `0.5px solid ${K.rowBd}`, padding: '9px 12px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span onClick={() => onOpenTask && onOpenTask(t)} style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 11, fontWeight: 700, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
+              <span onClick={() => onOpenTask && onOpenTask(t)} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}><span style={{ minWidth: 0, fontFamily: J, fontSize: 11, fontWeight: 700, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span><GTaskMark id={t.id} size={11} /></span>
               {statusPill(t.status)}
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 5 }}>
@@ -9423,7 +9586,7 @@ Rules:
       const decRow = (t) => { const sel = selId === t.id; return (
         <div key={t.id} onClick={() => setSelId(t.id)} style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: '9px 11px', margin: '0 8px 6px', borderRadius: 9, cursor: 'pointer', border: `1px solid ${sel ? K.gold : K.cellBd}`, borderLeft: `2.5px solid ${accentOf(t)}`, background: sel ? (dark ? '#0A1E44' : '#F3EBDA') : (dark ? '#0B1526' : '#fff'), opacity: isResolved(t) ? 0.72 : 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 11, fontWeight: 700, color: K.date, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
+            <span style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 5 }}><span style={{ minWidth: 0, fontFamily: J, fontSize: 11, fontWeight: 700, color: K.date, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span><GTaskMark id={t.id} size={11} /></span>
             {statusPill(t.status)}
           </div>
           {t.decision_question && <div style={{ fontFamily: J, fontSize: 9, color: K.reg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.decision_question}</div>}
@@ -9438,7 +9601,7 @@ Rules:
         return (
           <div key={t.id} style={{ margin: '0 12px 8px', borderRadius: 10, border: `1px solid ${K.cellBd}`, borderLeft: `2.5px solid ${accentOf(t)}`, background: dark ? '#0B1526' : '#fff', padding: '11px 13px', opacity: isResolved(t) ? 0.78 : 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span onClick={() => onOpenTask && onOpenTask(t)} style={{ flex: 1, minWidth: 0, fontFamily: J, fontSize: 12, fontWeight: 700, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span>
+              <span onClick={() => onOpenTask && onOpenTask(t)} style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}><span style={{ minWidth: 0, fontFamily: J, fontSize: 12, fontWeight: 700, color: K.date, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</span><GTaskMark id={t.id} size={12} /></span>
               {statusPill(t.status)}
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 5 }}>

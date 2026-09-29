@@ -5830,6 +5830,48 @@ Rules:
           </React.Fragment>
         ) : null;
 
+        // ── Commission Disbursement Information: PREVIEW ──
+        //  The section planned for Zoho Deals on 2026-09-30, mirroring the CD
+        //  tab of the scorecard sheet. None of its new fields exist in Zoho
+        //  yet, so this shows the layout only: the three values the deal
+        //  already has, "Not set" for what gets typed in, and the math for
+        //  what Zoho will calculate. Swap in live values once the fields exist.
+        const cdNone = <span style={{ color: sub, fontWeight: 400 }}>Not set</span>;
+        const cdHint = (t) => <span style={{ color: sub, fontWeight: 400, fontSize: 12.5 }}>{t}</span>;
+        const cdSub = (t) => <div style={{ fontSize: 10.5, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontWeight: 600, margin: '16px 0 2px', fontFamily: C.fontSans }}>{t}</div>;
+        const CD_TYPED = [
+          ['Marketing', null], ['Commission %', null], ["Christie's %", '14% by default'],
+          ['Transaction fee', '$350 by default'], ['Referral %', null], ['Referral flat $', null],
+          ['Agent split %', null], ['Marketing expenses', null], ['Amount received', null],
+          ['Date deposit received', null], ['Commission notes', null],
+        ];
+        const CD_CALC = [
+          ['Commission $', 'Sale price × Commission %'],
+          ["Christie's fee", "Commission $ × Christie's %"],
+          ['Net commission', "Commission $ - Christie's fee - Transaction fee"],
+          ['Referral $', 'Commission $ × Referral %, plus Referral flat $'],
+          ['After referral', 'Net commission - Referral $'],
+          ['Agent receives', 'After referral × Agent split %'],
+          ['TMG receives', 'After referral - Agent receives'],
+        ];
+        const cdBlock = isCtc ? (
+          <React.Fragment>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '22px 0 8px' }}>
+              <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600 }}>Commission disbursement information</div>
+              <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 6px', borderRadius: 3, background: dark ? 'rgba(173,131,47,.22)' : '#F3EBDA', color: gold, fontWeight: 600, fontFamily: C.fontSans }}>Preview</span>
+            </div>
+            {cdSub('Already in the Zoho deal')}
+            {dealRow('Closed date', deal && deal.closing_date ? fmtD(deal.closing_date) : cdNone)}
+            {dealRow('Agent', (deal && deal.owner) || cdNone)}
+            {dealRow('Sale price', deal && deal.amount != null ? money(deal.amount) : cdNone)}
+            {cdSub('Typed in')}
+            {CD_TYPED.map(([k, hint]) => <React.Fragment key={k}>{dealRow(k, hint ? cdHint(hint) : cdNone)}</React.Fragment>)}
+            {cdSub('Calculated by Zoho')}
+            {CD_CALC.map(([k, f]) => <React.Fragment key={k}>{dealRow(k, cdHint('= ' + f))}</React.Fragment>)}
+            <div style={{ fontSize: 11, color: sub, fontFamily: C.fontSans, marginTop: 6 }}>Preview · these fields are not in Zoho yet</div>
+          </React.Fragment>
+        ) : null;
+
         // Parties table + the add form. Rendered only for a CTC file that
         // resolves to a deal — with no deal there is nothing to attach to.
         const pInput = { fontFamily: C.fontSans, fontSize: 13, padding: '8px 10px', borderRadius: 6, border: `1px solid ${bord}`, background: dark ? 'rgba(255,255,255,.04)' : '#fff', color: ink, outline: 'none', width: '100%', boxSizing: 'border-box' };
@@ -5979,6 +6021,7 @@ Rules:
           <React.Fragment>
             {dealBlock}
             {txBlock}
+            {cdBlock}
             {partiesBlock}
             {/* Updates filed from the Emails tab — approved by a human, never
                 auto-applied. Sits below Milestones, where Open tasks used to. */}

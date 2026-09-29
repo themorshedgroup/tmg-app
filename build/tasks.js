@@ -13956,6 +13956,78 @@ function ProjectsSurface({
       }
     }, "From Zoho Projects \xB7 edit them in Zoho and refresh"))) : null;
 
+    // ── Commission Disbursement Information: PREVIEW ──
+    //  The section planned for Zoho Deals on 2026-09-30, mirroring the CD
+    //  tab of the scorecard sheet. None of its new fields exist in Zoho
+    //  yet, so this shows the layout only: the three values the deal
+    //  already has, "Not set" for what gets typed in, and the math for
+    //  what Zoho will calculate. Swap in live values once the fields exist.
+    const cdNone = /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: sub,
+        fontWeight: 400
+      }
+    }, "Not set");
+    const cdHint = t => /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: sub,
+        fontWeight: 400,
+        fontSize: 12.5
+      }
+    }, t);
+    const cdSub = t => /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10.5,
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        color: gold,
+        fontWeight: 600,
+        margin: '16px 0 2px',
+        fontFamily: C.fontSans
+      }
+    }, t);
+    const CD_TYPED = [['Marketing', null], ['Commission %', null], ["Christie's %", '14% by default'], ['Transaction fee', '$350 by default'], ['Referral %', null], ['Referral flat $', null], ['Agent split %', null], ['Marketing expenses', null], ['Amount received', null], ['Date deposit received', null], ['Commission notes', null]];
+    const CD_CALC = [['Commission $', 'Sale price × Commission %'], ["Christie's fee", "Commission $ × Christie's %"], ['Net commission', "Commission $ - Christie's fee - Transaction fee"], ['Referral $', 'Commission $ × Referral %, plus Referral flat $'], ['After referral', 'Net commission - Referral $'], ['Agent receives', 'After referral × Agent split %'], ['TMG receives', 'After referral - Agent receives']];
+    const cdBlock = isCtc ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        margin: '22px 0 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: sub,
+        fontWeight: 600
+      }
+    }, "Commission disbursement information"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.58rem',
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        padding: '2px 6px',
+        borderRadius: 3,
+        background: dark ? 'rgba(173,131,47,.22)' : '#F3EBDA',
+        color: gold,
+        fontWeight: 600,
+        fontFamily: C.fontSans
+      }
+    }, "Preview")), cdSub('Already in the Zoho deal'), dealRow('Closed date', deal && deal.closing_date ? fmtD(deal.closing_date) : cdNone), dealRow('Agent', deal && deal.owner || cdNone), dealRow('Sale price', deal && deal.amount != null ? money(deal.amount) : cdNone), cdSub('Typed in'), CD_TYPED.map(([k, hint]) => /*#__PURE__*/React.createElement(React.Fragment, {
+      key: k
+    }, dealRow(k, hint ? cdHint(hint) : cdNone))), cdSub('Calculated by Zoho'), CD_CALC.map(([k, f]) => /*#__PURE__*/React.createElement(React.Fragment, {
+      key: k
+    }, dealRow(k, cdHint('= ' + f)))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: sub,
+        fontFamily: C.fontSans,
+        marginTop: 6
+      }
+    }, "Preview \xB7 these fields are not in Zoho yet")) : null;
+
     // Parties table + the add form. Rendered only for a CTC file that
     // resolves to a deal — with no deal there is nothing to attach to.
     const pInput = {
@@ -14440,7 +14512,7 @@ function ProjectsSurface({
         fontFamily: C.fontSans
       }
     }, "Saved to Zoho")))) : null;
-    const tasksBlock = /*#__PURE__*/React.createElement(React.Fragment, null, dealBlock, txBlock, partiesBlock, updates.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    const tasksBlock = /*#__PURE__*/React.createElement(React.Fragment, null, dealBlock, txBlock, cdBlock, partiesBlock, updates.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         letterSpacing: '0.14em',

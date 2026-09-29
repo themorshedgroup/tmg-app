@@ -1491,7 +1491,7 @@ Rules:
     // Either side may be the short form of the other ("Alexa" / "Alexandra"),
     // and three letters is the floor because two would match half the team.
     const leadWordHit = (a, b) => a.length >= 3 && b.length >= 3 && (a.startsWith(b) || b.startsWith(a));
-    // The mirror of TaskDB.tasklistForAssignee: here the list is known and the
+    // The mirror of tasklistForNames below: here the list is known and the
     // person is not. Returns null on no match AND on an ambiguous one. A task
     // created unassigned in the right list is something anyone can pick up; one
     // silently handed to the wrong person is the bug this path exists to stop.
@@ -1500,6 +1500,36 @@ Rules:
       if (w.length < 3) return null;
       const hits = (team || []).filter(m => (!m.status || m.status === 'active') && leadWordHit(leadWord(m.name), w));
       return hits.length === 1 ? hits[0] : null;
+    }
+    // The tasklist a new task belongs in, or null when nobody's list matches.
+    // zoho-projects-poll's tasklistForNames, duplicated so the browser and the
+    // poll file a task in the same list whichever of them sends it. A task on
+    // several people picks alphabetically by first name; one person with two
+    // lists ("Symon (O.M.)" and "Symon 2") gets the busier one, then the lower
+    // id, so the answer never wobbles between saves.
+    function tasklistForNames(names, lists, counts) {
+      const ordered = (names || []).map(leadWord).filter(n => n.length >= 3).sort();
+      for (const n of ordered) {
+        const hits = lists.filter(l => leadWordHit(leadWord(l.name), n));
+        if (hits.length) return hits.sort((a, b) => ((counts[b.id] || 0) - (counts[a.id] || 0)) || (a.id < b.id ? -1 : 1))[0].id;
+      }
+      return null;
+    }
+    // Is this project filed by person (Accountabilities) or by deal phase
+    // (every CTC file)? The poll's distinctPeopleWithLists: at least two
+    // distinct PEOPLE holding a list of their own. One is not enough, since a
+    // phase name can start like somebody's name ("Marketing Maintenance" and a
+    // Mark), and each list counts for one person at most.
+    function distinctPeopleWithLists(lists, teamNames) {
+      const team = Array.from(new Set((teamNames || []).map(leadWord).filter(n => n.length >= 3))).sort();
+      const people = new Set();
+      for (const l of lists) {
+        const w = leadWord(l.name);
+        if (w.length < 3) continue;
+        const who = team.find(m => leadWordHit(w, m));
+        if (who) people.add(who);
+      }
+      return people.size;
     }
 
     // ── Google Tasks ───────────────────────────────────────────────────
@@ -1728,28 +1758,58 @@ Rules:
         return data;
       },
 
-      // Which Zoho tasklist a new task belongs in, when the project keeps one
-      // list per person. The poller's own rows carry no assignee at all, so a
-      // person's list can only be recognised by its NAME. Returns null when
-      // nothing matches, and the caller falls back to the project default.
-      async tasklistForAssignee(projectId, profs) {
-        const c = this.client(); if (!c || !projectId || !profs || !profs.length) return null;
-        const { data: rows } = await c.from('tasks').select('zoho_tasklist_id,zoho_tasklist_name')
-          .eq('project_id', projectId).not('zoho_tasklist_id', 'is', null);
-        if (!rows || !rows.length) return null;
-        const lists = {};
-        rows.forEach(r => { const k = r.zoho_tasklist_id; if (!k) return; (lists[k] = lists[k] || { id: k, name: r.zoho_tasklist_name || '', n: 0 }).n++; });
-        // Leading word only, via the shared matcher above.
-        for (const p of profs) {
-          const fn = leadWord(p.first_name) || leadWord((p.email || '').split('@')[0]);
-          if (fn.length < 3) continue;
-          const hits = Object.keys(lists).map(k => lists[k]).filter(l => leadWordHit(leadWord(l.name), fn));
-          // One person with two lists ("Symon (O.M.)" and "Symon 2") is normal
-          // and the busier one is the live one. The id tiebreak stops the
-          // answer wobbling between saves.
-          if (hits.length) return hits.sort((a, b) => (b.n - a.n) || (a.id < b.id ? -1 : 1))[0].id;
-        }
-        return null;
+      // Zoho's own list of a project's tasklists. Our rows only know a list
+      // once some task has synced into it, so a person's list that was still
+      // empty (Brad's and Kyle's in Accountabilities, 2026-09-30) could not be
+      // seen, and their work fell through to the project default, which is
+      // Tarek's list. Cached per project for five minutes, promise and all:
+      // assigning to Everyone fires one create per person at once, and each
+      // would otherwise spend its own call against Zoho's 100-per-2-minute
+      // ceiling. A failed read is dropped from the cache, never kept.
+      _zohoLists: {},
+      zohoTasklists(zohoProjectId) {
+        const hit = this._zohoLists[zohoProjectId];
+        if (hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.p;
+        const p = callZohoProjects({ action: 'list_tasklists', project_id: zohoProjectId })
+          .then(r => (r.ok && r.data && Array.isArray(r.data.tasklists)) ? r.data.tasklists.filter(l => l && l.id) : null)
+          .catch(() => null);
+        const entry = { at: Date.now(), p };
+        this._zohoLists[zohoProjectId] = entry;
+        p.then(lists => { if (!lists && this._zohoLists[zohoProjectId] === entry) delete this._zohoLists[zohoProjectId]; });
+        return p;
+      },
+
+      // Which Zoho tasklist a new task goes in. The same rule as the push in
+      // zoho-projects-poll, so a task lands in the same list whichever side
+      // sends it:
+      //   - an id already on the task was picked on purpose (the plus on a
+      //     tasklist header) and wins;
+      //   - a project filed by PERSON takes the assignee's own list, and when
+      //     nobody's list matches, none. Its default is one person's list, and
+      //     falling back to it is the bug. The task stays unsent, and the poll
+      //     files it (and says why on the task) once the list exists;
+      //   - a project filed by phase (every CTC file) takes its only list, or
+      //     else the project default, as it always has.
+      // Returns { id } to send now, or { later: true } to leave for the poll.
+      // Any read that fails is { later: true } too: a missing answer must
+      // never read as "not per person", which would send it to the default.
+      async tasklistFor(task, proj, assigneeProfiles) {
+        if (task.zoho_tasklist_id) return { id: task.zoho_tasklist_id };
+        const c = this.client(); if (!c) return { later: true };
+        const lists = await this.zohoTasklists(proj.zoho_project_id);
+        if (!lists) return { later: true };
+        const { data: team, error: teamErr } = await c.from('profiles').select('first_name,email,status');
+        if (teamErr || !team) return { later: true };
+        const nameOf = (p) => String(p.first_name || '').trim() || String(p.email || '').split('@')[0];
+        const teamNames = team.filter(p => !p.status || p.status === 'active').map(nameOf);
+        if (distinctPeopleWithLists(lists, teamNames) < 2) return { id: lists.length === 1 ? lists[0].id : proj.zoho_tasklist_id };
+        const { data: rows, error: rowsErr } = await c.from('tasks').select('zoho_tasklist_id')
+          .eq('project_id', task.project_id).not('zoho_tasklist_id', 'is', null);
+        if (rowsErr) return { later: true };
+        const counts = {};
+        (rows || []).forEach(r => { const k = r.zoho_tasklist_id; if (k) counts[k] = (counts[k] || 0) + 1; });
+        const id = tasklistForNames((assigneeProfiles || []).map(nameOf).filter(Boolean), lists, counts);
+        return id ? { id } : { later: true };
       },
 
       // Push a task's synced fields (plan §2.1: title/description/due_at/
@@ -1790,10 +1850,15 @@ Rules:
             // that one person. Projects like Accountabilities keep a list per
             // person, and every task created here went into the default
             // regardless of who it was assigned to (Alexa's task filed under
-            // "Tarek", 2026-09-23). Ask the assignee's own list first.
-            // An id already on the task was chosen on purpose (the plus on a
-            // tasklist header), so it outranks both the guess and the default.
-            const tasklistId = task.zoho_tasklist_id || (await this.tasklistForAssignee(task.project_id, assigneeProfiles)) || proj.zoho_tasklist_id;
+            // "Tarek", 2026-09-23). See tasklistFor for the rule.
+            const pick = await this.tasklistFor(task, proj, assigneeProfiles);
+            // Nobody's list matched, or Zoho could not be asked. The row keeps
+            // its null zoho_task_id and nothing lands in the wrong person's
+            // list. An open task goes over on a later poll, which notes on the
+            // task why it is waiting; one already closed stays TMG-only, the
+            // same as the poll treats any closed task that never reached Zoho.
+            if (pick.later) return;
+            const tasklistId = pick.id;
             if (!tasklistId) {
               await this.addActivity(task.id, 'system', 'Zoho Projects sync skipped — this CTC file has no default tasklist configured yet.', user);
               return;
@@ -5707,7 +5772,7 @@ Rules:
           // One list per PERSON, not per name: "Symon (O.M.)" and "Symon 2" are
           // both Symon, so counting lists would read a one-person file as
           // per-person. Busiest list wins, and the tasklist ID breaks the tie,
-          // byte for byte the rule TaskDB.tasklistForAssignee uses. Breaking it
+          // byte for byte the tiebreak tasklistForNames uses. Breaking it
           // on the NAME instead would show a task under one of Symon's lists and
           // then sync it into the other, which reads as the task moving on its own.
           const listForMember = {};

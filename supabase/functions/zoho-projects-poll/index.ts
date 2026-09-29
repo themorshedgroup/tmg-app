@@ -1251,10 +1251,9 @@ Deno.serve(async (req) => {
             // things: who Zoho shows as responsible, and which list the task
             // is filed in. Read from task_people and matched by the same rule
             // tasks.jsx uses, so the two never disagree about whose list is
-            // whose. Where they do differ is what they are matching against:
-            // the browser only knows the lists that already have synced rows
-            // on them, while this job asks Zoho, so a list made this morning
-            // is one this job can file into and the browser cannot.
+            // whose. Both ask Zoho for the project's lists (the browser via
+            // list_tasklists, since 2026-09-30), so a list made this morning,
+            // or one still empty, is one either side can file into.
             const { data: assignees } = await sb.from("task_people")
               .select("user_id").eq("task_id", t.id).eq("role", "assignee");
             let emails: string[] = [];

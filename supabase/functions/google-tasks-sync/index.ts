@@ -137,7 +137,10 @@ async function gfetch(token: string, path: string, init?: RequestInit) {
 // a task due "Sep 15" never lands on the 14th for someone in Manila.
 const toGoogleDue = (dueAt: string | null) => dueAt ? new Date(dueAt).toISOString().slice(0, 10) + "T00:00:00.000Z" : null;
 const fromGoogleDue = (due: string | null | undefined) => due ? due.slice(0, 10) + "T00:00:00.000Z" : null;
-const toGoogleStatus = (s: string) => (s === "done" ? "completed" : "needsAction");
+// Google has two states and TMG has eight (Zoho's). Completed and Cancelled
+// are both closed, so both show ticked; the other six are all "not ticked".
+const isClosed = (s: string | null | undefined) => s === "done" || s === "cancelled";
+const toGoogleStatus = (s: string) => (isClosed(s) ? "completed" : "needsAction");
 const fromGoogleStatus = (s: string) => (s === "completed" ? "done" : "todo");
 
 type SyncResult = { user_id: string; pushed: number; pulled: number; updated: number; removed: number; skipped?: string; error?: string; sample?: string[]; agenda?: { importable: number; already_done: number; stale: number } };
@@ -239,23 +242,48 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
           // sides rewrite both fields is how sync loops start.
           const { data: t } = await sb.from("tasks").select("id,status,updated_at").eq("id", link.task_id).maybeSingle();
           if (!t) continue;
-          const want = fromGoogleStatus(gt.status);
           const googleUpdated = gt.updated ? new Date(gt.updated) : null;
           const tmgUpdated = t.updated_at ? new Date(t.updated_at) : null;
           const googleIsNewer = googleUpdated && (!tmgUpdated || googleUpdated > tmgUpdated);
-          if (want !== t.status && googleIsNewer) {
+          // Google can only say ticked or not, so it may only move a task
+          // across that line, and only when the checkbox itself moved since
+          // this job last wrote it. Reading "not ticked" as To Do reset In
+          // Progress, Completed and the rest to To Do right after every push
+          // (22 Accountabilities tasks on 2026-09-28): the push itself makes
+          // Google's copy the newer one, and a Zoho pull never moves
+          // updated_at, so Google won every time. Unticked on a task that is
+          // open in any of TMG's six ways leaves that status alone.
+          const googleMoved = (link.last_pushed?.status ?? null) !== gt.status;
+          const gClosed = gt.status === "completed";
+          const want = gClosed ? "done" : "todo";
+          const crosses = gClosed !== isClosed(t.status);
+          if (googleMoved && crosses && googleIsNewer) {
             if (sample.length < 8) sample.push(`status ${t.status}→${want}: ${gt.title || ""}`);
             if (!dry) {
               const patch: any = { status: want, updated_at: new Date().toISOString() };
               if (want === "done") patch.completed_at = gt.completed || new Date().toISOString();
               else patch.completed_at = null;
               await sb.from("tasks").update(patch).eq("id", t.id);
+              // field "status" also tells the Zoho sync this status is TMG's
+              // own change, so a later conflict with Zoho sends it there.
+              await sb.from("task_activity").insert({ task_id: t.id, kind: "system", field: "status",
+                content: gClosed ? "Status: marked Completed in Google Tasks." : "Status: reopened (To Do) in Google Tasks." });
             }
             out.updated++;
           }
           if (!dry) {
-            await sb.from("google_task_links")
-              .update({ google_updated: gt.updated || null, synced_at: new Date().toISOString() })
+            const linkPatch: any = { google_updated: gt.updated || null, synced_at: new Date().toISOString() };
+            // A checkbox move, once read, counts as seen. Only a push used to
+            // record it, so when no push followed, the person's NEXT tick was
+            // compared against an old state and ignored. When the app won
+            // instead (its edit is newer), recording it is what makes the OUT
+            // pass below see a difference and put the app's state back on the
+            // phone. Same object as byTaskId's, so the OUT pass sees it.
+            if (googleMoved) {
+              linkPatch.last_pushed = { ...(link.last_pushed || {}), status: gt.status };
+              link.last_pushed = linkPatch.last_pushed;
+            }
+            await sb.from("google_task_links").update(linkPatch)
               .eq("task_id", link.task_id).eq("user_id", userId);
           }
           continue;
@@ -375,7 +403,12 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
         continue;
       }
       // Old finished work stays out of it, see DONE_LOOKBACK_DAYS.
-      if (t.status === "done" && (!t.completed_at || t.completed_at < cutoff)) continue;
+      // Only for tasks with no copy yet: a copy already on the phone is still
+      // ticked off, however long ago (or undated) the completion was.
+      if (t.status === "done" && !link && (!t.completed_at || t.completed_at < cutoff)) continue;
+      // Cancelled work is never sent out. A copy already on someone's phone
+      // is ticked off once below, so it stops reading as live work there.
+      if (t.status === "cancelled" && !link) continue;
       const payload = { title: t.title, status: toGoogleStatus(t.status), due: toGoogleDue(t.due_at) };
 
       if (!link) {
@@ -418,10 +451,19 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
         }).eq("task_id", t.id).eq("user_id", userId);
         out.updated++;
       } catch (e) {
+        const msg = String((e as any)?.message || e);
+        // The person deleted this copy in Google. Recorded as sent so it is not
+        // retried, and failing, on every run. The link stays: without it the
+        // next run would post a fresh copy of something they chose to delete.
+        if (/→ (404|410)\b/.test(msg)) {
+          await sb.from("google_task_links").update({ last_pushed: payload, synced_at: new Date().toISOString() })
+            .eq("task_id", t.id).eq("user_id", userId);
+          continue;
+        }
         // Google restricts edits on tasks that came from a Doc. If it refuses,
         // the app's own status stays the truth and the reason is recorded
         // rather than swallowed.
-        out.error = String((e as any)?.message || e);
+        out.error = msg;
       }
     }
   }

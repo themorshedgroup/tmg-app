@@ -620,18 +620,54 @@ function zohoPriorityToTmg(p: string | null | undefined): string {
   if (s.includes("low") || s === "none") return "low";
   return "medium";
 }
-function tmgStatusToZoho(s: string | null | undefined): string {
-  if (s === "done") return "Closed";
-  if (s === "in_progress") return "In Progress";
-  return "Open"; // 'todo' and 'stuck' both fall back to Open — Zoho has no
-  // native "blocked" concept to map 'stuck' onto without knowing the pilot
-  // portal's custom statuses; confirm during Phase 1 whether a closer match exists.
+// Zoho's task statuses and the TMG id each one is. Read off the portal on
+// 2026-09-29: every linked project (three task layouts between them) carries
+// these same 8 with these same ids. Zoho's V1 API sets a status by its id, as
+// custom_status. The old code sent a NAME as `status`, which is not a V1
+// parameter, and the names it sent (Open, Closed) are not statuses this
+// portal has, so no status change made in TMG was ever confirmed in Zoho.
+// Keep this block identical to the copy in zoho-projects-poll.
+const ZOHO_STATUS: Record<string, { name: string; id: string }> = {
+  todo:        { name: "To Do",       id: "2435905000000084180" },
+  in_progress: { name: "In Progress", id: "2435905000000031001" },
+  submitted:   { name: "Submitted",   id: "2435905000000084179" },
+  revision:    { name: "Revision",    id: "2435905000000084181" },
+  stuck:       { name: "Stuck",       id: "2435905000000084182" },
+  on_hold:     { name: "On Hold",     id: "2435905000000031007" },
+  done:        { name: "Completed",   id: "2435905000000084183" },
+  cancelled:   { name: "Cancelled",   id: "2435905000000031011" },
+};
+// Zoho's stock names, for a project on a layout that still uses them.
+const ZOHO_STATUS_ALIAS: Record<string, string> = {
+  "open": "todo", "not started": "todo", "closed": "done", "complete": "done", "canceled": "cancelled",
+};
+function tmgStatusToZohoId(s: string | null | undefined): string | null {
+  return (s && ZOHO_STATUS[s]?.id) || null;
 }
-function zohoStatusToTmg(s: string | null | undefined): string {
-  const v = (s || "").toLowerCase();
-  if (v.includes("close") || v.includes("complet")) return "done";
-  if (v.includes("progress")) return "in_progress";
-  return "todo";
+// A Zoho status (the object on a task, or a bare name) as a TMG id: by id,
+// then by exact name, then by Zoho's own open/closed type. The substring
+// match this replaces turned Cancelled, Submitted, Revision, Stuck and On
+// Hold all into To Do, which is how 460 cancelled tasks sat in the app as
+// open work.
+function zohoStatusToTmg(st: any): string {
+  const obj = st && typeof st === "object";
+  const id = obj ? String(st.id ?? "") : "";
+  const name = String((obj ? st.name : st) ?? "").trim().toLowerCase();
+  const entries = Object.entries(ZOHO_STATUS);
+  if (id) for (const [k, v] of entries) if (v.id === id) return k;
+  for (const [k, v] of entries) if (v.name.toLowerCase() === name) return k;
+  if (ZOHO_STATUS_ALIAS[name]) return ZOHO_STATUS_ALIAS[name];
+  return obj && String(st.type ?? "").toLowerCase() === "closed" ? "done" : "todo";
+}
+// Why the status Zoho sent back is not the one TMG asked for, or null when it
+// is (or when no status was asked for). Zoho answers 200 to a write it only
+// partly applied, so the returned task is the only proof the status took.
+function statusMiss(t: any, sentId: string | null): string | null {
+  if (!sentId) return null;
+  if (!t) return "Zoho did not send the task back, so the status change is unconfirmed.";
+  const got = t.status && typeof t.status === "object" ? String(t.status.id ?? "") : "";
+  if (got === sentId) return null;
+  return `Zoho still shows "${(t.status && (t.status.name || t.status)) || "no status"}".`;
 }
 
 Deno.serve(async (req) => {
@@ -967,9 +1003,37 @@ Deno.serve(async (req) => {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return json({ error: d?.error || "Could not create Zoho task", detail: d }, r.status);
-      const t = (d.tasks || [])[0];
+      let t = (d.tasks || [])[0];
       if (!t) return json({ error: "Zoho did not return the created task.", detail: d }, 502);
-      return json({ ok: true, task: mapZohoTask(t) }, 200);
+      // Zoho creates every task in its start status (To Do). A task made in
+      // TMG further along than that gets its status in a second write, only
+      // when it needs one, checked against what Zoho sends back. The create
+      // itself already succeeded, so a miss is reported, not an error.
+      let status_error: string | null = null;
+      const wantId = body.status && body.status !== "todo" ? tmgStatusToZohoId(body.status) : null;
+      if (wantId) {
+        // Caught, because the Zoho task already exists: a throw here would
+        // lose its id and the browser would create it a second time.
+        try {
+          const tid = t.id_string || String(t.id);
+          const sr = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${projectId}/tasks/${tid}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ custom_status: wantId }).toString(),
+          });
+          const sd = await sr.json().catch(() => ({}));
+          const st = sr.ok ? (sd.tasks || [])[0] : null;
+          status_error = sr.ok ? statusMiss(st, wantId) : (sd?.error?.message || sd?.error || `Zoho answered HTTP ${sr.status}.`);
+          if (st && !status_error) t = st;
+        } catch (e) {
+          status_error = "The status request to Zoho failed: " + String((e as any)?.message || e);
+        }
+      }
+      const created = mapZohoTask(t);
+      // No modified time on a miss, so the browser stores none and the next
+      // poll re-reads the task and shows Zoho's real status.
+      if (status_error) created.last_modified_time = null;
+      return json({ ok: true, task: created, ...(status_error ? { status_error: String(status_error) } : {}) }, 200);
     }
 
     if (action === "update_task") {
@@ -998,7 +1062,19 @@ Deno.serve(async (req) => {
         }
       }
       if (body.priority) form.set("priority", tmgPriorityToZoho(body.priority));
-      if (body.status) form.set("status", tmgStatusToZoho(body.status));
+      // A status Zoho has no id for is refused out loud: sending nothing
+      // would leave Zoho on its old status while TMG shows the new one.
+      // status_changed is the proof a person changed it. Tabs still open on
+      // the app from before 2026-09-30 send the row's status on every save,
+      // even untouched, and that status can be stale (460 tasks cancelled in
+      // Zoho sat here as To Do). Those saves never moved Zoho's status before,
+      // so without the flag they are ignored exactly as they always were.
+      let sentStatusId: string | null = null;
+      if (body.status && body.status_changed === true) {
+        sentStatusId = tmgStatusToZohoId(body.status);
+        if (!sentStatusId) return json({ error: `Zoho Projects has no status for "${body.status}".` }, 400);
+        form.set("custom_status", sentStatusId);
+      }
       const assigneeEmails: string[] = Array.isArray(body.assignee_emails) ? body.assignee_emails : [];
       if (assigneeEmails.length) {
         const { ids } = await resolveZohoOwnerIds(sb, conn, accessToken, portalBase, assigneeEmails);
@@ -1012,7 +1088,10 @@ Deno.serve(async (req) => {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) return json({ error: d?.error || "Could not update Zoho task", detail: d }, r.status);
-      return json({ ok: true, id: taskId }, 200);
+      // The task Zoho hands back is the proof the status took.
+      const t = (d.tasks || [])[0] || null;
+      const status_error = statusMiss(t, sentStatusId);
+      return json({ ok: true, id: taskId, task: t ? mapZohoTask(t) : null, ...(status_error ? { status_error } : {}) }, 200);
     }
 
     if (action === "delete_task") {
@@ -1214,16 +1293,59 @@ Deno.serve(async (req) => {
           } else {
             const form = new URLSearchParams({
               name: local.title || "", description: local.description || "",
-              priority: tmgPriorityToZoho(local.priority), status: tmgStatusToZoho(local.status),
+              priority: tmgPriorityToZoho(local.priority),
             });
+            // Status goes only when TMG changed it since the last sync, which
+            // leaves a status line in the task's history. Other TMG writes
+            // (a note, an edit from the home page) also make TMG the newer
+            // side, and sending its status then would put an old one over a
+            // newer Zoho status: To Do back over a task just Cancelled there.
+            let stQ = sb.from("task_activity").select("id").eq("task_id", local.id).eq("field", "status");
+            if (local.zoho_last_synced_at) stQ = stQ.gt("created_at", local.zoho_last_synced_at);
+            const { data: stLines } = await stQ.limit(1);
+            const tmgMovedStatus = (stLines || []).length > 0;
+            const sentStatusId = tmgMovedStatus ? tmgStatusToZohoId(local.status) : null;
+            if (sentStatusId) form.set("custom_status", sentStatusId);
             const zd = isoToZohoDate(local.due_at); if (zd) form.set("end_date", zd);
             // Hand Zoho back the start date it already has, so writing the due
             // date can't make it invent one — see mapZohoTask's start_date note.
             if (zd && zt.start_date) form.set("start_date", zt.start_date);
-            await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${proj.zoho_project_id}/tasks/${zt.id}/`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
-            await sb.from("tasks").update({ zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: Date.now() }).eq("id", local.id);
-            await sb.from("zoho_sync_conflicts").insert({ task_id: local.id, project_id: proj.id, field: changedField, tmg_value: String((local as any)[changedField] ?? ""), zoho_value: String((zt as any)[changedField] ?? ""), resolution: "tmg_won" });
-            await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync conflict on "${changedField}": TMG's edit was more recent, so TMG's value was kept and pushed to Zoho.` });
+            const pr = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${proj.zoho_project_id}/tasks/${zt.id}/`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+            const pd = await pr.json().catch(() => ({}));
+            // Rate-limited or Zoho down: nothing was written, so the row is left
+            // as it is and the next run tries again (still under the per-run
+            // cap; the project's read cursor holds back so the task is re-read).
+            if (pr.status === 429 || pr.status >= 500) { conflictDeferred++; conflictPushes++; continue; }
+            // Any other refusal would come back every run and hold a push
+            // slot each time, so it is said once and the row is stamped with
+            // Zoho's own time: each side keeps its value until the next edit.
+            if (!pr.ok) {
+              const why = pd?.error?.message || pd?.error || `HTTP ${pr.status}`;
+              await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho Projects refused TMG's edit (${String(why)}), so the two copies differ until the next edit on either side.` });
+              await sb.from("tasks").update({ zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: zt.last_modified_time }).eq("id", local.id);
+              conflictPushes++; conflicts++; continue;
+            }
+            const back = (pd.tasks || [])[0] || null;
+            const miss = statusMiss(back, sentStatusId);
+            if (miss) await sb.from("task_activity").insert({ task_id: local.id, kind: "system", field: "status", content: `Zoho Projects did not take TMG's status (${ZOHO_STATUS[local.status]?.name || local.status}). ${miss}` });
+            // Zoho's own time for this write, so the next run does not read
+            // it back as a Zoho edit. None on a status miss: the next run
+            // then re-reads the task and shows the status Zoho really kept.
+            const stamp: any = { zoho_last_synced_at: new Date().toISOString(), zoho_last_modified_time: miss ? null : ((back ? mapZohoTask(back).last_modified_time : null) ?? Date.now()) };
+            // Status was not TMG's to send, so Zoho's stands and TMG takes it.
+            if (!tmgMovedStatus && zt.status !== local.status) { stamp.status = zt.status; stamp.completed_at = completionFor(zt, local); }
+            await sb.from("tasks").update(stamp).eq("id", local.id);
+            // Logged against a field TMG really won on. Status is left out of
+            // that when TMG did not send it, and a conflict that was only
+            // about status then reads as what happened: Zoho's was kept.
+            const wonField = tmgMovedStatus ? changedField : (overwrittenFields(local, zt).find((f) => f !== "status") || (zt.status !== local.status ? null : changedField));
+            if (!wonField) {
+              await sb.from("zoho_sync_conflicts").insert({ task_id: local.id, project_id: proj.id, field: "status", tmg_value: String(local.status ?? ""), zoho_value: String(zt.status ?? ""), resolution: "zoho_won" });
+              await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync: the status set in Zoho Projects (${ZOHO_STATUS[zt.status]?.name || zt.status}) was kept, since it was not changed here.` });
+            } else {
+              await sb.from("zoho_sync_conflicts").insert({ task_id: local.id, project_id: proj.id, field: wonField, tmg_value: String((local as any)[wonField] ?? ""), zoho_value: String((zt as any)[wonField] ?? ""), resolution: "tmg_won" });
+              await sb.from("task_activity").insert({ task_id: local.id, kind: "system", content: `Zoho sync conflict on "${wonField}": TMG's edit was more recent, so TMG's value was kept and pushed to Zoho.` });
+            }
             conflictPushes++;
           }
           conflicts++;
@@ -1284,7 +1406,9 @@ Deno.serve(async (req) => {
       // This stamp IS the incremental cursor. Moving it past a tail the paged
       // read never reached would skip those tasks for good, so a truncated
       // read leaves the cursor where it was and the next sync reads again.
-      if (!paged.truncated) {
+      // Held back too when a conflict push was put off, so that task is read
+      // again rather than lost behind the cursor.
+      if (!paged.truncated && !conflictDeferred) {
         await sb.from("projects").update({ zoho_last_synced_at: new Date().toISOString() }).eq("id", proj.id);
       }
       return json({
@@ -1431,6 +1555,8 @@ const FIELD_LABEL: Record<string, string> = {
 function shortValue(field: string, v: unknown): string {
   if (v == null || v === "") return "(empty)";
   if (field === "due_at") return shortDate(String(v)) || String(v);
+  // Status reads the way people see it in both apps, not as a TMG id.
+  if (field === "status") return ZOHO_STATUS[String(v)]?.name || String(v);
   const str = String(v);
   return str.length > 120 ? str.slice(0, 117) + "..." : str;
 }
@@ -1532,6 +1658,8 @@ function zohoOwners(t: any): ZOwner[] {
 // now() only on the TRANSITION into done. Never stamp a task that arrives
 // already finished: that is history, and dating it today would credit
 // month-old work to this week. Cleared when Zoho reopens a task.
+// Cancelled is closed in Zoho and may carry a completed time, but it is not
+// finished work: accountability_weeks credits completed_at, so it stays null.
 function completionFor(zt: any, local: any | null): string | null {
   if (zt.status !== "done") return null;
   if (zt.completed_at) return zt.completed_at;
@@ -1649,7 +1777,7 @@ function mapZohoTask(t: any) {
     // start date Zoho already has keeps it where the team put it.
     start_date: t.start_date || null,
     priority: zohoPriorityToTmg(t.priority),
-    status: zohoStatusToTmg(t.status?.name || t.status),
+    status: zohoStatusToTmg(t.status),
     last_modified_time: zohoModifiedMs(t) ?? zohoFingerprint(t),
     completed_at: zohoCompletedIso(t),
     owners: zohoOwners(t),

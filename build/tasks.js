@@ -1700,7 +1700,7 @@ Fields you can capture into the payload:
 - title (short)
 - dueDate ("YYYY-MM-DD"); dueTime ("HH:MM", 24-hour) only if a time was given
 - priority: "low" | "medium" | "high"  (default "medium")
-- status: "todo" | "in_progress" | "stuck" | "done"  (default "todo")
+- status: "todo" | "in_progress" | "submitted" | "revision" | "stuck" | "on_hold" | "done" | "cancelled"  (default "todo")
 - project (a short name)
 - assignees: array of the people's names who will do it
 - assigners: array of the people's names who asked for it
@@ -3371,6 +3371,9 @@ const AccessDB = {
 };
 
 // ─── Tasks ───────────────────────────────────────────────────────
+// Mirrors Zoho Projects' 8 statuses, in Zoho's order. The order drives every
+// Kanban column and status group, so keep it matching Zoho. src/index.jsx
+// keeps its own copy (separate bundle): change both.
 const TASK_STATUS = [{
   id: 'todo',
   label: 'To Do',
@@ -3388,6 +3391,22 @@ const TASK_STATUS = [{
 },
 // blue
 {
+  id: 'submitted',
+  label: 'Submitted',
+  color: '#6B3FA0',
+  bg: '#F1EAF9',
+  border: '#D6C4EE'
+},
+// purple
+{
+  id: 'revision',
+  label: 'Revision',
+  color: '#B45309',
+  bg: '#FDF0E1',
+  border: '#F5D0A6'
+},
+// amber
+{
   id: 'stuck',
   label: 'Stuck',
   color: '#9B1C1C',
@@ -3396,13 +3415,45 @@ const TASK_STATUS = [{
 },
 // red
 {
+  id: 'on_hold',
+  label: 'On Hold',
+  color: '#5F6B7A',
+  bg: '#EEF1F4',
+  border: '#CDD4DC'
+},
+// slate
+{
   id: 'done',
   label: 'Completed',
   color: '#0F6E56',
   bg: '#E6F2EC',
   border: '#A0D9C4'
-} // green
+},
+// green
+{
+  id: 'cancelled',
+  label: 'Cancelled',
+  color: '#7A7468',
+  bg: '#EFEDE8',
+  border: '#D9D5CC'
+} // warm grey
 ];
+// Closed = finished one way or the other. Anything "open / overdue / greyed /
+// offered in a picker" goes through this. Checks that mean COMPLETED
+// specifically (completed_at, recurrence, "Done <date>") stay === 'done'.
+const isClosed = s => s === 'done' || s === 'cancelled';
+// Status groups and board columns filter on an exact id, so a status this
+// list does not know (say one Zoho adds before the app learns it) would
+// drop the task out of sight. Those collect under 'Other' instead, in the
+// same grey the status helpers fall back to, shown only when non-empty.
+const STATUS_OTHER = {
+  id: 'other',
+  label: 'Other',
+  color: '#6B6B6B',
+  bg: '#EEEEEE',
+  border: '#E4DFD4'
+};
+const statusGroupId = s => TASK_STATUS.some(x => x.id === s) ? s : STATUS_OTHER.id;
 const TASK_PRIORITY = [{
   id: 'low',
   label: 'Low',
@@ -4083,6 +4134,10 @@ const TaskDB = {
       zoho_tasklist_id: fields.zoho_tasklist_id || null,
       zoho_tasklist_name: fields.zoho_tasklist_name || null
     };
+    // A task born Completed gets its completion time now, like one ticked
+    // off later, or it never scores on the Accountability tally. Only
+    // 'done' is stamped: a cancelled task was never completed.
+    if (base.status === 'done') base.completed_at = new Date().toISOString();
     // is_milestone lives in wd (not base) so the column-fallback below still
     // strips it — "Add a milestone…" used to create a plain task because
     // neither object carried the flag (audit C10).
@@ -4167,7 +4222,9 @@ const TaskDB = {
   // Zoho Projects sync must be genuinely two-way). Failures are logged to
   // the task's own activity feed instead of vanishing silently, since this
   // touches live CTC files.
-  async syncToZohoProjects(task, oldTask, user) {
+  // statusBefore is for a caller with no oldTask that still knows what the
+  // status was before its save (the form save, via setPeople).
+  async syncToZohoProjects(task, oldTask, user, statusBefore) {
     const c = this.client();
     if (!c || !task.project_id) return;
     try {
@@ -4207,6 +4264,9 @@ const TaskDB = {
           await this.addActivity(task.id, 'system', 'Zoho Projects sync skipped — this CTC file has no default tasklist configured yet.', user);
           return;
         }
+        // Status rides along on the create too, so a task made here as
+        // Submitted or On Hold does not land in Zoho as To Do and then get
+        // flipped back to To Do by the next poll.
         const {
           ok,
           data
@@ -4218,12 +4278,16 @@ const TaskDB = {
           description: task.description || null,
           due_at: task.due_at || null,
           priority: task.priority,
+          status: task.status,
           assignee_emails: assigneeEmails
         });
         if (!ok || !data?.task?.id) {
           await this.addActivity(task.id, 'system', 'Zoho Projects sync failed — will retry on next poll.', user);
           return;
         }
+        // The task itself was created, so its ids are still saved below.
+        // Only the status did not stick, and that is worth saying out loud.
+        if (data.status_error) await this.addActivity(task.id, 'system', 'Zoho Projects did not take the status change: ' + data.status_error, user);
         // Persist the tasklist Zoho actually filed this under — without
         // this the task shows up under "Other tasks" in TMG's own
         // grouping forever, since the poller only backfills these fields
@@ -4264,8 +4328,18 @@ const TaskDB = {
         payload.priority = task.priority;
         any = true;
       }
-      if (changed('status')) {
+      // Status is the exception to "no oldTask means send everything". A
+      // sync with no before-picture (a reassignment) would resend whatever
+      // status TMG happens to hold and overwrite a newer one set in Zoho.
+      // So status goes only when it really changed: against oldTask, or
+      // against statusBefore for a form save, whose push comes from
+      // setPeople and so has no oldTask of its own.
+      const prevStatus = oldTask ? oldTask.status : statusBefore;
+      // status_changed tells zoho-projects this one is real. It ignores a
+      // status without it, which is what older open tabs send on every save.
+      if (prevStatus !== undefined && (prevStatus || null) !== (task.status || null)) {
         payload.status = task.status;
+        payload.status_changed = true;
         any = true;
       }
       if (assigneeEmails.length) {
@@ -4281,9 +4355,23 @@ const TaskDB = {
         await this.addActivity(task.id, 'system', 'Zoho Projects sync failed — will retry on next poll.', user);
         return;
       }
-      await c.from('tasks').update({
-        zoho_last_synced_at: new Date().toISOString()
-      }).eq('id', task.id);
+      // Only the sync time is stamped, never Zoho's modified time from the
+      // reply: that time also covers any edit made in Zoho since the last
+      // poll, and stamping it would mark that edit as already pulled. The
+      // next poll reads our own write back as a harmless plain pull.
+      // A refused status clears the stored time instead, so that poll
+      // re-reads the task and shows the status Zoho really kept.
+      if (data && data.status_error) {
+        await this.addActivity(task.id, 'system', 'Zoho Projects did not take the status change: ' + data.status_error, user);
+        await c.from('tasks').update({
+          zoho_last_synced_at: new Date().toISOString(),
+          zoho_last_modified_time: null
+        }).eq('id', task.id);
+      } else {
+        await c.from('tasks').update({
+          zoho_last_synced_at: new Date().toISOString()
+        }).eq('id', task.id);
+      }
     } catch (e) {/* fire-and-forget — a poll cycle will reconcile eventually */}
   },
   async update(id, oldTask, fields, user, skipZohoSync) {
@@ -4294,6 +4382,10 @@ const TaskDB = {
       updated_at: new Date().toISOString()
     };
     if (fields.status === 'done' && oldTask.status !== 'done') patch.completed_at = new Date().toISOString();
+    // Leaving Completed for anything (Cancelled included) clears the stamp.
+    // The Accountability tally counts completions by completed_at alone, so
+    // a reopened or cancelled task that kept it would still score as done.
+    else if ('status' in fields && fields.status !== 'done' && oldTask.status === 'done') patch.completed_at = null;
     let {
       error
     } = await c.from('tasks').update(patch).eq('id', id);
@@ -4356,6 +4448,8 @@ const TaskDB = {
       await this.addActivity(id, 'system', msg, user, k);
     }
     // Recurrence rule: completing a repeating task spawns the next occurrence.
+    // Only a move INTO 'done' counts. Cancelling spawns nothing, so a
+    // cancelled repeating task stops the series there.
     if (fields.status === 'done' && oldTask.status !== 'done' && oldTask.recurrence && oldTask.recurrence !== 'none') {
       await this.spawnRecurrence({
         ...oldTask,
@@ -4547,7 +4641,7 @@ const TaskDB = {
       assignee: me
     } : p;
   },
-  async setPeople(taskId, people, skipZohoSync) {
+  async setPeople(taskId, people, skipZohoSync, statusBefore) {
     // { assignee:[ids], assigner:[ids], decision_maker:[ids] }
     const c = this.client();
     if (!c) return;
@@ -4581,11 +4675,14 @@ const TaskDB = {
     // skipZohoSync is create()'s: it fires its own create straight after
     // this one and two creates mean two Zoho tasks. Reassignment on an
     // existing task never passes it, so that path is untouched.
+    // statusBefore comes only from a form save. That save's one Zoho push
+    // is this one, so without it a status changed in the form would never
+    // reach Zoho. A bare reassignment leaves it out and sends no status.
     if ('assignee' in people && !skipZohoSync) {
       const {
         data: t
       } = await c.from('tasks').select('*').eq('id', taskId).single();
-      if (t) this.syncToZohoProjects(t, null, null);
+      if (t) this.syncToZohoProjects(t, null, null, statusBefore);
     }
   },
   // Per-user labels (each person keeps their own on a shared task).
@@ -5125,9 +5222,11 @@ const ProjectDB = {
         _projectName: p.name
       }));
       const milestones = ms.slice().sort(dueCmp);
+      // A cancelled milestone is off the plan: it counts on neither side of
+      // the progress bar and is never the "next" one.
       const doneMs = milestones.filter(m => m.status === 'done').length;
-      const totalMs = milestones.length;
-      const nextMs = milestones.find(m => m.status !== 'done') || null;
+      const totalMs = milestones.filter(m => m.status !== 'cancelled').length;
+      const nextMs = milestones.find(m => !isClosed(m.status)) || null;
       const st = statsBy[p.id] || {
         total: 0,
         done: 0,
@@ -5195,10 +5294,15 @@ const ProjectDB = {
       _projectName: p.name
     })).sort(rankCmp('list_rank'));
     const milestones = ts.filter(t => t.is_milestone).slice().sort(dueCmp);
+    // Same milestone rule as loadFull: cancelled ones are off the plan.
     const doneMs = milestones.filter(m => m.status === 'done').length;
-    const totalMs = milestones.length;
-    const nextMs = milestones.find(m => m.status !== 'done') || null;
-    const openTasks = ts.filter(t => t.status !== 'done').slice().sort(dueCmp);
+    const totalMs = milestones.filter(m => m.status !== 'cancelled').length;
+    const nextMs = milestones.find(m => !isClosed(m.status)) || null;
+    const openTasks = ts.filter(t => !isClosed(t.status)).slice().sort(dueCmp);
+    // Counts read "completed / total" with cancelled tasks left out of the
+    // total, the same way project_task_stats() counts them for the list
+    // rows, so a file shows the same numbers closed and opened.
+    const liveCount = ts.filter(t => t.status !== 'cancelled').length;
     const collaborators = Array.from(new Set(ts.flatMap(t => (peopleByTask[t.id] || []).filter(x => x.role === 'assignee').map(x => x.user_id))));
     return {
       ...p,
@@ -5211,12 +5315,12 @@ const ProjectDB = {
       _nextMs: nextMs,
       _progress: totalMs ? Math.round(doneMs / totalMs * 100) : 0,
       _openTasks: openTasks,
-      _taskCount: ts.length,
-      _doneCount: ts.length - openTasks.length,
+      _taskCount: liveCount,
+      _doneCount: ts.filter(t => t.status === 'done').length,
       _collaborators: collaborators,
       _stuck: openTasks.filter(t => t.status === 'stuck').length,
       _overdue: openTasks.filter(t => t.due_at && new Date(t.due_at) < new Date()).length,
-      _anyDates: ts.some(t => t.due_at)
+      _anyDates: ts.some(t => t.due_at && t.status !== 'cancelled')
     };
   },
   async create(fields, user) {
@@ -5365,7 +5469,7 @@ async function createTaskFromAI(payload, user) {
     due_at,
     project_id,
     priority: ['low', 'medium', 'high'].includes(payload.priority) ? payload.priority : 'medium',
-    status: ['todo', 'in_progress', 'stuck', 'done'].includes(payload.status) ? payload.status : 'todo',
+    status: TASK_STATUS.some(s => s.id === payload.status) ? payload.status : 'todo',
     description: payload.description || payload.summary || null,
     context: payload.context || null,
     working_url: payload.workingUrl || null,
@@ -6833,6 +6937,9 @@ function TaskForm({
   const [newProjMode, setNewProjMode] = useState(false);
   const [priority, setPriority] = useState(t.priority || 'medium');
   const [status, setStatus] = useState(t.status || 'todo');
+  // What the status field started as, so a save can tell whether the
+  // person changed it even if the row underneath was refreshed meanwhile.
+  const [statusSeed] = useState(t.status || 'todo');
   const [isMilestone, setIsMilestone] = useState(!!t.is_milestone);
   const [myLabels, setMyLabels] = useState([]);
   const [labelInput, setLabelInput] = useState('');
@@ -7042,6 +7149,7 @@ function TaskForm({
         project,
         priority,
         status,
+        statusSeed,
         is_milestone: isMilestone,
         assignees,
         assigners,
@@ -8499,12 +8607,12 @@ function TaskDetail({
       flex: 1,
       minWidth: 0,
       fontSize: 14,
-      color: s.status === 'done' ? sub : ink,
+      color: isClosed(s.status) ? sub : ink,
       fontFamily: C.fontSans,
       whiteSpace: 'nowrap',
       overflow: 'hidden',
       textOverflow: 'ellipsis',
-      textDecoration: s.status === 'done' ? 'line-through' : 'none'
+      textDecoration: isClosed(s.status) ? 'line-through' : 'none'
     }
   }, s.title), /*#__PURE__*/React.createElement("span", {
     style: {
@@ -11177,8 +11285,10 @@ function ProjectsSurface({
     }
     await refreshContainer(task.id, !!(openTask && openTask.id === task.id));
   }
+  // The row tick is two-state. A closed task (Completed or Cancelled)
+  // reopens to To Do, so ticking a cancelled task never marks it Completed.
   async function toggleTaskDone(t) {
-    await onTaskStatus(t, t.status === 'done' ? 'todo' : 'done');
+    await onTaskStatus(t, isClosed(t.status) ? 'todo' : 'done');
   }
   async function onBoardDrop(taskId, status) {
     const t = (current && current._tasks || []).find(x => x.id === taskId);
@@ -11231,8 +11341,16 @@ function ProjectsSurface({
       // only one that sees the assignees this save just wrote, which makes
       // it the one to keep. When people could not be read we skip setPeople
       // entirely, and then update has to keep its own or nothing goes out.
-      await TaskDB.update(openTask.id, openTask, fields, user, !!known);
-      if (known) await TaskDB.setPeople(openTask.id, people);
+      // Status is written only when this form changed it. The form is
+      // seeded from a row the poll may have moved on since, and writing
+      // that old status back would undo a newer one pulled from Zoho.
+      const statusChanged = form.status !== (form.statusSeed || openTask.status);
+      const edit = {
+        ...fields
+      };
+      if (!statusChanged) delete edit.status;
+      await TaskDB.update(openTask.id, openTask, edit, user, !!known);
+      if (known) await TaskDB.setPeople(openTask.id, people, false, statusChanged ? openTask.status : undefined);
       taskId = openTask.id;
     } else if (form.bulkGroup) {
       // Reachable now that this form opens for NEW tasks too: one copy each
@@ -11337,6 +11455,8 @@ function ProjectsSurface({
   // Counts come from project_task_stats() so the list needs no task rows;
   // once a record is opened its own tasks are loaded and are more current
   // than the stats snapshot, so prefer them.
+  // Only Stuck reads as blocked. On Hold and Revision are open work that
+  // flags only once overdue, and cancelled tasks are never in _openTasks.
   const attentionOf = p => {
     const stuck = p._hydrated ? p._openTasks.filter(t => t.status === 'stuck').length : p._stuck || 0;
     if (stuck) return {
@@ -11352,7 +11472,7 @@ function ProjectsSurface({
       text: 'No tasks yet',
       tone: 'sub'
     };
-    const anyDates = p._hydrated ? p._tasks.some(t => t.due_at) : !!p._anyDates;
+    const anyDates = p._hydrated ? p._tasks.some(t => t.due_at && t.status !== 'cancelled') : !!p._anyDates;
     if (!anyDates) return {
       text: 'Dates missing',
       tone: 'sub'
@@ -11911,12 +12031,19 @@ function ProjectsSurface({
       background: gold,
       boxShadow: `0 0 0 3px ${dark ? 'rgba(201,164,90,.2)' : 'rgba(173,131,47,.16)'}`
     };
+    if (state === 'cancelled') return {
+      ...base,
+      background: dotIdle,
+      opacity: 0.45
+    };
     return {
       ...base,
       background: dotIdle
     };
   };
-  const msState = (p, m) => m.status === 'done' ? 'done' : p._nextMs && p._nextMs.id === m.id ? 'next' : 'future';
+  // A cancelled milestone keeps its place in the chain (so the history
+  // reads true) but is struck through, muted and never the "next" one.
+  const msState = (p, m) => m.status === 'done' ? 'done' : m.status === 'cancelled' ? 'cancelled' : p._nextMs && p._nextMs.id === m.id ? 'next' : 'future';
 
   // ── CTC-only: horizontal milestone-chain rail node (replaces the % complete
   // column — reference: "the number that matters is days to the next binding date") ──
@@ -11945,7 +12072,8 @@ function ProjectsSurface({
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
-        fontFamily: C.fontSans
+        fontFamily: C.fontSans,
+        textDecoration: st === 'cancelled' ? 'line-through' : 'none'
       }
     }, m.title), /*#__PURE__*/React.createElement("div", {
       style: {
@@ -11954,7 +12082,7 @@ function ProjectsSurface({
         marginTop: 2,
         fontFamily: C.fontSans
       }
-    }, m.status === 'done' ? 'Done' : fmtD(m.due_at)));
+    }, m.status === 'done' ? 'Done' : st === 'cancelled' ? 'Cancelled' : fmtD(m.due_at)));
   };
 
   // ── mobile project card ──
@@ -12028,14 +12156,15 @@ function ProjectsSurface({
         minWidth: 0,
         whiteSpace: 'nowrap',
         overflow: 'hidden',
-        textOverflow: 'ellipsis'
+        textOverflow: 'ellipsis',
+        textDecoration: st === 'cancelled' ? 'line-through' : 'none'
       }
     }, m.title), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 10,
         color: st === 'done' ? teal : st === 'next' ? ink : sub
       }
-    }, m.status === 'done' ? 'Done' : fmtD(m.due_at)));
+    }, m.status === 'done' ? 'Done' : st === 'cancelled' ? 'Cancelled' : fmtD(m.due_at)));
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       height: 8,
@@ -12586,7 +12715,8 @@ function ProjectsSurface({
         fontSize: '0.8rem',
         color: st === 'next' ? ink : sub,
         fontWeight: st === 'next' ? 500 : 300,
-        fontFamily: C.fontSans
+        fontFamily: C.fontSans,
+        textDecoration: st === 'cancelled' ? 'line-through' : 'none'
       }
     }, m.title), /*#__PURE__*/React.createElement("div", {
       style: {
@@ -12595,7 +12725,7 @@ function ProjectsSurface({
         marginTop: 3,
         fontFamily: C.fontSans
       }
-    }, m.status === 'done' ? 'Completed ' + fmtD(m.completed_at || m.updated_at) : m.due_at ? 'Due ' + fmtD(m.due_at) : 'No date')));
+    }, m.status === 'done' ? 'Completed ' + fmtD(m.completed_at || m.updated_at) : st === 'cancelled' ? 'Cancelled' : m.due_at ? 'Due ' + fmtD(m.due_at) : 'No date')));
   };
   const newTaskOverlay = () => /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -12853,7 +12983,10 @@ function ProjectsSurface({
     const kids = kidsOf(t.id);
     if (!kids.length) return null;
     const open = !!subsOpen[t.id];
+    // Completed out of the live ones: a cancelled subtask is off the list,
+    // not unfinished work, so it drops out of the total.
     const done = kids.filter(k => k.status === 'done').length;
+    const live = kids.filter(k => k.status !== 'cancelled').length;
     return /*#__PURE__*/React.createElement("span", {
       onClick: e => {
         e.stopPropagation();
@@ -12887,7 +13020,7 @@ function ProjectsSurface({
       style: {
         fontSize: 11
       }
-    }), done, "/", kids.length);
+    }), done, "/", live);
   };
   const withSubs = rowFn => t => {
     const kids = kidsOf(t.id);
@@ -12926,13 +13059,13 @@ function ProjectsSurface({
       e.stopPropagation();
       toggleTaskDone(t);
     },
-    title: t.status === 'done' ? 'Mark not done' : 'Mark done',
+    title: t.status === 'done' ? 'Mark not done' : t.status === 'cancelled' ? 'Cancelled, click to reopen' : 'Mark done',
     style: {
       width: 16,
       height: 16,
       borderRadius: '50%',
-      border: `1.6px solid ${t.status === 'done' ? statusColor('done') : dark ? 'rgba(255,255,255,.28)' : '#C9C4B5'}`,
-      background: t.status === 'done' ? statusColor('done') : 'transparent',
+      border: `1.6px solid ${isClosed(t.status) ? statusColor(t.status) : dark ? 'rgba(255,255,255,.28)' : '#C9C4B5'}`,
+      background: isClosed(t.status) ? statusColor(t.status) : 'transparent',
       flexShrink: 0,
       display: 'grid',
       placeItems: 'center',
@@ -12940,6 +13073,12 @@ function ProjectsSurface({
     }
   }, t.status === 'done' && /*#__PURE__*/React.createElement("i", {
     className: "ti ti-check",
+    style: {
+      fontSize: 10,
+      color: '#fff'
+    }
+  }), t.status === 'cancelled' && /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-x",
     style: {
       fontSize: 10,
       color: '#fff'
@@ -12998,7 +13137,7 @@ function ProjectsSurface({
       whiteSpace: 'nowrap',
       overflow: 'hidden',
       textOverflow: 'ellipsis',
-      textDecoration: t.status === 'done' ? 'line-through' : 'none'
+      textDecoration: isClosed(t.status) ? 'line-through' : 'none'
     }
   }, t.title), /*#__PURE__*/React.createElement(GTaskMark, {
     id: t.id,
@@ -13020,8 +13159,8 @@ function ProjectsSurface({
       width: 60,
       textAlign: 'right',
       fontSize: '0.68rem',
-      color: isOverdue(t.due_at) && t.status !== 'done' ? lateColor : sub,
-      fontWeight: isOverdue(t.due_at) && t.status !== 'done' ? 600 : 400,
+      color: isOverdue(t.due_at) && !isClosed(t.status) ? lateColor : sub,
+      fontWeight: isOverdue(t.due_at) && !isClosed(t.status) ? 600 : 400,
       flexShrink: 0,
       fontFamily: C.fontSans
     }
@@ -13121,7 +13260,7 @@ function ProjectsSurface({
       style: {
         color: isOverdue(p.target_date) ? lateColor : ink
       }
-    }, fmtD(p.target_date))), fld('Tasks', (p._hydrated ? p._taskCount - p._openTasks.length : p._doneCount || 0) + ' / ' + p._taskCount), fld('Collaborators', p._collaborators.length ? /*#__PURE__*/React.createElement("span", {
+    }, fmtD(p.target_date))), fld('Tasks', (p._doneCount || 0) + ' / ' + p._taskCount), fld('Collaborators', p._collaborators.length ? /*#__PURE__*/React.createElement("span", {
       style: {
         display: 'flex'
       }
@@ -13718,8 +13857,8 @@ function ProjectsSurface({
         color: sub,
         fontFamily: C.fontSans
       }
-    }, "No tasks yet.") : /*#__PURE__*/React.createElement(React.Fragment, null, foldAllBar(TASK_STATUS.filter(col => p._tasks.some(t => t.status === col.id && !isChildHere(t))).map(col => 'status:' + col.id)), TASK_STATUS.map(col => {
-      const items = p._tasks.filter(t => t.status === col.id && !isChildHere(t));
+    }, "No tasks yet.") : /*#__PURE__*/React.createElement(React.Fragment, null, foldAllBar([...TASK_STATUS, STATUS_OTHER].filter(col => p._tasks.some(t => statusGroupId(t.status) === col.id && !isChildHere(t))).map(col => 'status:' + col.id)), [...TASK_STATUS, STATUS_OTHER].map(col => {
+      const items = p._tasks.filter(t => statusGroupId(t.status) === col.id && !isChildHere(t));
       if (!items.length) return null;
       const fk = 'status:' + col.id,
         folded = isFolded(p.id, fk);
@@ -15778,10 +15917,15 @@ function TaskBoard({
   // TasksScreen strips children out of its flat list, so it hands its own
   // map down; ProjectsSurface's _tasks already holds them.
   const kidsFor = id => kidsByTask && kidsByTask[id] || derivedKids[id] || [];
+  // Every status is a column in ONE row that scrolls sideways, so the
+  // board reads left to right in Zoho's order. 'Other' joins only when a
+  // task carries a status the app does not know, and takes no drops: it
+  // is not a status anything can be moved to.
+  const cols = items.some(t => statusGroupId(t.status) === STATUS_OTHER.id) ? [...TASK_STATUS, STATUS_OTHER] : TASK_STATUS;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
-      gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))',
+      gridTemplateColumns: `repeat(${cols.length}, minmax(200px, 1fr))`,
       gap: 14,
       padding: '18px 34px',
       overflowX: 'auto',
@@ -15789,11 +15933,13 @@ function TaskBoard({
       minHeight: 0,
       alignContent: 'start'
     }
-  }, TASK_STATUS.map(col => {
-    const colItems = items.filter(t => t.status === col.id);
+  }, cols.map(col => {
+    const colItems = items.filter(t => statusGroupId(t.status) === col.id);
+    const dropOk = col.id !== STATUS_OTHER.id;
     return /*#__PURE__*/React.createElement("div", {
       key: col.id,
       onDragOver: e => {
+        if (!dropOk) return;
         e.preventDefault();
         setOverCol(col.id);
       },
@@ -15801,7 +15947,7 @@ function TaskBoard({
       onDrop: e => {
         e.preventDefault();
         setOverCol(null);
-        if (dragId != null && onDrop) onDrop(dragId, col.id);
+        if (dropOk && dragId != null && onDrop) onDrop(dragId, col.id);
         setDragId(null);
       },
       style: {
@@ -15920,7 +16066,7 @@ function TaskBoard({
         style: {
           fontSize: 11
         }
-      }), kids.filter(k => k.status === 'done').length, "/", kids.length), (linksByTask && linksByTask[t.id] || []).length > 0 && /*#__PURE__*/React.createElement("i", {
+      }), kids.filter(k => k.status === 'done').length, "/", kids.filter(k => k.status !== 'cancelled').length), (linksByTask && linksByTask[t.id] || []).length > 0 && /*#__PURE__*/React.createElement("i", {
         className: "ti ti-mail",
         style: {
           fontSize: 12,
@@ -16585,7 +16731,7 @@ function TaskMailbox({
       style: {
         fontSize: 13
       }
-    }), "New task from this email"), tasks.filter(t => t.status !== 'done').map(t => /*#__PURE__*/React.createElement("button", {
+    }), "New task from this email"), tasks.filter(t => !isClosed(t.status)).map(t => /*#__PURE__*/React.createElement("button", {
       key: t.id,
       onClick: () => doAttach(th.id, t.id),
       style: {
@@ -16726,7 +16872,9 @@ function AccountabilitySurface({
   const taskLine = (t, depth) => {
     const kids = depth ? [] : kidsOf(t.id);
     const open = !!subsOpen[t.id];
+    // Completed out of the live subtasks, cancelled left out of the total.
     const doneKids = kids.filter(k => k.status === 'done').length;
+    const liveKids = kids.filter(k => k.status !== 'cancelled').length;
     return /*#__PURE__*/React.createElement("div", {
       key: t.id,
       style: {
@@ -16747,10 +16895,10 @@ function AccountabilitySurface({
       style: {
         fontFamily: J,
         fontSize: depth ? 12.5 : 13,
-        color: t.status === 'done' ? sub : ink,
+        color: isClosed(t.status) ? sub : ink,
         flex: 1,
         minWidth: 0,
-        textDecoration: t.status === 'done' ? 'line-through' : 'none'
+        textDecoration: isClosed(t.status) ? 'line-through' : 'none'
       }
     }, t.title, /*#__PURE__*/React.createElement(GTaskMark, {
       id: t.id,
@@ -16783,7 +16931,7 @@ function AccountabilitySurface({
       style: {
         fontSize: 11
       }
-    }), doneKids, "/", kids.length) : null, t.context && /*#__PURE__*/React.createElement("span", {
+    }), doneKids, "/", liveKids) : null, t.context && /*#__PURE__*/React.createElement("span", {
       style: {
         fontFamily: J,
         fontSize: 11,
@@ -16802,7 +16950,7 @@ function AccountabilitySurface({
     }, t.status === 'done' ? t.completed_at ? 'Done ' + new Date(t.completed_at).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric'
-    }) : 'Done' : t.due_at ? 'Due ' + new Date(t.due_at).toLocaleDateString('en-US', {
+    }) : 'Done' : t.status === 'cancelled' ? 'Cancelled' : t.due_at ? 'Due ' + new Date(t.due_at).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric'
     }) : 'No date'));
@@ -17144,7 +17292,10 @@ function TasksScreen({
     const kids = kidsOf(t.id);
     if (!kids.length) return null;
     const open = !!subsOpen[t.id];
+    // Completed out of the live ones: a cancelled subtask is off the list,
+    // not unfinished work, so it drops out of the total.
     const done = kids.filter(k => k.status === 'done').length;
+    const live = kids.filter(k => k.status !== 'cancelled').length;
     return /*#__PURE__*/React.createElement("span", {
       onClick: e => {
         e.stopPropagation();
@@ -17178,7 +17329,7 @@ function TasksScreen({
       style: {
         fontSize: 11
       }
-    }), done, "/", kids.length);
+    }), done, "/", live);
   };
   // Renders a parent row, then its subtasks indented beneath it when open.
   // Wrapping the row function rather than every call site keeps the eight
@@ -17395,6 +17546,7 @@ function TasksScreen({
   const [dispOpen, setDispOpen] = useState(false);
   const [dispSub, setDispSub] = useState(null); // 'layout' | 'group' | 'sort' | 'cols' | null
   const [completedOpen, setCompletedOpen] = useState(false);
+  const [cancelledOpen, setCancelledOpen] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y, task }
   // Surface switcher (standalone only): My Tasks | Projects | Rocks. CTC
   // Files moved to More (index.jsx CtcFilesFrame) — see the useState below.
@@ -17733,8 +17885,15 @@ function TasksScreen({
       // Same one-sync rule as ProjectsSurface's onTaskSave: setPeople is
       // the later of the two and the only one that sees the new assignees,
       // so update's own push stands down whenever setPeople will run.
-      await TaskDB.update(current.id, current, fields, user, !!known);
-      if (known) await TaskDB.setPeople(current.id, people);
+      // Status only when this form changed it, as in onTaskSave: a stale
+      // form must not write an old status over a newer one from Zoho.
+      const statusChanged = form.status !== (form.statusSeed || current.status);
+      const edit = {
+        ...fields
+      };
+      if (!statusChanged) delete edit.status;
+      await TaskDB.update(current.id, current, edit, user, !!known);
+      if (known) await TaskDB.setPeople(current.id, people, false, statusChanged ? current.status : undefined);
       taskId = current.id;
     } else if (form.bulkGroup) {
       // Group assign: one task each. Nothing lands in MY list unless I'm in
@@ -17815,8 +17974,10 @@ function TasksScreen({
   // Row-level done/undone toggle — a separate hit target from opening the
   // drawer (rows call this with stopPropagation), same status path as the
   // drawer's own status buttons and the Kanban board's drag-and-drop.
+  // A closed task (Completed or Cancelled) reopens to To Do, so ticking a
+  // cancelled task never marks it Completed.
   async function toggleDone(t) {
-    await changeStatus(t, t.status === 'done' ? 'todo' : 'done');
+    await changeStatus(t, isClosed(t.status) ? 'todo' : 'done');
   }
   // Quick-add: type + Enter creates a plain To Do/Medium task and keeps
   // focus. The group headers below use the same shape, seeded with
@@ -18006,7 +18167,7 @@ function TasksScreen({
         borderRadius: 12,
         marginBottom: 8,
         cursor: 'pointer',
-        opacity: t.status === 'done' ? 0.75 : 1
+        opacity: isClosed(t.status) ? 0.75 : 1
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: {
@@ -18189,8 +18350,9 @@ function TasksScreen({
         }
       }, groupHead(sub, 'Unlabeled · ' + unlabeled.length), unlabeled.slice().sort(byThen).map(rowWithStatus)));
     }
-    return TASK_STATUS.map(col => {
-      const items = data.tasks.filter(t => t.status === col.id).sort(byThen);
+    // 'Other' catches a status the app does not know, so no task drops out.
+    return [...TASK_STATUS, STATUS_OTHER].map(col => {
+      const items = data.tasks.filter(t => statusGroupId(t.status) === col.id).sort(byThen);
       if (!items.length) return null;
       return /*#__PURE__*/React.createElement("div", {
         key: col.id,
@@ -18506,7 +18668,7 @@ function TasksScreen({
   const now0 = new Date();
   const startOfToday = new Date(now0.getFullYear(), now0.getMonth(), now0.getDate());
   const endOfToday = new Date(startOfToday.getTime() + 86400000);
-  const openTasksList = data.tasks.filter(t => t.status !== 'done');
+  const openTasksList = data.tasks.filter(t => !isClosed(t.status));
   const dueTodayCount = openTasksList.filter(t => t.due_at && new Date(t.due_at) >= startOfToday && new Date(t.due_at) < endOfToday).length;
   const overdueCount = openTasksList.filter(t => t.due_at && new Date(t.due_at) < startOfToday).length;
   const openCount = openTasksList.length;
@@ -19002,30 +19164,41 @@ function TasksScreen({
   // drawer, matching Asana/Monday's row anatomy (checkbox toggles, row body opens).
   const doneCheck = (t, sz) => {
     const s = sz || 17;
-    return /*#__PURE__*/React.createElement("div", {
-      onClick: e => {
-        e.stopPropagation();
-        toggleDone(t);
-      },
-      title: t.status === 'done' ? 'Mark not done' : 'Mark done',
-      style: {
-        width: s,
-        height: s,
-        borderRadius: '50%',
-        border: `1.6px solid ${t.status === 'done' ? statusColor('done') : dark ? 'rgba(255,255,255,.28)' : '#C9C4B5'}`,
-        background: t.status === 'done' ? statusColor('done') : 'transparent',
-        flexShrink: 0,
-        display: 'grid',
-        placeItems: 'center',
-        cursor: 'pointer'
-      }
-    }, t.status === 'done' && /*#__PURE__*/React.createElement("i", {
-      className: "ti ti-check",
-      style: {
-        fontSize: s * 0.62,
-        color: '#fff'
-      }
-    }));
+    return (
+      /*#__PURE__*/
+      // Completed = green tick, Cancelled = grey cross. Either one is closed
+      // and a click reopens it to To Do (see toggleDone).
+      React.createElement("div", {
+        onClick: e => {
+          e.stopPropagation();
+          toggleDone(t);
+        },
+        title: t.status === 'done' ? 'Mark not done' : t.status === 'cancelled' ? 'Cancelled, click to reopen' : 'Mark done',
+        style: {
+          width: s,
+          height: s,
+          borderRadius: '50%',
+          border: `1.6px solid ${isClosed(t.status) ? statusColor(t.status) : dark ? 'rgba(255,255,255,.28)' : '#C9C4B5'}`,
+          background: isClosed(t.status) ? statusColor(t.status) : 'transparent',
+          flexShrink: 0,
+          display: 'grid',
+          placeItems: 'center',
+          cursor: 'pointer'
+        }
+      }, t.status === 'done' && /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-check",
+        style: {
+          fontSize: s * 0.62,
+          color: '#fff'
+        }
+      }), t.status === 'cancelled' && /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-x",
+        style: {
+          fontSize: s * 0.62,
+          color: '#fff'
+        }
+      }))
+    );
   };
   // Tinted-background status pill — used everywhere a task's status needs to
   // be legible in a row, not just implied by a border color or bare dot.
@@ -19364,7 +19537,7 @@ function TasksScreen({
   // Mobile/narrow row
   const taskRowNew = (t, isChild) => {
     const myLabels = myLabelsFor(t.id);
-    const late = t.due_at && t.status !== 'done' && new Date(t.due_at) < startOfToday;
+    const late = t.due_at && !isClosed(t.status) && new Date(t.due_at) < startOfToday;
     const drg = !isChild && !dragOff;
     return /*#__PURE__*/React.createElement("div", _extends({
       key: t.id,
@@ -19389,7 +19562,7 @@ function TasksScreen({
         marginBottom: 8,
         cursor: 'pointer',
         ...dragRowStyle(myDrag, drg ? t.id : null, gold, `1px solid ${bord}`),
-        opacity: t.status === 'done' ? 0.72 : myDrag.drag && myDrag.drag.id === t.id ? 0.4 : 1
+        opacity: isClosed(t.status) ? 0.72 : myDrag.drag && myDrag.drag.id === t.id ? 0.4 : 1
       }
     }), /*#__PURE__*/React.createElement("div", {
       style: {
@@ -19417,7 +19590,7 @@ function TasksScreen({
         fontWeight: 600,
         color: ink,
         fontFamily: C.fontSans,
-        textDecoration: t.status === 'done' ? 'line-through' : 'none'
+        textDecoration: isClosed(t.status) ? 'line-through' : 'none'
       }
     }, t.title, /*#__PURE__*/React.createElement(GTaskMark, {
       id: t.id,
@@ -19478,7 +19651,7 @@ function TasksScreen({
   const deskRow = (t, isChild) => {
     const assignees = (data.peopleByTask[t.id] || []).filter(p => p.role === 'assignee').map(p => (team.find(m => m.id === p.user_id) || {}).name).filter(Boolean);
     const myLabels = myLabelsFor(t.id);
-    const late = t.due_at && t.status !== 'done' && new Date(t.due_at) < startOfToday;
+    const late = t.due_at && !isClosed(t.status) && new Date(t.due_at) < startOfToday;
     const drg = !isChild && !dragOff;
     return /*#__PURE__*/React.createElement("div", _extends({
       key: t.id,
@@ -19516,7 +19689,7 @@ function TasksScreen({
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
-        textDecoration: t.status === 'done' ? 'line-through' : 'none'
+        textDecoration: isClosed(t.status) ? 'line-through' : 'none'
       }
     }, t.title), /*#__PURE__*/React.createElement(GTaskMark, {
       id: t.id,
@@ -19615,7 +19788,9 @@ function TasksScreen({
   };
 
   // Grouping/sorting shared by both row styles above. Completed tasks always
-  // collapse to their own section at the bottom, regardless of Group mode.
+  // collapse to their own section at the bottom, regardless of Group mode,
+  // and Cancelled ones to a second section after it. Kept apart so the
+  // Completed count stays the real number of finished tasks.
   function renderGroupedList(rowFn) {
     const PRI = {
       high: 0,
@@ -19635,8 +19810,9 @@ function TasksScreen({
       if (thenBy === 'created') return new Date(b.created_at || 0) - new Date(a.created_at || 0);
       return dueCmp(a, b);
     };
-    const active = filteredTasks.filter(t => t.status !== 'done');
+    const active = filteredTasks.filter(t => !isClosed(t.status));
     const completed = filteredTasks.filter(t => t.status === 'done').sort(byThen);
+    const cancelled = filteredTasks.filter(t => t.status === 'cancelled').sort(byThen);
     // Under Label and Assignee one task is drawn in two or three groups, so
     // a single position can't mean two places. Say so instead of silently
     // dropping the handles.
@@ -19742,9 +19918,18 @@ function TasksScreen({
         projectId: groups[n][0].project_id || null
       }), groups[n].slice().sort(byThen).map(rowFn)));
     } else {
-      body = TASK_STATUS.filter(col => col.id !== 'done').map(col => {
-        const items = active.filter(t => t.status === col.id).sort(byThen);
+      // Closed statuses never get an active group (or its plus): they live
+      // in the folded sections below. 'Other' holds any status the app
+      // does not know, with no plus, since nothing can be added as one.
+      body = [...TASK_STATUS.filter(col => !isClosed(col.id)), STATUS_OTHER].map(col => {
+        const items = active.filter(t => statusGroupId(t.status) === col.id).sort(byThen);
         if (!items.length) return null;
+        if (col.id === STATUS_OTHER.id) return /*#__PURE__*/React.createElement("div", {
+          key: col.id,
+          style: {
+            marginBottom: 16
+          }
+        }, groupHead(col.color, col.label + ' · ' + items.length), items.map(rowFn));
         return /*#__PURE__*/React.createElement("div", {
           key: col.id,
           style: {
@@ -19788,7 +19973,38 @@ function TasksScreen({
         textTransform: 'uppercase',
         color: sub
       }
-    }, "Completed \xB7 ", completed.length)), completedOpen && completed.map(rowFn)));
+    }, "Completed \xB7 ", completed.length)), completedOpen && completed.map(rowFn)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: cancelled.length ? 16 : 0
+      }
+    }, cancelled.length > 0 && /*#__PURE__*/React.createElement("button", {
+      onClick: () => setCancelledOpen(o => !o),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        width: '100%',
+        background: 'none',
+        border: 'none',
+        padding: '6px 0',
+        cursor: 'pointer',
+        fontFamily: C.fontSans
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: 'ti ti-chevron-' + (cancelledOpen ? 'down' : 'right'),
+      style: {
+        fontSize: 13,
+        color: sub
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.64rem',
+        fontWeight: 700,
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        color: sub
+      }
+    }, "Cancelled \xB7 ", cancelled.length)), cancelledOpen && cancelled.map(rowFn)));
   }
 
   // Kanban board — the shared TaskBoard component, wired to My Tasks' own
@@ -22248,8 +22464,9 @@ function CalendarPopover({
 
   // ── task + event helpers ──
   const dueMs = t => t.due_at ? new Date(t.due_at).getTime() : Infinity;
-  const topTasks = n => (tasks || []).filter(t => t.status !== 'done').sort((a, b) => dueMs(a) - dueMs(b)).slice(0, n);
-  const allTasksSorted = () => (tasks || []).slice().sort((a, b) => (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0) || dueMs(a) - dueMs(b));
+  const topTasks = n => (tasks || []).filter(t => !isClosed(t.status)).sort((a, b) => dueMs(a) - dueMs(b)).slice(0, n);
+  // Closed tasks (Completed and Cancelled alike) sink below the open ones.
+  const allTasksSorted = () => (tasks || []).slice().sort((a, b) => (isClosed(a.status) ? 1 : 0) - (isClosed(b.status) ? 1 : 0) || dueMs(a) - dueMs(b));
   // Top tasks = the W/D priorities: daily rank in Day view, weekly rank in Week view (1/2/3).
   const prioTasks = () => {
     if (view === 'week') {
@@ -22482,23 +22699,33 @@ function CalendarPopover({
   useEffect(() => {
     if (scrollRef.current && view !== 'month') scrollRef.current.scrollTop = 7 * (view === 'week' ? 44 : 48);
   }, [view, anchor]);
+
+  // Completed fills green with a tick, Cancelled fills grey with a cross.
   const circle = (t, sz) => {
     const done = t.status === 'done';
+    const cancelled = t.status === 'cancelled';
     const sc = statusColor(t.status);
+    const fill = done ? K.doneBg : cancelled ? statusColor('cancelled') : null;
     return /*#__PURE__*/React.createElement("div", {
       style: {
         width: sz,
         height: sz,
         borderRadius: '50%',
         flexShrink: 0,
-        border: `1.5px solid ${done ? K.doneBg : sc}`,
-        background: done ? K.doneBg : t.status === 'in_progress' ? dark ? 'rgba(24,95,165,0.20)' : '#EEF3FB' : 'transparent',
+        border: `1.5px solid ${fill || sc}`,
+        background: fill || (t.status === 'in_progress' ? dark ? 'rgba(24,95,165,0.20)' : '#EEF3FB' : 'transparent'),
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center'
       }
     }, done && /*#__PURE__*/React.createElement("i", {
       className: "ti ti-check",
+      style: {
+        fontSize: sz - 5,
+        color: '#fff'
+      }
+    }), cancelled && /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-x",
       style: {
         fontSize: sz - 5,
         color: '#fff'
@@ -22706,8 +22933,8 @@ function CalendarPopover({
     prioIds[t.id] = true;
   });
   const expandedTasks = prios.concat(allTasksSorted().filter(t => !prioIds[t.id]));
-  const taskColor = t => t.status === 'done' ? K.doneName : prioIds[t.id] ? K.prioName : K.reg;
-  const taskWeight = t => prioIds[t.id] && t.status !== 'done' ? 700 : 500;
+  const taskColor = t => isClosed(t.status) ? K.doneName : prioIds[t.id] ? K.prioName : K.reg;
+  const taskWeight = t => prioIds[t.id] && !isClosed(t.status) ? 700 : 500;
   const taskStrip = /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     onClick: () => setTasksOpen(o => !o),
     style: {
@@ -22776,7 +23003,7 @@ function CalendarPopover({
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
-        textDecoration: t.status === 'done' ? 'line-through' : 'none'
+        textDecoration: isClosed(t.status) ? 'line-through' : 'none'
       }
     }, t.title));
   }) : /*#__PURE__*/React.createElement("div", {
@@ -22841,7 +23068,7 @@ function CalendarPopover({
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
-        textDecoration: t.status === 'done' ? 'line-through' : 'none'
+        textDecoration: isClosed(t.status) ? 'line-through' : 'none'
       }
     }, t.title), di.label && /*#__PURE__*/React.createElement("span", {
       style: {
@@ -24731,9 +24958,11 @@ function DecisionsPopover({
   };
   const decs = decisionTasks();
   // A decision is "resolved" once an option is chosen (or its task is done); else it's "open".
+  // Resolved = an option was chosen, or the task is closed. A cancelled
+  // decision is not waiting on anyone any more.
   const isResolved = t => {
     const d = decData[t.id] || {};
-    return (d.options || []).some(o => o.is_chosen) || t.status === 'done';
+    return (d.options || []).some(o => o.is_chosen) || isClosed(t.status);
   };
   const isUrgent = t => {
     if (!t.decision_due_at) return false;

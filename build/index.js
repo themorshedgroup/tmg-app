@@ -1510,7 +1510,7 @@ Fields you can capture into the payload:
 - title (short)
 - dueDate ("YYYY-MM-DD"); dueTime ("HH:MM", 24-hour) only if a time was given
 - priority: "low" | "medium" | "high"  (default "medium")
-- status: "todo" | "in_progress" | "stuck" | "done"  (default "todo")
+- status: "todo" | "in_progress" | "submitted" | "revision" | "stuck" | "on_hold" | "done" | "cancelled"  (default "todo")
 - project (a short name)
 - assignees: array of the people's names who will do it
 - assigners: array of the people's names who asked for it
@@ -4221,6 +4221,8 @@ const GUIDES = [{
 }];
 
 // ─── Tasks ───────────────────────────────────────────────────────
+// Mirrors Zoho Projects' 8 statuses, in Zoho's order. A copy of the list in
+// src/tasks.jsx (a separate bundle, so it cannot be imported): change both.
 const TASK_STATUS = [{
   id: 'todo',
   label: 'To Do',
@@ -4238,6 +4240,22 @@ const TASK_STATUS = [{
 },
 // blue
 {
+  id: 'submitted',
+  label: 'Submitted',
+  color: '#6B3FA0',
+  bg: '#F1EAF9',
+  border: '#D6C4EE'
+},
+// purple
+{
+  id: 'revision',
+  label: 'Revision',
+  color: '#B45309',
+  bg: '#FDF0E1',
+  border: '#F5D0A6'
+},
+// amber
+{
   id: 'stuck',
   label: 'Stuck',
   color: '#9B1C1C',
@@ -4246,13 +4264,32 @@ const TASK_STATUS = [{
 },
 // red
 {
+  id: 'on_hold',
+  label: 'On Hold',
+  color: '#5F6B7A',
+  bg: '#EEF1F4',
+  border: '#CDD4DC'
+},
+// slate
+{
   id: 'done',
   label: 'Completed',
   color: '#0F6E56',
   bg: '#E6F2EC',
   border: '#A0D9C4'
-} // green
+},
+// green
+{
+  id: 'cancelled',
+  label: 'Cancelled',
+  color: '#7A7468',
+  bg: '#EFEDE8',
+  border: '#D9D5CC'
+} // warm grey
 ];
+// Closed = finished one way or the other. Checks that mean COMPLETED
+// specifically (completed_at, recurrence) stay === 'done'.
+const isClosed = s => s === 'done' || s === 'cancelled';
 const TASK_PRIORITY = [{
   id: 'low',
   label: 'Low',
@@ -4404,6 +4441,10 @@ const TaskDB = {
       parent_task_id: fields.parent_task_id || null,
       created_by: user?.id || null
     };
+    // A task born Completed gets its completion time now, like one ticked
+    // off later, or it never scores on the Accountability tally. Only
+    // 'done' is stamped: a cancelled task was never completed.
+    if (base.status === 'done') base.completed_at = new Date().toISOString();
     const wd = {
       weekly_priority: fields.weekly_priority || null,
       weekly_rank: fields.weekly_rank || null,
@@ -4445,6 +4486,10 @@ const TaskDB = {
       updated_at: new Date().toISOString()
     };
     if (fields.status === 'done' && oldTask.status !== 'done') patch.completed_at = new Date().toISOString();
+    // Leaving Completed for anything (Cancelled included) clears the stamp.
+    // The Accountability tally counts completions by completed_at alone, so
+    // a reopened or cancelled task that kept it would still score as done.
+    else if ('status' in fields && fields.status !== 'done' && oldTask.status === 'done') patch.completed_at = null;
     let {
       error
     } = await c.from('tasks').update(patch).eq('id', id);
@@ -4491,6 +4536,8 @@ const TaskDB = {
       await this.addActivity(id, 'system', msg, user, k);
     }
     // Recurrence rule: completing a repeating task spawns the next occurrence.
+    // Only a move INTO 'done' counts. Cancelling spawns nothing, so a
+    // cancelled repeating task stops the series there.
     if (fields.status === 'done' && oldTask.status !== 'done' && oldTask.recurrence && oldTask.recurrence !== 'none') {
       await this.spawnRecurrence({
         ...oldTask,
@@ -5056,7 +5103,7 @@ async function createTaskFromAI(payload, user) {
     due_at,
     project_id,
     priority: ['low', 'medium', 'high'].includes(payload.priority) ? payload.priority : 'medium',
-    status: ['todo', 'in_progress', 'stuck', 'done'].includes(payload.status) ? payload.status : 'todo',
+    status: TASK_STATUS.some(s => s.id === payload.status) ? payload.status : 'todo',
     description: payload.description || payload.summary || null,
     context: payload.context || null,
     working_url: payload.workingUrl || null,
@@ -25817,7 +25864,7 @@ function parsePath() {
 // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
 // /tasks app. The top-bar icons open it in an iframe popout inside the content
 // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-const TASKS_POPOUT_VERSION = '20260930a'; // bump when tasks.html changes to bust the iframe/standalone-link cache
+const TASKS_POPOUT_VERSION = '20260930b'; // bump when tasks.html changes to bust the iframe/standalone-link cache
 function TaskFramePopover({
   which,
   zoneH,

@@ -5838,7 +5838,20 @@ Rules:
         //  what Zoho will calculate. Swap in live values once the fields exist.
         const cdNone = <span style={{ color: sub, fontWeight: 400 }}>Not set</span>;
         const cdHint = (t) => <span style={{ color: sub, fontWeight: 400, fontSize: 12.5 }}>{t}</span>;
-        const cdSub = (t) => <div style={{ fontSize: 10.5, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontWeight: 600, margin: '16px 0 2px', fontFamily: C.fontSans }}>{t}</div>;
+        // Two fields per row, half the height of a one-per-row list. Group
+        // titles span both columns; an odd group gets a blank cell so the
+        // table's grid lines close.
+        const cdCell = { padding: '8px 10px', borderRight: `1px solid ${bord}`, borderBottom: `1px solid ${bord}`, minWidth: 0 };
+        const cdGroup = (title, rows) => [
+          <div key={'h-' + title} style={{ gridColumn: '1 / -1', padding: '7px 10px', borderRight: `1px solid ${bord}`, borderBottom: `1px solid ${bord}`, background: dark ? 'rgba(173,131,47,.10)' : '#FAF6EE', fontSize: 10.5, letterSpacing: '0.12em', textTransform: 'uppercase', color: gold, fontWeight: 600 }}>{title}</div>,
+          ...rows.map(([k, v]) => (
+            <div key={k} style={cdCell}>
+              <div style={{ color: sub, letterSpacing: '0.1em', textTransform: 'uppercase', fontSize: 10.5 }}>{k}</div>
+              <div style={{ color: ink, fontWeight: 500, fontSize: 13.5, marginTop: 3, overflowWrap: 'anywhere' }}>{v}</div>
+            </div>
+          )),
+          ...(rows.length % 2 ? [<div key={'pad-' + title} style={cdCell} />] : []),
+        ];
         const CD_TYPED = [
           ['Marketing', null], ['Commission %', null], ["Christie's %", '14% by default'],
           ['Transaction fee', '$350 by default'], ['Referral %', null], ['Referral flat $', null],
@@ -5860,14 +5873,15 @@ Rules:
               <div style={{ fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase', color: sub, fontWeight: 600 }}>Commission disbursement information</div>
               <span style={{ fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '2px 6px', borderRadius: 3, background: dark ? 'rgba(173,131,47,.22)' : '#F3EBDA', color: gold, fontWeight: 600, fontFamily: C.fontSans }}>Preview</span>
             </div>
-            {cdSub('Already in the Zoho deal')}
-            {dealRow('Closed date', deal && deal.closing_date ? fmtD(deal.closing_date) : cdNone)}
-            {dealRow('Agent', (deal && deal.owner) || cdNone)}
-            {dealRow('Sale price', deal && deal.amount != null ? money(deal.amount) : cdNone)}
-            {cdSub('Typed in')}
-            {CD_TYPED.map(([k, hint]) => <React.Fragment key={k}>{dealRow(k, hint ? cdHint(hint) : cdNone)}</React.Fragment>)}
-            {cdSub('Calculated by Zoho')}
-            {CD_CALC.map(([k, f]) => <React.Fragment key={k}>{dealRow(k, cdHint('= ' + f))}</React.Fragment>)}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderTop: `1px solid ${bord}`, borderLeft: `1px solid ${bord}`, fontFamily: C.fontSans }}>
+              {cdGroup('Already in the Zoho deal', [
+                ['Closed date', deal && deal.closing_date ? fmtD(deal.closing_date) : cdNone],
+                ['Agent', (deal && deal.owner) || cdNone],
+                ['Sale price', deal && deal.amount != null ? money(deal.amount) : cdNone],
+              ])}
+              {cdGroup('Typed in', CD_TYPED.map(([k, hint]) => [k, hint ? cdHint(hint) : cdNone]))}
+              {cdGroup('Calculated by Zoho', CD_CALC.map(([k, f]) => [k, cdHint('= ' + f)]))}
+            </div>
             <div style={{ fontSize: 11, color: sub, fontFamily: C.fontSans, marginTop: 6 }}>Preview · these fields are not in Zoho yet</div>
           </React.Fragment>
         ) : null;

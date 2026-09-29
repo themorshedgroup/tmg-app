@@ -13975,17 +13975,51 @@ function ProjectsSurface({
         fontSize: 12.5
       }
     }, t);
-    const cdSub = t => /*#__PURE__*/React.createElement("div", {
+    // Two fields per row, half the height of a one-per-row list. Group
+    // titles span both columns; an odd group gets a blank cell so the
+    // table's grid lines close.
+    const cdCell = {
+      padding: '8px 10px',
+      borderRight: `1px solid ${bord}`,
+      borderBottom: `1px solid ${bord}`,
+      minWidth: 0
+    };
+    const cdGroup = (title, rows) => [/*#__PURE__*/React.createElement("div", {
+      key: 'h-' + title,
       style: {
+        gridColumn: '1 / -1',
+        padding: '7px 10px',
+        borderRight: `1px solid ${bord}`,
+        borderBottom: `1px solid ${bord}`,
+        background: dark ? 'rgba(173,131,47,.10)' : '#FAF6EE',
         fontSize: 10.5,
         letterSpacing: '0.12em',
         textTransform: 'uppercase',
         color: gold,
-        fontWeight: 600,
-        margin: '16px 0 2px',
-        fontFamily: C.fontSans
+        fontWeight: 600
       }
-    }, t);
+    }, title), ...rows.map(([k, v]) => /*#__PURE__*/React.createElement("div", {
+      key: k,
+      style: cdCell
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: sub,
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        fontSize: 10.5
+      }
+    }, k), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: ink,
+        fontWeight: 500,
+        fontSize: 13.5,
+        marginTop: 3,
+        overflowWrap: 'anywhere'
+      }
+    }, v))), ...(rows.length % 2 ? [/*#__PURE__*/React.createElement("div", {
+      key: 'pad-' + title,
+      style: cdCell
+    })] : [])];
     const CD_TYPED = [['Marketing', null], ['Commission %', null], ["Christie's %", '14% by default'], ['Transaction fee', '$350 by default'], ['Referral %', null], ['Referral flat $', null], ['Agent split %', null], ['Marketing expenses', null], ['Amount received', null], ['Date deposit received', null], ['Commission notes', null]];
     const CD_CALC = [['Commission $', 'Sale price × Commission %'], ["Christie's fee", "Commission $ × Christie's %"], ['Net commission', "Commission $ - Christie's fee - Transaction fee"], ['Referral $', 'Commission $ × Referral %, plus Referral flat $'], ['After referral', 'Net commission - Referral $'], ['Agent receives', 'After referral × Agent split %'], ['TMG receives', 'After referral - Agent receives']];
     const cdBlock = isCtc ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
@@ -14015,11 +14049,15 @@ function ProjectsSurface({
         fontWeight: 600,
         fontFamily: C.fontSans
       }
-    }, "Preview")), cdSub('Already in the Zoho deal'), dealRow('Closed date', deal && deal.closing_date ? fmtD(deal.closing_date) : cdNone), dealRow('Agent', deal && deal.owner || cdNone), dealRow('Sale price', deal && deal.amount != null ? money(deal.amount) : cdNone), cdSub('Typed in'), CD_TYPED.map(([k, hint]) => /*#__PURE__*/React.createElement(React.Fragment, {
-      key: k
-    }, dealRow(k, hint ? cdHint(hint) : cdNone))), cdSub('Calculated by Zoho'), CD_CALC.map(([k, f]) => /*#__PURE__*/React.createElement(React.Fragment, {
-      key: k
-    }, dealRow(k, cdHint('= ' + f)))), /*#__PURE__*/React.createElement("div", {
+    }, "Preview")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        borderTop: `1px solid ${bord}`,
+        borderLeft: `1px solid ${bord}`,
+        fontFamily: C.fontSans
+      }
+    }, cdGroup('Already in the Zoho deal', [['Closed date', deal && deal.closing_date ? fmtD(deal.closing_date) : cdNone], ['Agent', deal && deal.owner || cdNone], ['Sale price', deal && deal.amount != null ? money(deal.amount) : cdNone]]), cdGroup('Typed in', CD_TYPED.map(([k, hint]) => [k, hint ? cdHint(hint) : cdNone])), cdGroup('Calculated by Zoho', CD_CALC.map(([k, f]) => [k, cdHint('= ' + f)]))), /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         color: sub,

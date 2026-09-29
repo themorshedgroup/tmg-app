@@ -4865,16 +4865,43 @@ Rules:
     // CTC Files used to live inside the Tasks app's own surface switcher;
     // moved here (2026-09-08) so it's reachable without opening Tasks at all.
     // Same tasks.html bundle, opened straight to its #ctc route.
+    //
+    // Each CTC file has its own address here: #ctc/<id>. The frame reports the
+    // file it has open and this page's address bar follows it, so the link can
+    // be copied straight from the bar (the file's LINK button copies the same).
+    // A pasted link opens that file, on load or into an already-open tab.
     function CtcFilesFrame({ dark, onBack }) {
       const ink = dark ? '#fff' : '#001A4A';
-      const src = 'tasks.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + TASKS_POPOUT_VERSION + '#ctc';
+      const frameRef = useRef(null);
+      const [start] = useState(() => { const m = (location.hash || '').match(/^#\/?(ctc\/[^?#=]+)$/i); return m ? m[1] : 'ctc'; });
+      useEffect(() => {
+        const onMsg = (e) => {
+          const w = frameRef.current && frameRef.current.contentWindow;
+          if (e.origin !== location.origin || !w || e.source !== w || !e.data || e.data.tmg !== 'ctc-route') return;
+          const h = String(e.data.hash || '');
+          if (!/^ctc(\/[^?#=]*)?$/.test(h)) return;
+          if (location.hash.indexOf('=') !== -1) return;   // never over the OAuth hash
+          // replaceState fires no hashchange, so App's router is not re-run.
+          try { if (location.hash.replace(/^#\/?/, '') !== h) history.replaceState(null, '', '#' + h); } catch (err) {}
+        };
+        const onHash = () => {
+          const m = (location.hash || '').match(/^#\/?(ctc\/[^?#=]+)$/i);
+          const w = frameRef.current && frameRef.current.contentWindow;
+          if (!m || !w) return;
+          try { if (w.location.hash.replace(/^#\/?/, '') !== m[1]) w.location.hash = m[1]; } catch (err) {}
+        };
+        window.addEventListener('message', onMsg);
+        window.addEventListener('hashchange', onHash);
+        return () => { window.removeEventListener('message', onMsg); window.removeEventListener('hashchange', onHash); };
+      }, []);
+      const src = 'tasks.html?embed=1&theme=' + (dark ? 'dark' : 'light') + '&v=' + TASKS_POPOUT_VERSION + '#' + start;
       return (
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: dark ? '#000D26' : '#FCFBF8' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px 7px 10px', borderBottom: `1px solid ${dark ? '#0D1E3A' : '#E4DFD4'}`, flexShrink: 0 }}>
             <button onClick={onBack} aria-label="Back" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', color: dark ? '#C9A45A' : '#AD832F' }}><i className="ti ti-chevron-left" style={{ fontSize: 20 }} /></button>
             <span style={{ flex: 1, minWidth: 0, fontFamily: "'Jost', sans-serif", fontSize: 13, fontWeight: 600, letterSpacing: '0.02em', color: ink }}>CTC Files</span>
           </div>
-          <iframe src={src} title="CTC Files" style={{ flex: 1, width: '100%', border: 'none', display: 'block' }} />
+          <iframe ref={frameRef} src={src} title="CTC Files" style={{ flex: 1, width: '100%', border: 'none', display: 'block' }} />
         </div>
       );
     }
@@ -10480,6 +10507,9 @@ Rules:
     function parseRoute(hash) {
       const h = (hash || '').replace(/^#\/?/, '').trim().toLowerCase();
       if (ROUTE_MORE.indexOf(h) !== -1) return { tab: 'more', view: h };
+      // One CTC file (#ctc/<id>, or #ctc/<id>/board and the like). CtcFilesFrame
+      // reads the rest of the hash itself and opens that file.
+      if (h.indexOf('ctc/') === 0) return { tab: 'more', view: 'ctc' };
       if (ROUTE_TABS.indexOf(h) !== -1) return { tab: h, view: null };
       return { tab: 'chat', view: null };
     }
@@ -10497,7 +10527,7 @@ Rules:
     // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
     // /tasks app. The top-bar icons open it in an iframe popout inside the content
     // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-    const TASKS_POPOUT_VERSION = '20260930b';  // bump when tasks.html changes to bust the iframe/standalone-link cache
+    const TASKS_POPOUT_VERSION = '20260930c';  // bump when tasks.html changes to bust the iframe/standalone-link cache
     function TaskFramePopover({ which, zoneH, onClose }) {
       const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
       useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
@@ -10916,7 +10946,8 @@ Rules:
         if (onGuidePath) {
           // Leaving a guide deep-link for another tab → reset to root with the tab hash.
           try { history.pushState(null, '', '/#' + token); } catch (e) { try { location.hash = token; } catch (e2) {} }
-        } else if (location.hash.replace(/^#\/?/, '') !== token) {
+        } else if (location.hash.replace(/^#\/?/, '') !== token && !(token === 'ctc' && /^#\/?ctc\//i.test(location.hash))) {
+          // (A file's own #ctc/<id> is kept: it is CTC Files, one file deeper.)
           try { firstSync.current ? history.replaceState(null, '', '#' + token) : history.pushState(null, '', '#' + token); }
           catch (e) { location.hash = token; }
         }

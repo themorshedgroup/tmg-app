@@ -84,6 +84,9 @@
     // buster survives — a link without it can serve a recipient a stale
     // tasks.html that predates the route it points at.
     function permalinkFor(hash) {
+      // A CTC file's link opens the main app on that file (app/#ctc/<id>),
+      // the same address its bar shows while the file is open there.
+      if (/^ctc\//.test(hash)) return location.origin + '/#' + hash;
       const q = (location.search || '').replace(/[?&]embed=1\b/, '').replace(/^&/, '?');
       return location.origin + location.pathname + q + '#' + hash;
     }
@@ -4634,7 +4637,6 @@ Rules:
       // project too. Same rules as the router's writer: replaceState only,
       // coalesced, never inside the iframe, never over the OAuth hash.
       useEffect(() => {
-        if (TASKS_EMBED) return;   // embed: URL is invisible, history is shared
         if (location.hash.indexOf('=') !== -1) return;
         // Hold off while a sidebar/deep-link open is still pending (the rows
         // may not be in yet), and after a miss — otherwise the pasted link is
@@ -4648,6 +4650,15 @@ Rules:
           ? seg + '/' + current.id + (dtab && dtab !== defaultDtab(current.record_type || kind) ? '/' + dtab : '')
           : (isCtc && ctcTab === 'emails') ? listSeg + '/emails'
           : listSeg;
+        // Embedded, this URL is invisible and the history is shared, so it is
+        // left alone. A CTC file is told to the main app instead, which puts
+        // it in ITS address bar: every open file then has a link that can be
+        // copied from there and opens the main app on that same file.
+        if (TASKS_EMBED) {
+          if (seg !== 'ctc') return;
+          try { window.parent.postMessage({ tmg: 'ctc-route', hash }, location.origin); } catch (e) {}
+          return;
+        }
         const t = setTimeout(() => {
           try { if (location.hash.replace(/^#\/?/, '') !== hash) history.replaceState(null, '', '#' + hash); } catch (e) {}
         }, 120);

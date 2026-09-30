@@ -1,10 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────
 // TMG App — Supabase Edge Function: tmg-calendar-summary
-// Broadcasts the shared Team Calendar to the whole team, twice on a fixed
-// schedule (no filtering — every event on the calendar is included):
+// Broadcasts the shared Team Calendar to the whole team, three times on a
+// fixed schedule (no filtering — every event on the calendar is included):
 //
-//   weekly  — sent every Thursday, covers the coming Monday-Sunday.
-//   monthly — sent on the last day of the month, covers the coming month.
+//   weekly    — sent every Thursday, covers the coming Monday-Sunday.
+//   monthly   — sent on the last day of the month, covers the coming month.
+//   mid-month — sent on the 15th, covers the rest of the current month (a
+//     refresher of what's left, added 2026-10-01 at Symon's ask).
+//
+// Recurring events (anything Google tags with a recurringEventId) are rolled
+// up into one "Recurring" table at the top of the email instead of listing
+// every occurrence — a month view was showing "Tarek's FR" four or five
+// times, once per week, which is what made the October email unreadably
+// long (Symon, 2026-10-01). One-off events still get the full day-by-day
+// treatment below the table: RSVP buttons, tally, participants.
 //
 // Sent individually to every active profile (their own email as "To:" —
 // no BCC, no shared broadcast) so each person's copy can show THEIR OWN
@@ -39,10 +48,12 @@
 //   (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are injected automatically.)
 //
 // POST actions:
-//   { action: 'preview_weekly' }  → admin; builds the coming Mon-Sun email, sends/logs nothing
-//   { action: 'send_weekly' }     → cron or admin; sends it to every active profile, logs the send
-//   { action: 'preview_monthly' } → admin; builds the coming month's email, sends/logs nothing
-//   { action: 'send_monthly' }    → cron or admin; sends it, logs the send
+//   { action: 'preview_weekly' }   → admin; builds the coming Mon-Sun email, sends/logs nothing
+//   { action: 'send_weekly' }      → cron or admin; sends it to every active profile, logs the send
+//   { action: 'preview_monthly' }  → admin; builds the coming month's email, sends/logs nothing
+//   { action: 'send_monthly' }     → cron or admin; sends it, logs the send
+//   { action: 'preview_midmonth' } → admin; builds the rest-of-month refresher, sends/logs nothing
+//   { action: 'send_midmonth' }    → cron or admin; sends it, logs the send
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -247,6 +258,23 @@ function monthlyRange(nowMs: number) {
     periodKey: `${nextY}-${String(nextMo).padStart(2, "0")}`,
   };
 }
+// Rest of the current month, from today (Central) through the end of the
+// month. Cron fires on the 15th, so "rest of the month" always means the
+// back half — correct on any other invocation day too, same as weekly/monthly.
+function midMonthRange(nowMs: number) {
+  const { y, mo, d } = centralParts(nowMs);
+  const startUtc = centralDateToUtc(y, mo, d);
+  const nextMo = mo === 12 ? 1 : mo + 1;
+  const nextY = mo === 12 ? y + 1 : y;
+  const endUtc = centralDateToUtc(nextY, nextMo, 1);
+  const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate(); // day 0 of next month = last day of this one
+  return {
+    timeMin: new Date(startUtc).toISOString(),
+    timeMax: new Date(endUtc).toISOString(),
+    dateLine: `${MONTH_NAMES[mo - 1]} ${String(d).padStart(2, "0")} - ${lastDay}`,
+    periodKey: `${y}-${String(mo).padStart(2, "0")}-15`,
+  };
+}
 
 // ── Team Calendar read — every event in range, no filtering ──
 async function fetchTeamEvents(timeMin: string, timeMax: string) {
@@ -267,7 +295,38 @@ async function fetchTeamEvents(timeMin: string, timeMax: string) {
     end: e.end?.dateTime || e.end?.date || null,
     allDay: !!e.start?.date && !e.start?.dateTime,
     htmlLink: (e.htmlLink as string) || "",
+    attendeesRaw: Array.isArray(e.attendees) ? e.attendees : [],
+    recurringEventId: (e.recurringEventId as string) || null,
   }));
+}
+
+// ── Real names over raw emails: Google's attendee data usually has no
+// displayName for outside invites, but our own teammates are always in
+// `profiles`. One batched lookup per send resolves everyone's email to
+// "First Last" where we can; anyone not on the team keeps whatever Google
+// gave us (their displayName, or failing that, their email). ──
+async function resolveParticipantNames(sb: any, events: any[]): Promise<Record<string, string[]>> {
+  const emails = new Set<string>();
+  for (const e of events) {
+    for (const a of e.attendeesRaw || []) {
+      if (!a.self && !a.resource && a.email) emails.add(String(a.email).toLowerCase());
+    }
+  }
+  const nameByEmail = new Map<string, string>();
+  if (emails.size) {
+    const { data } = await sb.from("profiles").select("email, first_name, last_name").in("email", Array.from(emails));
+    for (const p of (data || []) as any[]) {
+      const full = `${p.first_name || ""} ${p.last_name || ""}`.trim();
+      if (full && p.email) nameByEmail.set(String(p.email).toLowerCase(), full);
+    }
+  }
+  const out: Record<string, string[]> = {};
+  for (const e of events) {
+    out[e.id] = (e.attendeesRaw || [])
+      .filter((a: any) => !a.self && !a.resource && a.email)
+      .map((a: any) => nameByEmail.get(String(a.email).toLowerCase()) || a.displayName || a.email);
+  }
+  return out;
 }
 
 function escapeHtml(s: string): string {
@@ -287,6 +346,61 @@ function dayKey(dateIso: string, allDay: boolean): string {
   const d = new Date(dateIso);
   const p = new Intl.DateTimeFormat("en-CA", { timeZone: allDay ? "UTC" : DEFAULT_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d);
   return p.map((x) => x.value).join("");
+}
+
+// ── Recurring rollup — one row per series instead of one block per
+// occurrence (see the file header for why). Google expands a recurring
+// series into individual instances (singleEvents=true) but tags every one
+// with the SAME recurringEventId, so grouping by that id recovers the series. ──
+const DOW_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+function eventDow(dateIso: string, allDay: boolean): number {
+  const wd = new Intl.DateTimeFormat("en-US", { timeZone: allDay ? "UTC" : DEFAULT_TZ, weekday: "short" }).format(new Date(dateIso));
+  const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return map[wd] ?? 0;
+}
+function partitionEvents(events: any[]): { recurringGroups: Map<string, any[]>; oneOff: any[] } {
+  const recurringGroups = new Map<string, any[]>();
+  const oneOff: any[] = [];
+  for (const e of events) {
+    if (e.recurringEventId) {
+      if (!recurringGroups.has(e.recurringEventId)) recurringGroups.set(e.recurringEventId, []);
+      recurringGroups.get(e.recurringEventId)!.push(e);
+    } else {
+      oneOff.push(e);
+    }
+  }
+  return { recurringGroups, oneOff };
+}
+// "Every Monday", "Every Tuesday & Thursday", "Every Mon, Wed & Fri" — from
+// whichever weekdays this series' occurrences actually landed on within the
+// period, since that's simpler and more honest than parsing the RRULE.
+function recurringScheduleLabel(evs: any[]): string {
+  const names = Array.from(new Set(evs.map((e) => eventDow(e.start, e.allDay)))).sort((a, b) => a - b).map((n) => DOW_NAMES[n]);
+  if (names.length <= 1) return `Every ${names[0] || ""}`.trim();
+  if (names.length === 2) return `Every ${names[0]} & ${names[1]}`;
+  return `Every ${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}`;
+}
+function recurringTableHtml(recurringGroups: Map<string, any[]>): string {
+  if (!recurringGroups.size) return "";
+  const rows = Array.from(recurringGroups.values()).map((evs) => {
+    const first = evs[0];
+    return `<tr>
+      <td style="padding:8px 12px 8px 0;border-bottom:1px solid #EDECE7;font-weight:500;">${escapeHtml(first.summary)}</td>
+      <td style="padding:8px 12px 8px 0;border-bottom:1px solid #EDECE7;color:#5f6368;white-space:nowrap;">${escapeHtml(recurringScheduleLabel(evs))}</td>
+      <td style="padding:8px 0 8px;border-bottom:1px solid #EDECE7;color:#5f6368;white-space:nowrap;">${escapeHtml(timeLabel(first.start, first.end, first.allDay))}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <p style="margin:0 0 8px;font-weight:600;color:#001A4A;">Recurring</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 28px;">${rows}</table>`;
+}
+function recurringTableText(recurringGroups: Map<string, any[]>): string {
+  if (!recurringGroups.size) return "";
+  const lines = Array.from(recurringGroups.values()).map((evs) => {
+    const first = evs[0];
+    return `${first.summary} — ${recurringScheduleLabel(evs)}, ${timeLabel(first.start, first.end, first.allDay)}`;
+  });
+  return `Recurring\n${lines.join("\n")}\n\n`;
 }
 
 // ── Navy Edge shell — identical header/footer/logo as tmg-notify; only the
@@ -367,25 +481,35 @@ function rsvpButtonsHtml(eventId: string, current?: string): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;"><tr>${cells}</tr></table>`;
 }
 
-function buildBodyHtml(events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>): string {
+function buildBodyHtml(events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>): string {
   if (!events.length) {
     return `<p style="margin:0;color:#5f6368;">No events on the calendar for this period.</p>`;
   }
+  const { recurringGroups, oneOff } = partitionEvents(events);
+  const recurTable = recurringTableHtml(recurringGroups);
+  if (!oneOff.length) {
+    return recurTable || `<p style="margin:0;color:#5f6368;">No events on the calendar for this period.</p>`;
+  }
   const groups = new Map<string, any[]>();
-  for (const e of events) {
+  for (const e of oneOff) {
     const k = dayKey(e.start, e.allDay);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k)!.push(e);
   }
   const days = Array.from(groups.entries());
-  return days.map(([, evs]) => {
+  return recurTable + days.map(([, evs]) => {
     const heading = `<p style="margin:0 0 8px;font-weight:600;color:#001A4A;">${escapeHtml(dayLabel(evs[0].start, evs[0].allDay))}</p>`;
     const rows = evs.map((e) => {
       const t = tallyLine(tallies[e.id]);
+      const participants = participantsByEvent[e.id];
+      const participantsLine = participants?.length
+        ? `<div style="font-size:12.5px;color:#7A6A48;margin-top:2px;">${escapeHtml(participants.join(", "))}</div>`
+        : "";
       return `
         <div style="margin:0 0 18px;padding:0 0 18px;border-bottom:1px solid #EDECE7;">
           <div style="font-weight:500;">${escapeHtml(e.summary)}</div>
-          <div style="font-size:13px;color:#5f6368;margin-top:2px;">${escapeHtml(timeLabel(e.start, e.end, e.allDay))}</div>
+          ${participantsLine}
+          <div style="font-size:13px;color:#5f6368;margin-top:6px;">${escapeHtml(timeLabel(e.start, e.end, e.allDay))}</div>
           ${t ? `<div style="font-size:12px;color:#7A6A48;margin-top:6px;">${escapeHtml(t)}</div>` : ""}
           <div style="margin-top:10px;">${rsvpButtonsHtml(e.id, ownResponses[e.id])}</div>
         </div>`;
@@ -393,13 +517,18 @@ function buildBodyHtml(events: any[], tallies: Record<string, Record<string, num
     return heading + rows;
   }).join("");
 }
-function buildBodyText(events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>): string {
+function buildBodyText(events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>): string {
   if (!events.length) return "No events on the calendar for this period.";
-  return events.map((e) => {
+  const { recurringGroups, oneOff } = partitionEvents(events);
+  const recurText = recurringTableText(recurringGroups);
+  if (!oneOff.length) return (recurText || "No events on the calendar for this period.").trim();
+  return recurText + oneOff.map((e) => {
     const t = tallyLine(tallies[e.id]);
     const mine = ownResponses[e.id];
     const mineLine = mine ? `Your response: ${mine.charAt(0).toUpperCase()}${mine.slice(1)}\n` : "";
-    return `${dayLabel(e.start, e.allDay)} — ${e.summary}\n${timeLabel(e.start, e.end, e.allDay)}${t ? "  (" + t + ")" : ""}\n${mineLine}RSVP: Yes ${rsvpLink(e.id, "yes")}  Maybe ${rsvpLink(e.id, "maybe")}  No ${rsvpLink(e.id, "no")}`;
+    const participants = participantsByEvent[e.id];
+    const participantsLine = participants?.length ? `${participants.join(", ")}\n` : "";
+    return `${dayLabel(e.start, e.allDay)} — ${e.summary}\n${participantsLine}${timeLabel(e.start, e.end, e.allDay)}${t ? "  (" + t + ")" : ""}\n${mineLine}RSVP: Yes ${rsvpLink(e.id, "yes")}  Maybe ${rsvpLink(e.id, "maybe")}  No ${rsvpLink(e.id, "no")}`;
   }).join("\n\n");
 }
 
@@ -440,14 +569,14 @@ async function activeRecipients(sb: any): Promise<Array<{ id: string; email: str
 // broadcast identical to everyone is no longer possible once the buttons
 // reflect "your" status, so send_* now emails each recipient individually
 // (see below), all built from this ONE shared events+rows fetch.
-function renderEmail(range: { dateLine: string }, events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>) {
+function renderEmail(range: { dateLine: string }, events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>) {
   const titleBlock = `
     <p style="margin:0 0 24px;">
       <span style="display:block;font-size:20px;font-weight:600;color:#001A4A;">Team Calendar Summary</span>
       <span style="display:block;font-size:13px;color:#7A6A48;margin-top:4px;">${escapeHtml(range.dateLine)}</span>
     </p>`;
-  const html = shellHtml("Team Calendar Summary", titleBlock + buildBodyHtml(events, tallies, ownResponses));
-  const text = `Team Calendar Summary\n${range.dateLine}\n\n${buildBodyText(events, tallies, ownResponses)}`;
+  const html = shellHtml("Team Calendar Summary", titleBlock + buildBodyHtml(events, tallies, ownResponses, participantsByEvent));
+  const text = `Team Calendar Summary\n${range.dateLine}\n\n${buildBodyText(events, tallies, ownResponses, participantsByEvent)}`;
   const subject = `Team Calendar Summary - ${range.dateLine}`;
   return { html, text, subject };
 }
@@ -469,7 +598,7 @@ Deno.serve(async (req: Request) => {
   const action = body?.action;
 
   try {
-    if (action === "preview_weekly" || action === "preview_monthly") {
+    if (action === "preview_weekly" || action === "preview_monthly" || action === "preview_midmonth") {
       // Read-only (sends nothing, logs nothing) — cron secret OR admin session,
       // same as send_*, so this is exactly as protected as the real send.
       let sb; let asProfileId: string | null = null;
@@ -485,17 +614,20 @@ Deno.serve(async (req: Request) => {
         sb = auth.sb;
         asProfileId = auth.userId; // preview as the admin who's looking at it
       }
-      const range = action === "preview_weekly" ? weeklyRange(Date.now()) : monthlyRange(Date.now());
+      const range = action === "preview_weekly" ? weeklyRange(Date.now())
+        : action === "preview_midmonth" ? midMonthRange(Date.now())
+        : monthlyRange(Date.now());
       const events = await fetchTeamEvents(range.timeMin, range.timeMax);
       const rows = await fetchRsvpRows(sb, events.map((e: any) => e.id));
       const tallies = talliesFromRows(rows);
       const ownResponses = asProfileId ? ownResponsesFromRows(rows, asProfileId) : {};
-      const email = renderEmail(range, events, tallies, ownResponses);
+      const participantsByEvent = await resolveParticipantNames(sb, events);
+      const email = renderEmail(range, events, tallies, ownResponses, participantsByEvent);
       return json({ ok: true, ...email, eventCount: events.length, timeMin: range.timeMin, timeMax: range.timeMax });
     }
 
-    if (action === "send_weekly" || action === "send_monthly") {
-      const sendType = action === "send_weekly" ? "weekly" : "monthly";
+    if (action === "send_weekly" || action === "send_monthly" || action === "send_midmonth") {
+      const sendType = action === "send_weekly" ? "weekly" : action === "send_midmonth" ? "midmonth" : "monthly";
       const secretName = "TMG_CALENDAR_SUMMARY_CRON_SECRET";
       const isCron = requireCronOrAdmin(req, secretName);
       let sb;
@@ -507,13 +639,14 @@ Deno.serve(async (req: Request) => {
         if (!auth.ok) return json({ error: auth.error }, auth.status);
         sb = auth.sb;
       }
-      const range = sendType === "weekly" ? weeklyRange(Date.now()) : monthlyRange(Date.now());
+      const range = sendType === "weekly" ? weeklyRange(Date.now()) : sendType === "midmonth" ? midMonthRange(Date.now()) : monthlyRange(Date.now());
       if (await alreadySent(sb, sendType, range.periodKey)) {
         return json({ ok: true, skipped: "already_sent", periodKey: range.periodKey });
       }
       const events = await fetchTeamEvents(range.timeMin, range.timeMax);
       const rows = await fetchRsvpRows(sb, events.map((e: any) => e.id));
       const tallies = talliesFromRows(rows);
+      const participantsByEvent = await resolveParticipantNames(sb, events);
       const recipients = await activeRecipients(sb);
       if (!recipients.length) return json({ error: "No active recipients found." }, 500);
       // Personalized per recipient (their own RSVP status highlighted) means
@@ -525,7 +658,7 @@ Deno.serve(async (req: Request) => {
       for (const r of recipients) {
         try {
           const ownResponses = ownResponsesFromRows(rows, r.id);
-          const email = renderEmail(range, events, tallies, ownResponses);
+          const email = renderEmail(range, events, tallies, ownResponses, participantsByEvent);
           await sendGmail([r.email], email.subject, email.html, email.text);
           sentCount++;
         } catch (e) {

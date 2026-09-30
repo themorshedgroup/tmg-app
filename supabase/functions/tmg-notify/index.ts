@@ -4,8 +4,15 @@
 // operations@themorshedgroup.com:
 //
 //   meeting notices — whenever Tarek's calendar shows a meeting with at
-//     least one active operations-access team member (recurring series
-//     excluded — see detectMeetings below).
+//     least ONE other active operations-access team member (recurring
+//     series excluded — see detectMeetings below). Changed 2026-09-24 from a
+//     two-person minimum: that rule was silently skipping plain 1:1s (Tarek
+//     alone with Camila, or alone with Gustavo), which is exactly the kind
+//     of ops call Symon wants to know about. Outside attendees (clients,
+//     vendors) are still fine on the invite; only the ops-headcount floor
+//     changed. Recurring series (Tarek's FR, Team-wide Huddle, Operations
+//     Weekly Sync, etc.) stay excluded either way — that part was never
+//     the problem.
 //   EOD task digest — once a day, every task completed that day, grouped
 //     by who completed it.
 //
@@ -442,7 +449,7 @@ async function detectMeetings(sb: any, tarek: { id: string; email: string }, ros
     }
     const orgEmail = String(ev.organizer?.email || "").toLowerCase();
     if (roster.has(orgEmail) && orgEmail !== tarek.email) opsMatches.add(orgEmail);
-    if (!opsMatches.size) continue;
+    if (opsMatches.size < 1) continue;
     // Must actually involve Tarek — organizer is him, or he's a non-declined attendee.
     const tarekInvolved = orgEmail === tarek.email ||
       attendees.some((a: any) => String(a.email || "").toLowerCase() === tarek.email && a.responseStatus !== "declined");

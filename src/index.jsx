@@ -8999,6 +8999,13 @@ Rules:
     const HG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const HG_STATUSES = ['In Progress', 'Catching Up', 'Success', 'Failed'];
     const HG_STATUS_COLOR = { 'In Progress': '#185FA5', 'Catching Up': '#B07A00', 'Success': '#0F6E56', 'Failed': '#9B1C1C' };
+    // A quarter's three months, for "log this goal across the whole quarter"
+    // instead of just the tab that happens to be open: Jan-Mar, Apr-Jun,
+    // Jul-Sep, Oct-Dec.
+    function hgQuarterMonths(monthIdx) {
+      const start = Math.floor(monthIdx / 3) * 3;
+      return [start, start + 1, start + 2];
+    }
 
     // The roster is FIXED: every month shows these rows, in this order, whether
     // or not that person has logged a goal in Zoho yet (an empty month is a
@@ -9096,9 +9103,15 @@ Rules:
       // else only ever for themselves (the server enforces that too — the
       // picker is a convenience, not the control).
       const [goalFor, setGoalFor] = useState('');
+      // Monthly files one record for the tab that's open; Quarterly files the
+      // same goal for all three months of that tab's quarter, so a goal
+      // meant to run October-December doesn't have to be re-typed three times.
+      const [frequency, setFrequency] = useState('Monthly');
 
       const monthName = HG_MONTHS[monthIdx];
       const weeks = hgWeeks(year, monthIdx);
+      const quarterMonths = hgQuarterMonths(monthIdx);
+      const quarterLabel = `Q${Math.floor(monthIdx / 3) + 1} ${year} (${HG_MONTHS[quarterMonths[0]].slice(0, 3)}-${HG_MONTHS[quarterMonths[2]].slice(0, 3)})`;
 
       const ink     = dark ? '#FFFFFF' : '#001A4A';
       const muted   = dark ? 'rgba(255,255,255,0.45)' : '#6B6B6B';
@@ -9220,14 +9233,21 @@ Rules:
         const goal = newGoal.trim();
         if (!goal) return;
         setSaving(true); setNote('');
-        const { ok, data } = await callZoho({
-          action: 'create_health_goal', goal, month: monthName, status: 'In Progress',
-          owner_email: (isAdmin && goalFor) ? goalFor : ownerEmail,
-        });
+        const months = frequency === 'Quarterly' ? quarterMonths : [monthIdx];
+        const owner_email = (isAdmin && goalFor) ? goalFor : ownerEmail;
+        // One Zoho record per month, even for a quarterly goal — the module has
+        // no way to span months on one record, and separate records let each
+        // month's status and weekly ticks move independently (April can hit
+        // "Success" while June is still "In Progress").
+        const results = await Promise.all(months.map(m => callZoho({
+          action: 'create_health_goal', goal, month: HG_MONTHS[m], status: 'In Progress', owner_email,
+        })));
         setSaving(false);
-        if (!ok) { setNote(data.error || 'Could not save to Zoho.'); return; }
-        if (data.owner_warning) setNote(data.owner_warning);
-        setNewGoal(''); setGoalFor(''); setAdding(false); load();
+        const failed = results.find(r => !r.ok);
+        if (failed) { setNote(failed.data.error || 'Could not save to Zoho.'); return; }
+        const warning = results.map(r => r.data.owner_warning).find(Boolean);
+        if (warning) setNote(warning);
+        setNewGoal(''); setGoalFor(''); setFrequency('Monthly'); setAdding(false); load();
       };
 
       const stepMonth = (dir) => {
@@ -9357,7 +9377,15 @@ Rules:
 
           {adding && (
             <div style={{ padding: '12px 14px', borderBottom: `1px solid ${line}`, background: cardBg, flexShrink: 0 }}>
-              <div style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.14em', fontWeight: 600, textTransform: 'uppercase', color: gold, marginBottom: 6 }}>New goal for {monthName}</div>
+              <div style={{ fontFamily: J, fontSize: 9, letterSpacing: '0.14em', fontWeight: 600, textTransform: 'uppercase', color: gold, marginBottom: 6 }}>New goal for {frequency === 'Quarterly' ? quarterLabel : monthName}</div>
+              <select
+                value={frequency}
+                onChange={e => setFrequency(e.target.value)}
+                style={{ width: '100%', boxSizing: 'border-box', fontFamily: J, fontSize: 12, color: ink, background: dark ? '#050B16' : '#FCFBF8', border: `1px solid ${line}`, borderRadius: 8, padding: '8px 9px', marginBottom: 8, cursor: 'pointer' }}
+              >
+                <option value="Monthly">Monthly (just {monthName})</option>
+                <option value="Quarterly">Quarterly (all of {quarterLabel})</option>
+              </select>
               {isAdmin && (
                 <select
                   value={goalFor}
@@ -9379,7 +9407,7 @@ Rules:
               />
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 <button onClick={addGoal} disabled={saving || !newGoal.trim()} style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: '#fff', background: saving || !newGoal.trim() ? '#B4B2A9' : (dark ? '#AD832F' : '#001A4A'), border: 'none', borderRadius: 7, padding: '7px 14px', cursor: saving || !newGoal.trim() ? 'default' : 'pointer' }}>{saving ? 'Saving…' : 'Save to Zoho'}</button>
-                <button onClick={() => { setAdding(false); setNewGoal(''); }} style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: muted, background: 'none', border: `1px solid ${line}`, borderRadius: 7, padding: '7px 14px', cursor: 'pointer' }}>Cancel</button>
+                <button onClick={() => { setAdding(false); setNewGoal(''); setFrequency('Monthly'); }} style={{ fontFamily: J, fontSize: 11, fontWeight: 500, color: muted, background: 'none', border: `1px solid ${line}`, borderRadius: 7, padding: '7px 14px', cursor: 'pointer' }}>Cancel</button>
               </div>
             </div>
           )}

@@ -10802,10 +10802,6 @@ function ProjectsSurface({
   // full form was only ever wired to open on an EXISTING task. This opens
   // it for a new one, with the file already filled in.
   const [newTaskOpen, setNewTaskOpen] = useState(null); // null | seed object for TaskForm
-  const [tlAdd, setTlAdd] = useState(null); // null | { key: tasklist id, val, err }, the inline add under one tasklist header
-  // A ref, not state: the second Enter of a fast double-tap arrives before
-  // any re-render, so a state flag would still be false when it lands.
-  const tlAddBusy = useRef(false);
   // Collapsed lists on a file's List tab: { projectId: { listKey: true } }.
   // A view preference, so it stays on this device, like the grouping choice.
   // The key is the same one reordering uses (the Zoho tasklist id where
@@ -11570,7 +11566,21 @@ function ProjectsSurface({
         await TaskDB.setDecisionOptions(t.id, form.decisionOptions || []);
       }
     } else {
-      const created = await TaskDB.create(fields, people, user);
+      // Opened from the plus on a Zoho tasklist header: filed into that
+      // list, as the header promised. The id goes explicitly rather than
+      // being guessed, because the project default (one person's list)
+      // would otherwise capture it, which is how a task assigned to
+      // Alexandra ended up filed under "Tarek". Dropped when the form moved
+      // the task somewhere the list no longer fits: another file, or a
+      // person's list now assigned to somebody else, who then gets their
+      // own list from the usual routing.
+      const seed = newTaskOpen || {};
+      const keepList = seed.zoho_tasklist_id && current && project_id === current.id && !(seed._listOwner && (form.assignees || []).some(id => id !== seed._listOwner));
+      const created = await TaskDB.create(keepList ? {
+        ...fields,
+        zoho_tasklist_id: seed.zoho_tasklist_id,
+        zoho_tasklist_name: seed.zoho_tasklist_name
+      } : fields, people, user);
       taskId = created && created.id;
     }
     if (taskId) {
@@ -11579,57 +11589,6 @@ function ProjectsSurface({
     }
     setTaskEditing(false);
     await refreshContainer(taskId, true);
-  }
-
-  // Add straight into one Zoho tasklist, from the plus on its own header.
-  // The id is passed explicitly rather than guessed: the header already
-  // answers which list this is, and the project default (which is one
-  // person's list) would otherwise capture it, which is how a task assigned
-  // to Alexandra ended up filed under "Tarek".
-  async function addToTasklist(tasklistId, tasklistName) {
-    const g = tlAdd;
-    if (!g) return;
-    const title = (g.val || '').trim();
-    if (!title) return;
-    if (tlAddBusy.current) return;
-    tlAddBusy.current = true;
-    // No match means nobody, never a guess. An unassigned task in the right
-    // list is something anyone can pick up; the wrong name on it is not.
-    const who = memberForTasklistName(tasklistName, team);
-    try {
-      const made = await TaskDB.create({
-        title,
-        status: 'todo',
-        priority: 'medium',
-        project_id: current ? current.id : null,
-        zoho_tasklist_id: tasklistId,
-        zoho_tasklist_name: tasklistName
-      }, who ? {
-        assignee: [who.id]
-      } : {}, user);
-      // create() throws on a failed insert but RETURNS NULL when there is no
-      // client at all (signed out, or a cold tab before auth attaches). The
-      // null read as success and cleared the box with nothing saved.
-      if (!made) throw new Error('not connected, check you are still signed in');
-    }
-    // Leave what they typed where it is, and say so right under the box:
-    // the reorder bar at the top of this list is off-screen on a file with
-    // a dozen headers, which is exactly when this box gets used.
-    catch (e) {
-      setTlAdd(x => x && x.key === g.key ? {
-        ...x,
-        err: 'Could not add this: ' + (e && e.message || 'the save failed') + '. It is still here, try again.'
-      } : x);
-      return;
-    } finally {
-      tlAddBusy.current = false;
-    }
-    setTlAdd(x => x && x.key === g.key ? {
-      ...x,
-      val: '',
-      err: null
-    } : x);
-    await refreshContainer(null, false);
   }
   const nameOf = id => (team.find(m => m.id === id) || {}).name || '';
   const initialsOf = id => {
@@ -12963,7 +12922,15 @@ function ProjectsSurface({
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap'
     }
-  }, current && current.name || KL.plural, " / New task")), /*#__PURE__*/React.createElement("div", {
+  }, current && current.name || KL.plural, " / New task", newTaskOpen && newTaskOpen.zoho_tasklist_name ? ' in ' + newTaskOpen.zoho_tasklist_name : '')), newTaskOpen && newTaskOpen._zohoNote && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '8px 20px',
+      fontSize: '0.72rem',
+      color: sub,
+      borderBottom: `1px solid ${bord}`,
+      fontFamily: C.fontSans
+    }
+  }, newTaskOpen._zohoNote), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
       minHeight: 0,
@@ -13842,8 +13809,8 @@ function ProjectsSurface({
       // else. The plus stays: everywhere else on this screen a paused file
       // keeps its controls and is simply labelled ("Linked · paused", the
       // amber dot), and hiding the only way to file into a named list would
-      // be a bigger loss than the confusion it saves. The inline row says
-      // plainly where the task will and will not go instead.
+      // be a bigger loss than the confusion it saves. The form it opens
+      // says plainly where the task will and will not go instead.
       const zohoOffNote = zohoSyncable && p.zoho_sync_enabled && p.zoho_project_id ? null : zohoSyncable && p.zoho_project_id ? 'Zoho syncing is paused for this file, so this is saved here only. It will not reach Zoho until syncing is resumed.' : 'This file is not linked to Zoho, so this is saved here only.';
       // A task that has never reached Zoho carries no tasklist, so all of
       // them piled into "Other tasks" (29 of 52 on Accountabilities, the
@@ -13928,16 +13895,27 @@ function ProjectsSurface({
         // "Other tasks" is the catch-all for rows that have none, so
         // there is no list there to file anything into.
         const tlId = key === 'Other tasks' ? null : gsrc(key).zoho_tasklist_id;
-        const open = !!(tlId && tlAdd && tlAdd.key === tlId);
+        // No match means nobody, never a guess. An unassigned task in the
+        // right list is something anyone can pick up; the wrong name on
+        // it is not.
         const who = tlId ? memberForTasklistName(key, team) : null;
         const hint = who ? 'Add a task for ' + who.name : 'Add a task in ' + key;
         const folded = isFolded(p.id, gkey(key));
-        const toggleTlAdd = () => {
+        // The full form, not a one-line title box: a task added here
+        // wants a due date and a description as often as one added from
+        // the header, and was coming out bare. Seeded with this list and,
+        // on a person's list, that person.
+        const openTlForm = () => {
           // Adding into a folded list opens it, so the new task is seen landing.
           if (folded) setFolded(p.id, [gkey(key)], false);
-          setTlAdd(g => g && g.key === tlId ? null : {
-            key: tlId,
-            val: ''
+          setNewTaskOpen({
+            zoho_tasklist_id: tlId,
+            zoho_tasklist_name: key,
+            _zohoNote: zohoOffNote,
+            ...(who ? {
+              _assignees: [who.id],
+              _listOwner: who.id
+            } : {})
           });
         };
         return /*#__PURE__*/React.createElement("div", {
@@ -13970,76 +13948,30 @@ function ProjectsSurface({
             cursor: 'pointer'
           }
         }, key, " \xB7 ", groups[key].length), tlId && /*#__PURE__*/React.createElement("i", {
-          className: 'ti ti-' + (open ? 'x' : 'plus'),
+          className: "ti ti-plus",
           title: hint,
           "aria-label": hint,
           role: "button",
           tabIndex: 0,
           onClick: e => {
             e.stopPropagation();
-            toggleTlAdd();
+            openTlForm();
           },
           onKeyDown: e => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               e.stopPropagation();
-              toggleTlAdd();
+              openTlForm();
             }
           },
           style: {
             fontSize: 14,
             color: sub,
-            opacity: open ? 0.9 : 0.7,
+            opacity: 0.7,
             cursor: 'pointer',
             flexShrink: 0
           }
-        })), open && /*#__PURE__*/React.createElement("div", {
-          style: {
-            padding: '0 0 10px'
-          }
-        }, /*#__PURE__*/React.createElement("div", {
-          style: {
-            display: 'flex',
-            gap: 8
-          }
-        }, /*#__PURE__*/React.createElement("input", {
-          autoFocus: true,
-          value: tlAdd.val,
-          onChange: e => setTlAdd(g => g ? {
-            ...g,
-            val: e.target.value,
-            err: null
-          } : g),
-          onKeyDown: e => {
-            if (e.key === 'Enter') addToTasklist(tlId, key);else if (e.key === 'Escape') setTlAdd(null);
-          },
-          placeholder: hint + ' and press Enter…',
-          style: {
-            flex: 1,
-            padding: '9px 12px',
-            background: dark ? '#0A1730' : '#fff',
-            border: `1px solid ${tlAdd.err ? lateColor : bord}`,
-            borderRadius: 6,
-            color: ink,
-            fontSize: 14,
-            outline: 'none',
-            fontFamily: C.fontSans
-          }
-        })), tlAdd.err && /*#__PURE__*/React.createElement("div", {
-          style: {
-            marginTop: 5,
-            fontSize: '0.68rem',
-            color: lateColor,
-            fontFamily: C.fontSans
-          }
-        }, tlAdd.err), zohoOffNote && /*#__PURE__*/React.createElement("div", {
-          style: {
-            marginTop: 5,
-            fontSize: '0.68rem',
-            color: sub,
-            fontFamily: C.fontSans
-          }
-        }, zohoOffNote)), !folded && groups[key].map(withSubs((t, isChild) => detailTaskRow(t, isChild, !!guessed[t.id]))));
+        })), !folded && groups[key].map(withSubs((t, isChild) => detailTaskRow(t, isChild, !!guessed[t.id]))));
       }));
     }
     return /*#__PURE__*/React.createElement("div", {

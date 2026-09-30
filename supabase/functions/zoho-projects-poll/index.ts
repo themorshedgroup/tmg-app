@@ -818,6 +818,36 @@ async function noteUnrouted(sb: any, taskId: string, projectName: string, names:
   });
 }
 
+// ── A create still in flight ──────────────────────────────────────────────
+// A task is created in Zoho first and its Zoho id written onto the TMG row a
+// beat later, once Zoho answers. In that gap the row still reads as unsent and
+// the Zoho task as unknown here, so a pull would bring the Zoho task back in
+// as a second TMG task. Only one sender ever creates: it first claims the row
+// by stamping zoho_last_synced_at on it while it has no Zoho id, and the claim
+// holds for IN_FLIGHT_MS (the browser, src/tasks.jsx ZOHO_SEND_CLAIM_MS, and
+// the poll's push both take it). A brand-new row counts as claimed too, for
+// open tabs still running code from before the claim existed. A pull leaves
+// an unknown Zoho task alone for a tick while any such claim is live on its
+// project: a real create finishes in seconds, and a tick later the two read as
+// the one task they are. Duplicated byte for byte in zoho-projects (sync_now),
+// like the other shared helpers.
+const IN_FLIGHT_MS = 2 * 60 * 1000;
+const inFlightSince = () => new Date(Date.now() - IN_FLIGHT_MS).toISOString();
+// Might this Zoho task still be one of TMG's own creates, not yet linked? Yes
+// while a claim is live on the project, and also when a row has meanwhile been
+// linked to it: one read, so a link landing between the pull's lookup and this
+// check is still caught. A failed read answers yes: waiting a tick costs
+// nothing, a duplicate costs somebody's time.
+async function createInFlight(sb: any, projectId: string, zohoTaskId: string): Promise<boolean> {
+  const since = inFlightSince();
+  const { data, error } = await sb.from("tasks").select("id")
+    .eq("project_id", projectId)
+    .or(`zoho_task_id.eq."${zohoTaskId}",and(zoho_task_id.is.null,zoho_last_synced_at.gt."${since}"),and(zoho_task_id.is.null,created_at.gt."${since}")`)
+    .limit(1);
+  if (error) return true;
+  return !!(data && data.length);
+}
+
 // Zoho Projects allows 100 calls / 2 min per token and this job runs every
 // 5 min, so a first run over a long-neglected project must not try to create
 // everything at once. Whatever does not fit goes on the next tick; the cap is
@@ -929,7 +959,7 @@ Deno.serve(async (req) => {
       if (page.error) { summary.push({ project: proj.name, error: page.error }); continue; }
 
       const zTasks = page.tasks.map(mapZohoTask);
-      let pulled = 0, conflicts = 0, created = 0, conflictDeferred = 0, unverified = 0;
+      let pulled = 0, conflicts = 0, created = 0, conflictDeferred = 0, unverified = 0, mirrorDeferred = 0;
       let conflictRowsRejected = 0, conflictRejectWhy = "";
 
       // Read at most once per project per run, and only when something
@@ -985,8 +1015,16 @@ Deno.serve(async (req) => {
       };
 
       for (const zt of zTasks) {
-        const { data: local } = await sb.from("tasks").select("*")
-          .eq("project_id", proj.id).eq("zoho_task_id", zt.id).maybeSingle();
+        // The first row, not .maybeSingle(): should two rows ever share one
+        // Zoho id, maybeSingle errors, reads as "no local task", and every
+        // later pull of that Zoho task would add one more copy. A failed read
+        // is not "none" either: it waits a round, cursor held, like an
+        // in-flight create, rather than bringing the task in again.
+        const { data: hits, error: hitErr } = await sb.from("tasks").select("*")
+          .eq("project_id", proj.id).eq("zoho_task_id", zt.id)
+          .order("created_at", { ascending: true }).limit(1);
+        if (hitErr) { mirrorDeferred++; continue; }
+        const local = hits?.[0] || null;
 
         const owned = await resolveOwners(zt.owners);
         // Nobody came back from Zoho's owner field, so ask the tasklist. A
@@ -1014,6 +1052,11 @@ Deno.serve(async (req) => {
         const zohoEpochMs = (zt.last_modified_time || 0) >= MIN_REAL_EPOCH_MS ? zt.last_modified_time : null;
 
         if (!local) {
+          // Possibly TMG's own create, not linked yet (see createInFlight).
+          // Mirroring it now would give TMG the task twice. Skipped, and the
+          // cursor held below, so the next tick reads it again, by which time
+          // it is linked and reads as the same task.
+          if (await createInFlight(sb, proj.id, zt.id)) { mirrorDeferred++; continue; }
           // A task created directly in Zoho, so mirror it into TMG.
           const { data: inserted } = await sb.from("tasks").insert({
             title: zt.title, description: zt.description, due_at: zt.due_at,
@@ -1240,6 +1283,12 @@ Deno.serve(async (req) => {
             .eq("project_id", proj.id)
             .is("zoho_task_id", null)
             .not("status", "in", "(done,cancelled)")   // closed before it ever reached Zoho: history, not work
+            // Anything younger, or already being sent by somebody else, is most
+            // likely a create still in flight (see createInFlight). Sending it
+            // too would put the task in Zoho twice; left alone, it is linked
+            // or sent next tick.
+            .lt("created_at", inFlightSince())
+            .or(`zoho_last_synced_at.is.null,zoho_last_synced_at.lt."${inFlightSince()}"`)
             .order("created_at", { ascending: true })
             .limit(room * 4 + 1);
 
@@ -1301,6 +1350,21 @@ Deno.serve(async (req) => {
             // being created means a skipped task costs nothing at all.
             const ownerIds = await zohoOwnerIds(sb, conn, zFetch, portalBase, emails);
 
+            // Claims the send (see createInFlight): only the sender holding
+            // the claim creates, so a browser save on this same task waits for
+            // this create and sends its edit on top, instead of making a second
+            // copy. No claim means somebody else is sending it right now, or it
+            // was linked since the read above, so it is theirs. The claim also
+            // hands back the row as it stands now, so an edit saved since that
+            // read goes to Zoho with the create.
+            const claimedAt = new Date().toISOString();
+            const { data: claimed, error: claimErr } = await sb.from("tasks")
+              .update({ zoho_last_synced_at: claimedAt })
+              .eq("id", t.id).is("zoho_task_id", null)
+              .or(`zoho_last_synced_at.is.null,zoho_last_synced_at.lt."${inFlightSince()}"`)
+              .select("id,title,description,due_at,priority,status");
+            if (claimErr || !claimed?.length) continue;
+            Object.assign(t, claimed[0]);
             const form = new URLSearchParams({ name: t.title || "(untitled)" });
             form.set("tasklist_id", tasklistId);
             if (t.description) form.set("description", String(t.description));
@@ -1350,16 +1414,39 @@ Deno.serve(async (req) => {
               }
               if (miss) statusNote = ` Its status stayed To Do in Zoho, not ${ZOHO_STATUS[t.status]?.name || t.status}: ${miss}`;
             }
-            await sb.from("tasks").update({
+            // Only onto a row still unlinked, as a last guard: should this
+            // create outlast its claim and another sender link first,
+            // overwriting that id would strand the other copy in Zoho for the
+            // next pull to bring back as a second task.
+            // Synced as of the claim, not now: this create carries the row as
+            // the claim found it, and an edit saved since must still read as
+            // unsent here, so the next tick sends it if the browser could not.
+            const { data: linked, error: linkErr } = await sb.from("tasks").update({
               zoho_task_id: mapped.id,
-              zoho_last_synced_at: new Date().toISOString(),
+              zoho_last_synced_at: claimedAt,
               // Left empty when the status did not take: the next tick then
               // reads Zoho's copy as new and brings the two back in line,
               // rather than both sides quietly disagreeing for good.
               zoho_last_modified_time: statusNote ? null : mapped.last_modified_time,
               zoho_tasklist_id: mapped.tasklist_id,
               zoho_tasklist_name: mapped.tasklist_name,
-            }).eq("id", t.id);
+            }).eq("id", t.id).is("zoho_task_id", null).select("id");
+            if (!linkErr && !linked?.length) {
+              // Lost to that other sender, so the copy made a moment ago is the spare.
+              // Removed unless the row somehow points at this very copy. A
+              // row deleted meanwhile has no task left to own it either.
+              const { data: now } = await sb.from("tasks").select("zoho_task_id").eq("id", t.id).maybeSingle();
+              if (!now || now.zoho_task_id !== mapped.id) {
+                const dr = await zFetch(`${portalBase}/projects/${proj.zoho_project_id}/tasks/${mapped.id}/`, { method: "DELETE" }).catch(() => null);
+                if (!dr?.ok && now) {
+                  await sb.from("task_activity").insert({
+                    task_id: t.id, kind: "system",
+                    content: `Zoho Projects (${proj.name}) has this task twice: it was sent from here and from TMG at the same moment, and the spare copy could not be removed. Delete one of the two in Zoho.`,
+                  });
+                }
+              }
+              continue;
+            }
             await sb.from("task_activity").insert({
               task_id: t.id, kind: "system",
               content: (emails.length && !ownerIds.length
@@ -1383,11 +1470,14 @@ Deno.serve(async (req) => {
       // good. An unstamped project simply reads again on the next tick.
       // Nor when a conflict push was put off: an incremental read from a moved
       // cursor would never return that task again, and TMG's edit would be lost.
-      if (!page.truncated && !conflictDeferred) await sb.from("projects").update({ zoho_last_synced_at: new Date().toISOString() }).eq("id", proj.id);
+      // Nor when a Zoho task was left unmirrored because its TMG create was
+      // still in flight: the next read must return it so it can be matched.
+      if (!page.truncated && !conflictDeferred && !mirrorDeferred) await sb.from("projects").update({ zoho_last_synced_at: new Date().toISOString() }).eq("id", proj.id);
       summary.push({
         project: proj.name, pulled, created, conflicts, pushed,
         ...(page.truncated ? { pull_truncated: "page budget reached, continues next tick" } : {}),
         ...(conflictDeferred > 0 ? { conflicts_deferred: conflictDeferred } : {}),
+        ...(mirrorDeferred > 0 ? { mirrors_deferred: mirrorDeferred } : {}),
         ...(unverified > 0 ? { overwrites_unverified: unverified } : {}),
         ...(conflictRowsRejected > 0 ? { conflict_rows_rejected: conflictRowsRejected, conflict_rows_rejected_why: conflictRejectWhy } : {}),
         ...(pushSkipped === -1 ? { push_skipped: "no default tasklist on this project" }

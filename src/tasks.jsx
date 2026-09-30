@@ -962,6 +962,9 @@ Rules:
       const data = await res.json().catch(() => ({}));
       return { ok: res.ok, status: res.status, data };
     }
+    // How long a claim to send a task to Zoho holds (see syncToZohoProjects).
+    // The same span as IN_FLIGHT_MS in zoho-projects-poll, which honours it.
+    const ZOHO_SEND_CLAIM_MS = 2 * 60 * 1000;
     async function callZohoProjects(payload) {
       const res = await fetch(ZOHO_PROJECTS_ENDPOINT, {
         method: 'POST',
@@ -1823,6 +1826,27 @@ Rules:
       // touches live CTC files.
       // statusBefore is for a caller with no oldTask that still knows what the
       // status was before its save (the form save, via setPeople).
+      // After a lost claim (see syncToZohoProjects): the row as it stands once
+      // the send that holds the claim links it, or null when the row is gone,
+      // cannot be read, or nothing lands within about 20 seconds. That send
+      // failed or stalled, and the row keeps its null id for the poll to send,
+      // with this save's values in it.
+      async waitForZohoLink(id) {
+        const c = this.client(); if (!c) return null;
+        for (let i = 0; i < 14; i++) {
+          if (i) await new Promise(r => setTimeout(r, 1500));
+          const { data, error } = await c.from('tasks').select('*').eq('id', id).maybeSingle();
+          if (error || !data) return null;
+          if (data.zoho_task_id) return data;
+        }
+        return null;
+      },
+      // Gives a claim back when this send stops before anything reached Zoho,
+      // so the poll and Sync now need not wait out ZOHO_SEND_CLAIM_MS for it.
+      async releaseZohoClaim(id) {
+        const c = this.client(); if (!c) return;
+        await c.from('tasks').update({ zoho_last_synced_at: null }).eq('id', id).is('zoho_task_id', null);
+      },
       async syncToZohoProjects(task, oldTask, user, statusBefore) {
         const c = this.client(); if (!c || !task.project_id) return;
         try {
@@ -1844,6 +1868,42 @@ Rules:
             assigneeEmails = assigneeProfiles.map(p => p.email).filter(Boolean);
           }
 
+          // Only one sender ever creates a task in Zoho: whoever claims it on
+          // the row first. The claim is zoho_last_synced_at stamped on a row
+          // that has no Zoho id yet, good for ZOHO_SEND_CLAIM_MS, and the poll
+          // takes the same claim before it sends. Creating first and sorting
+          // out the clash afterwards put tasks in Zoho twice, or brought them
+          // back into TMG as a second task (2026-09-30).
+          // Also the sync time the link records: see the write-back below.
+          const claimedAt = new Date().toISOString();
+          if (!task.zoho_task_id) {
+            const { data: claimed, error: claimErr } = await c.from('tasks')
+              .update({ zoho_last_synced_at: claimedAt })
+              .eq('id', task.id).is('zoho_task_id', null)
+              .or(`zoho_last_synced_at.is.null,zoho_last_synced_at.lt."${new Date(Date.now() - ZOHO_SEND_CLAIM_MS).toISOString()}"`)
+              .select('*');
+            // Could not ask. The row keeps its null id and the poll sends it.
+            if (claimErr) return;
+            // Ours: the create goes out from the row as the claim found it,
+            // not from this tab's copy, which can be older (another tab's
+            // edit, or a save that gave up waiting for an earlier send).
+            if (claimed && claimed.length) task = { ...task, ...claimed[0] };
+            else {
+              // Not ours to create: the row is linked already (the task in
+              // hand is older than the row), or somebody else is sending it
+              // right now. Either way this save is an edit to that Zoho task,
+              // sent below once its id is known. The wait matters: the other
+              // send carries the task as it stood when it started, so an edit
+              // made meanwhile would otherwise never reach Zoho. What goes is
+              // the row as it stands then, compared with this save's before-
+              // picture, so two saves waiting at once cannot land in Zoho in
+              // the wrong order: the later one's value is what both send.
+              const row = await this.waitForZohoLink(task.id);
+              if (!row) return;
+              task = { ...task, ...row };
+            }
+          }
+
           if (!task.zoho_task_id) {
             // Zoho files a task into exactly one tasklist, and a project's
             // default list is one person's list, so it is only ever right for
@@ -1857,9 +1917,10 @@ Rules:
             // list. An open task goes over on a later poll, which notes on the
             // task why it is waiting; one already closed stays TMG-only, the
             // same as the poll treats any closed task that never reached Zoho.
-            if (pick.later) return;
+            if (pick.later) { await this.releaseZohoClaim(task.id); return; }
             const tasklistId = pick.id;
             if (!tasklistId) {
+              await this.releaseZohoClaim(task.id);
               await this.addActivity(task.id, 'system', 'Zoho Projects sync skipped — this CTC file has no default tasklist configured yet.', user);
               return;
             }
@@ -1880,12 +1941,27 @@ Rules:
             // this the task shows up under "Other tasks" in TMG's own
             // grouping forever, since the poller only backfills these fields
             // when something changes in Zoho after the fact (2026-09-11 fix).
-            await c.from('tasks').update({
-              zoho_task_id: data.task.id, zoho_last_synced_at: new Date().toISOString(),
+            // Only onto a row still unlinked, as a last guard: see below.
+            // Synced as of the claim, not now: this create carries the row as
+            // it stood then, and an edit saved since (sent by the save that
+            // waited on this one) must still read as unsent, so the poll
+            // retries it should that save's own send fail.
+            const { data: linked, error: linkErr } = await c.from('tasks').update({
+              zoho_task_id: data.task.id, zoho_last_synced_at: claimedAt,
               zoho_last_modified_time: data.task.last_modified_time || null,
               zoho_tasklist_id: data.task.tasklist_id || null,
               zoho_tasklist_name: data.task.tasklist_name || null,
-            }).eq('id', task.id);
+            }).eq('id', task.id).is('zoho_task_id', null).select('id');
+            if (linkErr || (linked && linked.length)) return;
+            // Only reachable when this create outlasted its claim and another
+            // sender took over and linked first, so the copy just made is the
+            // spare. Removed unless the row somehow points at this very copy;
+            // a row deleted meanwhile has no task left to own it either.
+            const { data: now } = await c.from('tasks').select('zoho_task_id').eq('id', task.id).maybeSingle();
+            if (!now || now.zoho_task_id !== data.task.id) {
+              const del = await callZohoProjects({ action: 'delete_task', project_id: proj.zoho_project_id, task_id: data.task.id }).catch(() => ({ ok: false }));
+              if (!del.ok && now) await this.addActivity(task.id, 'system', 'Zoho Projects now has this task twice: it was sent from here and by the automatic sync at the same moment, and the spare copy could not be removed. Delete one of the two in Zoho.', user);
+            }
             return;
           }
 

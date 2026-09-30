@@ -958,6 +958,57 @@ Deno.serve(async (req) => {
       return json({ tasks }, 200);
     }
 
+    // ── The Accountabilities Score tab, read straight off Zoho. Read-only.
+    // Zoho's own created and completed times, never the app's: the app's
+    // created_at is the day a task was first mirrored in (136 Accountabilities
+    // rows read 2026-09-28), and a week is scored on the day a task was really
+    // given out. The due date goes back as the bare calendar day Zoho holds
+    // (YYYY-MM-DD), so no time zone can move it. Lists come back in Zoho's
+    // order, which is the order the Score rows are shown in. ──
+    if (action === "score_tasks") {
+      const projectId = (body.project_id || "").toString().trim();
+      if (!projectId) return json({ error: "Missing project_id." }, 400);
+      const lr = await zohoFetch(sb, conn, accessToken, `${portalBase}/projects/${projectId}/tasklists/`, {});
+      const ld = await lr.json().catch(() => ({}));
+      if (!lr.ok) return json({ error: ld?.error || "Zoho tasklists error", detail: ld }, lr.status);
+      const tasklists = (ld.tasklists || []).map((l: any) => ({
+        id: l.id_string || String(l.id),
+        name: decodeEntities(String(l.name || "")).trim(),
+      }));
+      const tasks: any[] = [];
+      const range = 200;
+      for (let index = 1, page = 0; page < 50; page++, index += range) {
+        const u = new URL(`${portalBase}/projects/${projectId}/tasks/`);
+        u.searchParams.set("index", String(index));
+        u.searchParams.set("range", String(range));
+        const r = await zohoFetch(sb, conn, accessToken, u.toString(), {});
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ error: d?.error || "Zoho tasks list error", detail: d }, r.status);
+        const batch = d.tasks || [];
+        for (const t of batch) {
+          const m = mapZohoTask(t);
+          const due = /^(\d{2})-(\d{2})-(\d{4})$/.exec(String(t.end_date || "").trim());
+          // The day-only created_time when the exact one is missing, so a task
+          // is never silently left out of every week.
+          const createdMs = Number(t.created_time_long);
+          const created = createdMs > 0 ? new Date(createdMs).toISOString() : zohoDateToIso(t.created_time);
+          tasks.push({
+            id: m.id,
+            title: m.title,
+            status: m.status,
+            due: due ? `${due[3]}-${due[1]}-${due[2]}` : null,
+            created_at: created,
+            completed_at: m.completed_at,
+            tasklist_id: m.tasklist_id,
+            tasklist_name: m.tasklist_name,
+            url: t.link?.web?.url || null,
+          });
+        }
+        if (batch.length < range) break;
+      }
+      return json({ tasklists, tasks }, 200);
+    }
+
     // Ops-only: total live task count per tasklist, paging until Zoho returns
     // fewer than the page size. Exists to verify bulk-delete results against
     // Zoho directly rather than trusting a single capped page.

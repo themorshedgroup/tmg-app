@@ -72,7 +72,7 @@ const ROUTE_LIST_SEG = {
   rocks: 'rocks',
   accountability: 'accountability'
 };
-const ROUTE_DTABS = ['overview', 'list', 'board', 'timeline'];
+const ROUTE_DTABS = ['overview', 'list', 'board', 'timeline', 'score'];
 // Which sub-tab a record opens on when the link doesn't name one. A CTC
 // file is a checklist first — the TC opens it to work the task list, not
 // to read the summary — so it lands on List. Everything else still opens
@@ -11249,6 +11249,12 @@ function ProjectsSurface({
     setOpenTask(null);
     setTaskEditing(false);
   }, [current && current.id]);
+  // Score lives on Accountabilities only. A link, or a relink, that leaves
+  // it on any other file lands on List, so the tab bar and the address bar
+  // agree with what is on screen.
+  useEffect(() => {
+    if (dtab === 'score' && current && !isAcctProject(current)) setDtab('list');
+  }, [dtab, current && current.id, current && current.zoho_project_id]);
   // "Whatever CTC file they open, that's what gets loaded." The list ships
   // counts + milestones only; a record's tasks load the moment it becomes
   // current. Guarded on the id so a hydrated row replacing itself doesn't
@@ -13206,10 +13212,13 @@ function ProjectsSurface({
       }
     }, kids.map(k => rowFn(k, true))));
   };
+  // Accountabilities sorts its rows by rule, so a row there has no grip: a
+  // drag would save a place the rule then ignores.
+  const rowsFixed = isAcctProject(current);
   const detailTaskRow = (t, isChild, guessedList) => /*#__PURE__*/React.createElement("div", _extends({
     key: t.id,
     onClick: () => openTaskFull(t)
-  }, isChild ? {} : {
+  }, isChild || rowsFixed ? {} : {
     'data-drag-kind': 'task',
     'data-drag-id': t.id
   }, {
@@ -13219,11 +13228,11 @@ function ProjectsSurface({
       gap: 10,
       padding: '9px 0',
       cursor: 'pointer',
-      ...dragRowStyle(rowDrag, isChild ? null : t.id, gold, `1px solid ${bord}`)
+      ...dragRowStyle(rowDrag, isChild || rowsFixed ? null : t.id, gold, `1px solid ${bord}`)
     }
   }), dragGrip(rowDrag, 'task', t.id, {
     color: sub,
-    spacer: isChild,
+    spacer: isChild || rowsFixed,
     onArrow: d => moveTaskBy(t.id, d)
   }), /*#__PURE__*/React.createElement("div", {
     onClick: e => {
@@ -13596,6 +13605,9 @@ function ProjectsSurface({
   })));
 
   // Matches the prototype's .vtabs/.vtab exactly.
+  // Accountabilities carries a fifth tab, Score. On a phone five tabs at
+  // the usual spacing run past the screen edge, so they sit a little closer.
+  const dtabs = [['overview', 'Overview'], ['list', 'List'], ['board', 'Board'], ['timeline', 'Timeline'], ...(isAcctProject(current) ? [['score', 'Score']] : [])];
   const dtabBar = /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -13604,11 +13616,11 @@ function ProjectsSurface({
       borderBottom: `1px solid ${bord}`,
       flexShrink: 0
     }
-  }, [['overview', 'Overview'], ['list', 'List'], ['board', 'Board'], ['timeline', 'Timeline']].map(([id, label]) => /*#__PURE__*/React.createElement("div", {
+  }, dtabs.map(([id, label]) => /*#__PURE__*/React.createElement("div", {
     key: id,
     onClick: () => setDtab(id),
     style: {
-      padding: '10px 16px',
+      padding: wide || dtabs.length < 5 ? '10px 16px' : '10px 11px',
       fontSize: 13,
       color: dtab === id ? ink : sub,
       fontWeight: dtab === id ? 500 : 400,
@@ -13863,6 +13875,9 @@ function ProjectsSurface({
         }
         (groups[key] = groups[key] || []).push(t);
       });
+      // Accountabilities orders each list by rule, the way Zoho shows it
+      // (acctRowCmp), not by hand. Every other file keeps its dragged order.
+      if (isAcctProject(p)) Object.keys(groups).forEach(k => groups[k].sort(acctRowCmp));
       const earliest = arr => Math.min(...arr.map(t => t.created_at ? new Date(t.created_at).getTime() : Date.now()));
       // The header reads off a row Zoho actually filed, never simply the
       // first row in the group: an optimistically placed row carries no
@@ -15114,7 +15129,11 @@ function ProjectsSurface({
         marginBottom: 6,
         fontFamily: C.fontSans
       }
-    }, "Details"), detailFields(p))) : dtab === 'list' ? listTab(p) : dtab === 'board' ? boardTab(p) : timelineTab(p), openTask && /*#__PURE__*/React.createElement(TaskDrawer, {
+    }, "Details"), detailFields(p))) : dtab === 'score' && isAcctProject(p) ? /*#__PURE__*/React.createElement(AcctScoreTab, {
+      p: p,
+      dark: dark,
+      wide: wide
+    }) : dtab === 'list' || dtab === 'score' ? listTab(p) : dtab === 'board' ? boardTab(p) : timelineTab(p), openTask && /*#__PURE__*/React.createElement(TaskDrawer, {
       dark: dark,
       onClose: () => {
         setOpenTask(null);
@@ -15143,7 +15162,11 @@ function ProjectsSurface({
         margin: '8px 0 6px',
         fontFamily: C.fontSans
       }
-    }, "Details"), detailFields(p))) : dtab === 'list' ? listTab(p) : dtab === 'board' ? boardTab(p) : timelineTab(p));
+    }, "Details"), detailFields(p))) : dtab === 'score' && isAcctProject(p) ? /*#__PURE__*/React.createElement(AcctScoreTab, {
+      p: p,
+      dark: dark,
+      wide: wide
+    }) : dtab === 'list' || dtab === 'score' ? listTab(p) : dtab === 'board' ? boardTab(p) : timelineTab(p));
   };
 
   // ── FORM (create / edit) ──
@@ -16892,6 +16915,597 @@ function TaskMailbox({
       }
     }), t.title))));
   })));
+}
+
+// ── Accountabilities (the project) ─────────────────────────────────────
+// The one project filed by person. Found by its Zoho id, so renaming it in
+// Zoho can't quietly switch off the order and the Score tab below.
+const ACCT_ZOHO_PROJECT_ID = '2435905000000202003';
+const isAcctProject = p => !!p && String(p.zoho_project_id || '') === ACCT_ZOHO_PROJECT_ID;
+
+// Inside each person's list, the arrangement Zoho shows: the quarter's
+// priorities on top (a title that opens "Q3P:", "Q4 P1:"), then Completed,
+// In Progress, the waiting states, To Do, and Cancelled last. Soonest due
+// first within each, undated at the bottom.
+const QP_TITLE = /^\s*Q[1-4]\s*P[1-3]?\b/i;
+const ACCT_STATUS_ORDER = ['done', 'in_progress', 'submitted', 'revision', 'on_hold', 'stuck', 'todo', 'cancelled'];
+const acctRowCmp = (a, b) => {
+  const qa = QP_TITLE.test(a.title || '') ? 0 : 1,
+    qb = QP_TITLE.test(b.title || '') ? 0 : 1;
+  if (qa !== qb) return qa - qb;
+  // Priorities are ordered by due date alone; everything else by status first.
+  if (qa) {
+    const rank = s => {
+      const i = ACCT_STATUS_ORDER.indexOf(s);
+      return i < 0 ? ACCT_STATUS_ORDER.indexOf('todo') : i;
+    };
+    const d = rank(a.status) - rank(b.status);
+    if (d) return d;
+  }
+  const da = a.due_at ? Date.parse(a.due_at) : Infinity,
+    db = b.due_at ? Date.parse(b.due_at) : Infinity;
+  if (da !== db) return da < db ? -1 : 1;
+  return String(a.title || '').localeCompare(String(b.title || ''));
+};
+
+// ── Accountabilities: Score ───────────────────────────────────────────
+// The weekly accountability table from the scorecard sheet, counted off
+// Zoho itself (zoho-projects score_tasks). One row per list, in Zoho's
+// list order, Archive Bin left out. Weeks are Monday to Sunday, Central,
+// whoever is looking, so Manila and Texas read the same numbers.
+//
+// The rule for a week:
+//   - A task belongs to the week Zoho says it was CREATED in.
+//   - It is counted at the next Monday, 12 PM Central, and frozen there:
+//     finished by then is Completed; otherwise due that Monday or later (or
+//     undated) is On Track; otherwise Overdue. Finishing it later does not
+//     rewrite that week. The week still running is counted as of now.
+//   - Cancelled is left out of every number.
+//   - Completion % = Completed / (Completed + Overdue). On Track work is
+//     not late yet, so it neither helps nor hurts. YTD is the same ratio
+//     over every week from Jan 1 to the week shown.
+//
+// Zoho's created time, never the app's created_at: that is the day a task
+// was first mirrored here, and 136 of these rows read 2026-09-28.
+const SCORE_TZ = 'America/Chicago';
+const SCORE_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: SCORE_TZ,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+});
+const SCORE_CLOCK_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: SCORE_TZ,
+  hour12: false,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit'
+});
+const scoreParts = (fmt, ms) => {
+  const m = {};
+  fmt.formatToParts(new Date(ms)).forEach(x => {
+    m[x.type] = x.value;
+  });
+  return m;
+};
+// The Central calendar day an instant falls on, as YYYY-MM-DD.
+const scoreYmd = ms => {
+  const m = scoreParts(SCORE_DAY_FMT, ms);
+  return m.year + '-' + m.month + '-' + m.day;
+};
+const ymdAdd = (ymd, n) => {
+  const d = new Date(ymd + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const ymdMonday = ymd => ymdAdd(ymd, -((new Date(ymd + 'T00:00:00Z').getUTCDay() + 6) % 7));
+// The instant it is `hour`:00 on `ymd` in Central, daylight saving included.
+const scoreAt = (ymd, hour) => {
+  const off = ms => {
+    const m = scoreParts(SCORE_CLOCK_FMT, ms);
+    return Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour % 24, +m.minute, +m.second) - ms;
+  };
+  const naive = Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, +ymd.slice(8, 10), hour);
+  return naive - off(naive - off(naive));
+};
+// The moment a week (named by its Monday) is counted: the next Monday at
+// noon, or now while that is still ahead.
+const scoreCountMs = (monday, nowMs) => Math.min(scoreAt(ymdAdd(monday, 7), 12), nowMs);
+// Where one task stood at the moment its week was counted.
+function scoreBucket(t, countMs) {
+  if (t.status === 'cancelled') return 'cancelled';
+  if (t.status === 'done') {
+    const at = t.completed_at ? Date.parse(t.completed_at) : NaN;
+    // Done with no finish time on record is taken at its word.
+    if (isNaN(at) || at <= countMs) return 'done';
+  }
+  return !t.due || t.due >= scoreYmd(countMs) ? 'on_track' : 'overdue';
+}
+const scorePct = (done, overdue) => done + overdue ? Math.round(100 * done / (done + overdue)) + '%' : '';
+function AcctScoreTab({
+  p,
+  dark,
+  wide
+}) {
+  const bord = dark ? '#152545' : '#E4DFD4',
+    ink = dark ? '#fff' : '#001A4A';
+  const sub = dark ? 'rgba(255,255,255,0.5)' : '#6B6B6B',
+    gold = dark ? '#C9A45A' : '#AD832F';
+  const red = '#C0392B',
+    green = '#0F6E56';
+  const J = C.fontSans;
+  const [data, setData] = useState(null); // { tasklists, tasks }, null while loading
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [reload, setReload] = useState(0);
+  // Opens on LAST week: that is the one Monday's count scores.
+  const [offset, setOffset] = useState(1);
+  const [open, setOpen] = useState({
+    overdue: true
+  });
+
+  // Zoho hands its error back as an object ({ code, message }), and an
+  // object put on screen throws and blanks the whole page. Words only.
+  const errText = e => typeof e === 'string' ? e : e && (e.message || e.code) ? String(e.message || e.code) : 'Could not read Zoho.';
+  useEffect(() => {
+    let live = true;
+    setBusy(true);
+    setErr(null);
+    callZohoProjects({
+      action: 'score_tasks',
+      project_id: p.zoho_project_id
+    }).then(r => {
+      if (!live) return;
+      if (!r.ok) setErr('Could not read Zoho: ' + errText(r.data && r.data.error));else setData({
+        tasklists: r.data.tasklists || [],
+        tasks: r.data.tasks || []
+      });
+    }).catch(e => {
+      if (live) setErr('Could not read Zoho: ' + errText(e));
+    }).finally(() => {
+      if (live) setBusy(false);
+    });
+    return () => {
+      live = false;
+    };
+  }, [p.zoho_project_id, reload]);
+  const nowMs = Date.now();
+  const thisMonday = ymdMonday(scoreYmd(nowMs));
+  const monday = ymdAdd(thisMonday, -7 * offset);
+  const sunday = ymdAdd(monday, 6);
+  const countMs = scoreCountMs(monday, nowMs);
+  const counted = countMs < nowMs;
+  const yearStart = sunday.slice(0, 4) + '-01-01';
+
+  // Rows: Zoho's lists in Zoho's order, then any list a task names that
+  // the lists call did not return, so no task is silently dropped.
+  const isArchive = name => /^archive/i.test(String(name || '').trim());
+  const rows = [];
+  const seen = new Set();
+  const addRow = (id, name) => {
+    if (!id || seen.has(id) || isArchive(name)) return;
+    seen.add(id);
+    rows.push({
+      id,
+      name: String(name || '').split('(')[0].trim() || name
+    });
+  };
+  (data && data.tasklists || []).forEach(l => addRow(l.id, l.name));
+  (data && data.tasks || []).forEach(t => addRow(t.tasklist_id, t.tasklist_name));
+  const rowName = {};
+  rows.forEach(r => {
+    rowName[r.id] = r.name;
+  });
+  const weekOf = t => t.created_at ? ymdMonday(scoreYmd(Date.parse(t.created_at))) : null;
+  const countFor = {};
+  const blank = () => ({
+    on_track: 0,
+    overdue: 0,
+    done: 0,
+    cancelled: 0,
+    ytdDone: 0,
+    ytdOverdue: 0
+  });
+  const stat = {};
+  rows.forEach(r => {
+    stat[r.id] = blank();
+  });
+  const weekTasks = [];
+  let firstWeek = thisMonday;
+  (data && data.tasks || []).forEach(t => {
+    if (!stat[t.tasklist_id]) return;
+    const w = weekOf(t);
+    if (!w) return;
+    if (w < firstWeek) firstWeek = w;
+    if (w > monday) return;
+    const s = stat[t.tasklist_id];
+    if (countFor[w] == null) countFor[w] = scoreCountMs(w, nowMs);
+    const b = scoreBucket(t, countFor[w]);
+    if (w === monday) {
+      s[b]++;
+      weekTasks.push({
+        ...t,
+        _b: b
+      });
+    }
+    // By the task's WEEK: the week holding Jan 1 belongs to the new year
+    // whole, so its Dec 29-31 tasks count in that year's YTD like the rest.
+    if (ymdAdd(w, 6) >= yearStart) {
+      if (b === 'done') s.ytdDone++;else if (b === 'overdue') s.ytdOverdue++;
+    }
+  });
+  const total = rows.reduce((a, r) => {
+    const s = stat[r.id];
+    Object.keys(a).forEach(k => {
+      a[k] += s[k];
+    });
+    return a;
+  }, blank());
+  const maxOffset = Math.max(1, Math.round((Date.parse(thisMonday) - Date.parse(firstWeek)) / (7 * 86400000)));
+  const dayLabel = (ymd, withMonth) => new Date(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, +ymd.slice(8, 10)).toLocaleDateString('en-US', withMonth === false ? {
+    day: 'numeric'
+  } : {
+    month: 'short',
+    day: 'numeric'
+  });
+  const weekLabel = dayLabel(monday) + ' to ' + dayLabel(sunday, monday.slice(5, 7) !== sunday.slice(5, 7));
+  const countDay = new Date(scoreAt(ymdAdd(monday, 7), 12)).toLocaleDateString('en-US', {
+    timeZone: SCORE_TZ,
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric'
+  });
+  const doneLabel = iso => new Date(iso).toLocaleDateString('en-US', {
+    timeZone: SCORE_TZ,
+    month: 'short',
+    day: 'numeric'
+  });
+  const th = {
+    fontSize: 10.5,
+    letterSpacing: '0.12em',
+    textTransform: 'uppercase',
+    fontWeight: 500,
+    color: sub,
+    fontFamily: J
+  };
+  const numCell = {
+    width: 80,
+    flexShrink: 0,
+    textAlign: 'right',
+    fontFamily: J,
+    fontSize: 14
+  };
+  const navBtn = (icon, on, off) => /*#__PURE__*/React.createElement("i", {
+    className: `ti ti-${icon}`,
+    onClick: off ? undefined : on,
+    style: {
+      fontSize: 16,
+      color: gold,
+      cursor: off ? 'default' : 'pointer',
+      padding: '2px 4px',
+      opacity: off ? 0.3 : 1
+    }
+  });
+  // Blank, not zero, for nothing to count: the sheet this replaces reads the same way.
+  const n = v => v || '';
+  const line = (label, s, strong) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '10px 10px',
+      borderBottom: `1px solid ${bord}`,
+      fontWeight: strong ? 600 : 400,
+      background: strong ? dark ? 'rgba(201,164,90,.08)' : '#F7F4EE' : 'transparent'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      minWidth: 90,
+      fontFamily: J,
+      fontSize: 14,
+      color: ink,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap'
+    }
+  }, label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      color: ink
+    }
+  }, n(s.on_track + s.overdue + s.done)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      color: ink
+    }
+  }, n(s.on_track)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      color: s.overdue ? red : sub
+    }
+  }, n(s.overdue)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      color: s.done ? green : sub
+    }
+  }, n(s.done)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      color: ink
+    }
+  }, scorePct(s.done, s.overdue)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...numCell,
+      color: sub
+    }
+  }, scorePct(s.ytdDone, s.ytdOverdue)));
+  const SECTIONS = [['overdue', 'Overdue', red], ['on_track', 'On Track', ink], ['done', 'Completed', green], ['cancelled', 'Cancelled, not counted', sub]];
+  const rowIdx = {};
+  rows.forEach((r, i) => {
+    rowIdx[r.id] = i;
+  });
+  const byRowThenDue = (a, b) => rowIdx[a.tasklist_id] - rowIdx[b.tasklist_id] || String(a.due || '9999').localeCompare(String(b.due || '9999')) || String(a.title).localeCompare(String(b.title));
+  const whenText = t => {
+    const due = t.due ? 'Due ' + dayLabel(t.due) : 'No date';
+    if (t._b === 'done') return t.completed_at ? 'Done ' + doneLabel(t.completed_at) : 'Done';
+    // Finished after the count: the week keeps it as it stood, the line says what happened since.
+    if (t.status === 'done') return due + ', done ' + (t.completed_at ? doneLabel(t.completed_at) : 'later');
+    return due;
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto',
+      padding: wide ? '14px 20px 28px' : '12px 14px 24px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      flexWrap: 'wrap',
+      marginBottom: 4
+    }
+  }, navBtn('chevron-left', () => setOffset(o => Math.min(maxOffset, o + 1)), offset >= maxOffset), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: J,
+      fontSize: 14,
+      fontWeight: 600,
+      color: ink,
+      minWidth: 120,
+      textAlign: 'center'
+    }
+  }, weekLabel), navBtn('chevron-right', () => setOffset(o => Math.max(0, o - 1)), offset <= 0), offset !== 1 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOffset(1),
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      color: gold,
+      background: 'none',
+      border: `1px solid ${bord}`,
+      borderRadius: 14,
+      padding: '3px 10px',
+      cursor: 'pointer'
+    }
+  }, "Last week"), offset !== 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOffset(0),
+    style: {
+      fontFamily: J,
+      fontSize: 12,
+      color: gold,
+      background: 'none',
+      border: `1px solid ${bord}`,
+      borderRadius: 14,
+      padding: '3px 10px',
+      cursor: 'pointer'
+    }
+  }, "This week"), /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-refresh",
+    title: "Read Zoho again",
+    onClick: () => {
+      if (!busy) setReload(x => x + 1);
+    },
+    style: {
+      fontSize: 15,
+      color: sub,
+      cursor: busy ? 'default' : 'pointer',
+      marginLeft: 'auto',
+      opacity: busy ? 0.4 : 1
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 11.5,
+      color: sub,
+      marginBottom: 12
+    }
+  }, counted ? 'Counted ' + countDay + ', 12 PM Central' : 'Still running. Counted ' + countDay + ', 12 PM Central'), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 12.5,
+      color: red,
+      marginBottom: 12
+    }
+  }, err), data === null ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 13,
+      color: sub,
+      padding: 12
+    }
+  }, err ? '' : 'Reading Zoho…') : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      minWidth: 580
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '0 10px 8px',
+      borderBottom: `1px solid ${bord}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      flex: 1,
+      minWidth: 90
+    }
+  }, "Accountability"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "# of Tasks"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "On Track"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "Overdue"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "Completed"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "Completion %"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...th,
+      ...numCell
+    }
+  }, "YTD")), rows.map(r => /*#__PURE__*/React.createElement(React.Fragment, {
+    key: r.id
+  }, line(r.name, stat[r.id]))), line('Total', total, true))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 22
+    }
+  }, !weekTasks.length && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: J,
+      fontSize: 13,
+      color: sub
+    }
+  }, "Nothing was created in Zoho that week."), SECTIONS.map(([b, label, color]) => {
+    const items = weekTasks.filter(t => t._b === b).sort(byRowThenDue);
+    if (!items.length) return null;
+    const on = !!open[b];
+    return /*#__PURE__*/React.createElement("div", {
+      key: b,
+      style: {
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      onClick: () => setOpen(o => ({
+        ...o,
+        [b]: !o[b]
+      })),
+      role: "button",
+      tabIndex: 0,
+      onKeyDown: e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          setOpen(o => ({
+            ...o,
+            [b]: !o[b]
+          }));
+        }
+      },
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        cursor: 'pointer',
+        marginBottom: 6,
+        userSelect: 'none'
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: 'ti ti-chevron-' + (on ? 'down' : 'right'),
+      style: {
+        fontSize: 13,
+        color: sub
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: '0.66rem',
+        fontWeight: 700,
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        color,
+        fontFamily: J
+      }
+    }, label, " \xB7 ", items.length)), on && items.map(t => /*#__PURE__*/React.createElement("div", {
+      key: t.id,
+      style: {
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 10,
+        padding: '6px 0 6px 19px',
+        borderBottom: `1px solid ${bord}`
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 76,
+        flexShrink: 0,
+        fontFamily: J,
+        fontSize: 12,
+        color: sub,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      }
+    }, rowName[t.tasklist_id]), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        fontFamily: J,
+        fontSize: 13
+      }
+    }, t.url ? /*#__PURE__*/React.createElement("a", {
+      href: t.url,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      title: "Open in Zoho",
+      style: {
+        color: ink,
+        textDecoration: 'none'
+      }
+    }, t.title, " ", /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-external-link",
+      style: {
+        fontSize: 11,
+        color: gold
+      }
+    })) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: ink
+      }
+    }, t.title)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flexShrink: 0,
+        fontFamily: J,
+        fontSize: 11.5,
+        color: b === 'overdue' ? red : b === 'done' ? green : sub,
+        textAlign: 'right'
+      }
+    }, whenText(t)))));
+  }))));
 }
 
 // ── Accountability ─────────────────────────────────────────────────────

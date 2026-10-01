@@ -380,13 +380,14 @@ function recurringScheduleLabel(evs: any[]): string {
   if (names.length === 2) return `Every ${names[0]} & ${names[1]}`;
   return `Every ${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}`;
 }
-function recurringTableHtml(recurringGroups: Map<string, any[]>): string {
+function recurringTableHtml(recurringGroups: Map<string, any[]>, labelsById: Map<string, string>): string {
   if (!recurringGroups.size) return "";
-  const rows = Array.from(recurringGroups.values()).map((evs) => {
+  const rows = Array.from(recurringGroups.entries()).map(([seriesId, evs]) => {
     const first = evs[0];
+    const schedule = labelsById.get(seriesId) || recurringScheduleLabel(evs);
     return `<tr>
       <td style="padding:8px 12px 8px 0;border-bottom:1px solid #EDECE7;font-weight:500;">${escapeHtml(first.summary)}</td>
-      <td style="padding:8px 12px 8px 0;border-bottom:1px solid #EDECE7;color:#5f6368;white-space:nowrap;">${escapeHtml(recurringScheduleLabel(evs))}</td>
+      <td style="padding:8px 12px 8px 0;border-bottom:1px solid #EDECE7;color:#5f6368;white-space:nowrap;">${escapeHtml(schedule)}</td>
       <td style="padding:8px 0 8px;border-bottom:1px solid #EDECE7;color:#5f6368;white-space:nowrap;">${escapeHtml(timeLabel(first.start, first.end, first.allDay))}</td>
     </tr>`;
   }).join("");
@@ -394,13 +395,92 @@ function recurringTableHtml(recurringGroups: Map<string, any[]>): string {
     <p style="margin:0 0 8px;font-weight:600;color:#001A4A;">Recurring</p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 28px;">${rows}</table>`;
 }
-function recurringTableText(recurringGroups: Map<string, any[]>): string {
+function recurringTableText(recurringGroups: Map<string, any[]>, labelsById: Map<string, string>): string {
   if (!recurringGroups.size) return "";
-  const lines = Array.from(recurringGroups.values()).map((evs) => {
+  const lines = Array.from(recurringGroups.entries()).map(([seriesId, evs]) => {
     const first = evs[0];
-    return `${first.summary} — ${recurringScheduleLabel(evs)}, ${timeLabel(first.start, first.end, first.allDay)}`;
+    const schedule = labelsById.get(seriesId) || recurringScheduleLabel(evs);
+    return `${first.summary} — ${schedule}, ${timeLabel(first.start, first.end, first.allDay)}`;
   });
   return `Recurring\n${lines.join("\n")}\n\n`;
+}
+
+// ── Real cadence over a guess — recurringScheduleLabel above infers "Every
+// <weekday>" purely from which days the occurrences THAT LANDED IN THIS
+// EMAIL'S WINDOW fell on, which is wrong for anything that doesn't recur
+// weekly: a monthly "End of Month" meeting only ever shows one occurrence
+// in any single week/month window, so it was printing "Every Thursday" for
+// a meeting that happens once a month (caught by Symon on the live Oct 5-11
+// email, 2026-10-02). Fetching the series' actual RRULE from the master
+// event and parsing it gives the real cadence; recurringScheduleLabel stays
+// as the fallback for when that fetch fails or the rule can't be parsed. ──
+const ORDINALS: Record<string, string> = { "1": "1st", "2": "2nd", "3": "3rd", "4": "4th", "5": "5th", "-1": "last" };
+const BYDAY_NAMES: Record<string, string> = { SU: "Sunday", MO: "Monday", TU: "Tuesday", WE: "Wednesday", TH: "Thursday", FR: "Friday", SA: "Saturday" };
+function joinDayList(items: string[]): string {
+  if (items.length <= 1) return items[0] || "";
+  if (items.length === 2) return `${items[0]} & ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} & ${items[items.length - 1]}`;
+}
+async function fetchEventRecurrence(eventId: string): Promise<string[] | null> {
+  try {
+    const token = await serviceAccountToken();
+    const url = "https://www.googleapis.com/calendar/v3/calendars/" + encodeURIComponent(TEAM_CALENDAR_ID) + "/events/" + encodeURIComponent(eventId);
+    const res = await fetch(url, { headers: { Authorization: "Bearer " + token } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return Array.isArray(data.recurrence) ? (data.recurrence as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+function parseRruleLabel(recurrence: string[] | null): string | null {
+  if (!recurrence) return null;
+  const rrule = recurrence.find((r) => r.toUpperCase().startsWith("RRULE:"));
+  if (!rrule) return null;
+  const parts: Record<string, string> = {};
+  for (const kv of rrule.slice(6).split(";")) {
+    const [k, v] = kv.split("=");
+    if (k && v) parts[k.toUpperCase()] = v;
+  }
+  const freq = parts.FREQ;
+  const interval = Number(parts.INTERVAL || "1");
+  if (freq === "WEEKLY") {
+    const days = (parts.BYDAY || "").split(",").filter(Boolean).map((d) => BYDAY_NAMES[d] || d);
+    const dayList = days.length ? joinDayList(days) : "";
+    if (interval > 1) return dayList ? `Every ${interval} weeks on ${dayList}` : `Every ${interval} weeks`;
+    return dayList ? `Every ${dayList}` : "Weekly";
+  }
+  if (freq === "MONTHLY") {
+    if (parts.BYDAY) {
+      const entries = parts.BYDAY.split(",").filter(Boolean).map((token) => {
+        const m = token.match(/^(-?\d+)([A-Z]{2})$/);
+        if (!m) return BYDAY_NAMES[token] || token;
+        const [, ord, code] = m;
+        return `${ORDINALS[ord] || ord + "th"} ${BYDAY_NAMES[code] || code}`;
+      });
+      return `Monthly, ${joinDayList(entries)}`;
+    }
+    if (parts.BYMONTHDAY) {
+      return parts.BYMONTHDAY === "-1" ? "Monthly, last day" : `Monthly, day ${parts.BYMONTHDAY}`;
+    }
+    return interval > 1 ? `Every ${interval} months` : "Monthly";
+  }
+  if (freq === "DAILY") {
+    const byday = (parts.BYDAY || "").split(",").filter(Boolean);
+    const weekdays = ["MO", "TU", "WE", "TH", "FR"];
+    if (byday.length === 5 && weekdays.every((d) => byday.includes(d))) return "Weekdays";
+    return interval > 1 ? `Every ${interval} days` : "Daily";
+  }
+  if (freq === "YEARLY") return interval > 1 ? `Every ${interval} years` : "Yearly";
+  return null;
+}
+async function resolveRecurrenceLabels(recurringGroups: Map<string, any[]>): Promise<Map<string, string>> {
+  const labels = new Map<string, string>();
+  await Promise.all(Array.from(recurringGroups.keys()).map(async (seriesId) => {
+    const label = parseRruleLabel(await fetchEventRecurrence(seriesId));
+    if (label) labels.set(seriesId, label);
+  }));
+  return labels;
 }
 
 // ── Navy Edge shell — identical header/footer/logo as tmg-notify; only the
@@ -481,12 +561,12 @@ function rsvpButtonsHtml(eventId: string, current?: string): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;"><tr>${cells}</tr></table>`;
 }
 
-function buildBodyHtml(events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>): string {
+function buildBodyHtml(events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>, labelsById: Map<string, string>): string {
   if (!events.length) {
     return `<p style="margin:0;color:#5f6368;">No events on the calendar for this period.</p>`;
   }
   const { recurringGroups, oneOff } = partitionEvents(events);
-  const recurTable = recurringTableHtml(recurringGroups);
+  const recurTable = recurringTableHtml(recurringGroups, labelsById);
   if (!oneOff.length) {
     return recurTable || `<p style="margin:0;color:#5f6368;">No events on the calendar for this period.</p>`;
   }
@@ -517,10 +597,10 @@ function buildBodyHtml(events: any[], tallies: Record<string, Record<string, num
     return heading + rows;
   }).join("");
 }
-function buildBodyText(events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>): string {
+function buildBodyText(events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>, labelsById: Map<string, string>): string {
   if (!events.length) return "No events on the calendar for this period.";
   const { recurringGroups, oneOff } = partitionEvents(events);
-  const recurText = recurringTableText(recurringGroups);
+  const recurText = recurringTableText(recurringGroups, labelsById);
   if (!oneOff.length) return (recurText || "No events on the calendar for this period.").trim();
   return recurText + oneOff.map((e) => {
     const t = tallyLine(tallies[e.id]);
@@ -569,14 +649,14 @@ async function activeRecipients(sb: any): Promise<Array<{ id: string; email: str
 // broadcast identical to everyone is no longer possible once the buttons
 // reflect "your" status, so send_* now emails each recipient individually
 // (see below), all built from this ONE shared events+rows fetch.
-function renderEmail(range: { dateLine: string }, events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>) {
+function renderEmail(range: { dateLine: string }, events: any[], tallies: Record<string, Record<string, number>>, ownResponses: Record<string, string>, participantsByEvent: Record<string, string[]>, labelsById: Map<string, string>) {
   const titleBlock = `
     <p style="margin:0 0 24px;">
       <span style="display:block;font-size:20px;font-weight:600;color:#001A4A;">Team Calendar Summary</span>
       <span style="display:block;font-size:13px;color:#7A6A48;margin-top:4px;">${escapeHtml(range.dateLine)}</span>
     </p>`;
-  const html = shellHtml("Team Calendar Summary", titleBlock + buildBodyHtml(events, tallies, ownResponses, participantsByEvent));
-  const text = `Team Calendar Summary\n${range.dateLine}\n\n${buildBodyText(events, tallies, ownResponses, participantsByEvent)}`;
+  const html = shellHtml("Team Calendar Summary", titleBlock + buildBodyHtml(events, tallies, ownResponses, participantsByEvent, labelsById));
+  const text = `Team Calendar Summary\n${range.dateLine}\n\n${buildBodyText(events, tallies, ownResponses, participantsByEvent, labelsById)}`;
   const subject = `Team Calendar Summary - ${range.dateLine}`;
   return { html, text, subject };
 }
@@ -622,7 +702,8 @@ Deno.serve(async (req: Request) => {
       const tallies = talliesFromRows(rows);
       const ownResponses = asProfileId ? ownResponsesFromRows(rows, asProfileId) : {};
       const participantsByEvent = await resolveParticipantNames(sb, events);
-      const email = renderEmail(range, events, tallies, ownResponses, participantsByEvent);
+      const labelsById = await resolveRecurrenceLabels(partitionEvents(events).recurringGroups);
+      const email = renderEmail(range, events, tallies, ownResponses, participantsByEvent, labelsById);
       return json({ ok: true, ...email, eventCount: events.length, timeMin: range.timeMin, timeMax: range.timeMax });
     }
 
@@ -647,18 +728,20 @@ Deno.serve(async (req: Request) => {
       const rows = await fetchRsvpRows(sb, events.map((e: any) => e.id));
       const tallies = talliesFromRows(rows);
       const participantsByEvent = await resolveParticipantNames(sb, events);
+      const labelsById = await resolveRecurrenceLabels(partitionEvents(events).recurringGroups);
       const recipients = await activeRecipients(sb);
       if (!recipients.length) return json({ error: "No active recipients found." }, 500);
       // Personalized per recipient (their own RSVP status highlighted) means
       // one shared broadcast is no longer possible — each recipient gets
-      // their own Gmail send, built from the ONE shared events+rows fetch
-      // above so this stays one Team Calendar read, not N.
+      // their own Gmail send, built from the ONE shared events+rows+labels
+      // fetch above so this stays one Team Calendar read (plus one recurrence
+      // lookup per series), not N.
       let sentCount = 0;
       const failures: string[] = [];
       for (const r of recipients) {
         try {
           const ownResponses = ownResponsesFromRows(rows, r.id);
-          const email = renderEmail(range, events, tallies, ownResponses, participantsByEvent);
+          const email = renderEmail(range, events, tallies, ownResponses, participantsByEvent, labelsById);
           await sendGmail([r.email], email.subject, email.html, email.text);
           sentCount++;
         } catch (e) {

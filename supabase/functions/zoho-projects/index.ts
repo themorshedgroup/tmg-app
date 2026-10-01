@@ -522,6 +522,8 @@ function ownersDropped(t: any, sentIds: string[]): string[] {
 // repair_owners' pause between owner writes: 40 writes then take about a
 // minute, which leaves the poll room inside Zoho's 100 calls per 2 minutes.
 const REPAIR_WRITE_GAP_MS = 1500;
+// Owners Zoho may drop in one repair run before it stops (see repair_owners).
+const REPAIR_MAX_DROPS = 3;
 
 // What did not reach Zoho as owner, or null when all of it did. Every cause is
 // named rather than the first one found: a refused owner and an email nobody
@@ -532,7 +534,9 @@ function ownerTrouble(
   const parts: string[] = [];
   if (skipped) parts.push(skipped);
   if (refused) parts.push(`Zoho refused the owner (${refused})`);
-  if (dropped) parts.push(dropped === sent ? "Zoho did not keep the owner it was sent" : `Zoho kept only ${sent - dropped} of the ${sent} owners it was sent`);
+  // Zoho takes the write and quietly leaves out anyone who is not a member
+  // of that Zoho project, so that is the first thing to check.
+  if (dropped) parts.push((dropped === sent ? "Zoho did not keep the owner it was sent" : `Zoho kept only ${sent - dropped} of the ${sent} owners it was sent`) + " (most often because that person is not a member of this project in Zoho)");
   if (missing.length) parts.push(`no Zoho Projects user matches ${missing.join(", ")}`);
   if (unsure.length) parts.push(`Zoho's user list could not be checked for ${unsure.join(", ")} just now`);
   return parts.length ? parts.join("; ") + "." : null;
@@ -1854,8 +1858,12 @@ Deno.serve(async (req) => {
     //   - A task with a TMG edit Zoho has not had yet is skipped until the
     //     sync has sent that edit: this write would bump Zoho's modified time
     //     and make Zoho look like the newer side.
-    //   - Stops at the first owner Zoho does not keep, so a wrong guess about
-    //     the id Zoho wants costs one task, not all of them.
+    //   - An owner Zoho accepts but does not keep is almost always a person
+    //     who is not a member of that Zoho project (Kyle on Accountabilities,
+    //     2026-10-02). That person's other tasks are skipped and the rest
+    //     carry on. After REPAIR_MAX_DROPS such tasks the run stops, since
+    //     that many points at the id itself being wrong; any failed request
+    //     stops it at once.
     if (action === "repair_owners") {
       const projectId = (body.project_id || "").toString().trim();
       const dryRun = body.dry_run !== false;
@@ -1903,8 +1911,9 @@ Deno.serve(async (req) => {
         ? await portalUsersCache(sb, conn, (u: string) => zohoFetch(sb, conn, accessToken, u, {}), portalBase, allEmails, proj.zoho_project_id)
         : {};
       const { missing: unknown, unsure: unchecked } = portalLookup(roster, allEmails);
-      let fixed = 0, writes = 0;
+      let fixed = 0, writes = 0, drops = 0;
       let stopped: string | null = null;
+      const droppedIds = new Set<string>();
       for (const p of plan) {
         const { row, zt, ...item } = p;
         const { ids, missing, unsure } = portalLookup(roster, p.emails);
@@ -1913,6 +1922,10 @@ Deno.serve(async (req) => {
           continue;
         }
         if (dryRun) { results.push({ ...item, result: "would set", ids, missing, unsure }); continue; }
+        if (ids.every((id) => droppedIds.has(id))) {
+          results.push({ ...item, result: "skipped: Zoho dropped this person on an earlier task, so they are probably not a member of this Zoho project; add them there, then run this again", ids });
+          continue;
+        }
         if (writes >= limit) { results.push({ ...item, result: "not this run (limit reached)", ids }); continue; }
         if (writes) await new Promise((res) => setTimeout(res, REPAIR_WRITE_GAP_MS));
         writes++;
@@ -1923,10 +1936,21 @@ Deno.serve(async (req) => {
         });
         const d = await r.json().catch(() => ({}));
         const t = r.ok ? (d.tasks || [])[0] : null;
-        if (!t || ownersDropped(t, ids).length) {
-          stopped = `Zoho did not keep the owner on "${p.title}" (HTTP ${r.status}). Nothing after it was sent.`;
-          results.push({ ...item, result: "not kept", ids, status: r.status, detail: d?.error || null });
+        if (!t) {
+          stopped = `Zoho refused the owner write on "${p.title}" (HTTP ${r.status}). Nothing after it was sent.`;
+          results.push({ ...item, result: "failed", ids, status: r.status, detail: d?.error || null });
           break;
+        }
+        const lost = ownersDropped(t, ids);
+        if (lost.length) {
+          lost.forEach((id) => droppedIds.add(id));
+          drops++;
+          results.push({ ...item, result: "not kept (probably not a member of this Zoho project)", ids, lost });
+          if (drops >= REPAIR_MAX_DROPS) {
+            stopped = `Zoho did not keep the owner on ${drops} tasks, the last "${p.title}". Nothing after it was sent.`;
+            break;
+          }
+          continue;
         }
         fixed++;
         // The owner was the only change, and TMG already holds it. When TMG had
@@ -1941,7 +1965,7 @@ Deno.serve(async (req) => {
       }
       const remaining = results.filter((x) => x.result === "not this run (limit reached)").length;
       return json({
-        ok: !stopped, dry_run: dryRun, unassigned_in_zoho: unassigned.length, planned: plan.length, fixed, remaining,
+        ok: !stopped, dry_run: dryRun, unassigned_in_zoho: unassigned.length, planned: plan.length, fixed, not_kept: drops, remaining,
         ...(stopped ? { stopped } : {}), unknown_emails: unknown, unchecked_emails: unchecked, results,
       }, 200);
     }

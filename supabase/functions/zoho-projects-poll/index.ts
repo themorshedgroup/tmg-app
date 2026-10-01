@@ -710,7 +710,9 @@ function ownerTrouble(
   const parts: string[] = [];
   if (skipped) parts.push(skipped);
   if (refused) parts.push(`Zoho refused the owner (${refused})`);
-  if (dropped) parts.push(dropped === sent ? "Zoho did not keep the owner it was sent" : `Zoho kept only ${sent - dropped} of the ${sent} owners it was sent`);
+  // Zoho takes the write and quietly leaves out anyone who is not a member
+  // of that Zoho project, so that is the first thing to check.
+  if (dropped) parts.push((dropped === sent ? "Zoho did not keep the owner it was sent" : `Zoho kept only ${sent - dropped} of the ${sent} owners it was sent`) + " (most often because that person is not a member of this project in Zoho)");
   if (missing.length) parts.push(`no Zoho Projects user matches ${missing.join(", ")}`);
   if (unsure.length) parts.push(`Zoho's user list could not be checked for ${unsure.join(", ")} just now`);
   return parts.length ? parts.join("; ") + "." : null;

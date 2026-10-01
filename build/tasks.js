@@ -4338,7 +4338,12 @@ const TaskDB = {
       zoho_last_synced_at: null
     }).eq('id', id).is('zoho_task_id', null);
   },
-  async syncToZohoProjects(task, oldTask, user, statusBefore) {
+  // ownersChanged comes only from setPeople, and only when the assignee
+  // list really changed. Owners go to Zoho on a create and on that, never
+  // on an ordinary edit: Zoho replaces its whole owner list with what it
+  // is sent, so re-sending TMG's on every save would undo, the next time
+  // anyone touched the task here, a reassignment made in Zoho.
+  async syncToZohoProjects(task, oldTask, user, statusBefore, ownersChanged) {
     const c = this.client();
     if (!c || !task.project_id) return;
     try {
@@ -4453,6 +4458,10 @@ const TaskDB = {
         // The task itself was created, so its ids are still saved below.
         // Only the status did not stick, and that is worth saying out loud.
         if (data.status_error) await this.addActivity(task.id, 'system', 'Zoho Projects did not take the status change: ' + data.status_error, user);
+        // Same for the owner: a task saved unassigned in Zoho looks exactly
+        // like one saved correctly, so it is said, here and on a
+        // reassignment below.
+        if (data.owner_warning) await this.addActivity(task.id, 'system', data.owner_warning, user);
         // Persist the tasklist Zoho actually filed this under — without
         // this the task shows up under "Other tasks" in TMG's own
         // grouping forever, since the poller only backfills these fields
@@ -4533,8 +4542,12 @@ const TaskDB = {
         payload.status_changed = true;
         any = true;
       }
-      if (assigneeEmails.length) {
+      // owners_changed does for the owner what status_changed does for the
+      // status: zoho-projects ignores assignee_emails without it, which is
+      // what older open tabs send on every save.
+      if (assigneeEmails.length && ownersChanged) {
         payload.assignee_emails = assigneeEmails;
+        payload.owners_changed = true;
         any = true;
       }
       if (!any) return;
@@ -4546,6 +4559,7 @@ const TaskDB = {
         await this.addActivity(task.id, 'system', 'Zoho Projects sync failed — will retry on next poll.', user);
         return;
       }
+      if (data && data.owner_warning) await this.addActivity(task.id, 'system', data.owner_warning, user);
       // Only the sync time is stamped, never Zoho's modified time from the
       // reply: that time also covers any edit made in Zoho since the last
       // poll, and stamping it would mark that edit as already pulled. The
@@ -4832,10 +4846,24 @@ const TaskDB = {
       assignee: me
     } : p;
   },
-  async setPeople(taskId, people, skipZohoSync, statusBefore) {
+  async setPeople(taskId, people, skipZohoSync, statusBefore, assigneesBefore) {
     // { assignee:[ids], assigner:[ids], decision_maker:[ids] }
     const c = this.client();
     if (!c) return;
+    // Who was on it before, so the Zoho push below can tell a real
+    // reassignment from a form save that kept the same people. A form
+    // passes the assignees it opened with: the row as it stands now may
+    // have been changed meanwhile (in Zoho, or another tab), and judging
+    // the form against that would push the form's old owner back.
+    const syncing = 'assignee' in people && !skipZohoSync;
+    const idsKey = ids => [...new Set(ids || [])].sort().join(',');
+    let before = Array.isArray(assigneesBefore) ? idsKey(assigneesBefore) : null;
+    if (syncing && before === null) {
+      const {
+        data: prev
+      } = await c.from('task_people').select('user_id').eq('task_id', taskId).eq('role', 'assignee');
+      before = idsKey((prev || []).map(r => r.user_id));
+    }
     await c.from('task_people').delete().eq('task_id', taskId).in('role', ['assignee', 'assigner', 'decision_maker']);
     const rows = [];
     (people.assignee || []).forEach(uid => rows.push({
@@ -4869,11 +4897,11 @@ const TaskDB = {
     // statusBefore comes only from a form save. That save's one Zoho push
     // is this one, so without it a status changed in the form would never
     // reach Zoho. A bare reassignment leaves it out and sends no status.
-    if ('assignee' in people && !skipZohoSync) {
+    if (syncing) {
       const {
         data: t
       } = await c.from('tasks').select('*').eq('id', taskId).single();
-      if (t) this.syncToZohoProjects(t, null, null, statusBefore);
+      if (t) this.syncToZohoProjects(t, null, null, statusBefore, before !== idsKey(people.assignee));
     }
   },
   // Per-user labels (each person keeps their own on a shared task).
@@ -7141,6 +7169,10 @@ function TaskForm({
   const byRole = r => (t._people || []).filter(p => p.role === r).map(p => p.user_id);
   const [assignees, setAssignees] = useState(t._assignees || byRole('assignee'));
   const [assigners, setAssigners] = useState(t._assigners || byRole('assigner'));
+  // Who the form opened with, for the same reason as statusSeed: only a
+  // change made here may reassign the task in Zoho, never a row that was
+  // refreshed underneath an old form.
+  const [assigneesSeed] = useState(t._assignees || byRole('assignee'));
   const [workingUrl, setWorkingUrl] = useState(t.working_url || '');
   const [emailLink, setEmailLink] = useState(t.email_link || '');
   const [description, setDescription] = useState(t.description || '');
@@ -7343,6 +7375,7 @@ function TaskForm({
         statusSeed,
         is_milestone: isMilestone,
         assignees,
+        assigneesSeed,
         assigners,
         working_url: workingUrl.trim(),
         email_link: emailLink.trim(),
@@ -11556,7 +11589,7 @@ function ProjectsSurface({
       };
       if (!statusChanged) delete edit.status;
       await TaskDB.update(openTask.id, openTask, edit, user, !!known);
-      if (known) await TaskDB.setPeople(openTask.id, people, false, statusChanged ? openTask.status : undefined);
+      if (known) await TaskDB.setPeople(openTask.id, people, false, statusChanged ? openTask.status : undefined, form.assigneesSeed);
       taskId = openTask.id;
     } else if (form.bulkGroup) {
       // Reachable now that this form opens for NEW tasks too: one copy each
@@ -18643,7 +18676,7 @@ function TasksScreen({
       };
       if (!statusChanged) delete edit.status;
       await TaskDB.update(current.id, current, edit, user, !!known);
-      if (known) await TaskDB.setPeople(current.id, people, false, statusChanged ? current.status : undefined);
+      if (known) await TaskDB.setPeople(current.id, people, false, statusChanged ? current.status : undefined, form.assigneesSeed);
       taskId = current.id;
     } else if (form.bulkGroup) {
       // Group assign: one task each. Nothing lands in MY list unless I'm in

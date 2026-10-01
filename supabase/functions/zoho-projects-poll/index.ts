@@ -416,55 +416,304 @@ function completionFor(zt: any, local: any | null): string | null {
   return local && local.status !== "done" ? new Date().toISOString() : null;
 }
 
-// ── Zoho owner ids from TMG emails ────────────────────────────────────────
-// Same shape as zoho-projects' resolveZohoOwnerIds, and deliberately reading
-// the SAME cache column on zoho_projects_connection, so the two functions warm
-// each other rather than each burning a /users/ call. A task pushed without
-// person_responsible lands unassigned in Zoho, which is exactly the useless
-// state the Accountability Dashboard was already in, so this is not optional.
-const PORTAL_USERS_TTL_MS = 6 * 60 * 60 * 1000;
-// The roster itself, email -> Zoho user id. Split out from zohoOwnerIds
-// because the two directions of the sync want it the two different ways round:
-// the push knows a TMG email and needs Zoho's id, the pull gets Zoho's id off
-// a task and needs the email to find the person in TMG. One cache answers
-// both, so adding owners to the pull costs no extra /users/ call.
-async function portalUsersCache(
-  sb: any, conn: any, zFetch: (u: string, i?: RequestInit) => Promise<Response>,
-  portalBase: string, wanted: string[] = [],
-): Promise<Record<string, string>> {
-  let cache = (conn.portal_users_cache || {}) as Record<string, string>;
-  const cachedAt = conn.portal_users_cached_at ? Date.parse(conn.portal_users_cached_at) : 0;
-  const stale = !cachedAt || (Date.now() - cachedAt) > PORTAL_USERS_TTL_MS;
-  if (stale || wanted.some((e) => !cache[e])) {
-    const r = await zFetch(`${portalBase}/users/`);
-    const d = await r.json().catch(() => ({}));
-    if (r.ok) {
-      const fresh: Record<string, string> = {};
-      for (const u of (d.users || d.userlist || [])) {
-        const email = (u.email || "").toLowerCase().trim();
-        const id = u.id_string || (u.id != null ? String(u.id) : "");
-        if (email && id) fresh[email] = id;
-      }
-      cache = fresh;
-      conn.portal_users_cache = fresh;
-      conn.portal_users_cached_at = new Date().toISOString();
-      try {
-        await sb.from("zoho_projects_connection")
-          .update({ portal_users_cache: fresh, portal_users_cached_at: conn.portal_users_cached_at })
-          .eq("refresh_token", conn.refresh_token);
-      } catch (_) { /* cache write is best-effort */ }
+// ── Who is who in the Zoho portal ─────────────────────────────────────────
+// person_responsible takes Zoho's own user ids (zpuid), never emails, so a
+// TMG assignee has to be turned into one. The obvious source is GET /users/,
+// but the OAuth grant behind this connection has no ZohoProjects.users.READ:
+// it answers 6403 "Invalid OAuth scope" and always has. The roster built from
+// it was therefore always empty and every owner TMG sent was dropped without
+// a word, so tasks landed in the right person's list with nobody responsible
+// (2026-10-02: 26 open tasks in Accountabilities alone). Same cure as
+// zoho-crm's harvest fallback: every task already names its owners as
+// {zpuid, name, email}, readable with the task scope the grant does have, so
+// the roster is lifted from those. /users/ is still asked first, so granting
+// the scope one day makes it the source again with no code change.
+// Kept identical in zoho-projects and zoho-projects-poll.
+//
+// The roster lives in zoho_projects_connection.portal_users_cache: TMG email
+// -> zpuid, plus four bookkeeping keys that are never emails, "~miss"
+// ({email: when a complete read last failed to find it}), "~tried" ({email:
+// when a read that was not complete failed to find it}), "~alias" (the emails
+// matched by first name, see portalUsersMap) and "~reading" (a read under way).
+type PortalPerson = { zpuid: string; name: string; email: string };
+// The most task pages one read opens, newest project first. A read is the one
+// place this sync can spend calls in a burst against Zoho's 100 per 2 minutes,
+// and going over locks the shared token out for 30 minutes, which stops the
+// poll and every save in the app. Measured 2026-10-02 over the 30 active
+// projects: nine of the team turned up within 7 projects and Kyle, who owns
+// little in Zoho, only in the 19th, and two projects (Accountabilities with
+// 271 tasks, 1808 Forest Hill with 228) need a second page, so reading
+// everything takes 32 pages and the cap sits just above that. Raise it with the
+// project count: a cap below a whole read means no read is ever complete, so
+// no first-name match is made and a miss rests 30 minutes, not 6 hours. A
+// read is rare (an empty roster, or an email the cache has never seen) and
+// once found a person stays found.
+const HARVEST_MAX_READS = 36;
+// Zoho's largest page, and how many of them one project gets. A project still
+// handing back full pages after that is counted as not wholly seen.
+const HARVEST_PAGE = 200;
+const HARVEST_PAGES_PER_PROJECT = 3;
+// An email a full read could not place is not looked for again for this long.
+// operations@ belongs to nobody in Zoho, and without this every save of a
+// task assigned to it would pay for a whole read.
+const PORTAL_MISS_RETRY_MS = 6 * 60 * 60 * 1000;
+// An email a read looked for and did not find, when that read was not complete
+// enough to say nobody has it (it hit the cap, lost a page, or could not reach
+// Zoho at all), is put off for this long, so a Zoho outage does not turn every
+// save into another read.
+const PORTAL_TRY_RETRY_MS = 30 * 60 * 1000;
+// One read at a time across both functions. A request arriving while another
+// is reading takes the cache as it stands rather than starting a second read.
+const PORTAL_READ_LOCK_MS = 3 * 60 * 1000;
+// Leading words that are never anybody's first name. operations@ is filed in
+// TMG as "The Morshed Group Operations", and "the" must not match a Zoho
+// user called Theo.
+const NOT_A_NAME = new Set(["the", "tmg", "team", "admin", "info", "ops", "operations", "office", "support"]);
+const isEmailKey = (k: string) => k.includes("@") && !k.startsWith("~");
+
+// Everyone the portal shows, and whether that is the whole picture. Only a
+// complete read may conclude "nobody in Zoho has this email" or match anyone
+// by name; a read that stopped as soon as it had what it came for, ran into
+// the cap, or lost a page on the way, has not seen enough to say either.
+async function readPortalPeople(
+  zf: (url: string) => Promise<Response>, portalBase: string,
+  firstProjectId: string, enough: (people: PortalPerson[]) => boolean,
+): Promise<{ people: PortalPerson[]; complete: boolean } | null> {
+  const ur = await zf(`${portalBase}/users/`);
+  const ud = await ur.json().catch(() => ({}));
+  if (ur.ok) {
+    const people = ((ud.users || ud.userlist || []) as any[]).map((u) => ({
+      zpuid: String(u.zpuid || u.id_string || u.id || ""),
+      name: String(u.name || ""),
+      email: String(u.email || "").toLowerCase().trim(),
+    })).filter((p) => p.zpuid);
+    if (people.length) return { people, complete: true };
+  }
+  const found = new Map<string, PortalPerson>();
+  const add = (zpuid: unknown, name: unknown, email: unknown) => {
+    const id = String(zpuid || "");
+    if (!id) return;
+    const was = found.get(id);
+    const e = String(email || "").toLowerCase().trim();
+    // A later sighting fills in what an earlier one lacked, never replaces it.
+    found.set(id, { zpuid: id, name: was?.name || String(name || ""), email: was?.email || e });
+  };
+  // The project the task is going into first: its owners are the likeliest
+  // match, and a hit there ends the read after a single page. Then the most
+  // recently touched projects, which is where the current team's work is.
+  const ids: string[] = firstProjectId ? [firstProjectId] : [];
+  const pr = await zf(`${portalBase}/projects/?index=1&range=100`);
+  const pd = await pr.json().catch(() => ({}));
+  if (pr.ok) {
+    const projects = ((pd.projects || []) as any[]).slice()
+      .sort((a, b) => Number(b.updated_date_long || 0) - Number(a.updated_date_long || 0));
+    for (const p of projects) {
+      const id = String(p.id_string || p.id || "");
+      if (id && !ids.includes(id)) ids.push(id);
+      // Each project's owner rides on the list itself, so costs nothing.
+      add(p.owner_zpuid, p.owner_name, p.owner_email);
     }
   }
-  return cache;
+  let reads = 0, lost = 0, stoppedEarly = false, unread = false;
+  scan: for (const pid of ids) {
+    for (let page = 0; page < HARVEST_PAGES_PER_PROJECT; page++) {
+      if (found.size && enough([...found.values()])) { stoppedEarly = true; break scan; }
+      // Pages were left unread, so the read cannot speak for the whole portal.
+      if (reads >= HARVEST_MAX_READS) { unread = true; break scan; }
+      reads++;
+      const r = await zf(`${portalBase}/projects/${pid}/tasks/?index=${page * HARVEST_PAGE + 1}&range=${HARVEST_PAGE}`);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        lost++;
+        // Zoho saying slow down is the one answer worth stopping for at once.
+        if (r.status === 429) break scan;
+        break;
+      }
+      // A page past the end comes back empty (204), which ends the project.
+      const tasks = (d.tasks || []) as any[];
+      for (const t of tasks) {
+        for (const o of ((t.details?.owners ?? t.owners ?? []) as any[])) add(o.zpuid, o.full_name || o.name, o.email);
+      }
+      if (tasks.length < HARVEST_PAGE) break;
+      if (page === HARVEST_PAGES_PER_PROJECT - 1) unread = true;
+    }
+  }
+  // null only when Zoho could not be read at all, so the caller keeps what it
+  // already had rather than storing an empty roster as the truth.
+  if (!pr.ok && reads === lost && !found.size) return null;
+  return { people: [...found.values()], complete: pr.ok && !stoppedEarly && !unread && lost === 0 };
 }
+
+// TMG email -> zpuid. Matched on email first. A TMG person whose email Zoho
+// does not know (Symon is manager@ in TMG, symon@ in Zoho) is matched on first
+// name, only from a complete read, and only when nothing could be confused:
+// the same whole word, a real first name, exactly one person carrying it on
+// each side, and that Zoho user nobody else's in TMG by email. Filing one
+// person's task under another's name is worse than leaving it unassigned.
+function portalUsersMap(
+  people: PortalPerson[], roster: any[], everyone: any[], aliasing: boolean,
+): { map: Record<string, string>; aliases: string[] } {
+  const map: Record<string, string> = {};
+  const aliases: string[] = [];
+  for (const p of people) if (p.email && p.zpuid) map[p.email] = p.zpuid;
+  if (!aliasing) return { map, aliases };
+  const tmgEmails = new Set(everyone.map((r) => String(r.email || "").toLowerCase().trim()).filter(Boolean));
+  for (const r of roster) {
+    const email = String(r.email || "").toLowerCase().trim();
+    if (!email || map[email]) continue;
+    const w = leadWord(r.first_name);
+    if (w.length < 3 || NOT_A_NAME.has(w)) continue;
+    if (everyone.filter((x) => leadWord(x.first_name) === w).length !== 1) continue;
+    const hits = [...new Set(people.filter((p) => leadWord(p.name) === w).map((p) => p.zpuid))];
+    if (hits.length !== 1) continue;
+    if (people.some((p) => p.zpuid === hits[0] && tmgEmails.has(p.email))) continue;
+    map[email] = hits[0];
+    aliases.push(email);
+  }
+  return { map, aliases };
+}
+
+// The roster, read from Zoho only when it lacks an email asked for that is not
+// resting (see ~miss and ~tried above). Merged rather than replaced: a read
+// that stops early only sees the people it was looking for, and a Zoho user
+// id never changes. Re-read from the database before and after the Zoho read,
+// because this request's copy of the row can be minutes old (the poll loads
+// it once per run) and another request may have added people meanwhile. A
+// failed read keeps the old cache: a missing owner is recoverable, a blocked
+// task write is not.
+async function portalUsersCache(
+  sb: any, conn: any, zf: (url: string) => Promise<Response>, portalBase: string,
+  wanted: string[] = [], firstProjectId = "",
+): Promise<Record<string, any>> {
+  const now = Date.now();
+  const lately = (c: Record<string, any>, key: string, e: string, ms: number) => {
+    const at = Date.parse((c[key] || {})[e] || "");
+    return !isNaN(at) && now - at < ms;
+  };
+  const resting = (c: Record<string, any>, e: string) =>
+    lately(c, "~miss", e, PORTAL_MISS_RETRY_MS) || lately(c, "~tried", e, PORTAL_TRY_RETRY_MS);
+  const hasRoster = (c: Record<string, any>) => Object.keys(c).some(isEmailKey);
+  const todo = (c: Record<string, any>, emails: string[]) => emails.filter((e) => e && !c[e] && !resting(c, e));
+  const settled = (c: Record<string, any>) => hasRoster(c) && !todo(c, wanted).length;
+  const reload = async (): Promise<Record<string, any> | null> => {
+    const { data, error } = await sb.from("zoho_projects_connection")
+      .select("portal_users_cache").eq("refresh_token", conn.refresh_token).maybeSingle();
+    return error || !data ? null : (data.portal_users_cache || {});
+  };
+  const save = async (c: Record<string, any>) => {
+    conn.portal_users_cache = c;
+    conn.portal_users_cached_at = new Date().toISOString();
+    try {
+      await sb.from("zoho_projects_connection")
+        .update({ portal_users_cache: c, portal_users_cached_at: conn.portal_users_cached_at })
+        .eq("refresh_token", conn.refresh_token);
+    } catch (_) { /* cache write is best-effort */ }
+  };
+
+  let cache = (conn.portal_users_cache || {}) as Record<string, any>;
+  if (settled(cache)) return cache;
+  cache = (await reload()) ?? cache;
+  conn.portal_users_cache = cache;
+  if (settled(cache)) return cache;
+  const reading = Date.parse(cache["~reading"] || "");
+  if (!isNaN(reading) && now - reading < PORTAL_READ_LOCK_MS) return cache;
+
+  const { data: profs } = await sb.from("profiles").select("email,first_name,status");
+  const everyone = (profs || []) as any[];
+  const roster = everyone.filter((p) => !p.status || p.status === "active");
+  // An empty roster is filled for the whole team in one go; after that a read
+  // only goes looking for the emails it was asked about. Nothing left that is
+  // worth a read means no read.
+  const goal = todo(cache, hasRoster(cache)
+    ? wanted
+    : [...new Set([...wanted, ...roster.map((p) => String(p.email || "").toLowerCase().trim())])]);
+  if (!goal.length) return cache;
+  await save({ ...cache, "~reading": new Date().toISOString() });
+  const result = await readPortalPeople(zf, portalBase, firstProjectId, (ps) => {
+    const { map } = portalUsersMap(ps, roster, everyone, false);
+    return goal.every((e) => map[e]);
+  });
+
+  const next: Record<string, any> = { ...((await reload()) ?? cache) };
+  delete next["~reading"];
+  if (result) {
+    const { map, aliases } = portalUsersMap(result.people, roster, everyone, result.complete);
+    if (result.complete) {
+      // A name match a full read no longer supports is withdrawn.
+      for (const e of ((next["~alias"] || []) as string[])) if (!aliases.includes(e)) delete next[e];
+      next["~alias"] = aliases;
+    }
+    Object.assign(next, map);
+  }
+  // Every email this read went for and did not find rests: for hours when the
+  // read saw everything, for half an hour when it did not.
+  const stamp = new Date().toISOString();
+  const miss: Record<string, string> = { ...(next["~miss"] || {}) };
+  const tried: Record<string, string> = { ...(next["~tried"] || {}) };
+  for (const e of goal) if (!next[e]) (result?.complete ? miss : tried)[e] = stamp;
+  for (const e of Object.keys(miss)) if (next[e]) delete miss[e];
+  // Older entries go once found or once rested long enough.
+  for (const e of Object.keys(tried)) {
+    if (tried[e] === stamp) continue;
+    if (next[e] || !lately(next, "~tried", e, PORTAL_TRY_RETRY_MS)) delete tried[e];
+  }
+  next["~miss"] = miss;
+  next["~tried"] = tried;
+  await save(next);
+  return next;
+}
+
+// What the roster says about each email: a Zoho id, nobody in Zoho (a complete
+// read looked lately and found no one), or not known yet (a read is under
+// way, could not finish, or was put off). The last two need different words:
+// one is fixed in Zoho, the other is only a matter of time. A miss older than
+// PORTAL_MISS_RETRY_MS no longer counts, since the person may have been added
+// to Zoho since.
+function portalLookup(cache: Record<string, any>, emails: string[]): { ids: string[]; missing: string[]; unsure: string[] } {
+  const now = Date.now();
+  const ids: string[] = [], missing: string[] = [], unsure: string[] = [];
+  for (const e of emails) {
+    if (cache[e]) ids.push(String(cache[e]));
+    else if (now - Date.parse((cache["~miss"] || {})[e] || "") < PORTAL_MISS_RETRY_MS) missing.push(e);
+    else unsure.push(e);
+  }
+  return { ids, missing, unsure };
+}
+
+// The push knows TMG emails and needs Zoho's ids. Same answer as
+// zoho-projects' resolveZohoOwnerIds, from the same cache.
 async function zohoOwnerIds(
   sb: any, conn: any, zFetch: (u: string, i?: RequestInit) => Promise<Response>,
-  portalBase: string, emails: string[],
-): Promise<string[]> {
-  const wanted = emails.map((e) => (e || "").toLowerCase().trim()).filter(Boolean);
-  if (!wanted.length) return [];
-  const cache = await portalUsersCache(sb, conn, zFetch, portalBase, wanted);
-  return wanted.map((e) => cache[e]).filter(Boolean);
+  portalBase: string, emails: string[], projectId = "",
+): Promise<{ ids: string[]; missing: string[]; unsure: string[] }> {
+  const wanted = [...new Set(emails.map((e) => (e || "").toLowerCase().trim()).filter(Boolean))];
+  if (!wanted.length) return { ids: [], missing: [], unsure: [] };
+  const cache = await portalUsersCache(sb, conn, (u: string) => zFetch(u), portalBase, wanted, projectId);
+  return portalLookup(cache, wanted);
+}
+
+// The owners Zoho was sent but did not keep. A write Zoho accepts can still
+// come back without them, and that looks exactly like success unless the task
+// it hands back is read.
+function ownersDropped(t: any, sentIds: string[]): string[] {
+  const got = new Set(((t?.details?.owners ?? t?.owners ?? []) as any[])
+    .flatMap((o) => [o.zpuid, o.id_string, o.id].filter((v) => v != null).map(String)));
+  return sentIds.filter((id) => !got.has(id));
+}
+
+// What did not reach Zoho as owner, or null when all of it did. Every cause is
+// named rather than the first one found: a refused owner and an email nobody
+// in Zoho has are fixed in different places.
+function ownerTrouble(
+  missing: string[], refused: string, dropped: number, sent: number, skipped = "", unsure: string[] = [],
+): string | null {
+  const parts: string[] = [];
+  if (skipped) parts.push(skipped);
+  if (refused) parts.push(`Zoho refused the owner (${refused})`);
+  if (dropped) parts.push(dropped === sent ? "Zoho did not keep the owner it was sent" : `Zoho kept only ${sent - dropped} of the ${sent} owners it was sent`);
+  if (missing.length) parts.push(`no Zoho Projects user matches ${missing.join(", ")}`);
+  if (unsure.length) parts.push(`Zoho's user list could not be checked for ${unsure.join(", ")} just now`);
+  return parts.length ? parts.join("; ") + "." : null;
 }
 
 // ── Which tasklist belongs to which person ────────────────────────────────
@@ -508,7 +757,7 @@ function ownerResolver(
     if (!emailForZohoId) {
       const cache = await portalUsersCache(sb, conn, zFetch, portalBase);
       emailForZohoId = {};
-      for (const [email, id] of Object.entries(cache)) emailForZohoId[id] = email;
+      for (const [email, id] of Object.entries(cache)) if (isEmailKey(email)) emailForZohoId[String(id)] = email;
     }
     return emailForZohoId!;
   };
@@ -854,6 +1103,10 @@ async function createInFlight(sb: any, projectId: string, zohoTaskId: string): P
 // per project so one busy project cannot starve the others.
 const MAX_PUSH_PER_PROJECT = 10;
 const MAX_PUSH_PER_RUN = 40;
+// How long a new task may wait for an owner Zoho's user list could not yet
+// answer for (see the push below): long enough for a busy roster read to
+// finish, or for one put off by PORTAL_TRY_RETRY_MS to run again.
+const OWNER_WAIT_MS = 35 * 60 * 1000;
 // The conflict branch below can also write to Zoho, one call per task, and
 // nothing used to cap it. With the change detector repaired the first
 // catch-up run sees thousands of tasks at once, so it needs the same kind of
@@ -1279,7 +1532,7 @@ Deno.serve(async (req) => {
           // rows are cheap; Zoho calls are what the cap protects, and the loop
           // still stops at `room` of those.
           const { data: unsent } = await sb.from("tasks")
-            .select("id,title,description,due_at,priority,status")
+            .select("id,title,description,due_at,priority,status,created_at")
             .eq("project_id", proj.id)
             .is("zoho_task_id", null)
             .not("status", "in", "(done,cancelled)")   // closed before it ever reached Zoho: history, not work
@@ -1344,11 +1597,20 @@ Deno.serve(async (req) => {
             }
 
             // Deliberately after the routing decision, not before it. This is
-            // the one call in the push path that can hit Zoho per task: an
-            // email belonging to no Zoho user is never in the cache, so it
-            // re-asks every time. Asking only once the task is definitely
-            // being created means a skipped task costs nothing at all.
-            const ownerIds = await zohoOwnerIds(sb, conn, zFetch, portalBase, emails);
+            // the one place in the push path that can read Zoho for owners:
+            // an email the cache lacks starts a roster read (portalUsersCache),
+            // at most HARVEST_MAX_READS + 2 calls, and an email a full read
+            // could not place is not looked for again for 6 hours (half an
+            // hour after a read that could not finish). Asking only
+            // once the task is definitely being created means a skipped task
+            // costs nothing at all.
+            const owners = await zohoOwnerIds(sb, conn, zFetch, portalBase, emails, proj.zoho_project_id);
+            // Not yet known is not the same as nobody: a roster read under way
+            // or put off answers within minutes. A young task waits a tick or
+            // two for it rather than going over unassigned for good; past
+            // OWNER_WAIT_MS it goes anyway, and the note says why.
+            if (owners.unsure.length && Date.now() - Date.parse(t.created_at || "") < OWNER_WAIT_MS) continue;
+            let ownerIds = owners.ids;
 
             // Claims the send (see createInFlight): only the sender holding
             // the claim creates, so a browser save on this same task waits for
@@ -1376,12 +1638,24 @@ Deno.serve(async (req) => {
             if (zd) form.set("end_date", zd);
             if (ownerIds.length) form.set("person_responsible", ownerIds.join(","));
 
-            const cr = await zFetch(`${portalBase}/projects/${proj.zoho_project_id}/tasks/`, {
+            const send = () => zFetch(`${portalBase}/projects/${proj.zoho_project_id}/tasks/`, {
               method: "POST",
               headers: { "Content-Type": "application/x-www-form-urlencoded" },
               body: form.toString(),
             });
-            const cd = await cr.json().catch(() => ({}));
+            let cr = await send();
+            let cd = await cr.json().catch(() => ({}));
+            // An owner Zoho refuses must not cost the task itself, and only a
+            // plain 400 reads as that refusal (see create_task in zoho-projects).
+            let ownerRefused = "";
+            const sentOwners = ownerIds.length;
+            if (!cr.ok && cr.status === 400 && ownerIds.length) {
+              ownerRefused = String(cd?.error?.message || cd?.error || `HTTP ${cr.status}`);
+              form.delete("person_responsible");
+              ownerIds = [];
+              cr = await send();
+              cd = await cr.json().catch(() => ({}));
+            }
             const made = cr.ok ? (cd.tasks || [])[0] : null;
             if (!made) {
               // Left with zoho_task_id still null so the next tick retries it.
@@ -1449,9 +1723,10 @@ Deno.serve(async (req) => {
             }
             await sb.from("task_activity").insert({
               task_id: t.id, kind: "system",
-              content: (emails.length && !ownerIds.length
-                ? `Sent to Zoho Projects (${proj.name}): unassigned, no Zoho user matches ${emails.join(", ")}.`
-                : `Sent to Zoho Projects (${proj.name}).`) + statusNote,
+              content: (() => {
+                const trouble = ownerTrouble(owners.missing, ownerRefused, ownersDropped(made, ownerIds).length, sentOwners, "", owners.unsure);
+                return `Sent to Zoho Projects (${proj.name})` + (trouble ? `, but the owner did not fully reach Zoho: ${trouble}` : ".");
+              })() + statusNote,
             });
             pushed++; pushedThisRun++;
           }
@@ -1523,9 +1798,11 @@ Deno.serve(async (req) => {
 // without it that one run would have tried a Zoho write for every task it had
 // been skipping since 2026-09-07. Owner lookup usually makes no
 // call at all, because the result is cached on zoho_projects_connection and
-// shared with zoho-projects; an email that belongs to no Zoho user is never
-// in that cache, so in the worst case it is one /users/ call per task
-// actually created. It runs AFTER routing for that reason, so a task this
+// shared with zoho-projects. When the cache lacks an email it reads the
+// roster once (portalUsersCache): /users/, the project list, and at most
+// HARVEST_MAX_READS task pages, so 38 calls at worst, one read at a time
+// across both functions, and never again for 6 hours for an email that
+// belongs to nobody in Zoho (30 minutes after a read that could not finish). It runs AFTER routing for that reason, so a task this
 // run skips costs nothing. Tasklist routing adds one /tasklists/ call per
 // project that has something to push, once per project per run, and none at
 // all for a project with nothing waiting. The pull shares that same one read,
@@ -1537,15 +1814,15 @@ Deno.serve(async (req) => {
 // the number that matters is the RUN's, not one project's. What the caps allow
 // run-wide is 60 task pages (MAX_TASK_PAGES_PER_RUN) + one /tasklists/ per
 // linked project, 30 of them today + 20 conflict write-backs
-// (MAX_CONFLICT_PUSH_PER_RUN) + 40 creates (MAX_PUSH_PER_RUN) + 40 /users/,
-// one per create whose assignee is not already cached: 190 calls, which is
-// well over the 100-per-2-min ceiling.
+// (MAX_CONFLICT_PUSH_PER_RUN) + 40 creates (MAX_PUSH_PER_RUN) + one owner
+// roster read of at most 38: 188 calls, which is well over the
+// 100-per-2-min ceiling.
 //
-// No cap is added for it, because 190 needs every maximum at once and the live
+// No cap is added for it, because 188 needs every maximum at once and the live
 // numbers are nowhere near that. 30 linked projects holding 2711 synced rows
 // read in roughly 30 to 45 pages; only Accountabilities has anything waiting
 // to push at all and MAX_PUSH_PER_PROJECT holds it to 10 creates; the user
-// cache normally answers, so /users/ is usually 0; and the conflict branch
+// cache normally answers, so the roster read is usually 0; and the conflict branch
 // cannot fire on a catch-up run, because it requires a task TMG has stamped
 // before and every row is still missing its Zoho timestamp. That is about 45
 // to 60 calls on the catch-up run and nearer 30 on an ordinary tick.

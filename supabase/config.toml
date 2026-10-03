@@ -446,3 +446,5 @@ verify_jwt = false
 verify_jwt = false
 [functions.import-costar]
 verify_jwt = true
+[functions.quo-gchat]
+verify_jwt = false

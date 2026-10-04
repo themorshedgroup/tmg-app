@@ -70,8 +70,16 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
   // NOTE: anyone who connected before this scope changed must hit "Reconnect" once
   // — including anyone who already connected Calendar before gmail.readonly was
   // added here, since Google doesn't retroactively grant a scope to an old token.
-  async function connectCalendar() {
+  // opts.callAudit (Tarek's "Call audit" row in Calendar Settings) adds view-only
+  // Drive on top of the usual scopes, so his Meet transcripts and Gemini notes can
+  // be read for the Ops call audit. Google can't narrow Drive to meeting files, so
+  // it is a separate, opt-in button rather than part of everyone's connect.
+  // include_granted_scopes keeps an earlier grant alive: without it, a later plain
+  // "Reconnect" would issue a token without Drive and silently end the audit access.
+  async function connectCalendar(opts) {
+    const callAudit = !!(opts && opts.callAudit);
     try {
+      try { if (callAudit) sessionStorage.setItem('tmg_call_audit_connect', '1'); } catch (e) {}
       // Mark that the NEXT OAuth redirect is a deliberate calendar-connect, so init()
       // knows to persist the returned Google refresh token. Without this flag, a plain
       // login's refresh token (scoped to email/profile only) would also be stored and
@@ -86,11 +94,12 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          scopes: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/gmail.readonly',
+          scopes: 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/gmail.readonly'
+            + (callAudit ? ' https://www.googleapis.com/auth/drive.readonly' : ''),
           // select_account alongside consent — same 403 org_internal issue as plain sign-in
           // (see signInWithGoogle above): without it, Google silently uses the browser's
           // default Google session, which may not be the @themorshedgroup.com account.
-          queryParams: { access_type: 'offline', prompt: 'select_account consent' },
+          queryParams: { access_type: 'offline', prompt: 'select_account consent', include_granted_scopes: 'true' },
           redirectTo: _cleanUrl,
         },
       });
@@ -153,6 +162,14 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
       let fromConnect = false;
       try { fromConnect = sessionStorage.getItem('tmg_calendar_connect') === '1'; sessionStorage.removeItem('tmg_calendar_connect'); } catch (e) {}
       if (prt && fromConnect) { try { window.SupabaseAuth._googleRefresh = prt; } catch (e) {} }
+      // Remember on this device that the Call audit grant went through, so the row can
+      // say "Allowed" instead of offering the button again. Display only.
+      try {
+        if (sessionStorage.getItem('tmg_call_audit_connect') === '1') {
+          sessionStorage.removeItem('tmg_call_audit_connect');
+          if (prt && fromConnect) localStorage.setItem('tmg_call_audit_allowed', new Date().toISOString());
+        }
+      } catch (e) {}
       window.history.replaceState({}, document.title, _cleanUrl);
     }
     if (!_state.session) {

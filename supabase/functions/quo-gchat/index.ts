@@ -10,8 +10,11 @@
 // include ?t=<token>; only the token's SHA-256 is stored here (the repo is
 // public), the token itself lives in the Quo webhook URL and ~/.quo-gchat.
 //
-// Secret: GCHAT_TEXTS_WEBHOOK = the space's incoming-webhook URL (set by
-// Symon himself, never printed).
+// Secrets (each = a space's incoming-webhook URL, pasted by Symon, never printed):
+//   GCHAT_TEXTS_WEBHOOK   = "TMG SMS", Symon's own line (the default)
+//   GCHAT_WEBHOOK_MAINLINE = "TMG Main Line", the shared (512) 610-1095 line
+// A line listed in SHARED_LINES only ever posts to its own space; if that
+// secret is missing the text is skipped, never dropped into Symon's space.
 //
 // Threads: threadKey = the other party's 10-digit number, so every text with
 // the same person lands in the same thread. requestId = Quo's message id, so
@@ -19,6 +22,9 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 const TOKEN_SHA256 = "d00c4d11eb0dd4ce20295cdc7c66f2a19d20ca4bbe8395e4c2a75673aea77a3f";
+
+// Shared lines (several people text from them) → their own space's secret.
+const SHARED_LINES: Record<string, string> = { "5126101095": "GCHAT_WEBHOOK_MAINLINE" };
 
 const ok = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -36,9 +42,6 @@ Deno.serve(async (req) => {
   const t = new URL(req.url).searchParams.get("t") || "";
   if ((await sha256(t)) !== TOKEN_SHA256) return new Response(JSON.stringify({ error: "forbidden" }), { status: 403 });
 
-  const hook = Deno.env.get("GCHAT_TEXTS_WEBHOOK");
-  if (!hook) return ok({ ignored: "GCHAT_TEXTS_WEBHOOK not set" });
-
   // Always answer 200 so Quo never retry-storms a bad event (see sffu-inbound).
   try {
     let payload: any = {};
@@ -55,13 +58,18 @@ Deno.serve(async (req) => {
     const toRaw = Array.isArray(m.to) ? m.to[0] : (m.to || (ctx.recipientIdentifiers || [])[0]);
     const other = inbound ? fromN : digits10(toRaw);
     if (!other) return ok({ ignored: "no phone number on payload" });
+    const ourLine = inbound ? digits10(toRaw) : fromN;
+    const shared = SHARED_LINES[ourLine];
+    const secret = shared || "GCHAT_TEXTS_WEBHOOK";
+    const hook = Deno.env.get(secret);
+    if (!hook) return ok({ ignored: `${secret} not set` });
 
     let body = String(m.body ?? m.text ?? m.content ?? "").trim();
     const media = Array.isArray(m.media) ? m.media.length : 0;
     if (media) body = `${body}${body ? "\n" : ""}[${media} photo${media > 1 ? "s" : ""}/file${media > 1 ? "s" : ""}, open Quo to view]`;
     if (!body) body = "[empty message]";
 
-    const head = inbound ? `📥 *${pretty(other)}*` : `📤 *You → ${pretty(other)}*`;
+    const head = inbound ? `📥 *${pretty(other)}*` : `📤 *${shared ? "Sent" : "You"} → ${pretty(other)}*`;
     const url = new URL(hook);
     url.searchParams.set("threadKey", `sms-${other}`);
     url.searchParams.set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD");

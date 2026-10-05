@@ -44,9 +44,9 @@ const TOKEN_SHA256 = "d00c4d11eb0dd4ce20295cdc7c66f2a19d20ca4bbe8395e4c2a75673ae
 
 // Quo line → secret of the Chat space it posts to. Shared lines are flagged
 // so outgoing texts read "Sent" instead of "You".
-const LINES: Record<string, { secret: string; shared?: boolean; who?: string }> = {
+const LINES: Record<string, { secret: string; shared?: boolean; who?: string; label?: string }> = {
   "5126436688": { secret: "GCHAT_TEXTS_WEBHOOK", who: "Symon" },        // Symon → "TMG SMS"
-  "5126101095": { secret: "GCHAT_WEBHOOK_MAINLINE", shared: true },     // main line → "TMG Main Line"
+  "5126101095": { secret: "GCHAT_WEBHOOK_MAINLINE", shared: true, label: "TMG Main Line" }, // main line → "TMG Main Line"
   "5128314911": { secret: "GCHAT_WEBHOOK_ALEXANDRA", who: "Alexa" },    // → "Quo - Alexandra"
   "5129803161": { secret: "GCHAT_WEBHOOK_CAMILA", who: "Camila" },      // → "Quo - Camila"
   "5126101096": { secret: "GCHAT_WEBHOOK_ANGELICA", who: "Angelica" },  // → "Quo - Angelica"
@@ -282,12 +282,12 @@ async function nameFor(d: string) {
       }
       contacts = { at: Date.now(), map };
     }
-    const name = contacts.map.get(d) || teamName(d);
+    const name = contacts.map.get(d) || teamName(d) || LINES[d]?.label;
     return name ? `${name} | ${num}` : num;
   } catch (e) {
     console.error("[quo-gchat] contact names unavailable", String(e).slice(0, 120));
     contacts = { at: Date.now() - 9 * 60_000, map: contacts?.map || new Map() }; // retry in a minute
-    const name = contacts.map.get(d) || teamName(d);
+    const name = contacts.map.get(d) || teamName(d) || LINES[d]?.label;
     return name ? `${name} | ${num}` : num;
   }
 }
@@ -390,6 +390,7 @@ async function groupLabel(members: string[], ourLine: string) {
   const listed = await Promise.all(members.map(async (d) => {
     const team = teamName(d);
     if (team) return { name: team, rank: TEAM.indexOf(team) };
+    if (LINES[d]?.label) return { name: LINES[d].label!, rank: 50 };
     const full = await nameFor(d);
     const named = full.includes(" | ");
     return { name: named ? full.split(" ")[0] : full, rank: named ? 100 : 200 };

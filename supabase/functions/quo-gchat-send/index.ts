@@ -5,7 +5,7 @@
 // Chat API → Configuration) calls this when someone types, inside a person's
 // thread in one of the Quo spaces:
 //
-//   /send See you at 3, thanks!
+//   /quo See you at 3, thanks!
 //
 // and Quo texts that person from the space's own Quo line, as the sender.
 //
@@ -62,7 +62,7 @@ const pretty = (d: string) => (d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-const HELP = "Reply inside a person's thread with `/send your message` and Quo sends it to them by SMS from this space's number.";
+const HELP = "Reply inside a person's thread with `/quo your message` and Quo sends it to them by SMS from this space's number.";
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return new Response("ok");
@@ -106,7 +106,7 @@ async function handle(ev: any, reply: (text: string) => Response): Promise<Respo
   const thread = String(msg.thread?.name || "");
   const link = thread ? await readLink(thread) : null;
   if (!link) {
-    return reply("This thread isn't linked to a phone number yet, so nothing was sent. Use /send inside a thread Quo started; older threads link the next time that person sends an SMS or calls.");
+    return reply("This thread isn't linked to a phone number yet, so nothing was sent. Use /quo inside a thread Quo started; older threads link the next time that person sends an SMS or calls.");
   }
 
   const key = Deno.env.get("QUO_GCHAT_API_KEY");

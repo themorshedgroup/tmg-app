@@ -17,7 +17,7 @@
 // digits only, so nobody's texts ever land in someone else's space.
 //
 // What gets posted:
-//   message.received / message.delivered → 📱Name | 512-555-0100, then the text; photos show in the
+//   message.received / message.delivered → "📱Name | 512-555-0100 :", a blank line, the text; photos show in the
 //                                          thread (copied to storage, see showMedia)
 //   call.completed                       → one line: in/out, missed, length
 //   call.summary.completed               → Quo's AI summary + next steps
@@ -175,9 +175,8 @@ Deno.serve(async (req) => {
       if (!body) body = "[empty message]";
       // In a group thread the group's name is the thread's own first post
       // (see groupThreadHead), so each text shows only who sent it.
-      text = group.length
-        ? `${outbound ? `📤 ${line.shared ? "Sent" : "You"}` : `📱${who}`} :\n\n${body}`
-        : `${outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📱${who}`}\n${body}`;
+      const sender = outbound ? `📤 ${line.shared ? "Sent" : "You"}${group.length ? "" : ` → ${who}`}` : `📱${who}`;
+      text = `${sender} :\n\n${body}`;
       if (m.id) requestId = `quo-${m.id}`;
     } else if (evt === "call.completed") {
       const status = String(m.status || "").toLowerCase();

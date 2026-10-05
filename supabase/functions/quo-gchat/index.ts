@@ -28,7 +28,9 @@
 // Both voicemail paths share requestId vm-<callId>, so one voicemail posts once.
 //
 // Groups: a group text gets its own thread (threadKey grp-<hash of members>),
-// headed "👥 first names" (or a named group like "Team TⓂ️G"). /send there replies to the whole group.
+// whose first post is only its name: "👥 first names" (or a named group like
+// "Team TⓂ️G"). Texts in it read "📱Name | number :" then the text. /send there
+// replies to the whole group.
 // Threads: threadKey = the other party's 10-digit number, so every text and
 // call with the same person lands in the same thread. requestId = Quo's id, so
 // a Quo retry of the same event never posts twice.
@@ -171,10 +173,11 @@ Deno.serve(async (req) => {
         body = `${body}${body ? "\n" : ""}${shown.note}`;
       }
       if (!body) body = "[empty message]";
-      const head = group.length
-        ? `${groupHead}${outbound ? `📤 ${line.shared ? "Sent" : "You"}` : `📱${who}`}`
-        : outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📱${who}`;
-      text = `${head}\n${body}`;
+      // In a group thread the group's name is the thread's own first post
+      // (see groupThreadHead), so each text shows only who sent it.
+      text = group.length
+        ? `${outbound ? `📤 ${line.shared ? "Sent" : "You"}` : `📱${who}`} :\n\n${body}`
+        : `${outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📱${who}`}\n${body}`;
       if (m.id) requestId = `quo-${m.id}`;
     } else if (evt === "call.completed") {
       const status = String(m.status || "").toLowerCase();
@@ -215,6 +218,8 @@ Deno.serve(async (req) => {
     url.searchParams.set("threadKey", threadKey);
     url.searchParams.set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD");
     if (requestId) url.searchParams.set("requestId", requestId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60));
+
+    if (group.length) await groupThreadHead(hook, threadKey, groupHead.trim(), line.secret);
 
     const post = () => fetch(url, {
       method: "POST",
@@ -305,6 +310,36 @@ async function nameFor(d: string) {
 // JWT, and Storage refused it as a bare Bearer token ("Invalid Compact JWS"),
 // so links were not saved and /send said "not linked" in every new thread.
 const BUCKET = "quo-gchat";
+// A new group thread starts with a post that is only its name ("👥 Camila
+// and TMG Main Line"), so the space's thread list shows who the group is,
+// not its first text, for the thread's whole life (Symon, 2026-10-06).
+// heads/<space secret>__<threadKey>.json marks it done. Threads from before
+// this get the name once, as a reply.
+async function groupThreadHead(hook: string, threadKey: string, name: string, secret: string) {
+  const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !svc) return;
+  try {
+    const files = createClient(url, svc).storage.from(BUCKET);
+    const mark = `heads/${secret}__${threadKey}.json`;
+    const { data } = await files.download(mark);
+    if (data) return;
+    const u = new URL(hook);
+    u.searchParams.set("threadKey", threadKey);
+    u.searchParams.set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD");
+    const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json; charset=UTF-8" }, body: JSON.stringify({ text: name }) });
+    if (!r.ok) return console.error("[quo-gchat] group name post failed", r.status, (await r.text()).slice(0, 200));
+    const put = () => files.upload(mark, new Blob(["{}"], { type: "application/json" }), { upsert: true, contentType: "application/json" });
+    let { error } = await put();
+    if (error && /not found/i.test(error.message)) {
+      await createClient(url, svc).storage.createBucket(BUCKET, { public: false });
+      ({ error } = await put());
+    }
+    if (error) console.error("[quo-gchat] group name mark not saved", error.message.slice(0, 200));
+  } catch (e) {
+    console.error("[quo-gchat] group name error", String(e).slice(0, 120));
+  }
+}
+
 // The group a /send went to, from sent/<quo message id>.json (written by
 // quo-gchat-send). Tried twice, as the webhook can beat the write.
 async function sentGroup(id: unknown): Promise<string[]> {

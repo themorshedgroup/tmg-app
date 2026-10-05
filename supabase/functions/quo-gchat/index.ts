@@ -159,11 +159,23 @@ Deno.serve(async (req) => {
     url.searchParams.set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD");
     if (requestId) url.searchParams.set("requestId", requestId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60));
 
-    const r = await fetch(url, {
+    const post = () => fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=UTF-8" },
       body: JSON.stringify({ text }),
     });
+    let r = await post();
+    // Some spaces' webhooks refuse requestId ("Request Id is not supported for
+    // webhooks"). Post again without it rather than lose the message.
+    if (r.status === 400 && url.searchParams.has("requestId")) {
+      const err = await r.text();
+      if (!/request ?id/i.test(err)) {
+        console.error("[quo-gchat] chat post failed", r.status, err.slice(0, 300));
+        return ok({ posted: false, evt });
+      }
+      url.searchParams.delete("requestId");
+      r = await post();
+    }
     if (!r.ok) console.error("[quo-gchat] chat post failed", r.status, (await r.text()).slice(0, 300));
     return ok({ posted: r.ok, evt });
   } catch (e) {

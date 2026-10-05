@@ -17,7 +17,7 @@
 // digits only, so nobody's texts ever land in someone else's space.
 //
 // What gets posted:
-//   message.received / message.delivered → the text (photos noted, not copied)
+//   message.received / message.delivered → 📱Name | 512-555-0100, then the text (photos noted, not copied)
 //   call.completed                       → one line: in/out, missed, length
 //   call.summary.completed               → Quo's AI summary + next steps
 //   call.voicemail.completed             → the full voicemail transcript
@@ -121,7 +121,7 @@ Deno.serve(async (req) => {
       const media = Array.isArray(m.media) ? m.media.length : 0;
       if (media) body = `${body}${body ? "\n" : ""}[${media} photo${media > 1 ? "s" : ""}/file${media > 1 ? "s" : ""}, open Quo to view]`;
       if (!body) body = "[empty message]";
-      const head = outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📥 ${who}`;
+      const head = outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📱${who}`;
       text = `${head}\n${body}`;
       if (m.id) requestId = `quo-${m.id}`;
     } else if (evt === "call.completed") {
@@ -196,12 +196,12 @@ Deno.serve(async (req) => {
   }
 });
 
-// "Tarek Morshed (512) 799-8001" when the number is a saved Quo contact, else
+// "Tarek Morshed | 512-799-8001" when the number is a saved Quo contact, else
 // just the number. Contacts are cached for 10 minutes per running copy; if
 // Quo is slow or down the message still posts, with the number only.
 let contacts: { at: number; map: Map<string, string> } | null = null;
 async function nameFor(d: string) {
-  const num = pretty(d);
+  const num = d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : pretty(d);
   try {
     if (!contacts || Date.now() - contacts.at > 10 * 60_000) {
       const key = Deno.env.get("QUO_GCHAT_API_KEY");
@@ -230,12 +230,12 @@ async function nameFor(d: string) {
       contacts = { at: Date.now(), map };
     }
     const name = contacts.map.get(d);
-    return name ? `${name} ${num}` : num;
+    return name ? `${name} | ${num}` : num;
   } catch (e) {
     console.error("[quo-gchat] contact names unavailable", String(e).slice(0, 120));
     contacts = { at: Date.now() - 9 * 60_000, map: contacts?.map || new Map() }; // retry in a minute
     const name = contacts.map.get(d);
-    return name ? `${name} ${num}` : num;
+    return name ? `${name} | ${num}` : num;
   }
 }
 

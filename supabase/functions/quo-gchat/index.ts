@@ -29,6 +29,10 @@
 // Threads: threadKey = the other party's 10-digit number, so every text and
 // call with the same person lands in the same thread. requestId = Quo's id, so
 // a Quo retry of the same event never posts twice.
+//
+// Names: the person's name comes from the contacts saved in Quo (needs secret
+// QUO_GCHAT_API_KEY), read once every 10 minutes; unknown numbers show as the
+// number. No *bold* markers: phone notifications print them as raw asterisks.
 // ─────────────────────────────────────────────────────────────────────────
 
 const TOKEN_SHA256 = "d00c4d11eb0dd4ce20295cdc7c66f2a19d20ca4bbe8395e4c2a75673aea77a3f";
@@ -110,13 +114,14 @@ Deno.serve(async (req) => {
     if (!hook) return ok({ ignored: `${line.secret} not set` });
 
     // Build the message for this event.
+    const who = await nameFor(other);
     let text = "", requestId = "";
     if (evt.startsWith("message.")) {
       let body = String(m.body ?? m.text ?? m.content ?? "").trim();
       const media = Array.isArray(m.media) ? m.media.length : 0;
       if (media) body = `${body}${body ? "\n" : ""}[${media} photo${media > 1 ? "s" : ""}/file${media > 1 ? "s" : ""}, open Quo to view]`;
       if (!body) body = "[empty message]";
-      const head = outbound ? `📤 *${line.shared ? "Sent" : "You"} → ${pretty(other)}*` : `📥 *${pretty(other)}*`;
+      const head = outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📥 ${who}`;
       text = `${head}\n${body}`;
       if (m.id) requestId = `quo-${m.id}`;
     } else if (evt === "call.completed") {
@@ -125,15 +130,15 @@ Deno.serve(async (req) => {
       const label = missed
         ? (outbound ? "📞 Unanswered call to" : "📞 Missed call from")
         : (outbound ? `📞 Call to` : `📞 Call from`);
-      text = `${label} *${pretty(other)}*${missed ? "" : ` (${mins(m.duration)})`}`;
+      text = `${label} ${who}${missed ? "" : `, ${mins(m.duration)}`}`;
       if (m.id) requestId = `call-${m.id}`;
     } else if (evt === "call.summary.completed") {
       const summary = (Array.isArray(m.summary) ? m.summary : [m.summary]).filter(Boolean).map((s: unknown) => `• ${s}`);
       const steps = (Array.isArray(m.nextSteps) ? m.nextSteps : [m.nextSteps]).filter(Boolean).map((s: unknown) => `• ${s}`);
       if (!summary.length && !steps.length) return ok({ ignored: "empty summary" });
-      text = `📝 *Call summary, ${pretty(other)}*`;
+      text = `📝 Call summary, ${who}`;
       if (summary.length) text += `\n${summary.join("\n")}`;
-      if (steps.length) text += `\n*Next steps*\n${steps.join("\n")}`;
+      if (steps.length) text += `\nNext steps\n${steps.join("\n")}`;
       if (m.callId) requestId = `sum-${m.callId}`;
     } else if (evt === "call.voicemail.completed" || evt === "call.transcript.completed") {
       let transcript = "";
@@ -146,7 +151,7 @@ Deno.serve(async (req) => {
         if (!lines.length || oursSpoke) return ok({ ignored: "call transcript (not a voicemail)" });
         transcript = lines.map((d: any) => String(d?.content ?? "").trim()).filter(Boolean).join(" ");
       }
-      text = `🎙️ *Voicemail from ${pretty(other)}*${m.duration ? ` (${mins(m.duration)})` : ""}\n${transcript || "[no transcript yet, open Quo to listen]"}`;
+      text = `🎙️ Voicemail from ${who}${m.duration ? `, ${mins(m.duration)}` : ""}\n${transcript || "[no transcript yet, open Quo to listen]"}`;
       const callId = m.callId || m.id;
       if (callId) requestId = `vm-${callId}`;
     } else {
@@ -190,6 +195,49 @@ Deno.serve(async (req) => {
     return ok({ error: "handled" });
   }
 });
+
+// "Tarek Morshed (512) 799-8001" when the number is a saved Quo contact, else
+// just the number. Contacts are cached for 10 minutes per running copy; if
+// Quo is slow or down the message still posts, with the number only.
+let contacts: { at: number; map: Map<string, string> } | null = null;
+async function nameFor(d: string) {
+  const num = pretty(d);
+  try {
+    if (!contacts || Date.now() - contacts.at > 10 * 60_000) {
+      const key = Deno.env.get("QUO_GCHAT_API_KEY");
+      if (!key) return num;
+      const map = new Map<string, string>();
+      let pageToken = "";
+      for (let page = 0; page < 40; page++) {
+        const u = new URL("https://api.openphone.com/v1/contacts");
+        u.searchParams.set("maxResults", "50");
+        if (pageToken) u.searchParams.set("pageToken", pageToken);
+        const r = await fetch(u, { headers: { Authorization: key }, signal: AbortSignal.timeout(4000) });
+        if (!r.ok) throw new Error(`contacts ${r.status}`);
+        const j = await r.json();
+        for (const c of j.data || []) {
+          const f = c.defaultFields || {};
+          const name = [f.firstName, f.lastName].filter(Boolean).join(" ").trim() || String(f.company || "").trim();
+          if (!name) continue;
+          for (const p of f.phoneNumbers || []) {
+            const k = digits10(p?.value);
+            if (k.length === 10 && !map.has(k)) map.set(k, name);
+          }
+        }
+        pageToken = j.nextPageToken || "";
+        if (!pageToken) break;
+      }
+      contacts = { at: Date.now(), map };
+    }
+    const name = contacts.map.get(d);
+    return name ? `${name} ${num}` : num;
+  } catch (e) {
+    console.error("[quo-gchat] contact names unavailable", String(e).slice(0, 120));
+    contacts = { at: Date.now() - 9 * 60_000, map: contacts?.map || new Map() }; // retry in a minute
+    const name = contacts.map.get(d);
+    return name ? `${name} ${num}` : num;
+  }
+}
 
 // Remember which line and person each Chat thread belongs to, so /send
 // (quo-gchat-send) knows who to text. One small JSON file per thread in the

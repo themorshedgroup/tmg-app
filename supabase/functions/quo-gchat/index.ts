@@ -121,7 +121,13 @@ Deno.serve(async (req) => {
         const ours = tos.filter((d) => LINES[d]);
         ourLine = (ours.length > 1 ? await lineForId(m.phoneNumberId) : "") || ours[0] || tos[0] || "";
       }
-      const members = [...new Set([outbound ? "" : fromN, ...tos].filter((d) => d && d !== ourLine))];
+      let members = [...new Set([outbound ? "" : fromN, ...tos].filter((d) => d && d !== ourLine))];
+      // A group text sent with /send: its webhook named one member (seen
+      // 2026-10-06), so use the group /send recorded for this message.
+      if (outbound && members.length < 2) {
+        const sent = await sentGroup(m.id);
+        if (sent.length > 1) members = sent;
+      }
       other = members[0] || "";
       if (members.length > 1) group = members;
     } else if (evt.startsWith("call.")) {
@@ -299,6 +305,22 @@ async function nameFor(d: string) {
 // JWT, and Storage refused it as a bare Bearer token ("Invalid Compact JWS"),
 // so links were not saved and /send said "not linked" in every new thread.
 const BUCKET = "quo-gchat";
+// The group a /send went to, from sent/<quo message id>.json (written by
+// quo-gchat-send). Tried twice, as the webhook can beat the write.
+async function sentGroup(id: unknown): Promise<string[]> {
+  const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!id || !url || !svc) return [];
+  for (let i = 0; i < 2; i++) {
+    try {
+      const { data } = await createClient(url, svc).storage.from(BUCKET).download(`sent/${String(id).replace(/[^A-Za-z0-9_-]/g, "")}.json`);
+      const j = data ? JSON.parse(await data.text()) : null;
+      if (Array.isArray(j?.group)) return j.group.map(digits10).filter((d: string) => d.length === 10);
+    } catch (_) { /* not there yet */ }
+    if (i === 0) await new Promise((r) => setTimeout(r, 1500));
+  }
+  return [];
+}
+
 async function saveLink(posted: any, line: string, other: string, group: string[], key: string) {
   try {
     const m = String(posted?.thread?.name || "").match(/^spaces\/([^/]+)\/threads\/([^/]+)$/);

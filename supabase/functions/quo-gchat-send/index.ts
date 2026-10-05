@@ -140,6 +140,8 @@ async function handle(ev: any, reply: (text: string) => Response): Promise<Respo
     return reply(`Quo refused it (${sr.status}). Nothing was sent.`);
   }
   const sentId = (await sr.json().catch(() => null))?.data?.id;
+  // Tell the relay which group this was, so its 📤 copy lands in the group thread.
+  if (sentId && isGroup) await saveSent(sentId, link);
   if (sentId) EdgeRuntime.waitUntil(watchDelivery(sentId, link, quo));
   console.log("[quo-gchat-send] sent", `…${link.line.slice(-4)} → …${link.other.slice(-4)}`);
   const to = isGroup ? `the group (${link.group!.length} people)` : pretty(link.other);
@@ -162,6 +164,14 @@ async function readLink(thread: string): Promise<Link | null> {
   const group = Array.isArray(j?.group) ? j.group.map(digits10).filter((d: string) => d.length === 10) : [];
   const key = typeof j?.key === "string" ? j.key : "";
   return line.length === 10 && other.length === 10 ? { line, other, group, key } : null;
+}
+
+async function saveSent(id: string, link: Link) {
+  const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !svc) return;
+  const { error } = await createClient(url, svc).storage.from(BUCKET).upload(`sent/${id.replace(/[^A-Za-z0-9_-]/g, "")}.json`,
+    new Blob([JSON.stringify({ group: link.group, key: link.key })], { type: "application/json" }), { upsert: true, contentType: "application/json" });
+  if (error) console.error("[quo-gchat-send] sent record not saved", error.message.slice(0, 200));
 }
 
 // spaces/AAA/threads/BBB → threads/AAA__BBB.json (same rule as quo-gchat).

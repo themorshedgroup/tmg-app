@@ -176,10 +176,47 @@ Deno.serve(async (req) => {
       url.searchParams.delete("requestId");
       r = await post();
     }
+    // The space id goes back in the reply so Quo's events log shows where each post landed.
+    let space = "";
     if (!r.ok) console.error("[quo-gchat] chat post failed", r.status, (await r.text()).slice(0, 300));
-    return ok({ posted: r.ok, evt });
+    else {
+      const posted = await r.json().catch(() => null);
+      space = String(posted?.space?.name || posted?.name || "").split("/")[1] || `${url.host}${url.pathname.slice(0, 40)}`;
+      await saveLink(posted, ourLine, other);
+    }
+    return ok({ posted: r.ok, evt, space });
   } catch (e) {
     console.error("[quo-gchat] error", String(e));
     return ok({ error: "handled" });
   }
 });
+
+// Remember which line and person each Chat thread belongs to, so /send
+// (quo-gchat-send) knows who to text. One small JSON file per thread in the
+// private "quo-gchat" bucket, rewritten on every post. Never blocks posting.
+const BUCKET = "quo-gchat";
+async function saveLink(posted: any, line: string, other: string) {
+  try {
+    const m = String(posted?.thread?.name || "").match(/^spaces\/([^/]+)\/threads\/([^/]+)$/);
+    const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!m || !url || !svc) return;
+    const auth = { Authorization: `Bearer ${svc}` };
+    const put = () => fetch(`${url}/storage/v1/object/${BUCKET}/threads/${m[1]}__${m[2]}.json`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json", "x-upsert": "true" },
+      body: JSON.stringify({ line, other }),
+    });
+    let r = await put();
+    if (!r.ok && /bucket not found/i.test(await r.clone().text())) {
+      await fetch(`${url}/storage/v1/bucket`, {
+        method: "POST",
+        headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ id: BUCKET, name: BUCKET, public: false }),
+      });
+      r = await put();
+    }
+    if (!r.ok) console.error("[quo-gchat] thread link not saved", r.status, (await r.text()).slice(0, 200));
+  } catch (e) {
+    console.error("[quo-gchat] thread link error", String(e));
+  }
+}

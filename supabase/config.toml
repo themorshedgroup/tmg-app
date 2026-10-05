@@ -448,3 +448,5 @@ verify_jwt = false
 verify_jwt = true
 [functions.quo-gchat]
 verify_jwt = false
+[functions.quo-gchat-send]
+verify_jwt = false

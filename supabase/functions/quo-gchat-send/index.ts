@@ -144,8 +144,8 @@ async function handle(ev: any, reply: (text: string) => Response): Promise<Respo
   if (sentId && isGroup) await saveSent(sentId, link);
   if (sentId) EdgeRuntime.waitUntil(watchDelivery(sentId, link, quo));
   console.log("[quo-gchat-send] sent", `…${link.line.slice(-4)} → …${link.other.slice(-4)}`);
-  const to = isGroup ? `the group (${link.group!.length} people)` : pretty(link.other);
-  return reply(`Quo accepted it for ${to} from ${pretty(link.line)}. The 📤 line in this thread means it was delivered.${noFiles}`);
+  const to = isGroup ? "the group" : pretty(link.other);
+  return reply(`✓ Sent to ${to}.${noFiles}`);
 }
 
 // Through supabase-js: Storage refuses the injected secret key as a bare

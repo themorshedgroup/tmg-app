@@ -28,7 +28,7 @@
 // Both voicemail paths share requestId vm-<callId>, so one voicemail posts once.
 //
 // Groups: a group text gets its own thread (threadKey grp-<hash of members>),
-// headed "👥 Group: names". /send there replies to the whole group.
+// headed "👥 first names" (or a named group like "Ⓜ️ Team TMG"). /send there replies to the whole group.
 // Threads: threadKey = the other party's 10-digit number, so every text and
 // call with the same person lands in the same thread. requestId = Quo's id, so
 // a Quo retry of the same event never posts twice.
@@ -44,14 +44,26 @@ const TOKEN_SHA256 = "d00c4d11eb0dd4ce20295cdc7c66f2a19d20ca4bbe8395e4c2a75673ae
 
 // Quo line → secret of the Chat space it posts to. Shared lines are flagged
 // so outgoing texts read "Sent" instead of "You".
-const LINES: Record<string, { secret: string; shared?: boolean }> = {
-  "5126436688": { secret: "GCHAT_TEXTS_WEBHOOK" },            // Symon → "TMG SMS"
-  "5126101095": { secret: "GCHAT_WEBHOOK_MAINLINE", shared: true }, // main line → "TMG Main Line"
-  "5128314911": { secret: "GCHAT_WEBHOOK_ALEXANDRA" },       // → "Quo - Alexandra"
-  "5129803161": { secret: "GCHAT_WEBHOOK_CAMILA" },          // → "Quo - Camila"
-  "5126101096": { secret: "GCHAT_WEBHOOK_ANGELICA" },        // → "Quo - Angelica"
-  "5129001113": { secret: "GCHAT_WEBHOOK_GUSTAVO" },         // → "Quo - Gustavo"
+const LINES: Record<string, { secret: string; shared?: boolean; who?: string }> = {
+  "5126436688": { secret: "GCHAT_TEXTS_WEBHOOK", who: "Symon" },        // Symon → "TMG SMS"
+  "5126101095": { secret: "GCHAT_WEBHOOK_MAINLINE", shared: true },     // main line → "TMG Main Line"
+  "5128314911": { secret: "GCHAT_WEBHOOK_ALEXANDRA", who: "Alexa" },    // → "Quo - Alexandra"
+  "5129803161": { secret: "GCHAT_WEBHOOK_CAMILA", who: "Camila" },      // → "Quo - Camila"
+  "5126101096": { secret: "GCHAT_WEBHOOK_ANGELICA", who: "Angelica" },  // → "Quo - Angelica"
+  "5129001113": { secret: "GCHAT_WEBHOOK_GUSTAVO", who: "Gustavo" },    // → "Quo - Gustavo"
 };
+
+// Group headers list first names in this order (seniority, Symon's call
+// 2026-10-06), then everyone else A to Z, then bare numbers. The agents' own
+// cells are not in the repo (it is public): secret QUO_TEAM_NUMBERS holds
+// {"<10 digits>": "<first name>"}.
+const TEAM = ["Tarek", "Brad", "Brett", "Kyle", "Symon", "Angelica", "Alexa", "Gustavo", "Camila"];
+const OPS = ["Symon", "Angelica", "Alexa", "Gustavo", "Camila"];
+// Groups with a name of their own: exactly these people, nobody else.
+const NAMED_GROUPS: [string, string[]][] = [
+  ["Ⓜ️ Team TMG", TEAM],
+  ["Ⓜ️ TMG Ops w/ Tarek", [...OPS, "Tarek"]],
+];
 
 const ok = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -139,9 +151,7 @@ Deno.serve(async (req) => {
     // Build the message for this event. A group gets its own thread, named
     // after its members, so it never lands in one member's private thread.
     const who = await nameFor(other);
-    const groupHead = group.length
-      ? `👥 Group: ${(await Promise.all([...group].sort().map(nameFor))).map((n) => n.split(" | ")[0]).join(", ")}\n`
-      : "";
+    const groupHead = group.length ? `${await groupLabel(group, ourLine)}\n` : "";
     const threadKey = group.length ? `grp-${(await sha256([...group].sort().join(","))).slice(0, 20)}` : `sms-${other}`;
     let text = "", requestId = "";
     let cardsV2: any[] | undefined;
@@ -271,12 +281,12 @@ async function nameFor(d: string) {
       }
       contacts = { at: Date.now(), map };
     }
-    const name = contacts.map.get(d);
+    const name = contacts.map.get(d) || teamName(d);
     return name ? `${name} | ${num}` : num;
   } catch (e) {
     console.error("[quo-gchat] contact names unavailable", String(e).slice(0, 120));
     contacts = { at: Date.now() - 9 * 60_000, map: contacts?.map || new Map() }; // retry in a minute
-    const name = contacts.map.get(d);
+    const name = contacts.map.get(d) || teamName(d);
     return name ? `${name} | ${num}` : num;
   }
 }
@@ -358,6 +368,35 @@ async function showMedia(media: any[], msgId: string, who: string): Promise<{ no
   if (failed) parts.push(`${failed} more, open Quo to view`);
   const note = `[${parts.join(", ")}]`;
   return widgets.length ? { note, card: { cardId: "media", card: { sections: [{ widgets }] } } } : { note: fallback };
+}
+
+// "Ⓜ️ Team TMG" for a named group, else "👥 Tarek, Brad, and Jane".
+// Our line's owner counts as a member but is not listed (it is their space).
+let teamCells: Record<string, string> | null = null;
+function teamName(d: string) {
+  if (LINES[d]?.who) return LINES[d].who!;
+  if (!teamCells) {
+    try { teamCells = JSON.parse(Deno.env.get("QUO_TEAM_NUMBERS") || "{}"); } catch (_) { teamCells = {}; }
+  }
+  return teamCells![d] || "";
+}
+async function groupLabel(members: string[], ourLine: string) {
+  const everyone = [...members, ...(LINES[ourLine]?.shared ? [] : [ourLine])].map(teamName);
+  if (everyone.every(Boolean)) {
+    const set = [...new Set(everyone)].sort().join();
+    for (const [label, names] of NAMED_GROUPS) if ([...names].sort().join() === set) return label;
+  }
+  const listed = await Promise.all(members.map(async (d) => {
+    const team = teamName(d);
+    if (team) return { name: team, rank: TEAM.indexOf(team) };
+    const full = await nameFor(d);
+    const named = full.includes(" | ");
+    return { name: named ? full.split(" ")[0] : full, rank: named ? 100 : 200 };
+  }));
+  listed.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+  const n = listed.map((x) => x.name);
+  const joined = n.length < 3 ? n.join(" and ") : `${n.slice(0, -1).join(", ")}, and ${n.at(-1)}`;
+  return `👥 ${joined}`;
 }
 
 // Quo's own record of a message ({from, to[], phoneNumberId}); null if Quo

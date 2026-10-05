@@ -44,6 +44,10 @@ const QUO = "https://api.openphone.com/v1";
 const BUCKET = "quo-gchat";
 
 // Quo line → secret holding its space's incoming webhook. Same map as quo-gchat.
+// Group replies are new: only these people may /send into a group thread
+// until a live test shows Quo delivers it as one group text.
+const GROUP_SEND_TESTERS = ["manager@themorshedgroup.com"];
+
 const LINES: Record<string, string> = {
   "5126436688": "GCHAT_TEXTS_WEBHOOK",
   "5126101095": "GCHAT_WEBHOOK_MAINLINE",
@@ -105,6 +109,10 @@ Deno.serve(async (req) => {
   const pn = ((await pr.json()).data || []).find((p: any) => digits10(p.number) === link.line);
   if (!pn) return reply(`Quo line ${pretty(link.line)} wasn't found. Nothing was sent.`);
   const email = String(ev.user?.email || "").toLowerCase();
+  const isGroup = (link.group || []).length > 1;
+  if (isGroup && !GROUP_SEND_TESTERS.includes(email)) {
+    return reply("Replying to a group from Chat is still being tested. Reply from the Quo app for now. Nothing was sent.");
+  }
   const sender = (pn.users || []).find((u: any) => email && String(u.email || "").toLowerCase() === email);
   if (!sender) {
     console.log("[quo-gchat-send] not allowed on line", `…${link.line.slice(-4)}`, email ? "email given" : "no email on event");
@@ -113,7 +121,7 @@ Deno.serve(async (req) => {
 
   const sr = await quo("/messages", {
     method: "POST",
-    body: JSON.stringify({ content: text, from: pn.id, to: [`+1${link.other}`], userId: sender.id }),
+    body: JSON.stringify({ content: text, from: pn.id, to: (isGroup ? link.group! : [link.other]).map((d) => `+1${d}`), userId: sender.id }),
   });
   if (!sr.ok) {
     const err = (await sr.text()).slice(0, 200);
@@ -123,12 +131,14 @@ Deno.serve(async (req) => {
   const sentId = (await sr.json().catch(() => null))?.data?.id;
   if (sentId) EdgeRuntime.waitUntil(watchDelivery(sentId, link, quo));
   console.log("[quo-gchat-send] sent", `…${link.line.slice(-4)} → …${link.other.slice(-4)}`);
-  return reply(`Quo accepted it for ${pretty(link.other)} from ${pretty(link.line)}. The 📤 line in this thread means it was delivered.${noFiles}`);
+  const to = isGroup ? `the group (${link.group!.length} people)` : pretty(link.other);
+  return reply(`Quo accepted it for ${to} from ${pretty(link.line)}. The 📤 line in this thread means it was delivered.${noFiles}`);
 });
 
 // Through supabase-js: Storage refuses the injected secret key as a bare
 // Bearer token ("Invalid Compact JWS").
-async function readLink(thread: string): Promise<{ line: string; other: string } | null> {
+type Link = { line: string; other: string; group?: string[]; key?: string };
+async function readLink(thread: string): Promise<Link | null> {
   const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!url || !svc) return null;
   const { data, error } = await createClient(url, svc).storage.from(BUCKET).download(threadObject(thread));
@@ -138,7 +148,9 @@ async function readLink(thread: string): Promise<{ line: string; other: string }
   }
   const j = await data.text().then((t) => JSON.parse(t)).catch(() => null);
   const line = digits10(j?.line), other = digits10(j?.other);
-  return line.length === 10 && other.length === 10 ? { line, other } : null;
+  const group = Array.isArray(j?.group) ? j.group.map(digits10).filter((d: string) => d.length === 10) : [];
+  const key = typeof j?.key === "string" ? j.key : "";
+  return line.length === 10 && other.length === 10 ? { line, other, group, key } : null;
 }
 
 // spaces/AAA/threads/BBB → threads/AAA__BBB.json (same rule as quo-gchat).
@@ -151,7 +163,7 @@ function threadObject(thread: string) {
 // stops at 150s). Delivered: done, the mirror posts the 📤 line. Undelivered
 // or failed: warn in the person's thread. Still queued or sent after that:
 // say nothing, some carriers never report back.
-async function watchDelivery(id: string, link: { line: string; other: string }, quo: (p: string) => Promise<Response>) {
+async function watchDelivery(id: string, link: Link, quo: (p: string) => Promise<Response>) {
   try {
     for (const wait of [20_000, 40_000, 60_000]) {
       await new Promise((r) => setTimeout(r, wait));
@@ -165,12 +177,12 @@ async function watchDelivery(id: string, link: { line: string; other: string }, 
       if (!hook) return console.error("[quo-gchat-send] undelivered, no space webhook for", `…${link.line.slice(-4)}`);
       const said = String(m.text || "").replace(/\s+/g, " ").slice(0, 120);
       const url = new URL(hook);
-      url.searchParams.set("threadKey", `sms-${link.other}`);
+      url.searchParams.set("threadKey", link.key || `sms-${link.other}`);
       url.searchParams.set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD");
       const pr = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json; charset=UTF-8" },
-        body: JSON.stringify({ text: `⚠️ SMS NOT delivered to ${dashed(link.other)}${said ? `\n"${said}"` : ""}\nCheck the number, or reach them from the Quo app.` }),
+        body: JSON.stringify({ text: `⚠️ SMS NOT delivered to ${(link.group || []).length > 1 ? "the group" : dashed(link.other)}${said ? `\n"${said}"` : ""}\nCheck the number, or reach them from the Quo app.` }),
       });
       if (!pr.ok) console.error("[quo-gchat-send] undelivered warning not posted", pr.status);
       console.log("[quo-gchat-send] undelivered", `…${link.other.slice(-4)}`, status);

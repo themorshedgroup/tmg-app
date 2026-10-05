@@ -27,6 +27,8 @@
 //                                          transcripts are not mirrored
 // Both voicemail paths share requestId vm-<callId>, so one voicemail posts once.
 //
+// Groups: a group text gets its own thread (threadKey grp-<hash of members>),
+// headed "👥 Group: names". /send there replies to the whole group.
 // Threads: threadKey = the other party's 10-digit number, so every text and
 // call with the same person lands in the same thread. requestId = Quo's id, so
 // a Quo retry of the same event never posts twice.
@@ -85,12 +87,24 @@ Deno.serve(async (req) => {
     // Work out which of our lines this is about, and who is on the other end.
     // Trust the event type, not message.direction (unreliable on this account).
     let ourLine = "", other = "", outbound = false;
+    // A group text: everyone on it except our line, sender first. Empty for 1:1.
+    let group: string[] = [];
     if (evt === "message.received" || evt === "message.delivered") {
       outbound = evt === "message.delivered";
       const fromN = digits10(m.from || ctx.senderIdentifier);
-      const toN = digits10(first(m.to) || first(ctx.recipientIdentifiers));
-      ourLine = outbound ? fromN : toN;
-      other = outbound ? toN : fromN;
+      const tos = [...new Set([...(Array.isArray(m.to) ? m.to : [m.to]), ...(ctx.recipientIdentifiers || [])]
+        .map(digits10).filter((d) => d.length === 10))];
+      if (outbound) ourLine = fromN;
+      else {
+        // A group text lists every member in `to`, not always our line first.
+        // With two of our lines on it, Quo sends one event per line: the
+        // event's phoneNumberId says which one this is.
+        const ours = tos.filter((d) => LINES[d]);
+        ourLine = (ours.length > 1 ? await lineForId(m.phoneNumberId) : "") || ours[0] || tos[0] || "";
+      }
+      const members = [...new Set([outbound ? "" : fromN, ...tos].filter((d) => d && d !== ourLine))];
+      other = members[0] || "";
+      if (members.length > 1) group = members;
     } else if (evt.startsWith("call.")) {
       outbound = m.direction === "outgoing";
       if (first(parts.workspace)) {
@@ -116,8 +130,13 @@ Deno.serve(async (req) => {
     const hook = Deno.env.get(line.secret);
     if (!hook) return ok({ ignored: `${line.secret} not set` });
 
-    // Build the message for this event.
+    // Build the message for this event. A group gets its own thread, named
+    // after its members, so it never lands in one member's private thread.
     const who = await nameFor(other);
+    const groupHead = group.length
+      ? `👥 Group: ${(await Promise.all([...group].sort().map(nameFor))).map((n) => n.split(" | ")[0]).join(", ")}\n`
+      : "";
+    const threadKey = group.length ? `grp-${(await sha256([...group].sort().join(","))).slice(0, 20)}` : `sms-${other}`;
     let text = "", requestId = "";
     let cardsV2: any[] | undefined;
     if (evt.startsWith("message.")) {
@@ -129,7 +148,9 @@ Deno.serve(async (req) => {
         body = `${body}${body ? "\n" : ""}${shown.note}`;
       }
       if (!body) body = "[empty message]";
-      const head = outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📱${who}`;
+      const head = group.length
+        ? `${groupHead}${outbound ? `📤 ${line.shared ? "Sent" : "You"}` : `📱${who}`}`
+        : outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📱${who}`;
       text = `${head}\n${body}`;
       if (m.id) requestId = `quo-${m.id}`;
     } else if (evt === "call.completed") {
@@ -168,7 +189,7 @@ Deno.serve(async (req) => {
     if (deepLink && !evt.startsWith("message.")) text += `\n<${deepLink}|Open in Quo>`;
 
     const url = new URL(hook);
-    url.searchParams.set("threadKey", `sms-${other}`);
+    url.searchParams.set("threadKey", threadKey);
     url.searchParams.set("messageReplyOption", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD");
     if (requestId) url.searchParams.set("requestId", requestId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60));
 
@@ -202,7 +223,7 @@ Deno.serve(async (req) => {
     else {
       const posted = await r.json().catch(() => null);
       space = String(posted?.space?.name || posted?.name || "").split("/")[1] || `${url.host}${url.pathname.slice(0, 40)}`;
-      await saveLink(posted, ourLine, other);
+      await saveLink(posted, ourLine, other, group, threadKey);
     }
     return ok({ posted: r.ok, evt, space });
   } catch (e) {
@@ -261,14 +282,14 @@ async function nameFor(d: string) {
 // JWT, and Storage refused it as a bare Bearer token ("Invalid Compact JWS"),
 // so links were not saved and /send said "not linked" in every new thread.
 const BUCKET = "quo-gchat";
-async function saveLink(posted: any, line: string, other: string) {
+async function saveLink(posted: any, line: string, other: string, group: string[], key: string) {
   try {
     const m = String(posted?.thread?.name || "").match(/^spaces\/([^/]+)\/threads\/([^/]+)$/);
     const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     if (!m || !url || !svc) return;
     const files = createClient(url, svc).storage;
     const put = () => files.from(BUCKET).upload(`threads/${m[1]}__${m[2]}.json`,
-      new Blob([JSON.stringify({ line, other })], { type: "application/json" }),
+      new Blob([JSON.stringify(group.length ? { line, other, group, key } : { line, other, key })], { type: "application/json" }),
       { upsert: true, contentType: "application/json" });
     let { error } = await put();
     if (error && /not found/i.test(error.message)) {
@@ -331,4 +352,26 @@ async function showMedia(media: any[], msgId: string, who: string): Promise<{ no
   if (failed) parts.push(`${failed} more, open Quo to view`);
   const note = `[${parts.join(", ")}]`;
   return widgets.length ? { note, card: { cardId: "media", card: { sections: [{ widgets }] } } } : { note: fallback };
+}
+
+// Quo phone-number id → its 10 digits, for group texts that include two of
+// our lines. Cached 10 minutes; "" if Quo can't be reached.
+let lineIds: { at: number; map: Map<string, string> } | null = null;
+async function lineForId(id: unknown) {
+  if (!id) return "";
+  try {
+    if (!lineIds || Date.now() - lineIds.at > 10 * 60_000) {
+      const key = Deno.env.get("QUO_GCHAT_API_KEY");
+      if (!key) return "";
+      const r = await fetch("https://api.openphone.com/v1/phone-numbers", { headers: { Authorization: key }, signal: AbortSignal.timeout(4000) });
+      if (!r.ok) throw new Error(`phone-numbers ${r.status}`);
+      const map = new Map<string, string>();
+      for (const p of (await r.json()).data || []) map.set(String(p.id), digits10(p.number));
+      lineIds = { at: Date.now(), map };
+    }
+    return lineIds.map.get(String(id)) || "";
+  } catch (e) {
+    console.error("[quo-gchat] phone numbers unavailable", String(e).slice(0, 120));
+    return "";
+  }
 }

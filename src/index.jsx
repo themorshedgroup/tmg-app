@@ -9981,6 +9981,24 @@ Rules:
                 <i className="ti ti-brand-google" style={{ fontSize: 14, color: gold }} />
                 {gcalState === 'connected' ? 'Reconnect Google Calendar & Tasks' : 'Connect Google Calendar & Tasks'}
               </button>
+              {/* Call audit: Tarek only. Adds view-only Drive to his Google connection so the
+                  transcripts attached to his calendar calls with Ops can be audited. Lives here,
+                  not in the Calendar pop-out: that pop-out is an iframe, and Google refuses to
+                  show its sign-in page inside one (a bare 403). */}
+              {((user && user.email) || '').toLowerCase() === 'tarek@themorshedgroup.com' && (() => {
+                let allowedAt = null;
+                try { allowedAt = localStorage.getItem('tmg_call_audit_allowed'); } catch (e) {}
+                return (
+                  <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${ctrlBorder}` }}>
+                    <div style={{ fontFamily: J, fontSize: 11, fontWeight: 600, color: ink, marginBottom: 4 }}>Call audit{allowedAt ? ' · allowed' : ''}</div>
+                    <div style={{ fontFamily: J, fontSize: 10, color: keyMuted, lineHeight: 1.5, marginBottom: 10 }}>Lets the app open the Meet transcripts and Gemini notes on your calendar, view only, so calls with Ops can be reviewed. Google lists this as access to your Drive. Turn it off any time at myaccount.google.com/connections.</div>
+                    <button onClick={() => { try { window.SupabaseAuth.connectCalendar({ callAudit: true }); } catch (e) {} }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, width: '100%', padding: 12, borderRadius: 11, border: `1px solid ${ctrlBorder}`, cursor: 'pointer', fontFamily: J, fontSize: 11, fontWeight: 600, letterSpacing: '0.04em', background: dark ? '#0A1730' : '#FCFBF8', color: ink }}>
+                      <i className="ti ti-brand-google-drive" style={{ fontSize: 14, color: gold }} />
+                      {allowedAt ? 'Allow call audit again' : 'Allow call audit'}
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* ─── below the panel (untouched): Appearance · Chat History · Sign out ─── */}
@@ -10555,7 +10573,7 @@ Rules:
     // The task ecosystem (Tasks, Decisions, Calendar) now lives in the standalone
     // /tasks app. The top-bar icons open it in an iframe popout inside the content
     // area — top bar and bottom nav are never covered. Same origin ⇒ shared login.
-    const TASKS_POPOUT_VERSION = '20261001a';  // bump when tasks.html changes to bust the iframe/standalone-link cache
+    const TASKS_POPOUT_VERSION = '20261005a';  // bump when tasks.html changes to bust the iframe/standalone-link cache
     function TaskFramePopover({ which, zoneH, onClose }) {
       const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
       useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);

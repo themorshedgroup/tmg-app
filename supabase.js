@@ -91,6 +91,14 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
       // otherwise the page reload drops the user on the default Chat tab, which reads as
       // the app randomly bouncing them away mid-connect. Read once and cleared by index.html.
       try { sessionStorage.setItem('tmg_calendar_connect_return', '1'); } catch (e) {}
+      // The Calendar pop-out shows tasks.html inside an iframe, and Google refuses to
+      // render its sign-in page in a frame (the user just sees "403. That's an error.").
+      // So when framed, send the whole window to Google instead, and bring it back to
+      // the top page, which stores the grant and reopens the Profile panel. The flags
+      // above still apply: a same-origin iframe shares the top page's sessionStorage.
+      let top = null;
+      try { if (window.top !== window && window.top.location.origin === window.location.origin) top = window.top; } catch (e) {}
+      const topUrl = top ? top.location.origin + (/^\/guide(\/|$)/i.test(top.location.pathname) ? '/' : top.location.pathname) : null;
       const { data, error } = await client.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -100,7 +108,8 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
           // (see signInWithGoogle above): without it, Google silently uses the browser's
           // default Google session, which may not be the @themorshedgroup.com account.
           queryParams: { access_type: 'offline', prompt: 'select_account consent', include_granted_scopes: 'true' },
-          redirectTo: _cleanUrl,
+          redirectTo: topUrl || _cleanUrl,
+          skipBrowserRedirect: !!top,
         },
       });
       if (error) {
@@ -108,7 +117,7 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Jg-roLg8M-BZJ7dBfjEeig_HIdniPaV';
         alert('Calendar connect error: ' + error.message);
         return;
       }
-      if (data && data.url) window.location.href = data.url;
+      if (data && data.url) (top || window).location.href = data.url;
     } catch (e) {
       console.error('[SA] connectCalendar exception:', e);
       alert('Calendar connect exception: ' + (e && e.message ? e.message : e));

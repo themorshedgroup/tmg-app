@@ -9958,21 +9958,6 @@ Rules:
                 <span style={{ fontFamily: J, fontSize: 12, color: K.date }}>{gcal === 'needs_connect' ? 'Not connected' : ('Connected · calendar' + (calPrefs.autoSyncTasks ? ' + tasks sync is on' : ' sync only'))}</span>
                 <button onClick={() => { try { window.SupabaseAuth.connectCalendar(); } catch (e) {} }} style={settPill}>{gcal === 'needs_connect' ? 'Connect' : 'Reconnect'}</button>
               </div>
-              {/* Call audit: Tarek only. Adds view-only Drive to his Google connection so the
-                  transcripts attached to his calendar calls with Ops can be audited. */}
-              {((user && user.email) || '').toLowerCase() === 'tarek@themorshedgroup.com' && (() => {
-                let allowedAt = null;
-                try { allowedAt = localStorage.getItem('tmg_call_audit_allowed'); } catch (e) {}
-                return (
-                  <div style={{ ...settRow, borderTop: `0.5px solid ${K.rowBd}` }}>
-                    <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                      <span style={{ fontFamily: J, fontSize: 12, color: K.date }}>Call audit{allowedAt ? ' · allowed' : ''}</span>
-                      <span style={{ fontFamily: J, fontSize: 10, color: K.muted, lineHeight: 1.5 }}>Lets the app open the Meet transcripts and Gemini notes on your calendar, view only, so calls with Ops can be reviewed. Google lists this as access to your Drive. Turn it off any time at myaccount.google.com/connections.</span>
-                    </span>
-                    <button onClick={() => { try { window.SupabaseAuth.connectCalendar({ callAudit: true }); } catch (e) {} }} style={settPill}>{allowedAt ? 'Allow again' : 'Allow'}</button>
-                  </div>
-                );
-              })()}
               <div style={{ ...settRow, borderTop: `0.5px solid ${K.rowBd}` }}>
                 <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                   <span style={{ fontFamily: J, fontSize: 12, color: K.date }}>Sync my tasks with Google Tasks</span>

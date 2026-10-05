@@ -25040,47 +25040,7 @@ function CalendarPopover({
       } catch (e) {}
     },
     style: settPill
-  }, gcal === 'needs_connect' ? 'Connect' : 'Reconnect')), (user && user.email || '').toLowerCase() === 'tarek@themorshedgroup.com' && (() => {
-    let allowedAt = null;
-    try {
-      allowedAt = localStorage.getItem('tmg_call_audit_allowed');
-    } catch (e) {}
-    return /*#__PURE__*/React.createElement("div", {
-      style: {
-        ...settRow,
-        borderTop: `0.5px solid ${K.rowBd}`
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 2,
-        minWidth: 0
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontFamily: J,
-        fontSize: 12,
-        color: K.date
-      }
-    }, "Call audit", allowedAt ? ' · allowed' : ''), /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontFamily: J,
-        fontSize: 10,
-        color: K.muted,
-        lineHeight: 1.5
-      }
-    }, "Lets the app open the Meet transcripts and Gemini notes on your calendar, view only, so calls with Ops can be reviewed. Google lists this as access to your Drive. Turn it off any time at myaccount.google.com/connections.")), /*#__PURE__*/React.createElement("button", {
-      onClick: () => {
-        try {
-          window.SupabaseAuth.connectCalendar({
-            callAudit: true
-          });
-        } catch (e) {}
-      },
-      style: settPill
-    }, allowedAt ? 'Allow again' : 'Allow'));
-  })(), /*#__PURE__*/React.createElement("div", {
+  }, gcal === 'needs_connect' ? 'Connect' : 'Reconnect')), /*#__PURE__*/React.createElement("div", {
     style: {
       ...settRow,
       borderTop: `0.5px solid ${K.rowBd}`

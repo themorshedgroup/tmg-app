@@ -20,12 +20,14 @@
 //   IN   a checklist item assigned to someone inside one of the meeting
 //        agendas is ALREADY a real Google Task; Google Docs makes it. We read
 //        those back and file them under that person's My Tasks.
+//        A Google Chat space task assigned to someone is the same kind of
+//        task (Chat makes it): read back the same way, into Accountabilities.
 //
 // Nothing here reads a document and no AI is involved. An agenda task is
 // recognised only by the Drive file id Google stamps on it
-// (Task.assignmentInfo.driveResourceInfo.driveFileId). A Google task with no
-// matching id in `agenda_docs` — i.e. everything personal — is skipped and
-// never stored.
+// (Task.assignmentInfo.driveResourceInfo.driveFileId), a Chat space task by
+// its space (Task.assignmentInfo.spaceInfo.space). A Google task with neither,
+// i.e. everything personal, is skipped and never stored.
 //
 // Because Docs and Tasks are themselves two-way, ticking an agenda task off
 // in the app ticks the checkbox in the meeting agenda.
@@ -90,6 +92,12 @@ const IMPORT_LOOKBACK_DAYS = 120;
 // Re-scan window on each poll: Google's updatedMin is exclusive-ish and clock
 // skew is real, so we always look a little further back than last time.
 const CURSOR_OVERLAP_MIN = 10;
+// Chat space tasks are imported from this date on. Older open space tasks
+// stay in Google only: nobody expected them in the app when they made them.
+const CHAT_IMPORT_SINCE = Date.parse("2026-10-05T16:00:00Z"); // 6 Oct, midnight Manila
+// The project Chat space tasks are filed under, found by name on each run.
+const CHAT_PROJECT_NAME = "Accountabilities";
+let chatProjectId: string | null = null;
 
 function serviceClient() {
   const url = Deno.env.get("SUPABASE_URL");
@@ -289,10 +297,13 @@ async function syncUser(sb: any, userId: string, agendaByFile: Map<string, any>,
           continue;
         }
 
-        // Unknown to us. Import ONLY if it came from one of the agendas —
-        // everything else in this list is the person's own business.
-        if (!driveId) continue;
-        const doc = agendaByFile.get(driveId);
+        // Unknown to us. Import ONLY if it came from one of the agendas or a
+        // Chat space; everything else in this list is the person's own business.
+        const space = gt.assignmentInfo?.spaceInfo?.space || null;
+        let doc = driveId ? agendaByFile.get(driveId) : null;
+        if (!doc && !driveId && space && chatProjectId && gt.updated && Date.parse(gt.updated) >= CHAT_IMPORT_SINCE) {
+          doc = { name: "Google Chat", project_id: chatProjectId, url: gt.assignmentInfo?.linkToTask || null };
+        }
         if (!doc) continue;
         // A checkbox that was already ticked is history — importing years of
         // finished agenda items would bury everyone's real list. Completion
@@ -549,6 +560,8 @@ Deno.serve(async (req) => {
   }
 
   const { data: docs } = await sb.from("agenda_docs").select("*").eq("active", true);
+  const { data: chatProject } = await sb.from("projects").select("id").eq("name", CHAT_PROJECT_NAME).limit(1).maybeSingle();
+  chatProjectId = chatProject?.id || null;
   const agendaByFile = new Map<string, any>();
   for (const d of (docs || [])) agendaByFile.set(d.drive_file_id, d);
 

@@ -78,11 +78,22 @@ Deno.serve(async (req) => {
   // Only the person who typed /send sees the bot's answers.
   const reply = (text: string) => json(ev?.user?.name ? { privateMessageViewer: { name: ev.user.name }, text } : { text });
 
+  // A crash used to leave the thread silent (2026-10-06): say so instead.
+  try {
+    return await handle(ev, reply);
+  } catch (e) {
+    console.error("[quo-gchat-send] crashed", String(e).slice(0, 300));
+    return reply(`Quo Send hit an error (${String(e).slice(0, 120)}). Check the Quo app before sending again.`);
+  }
+});
+
+async function handle(ev: any, reply: (text: string) => Response): Promise<Response> {
   if (ev.type === "ADDED_TO_SPACE") return json({ text: `Quo Send is here. ${HELP}` });
   if (ev.type !== "MESSAGE" && ev.type !== "APP_COMMAND") return json({});
 
   const msg = ev.message || {};
   const isSend = String(msg.slashCommand?.commandId ?? ev.appCommandMetadata?.appCommandId ?? "") === "1";
+  console.log("[quo-gchat-send] event", ev.type, isSend ? "send" : "other", msg.thread?.name ? "in thread" : "no thread");
   if (!isSend) return reply(HELP);
 
   const text = String(msg.argumentText ?? "").trim();
@@ -133,7 +144,7 @@ Deno.serve(async (req) => {
   console.log("[quo-gchat-send] sent", `…${link.line.slice(-4)} → …${link.other.slice(-4)}`);
   const to = isGroup ? `the group (${link.group!.length} people)` : pretty(link.other);
   return reply(`Quo accepted it for ${to} from ${pretty(link.line)}. The 📤 line in this thread means it was delivered.${noFiles}`);
-});
+}
 
 // Through supabase-js: Storage refuses the injected secret key as a bare
 // Bearer token ("Invalid Compact JWS").

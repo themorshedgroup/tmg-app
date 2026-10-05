@@ -28,7 +28,7 @@
 // Both voicemail paths share requestId vm-<callId>, so one voicemail posts once.
 //
 // Groups: a group text gets its own thread (threadKey grp-<hash of members>),
-// headed "👥 first names" (or a named group like "Ⓜ️ Team TMG"). /send there replies to the whole group.
+// headed "👥 first names" (or a named group like "Team TⓂ️G"). /send there replies to the whole group.
 // Threads: threadKey = the other party's 10-digit number, so every text and
 // call with the same person lands in the same thread. requestId = Quo's id, so
 // a Quo retry of the same event never posts twice.
@@ -61,8 +61,9 @@ const TEAM = ["Tarek", "Brad", "Brett", "Kyle", "Symon", "Angelica", "Alexa", "G
 const OPS = ["Symon", "Angelica", "Alexa", "Gustavo", "Camila"];
 // Groups with a name of their own: exactly these people, nobody else.
 const NAMED_GROUPS: [string, string[]][] = [
-  ["Ⓜ️ Team TMG", TEAM],
-  ["Ⓜ️ TMG Ops w/ Tarek", [...OPS, "Tarek"]],
+  ["Team TⓂ️G", TEAM],
+  ["TⓂ️G Ops w/ Tarek", [...OPS, "Tarek"]],
+  ["TⓂ️G Ops", OPS],
 ];
 
 const ok = (body: unknown) =>
@@ -370,7 +371,7 @@ async function showMedia(media: any[], msgId: string, who: string): Promise<{ no
   return widgets.length ? { note, card: { cardId: "media", card: { sections: [{ widgets }] } } } : { note: fallback };
 }
 
-// "Ⓜ️ Team TMG" for a named group, else "👥 Tarek, Brad, and Jane".
+// "Team TⓂ️G" for a named group, else "👥 Tarek, Brad, and Jane".
 // Our line's owner counts as a member but is not listed (it is their space).
 let teamCells: Record<string, string> | null = null;
 function teamName(d: string) {

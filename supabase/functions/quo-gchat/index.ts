@@ -17,7 +17,8 @@
 // digits only, so nobody's texts ever land in someone else's space.
 //
 // What gets posted:
-//   message.received / message.delivered → 📱Name | 512-555-0100, then the text (photos noted, not copied)
+//   message.received / message.delivered → 📱Name | 512-555-0100, then the text; photos show in the
+//                                          thread (copied to storage, see showMedia)
 //   call.completed                       → one line: in/out, missed, length
 //   call.summary.completed               → Quo's AI summary + next steps
 //   call.voicemail.completed             → the full voicemail transcript
@@ -118,10 +119,15 @@ Deno.serve(async (req) => {
     // Build the message for this event.
     const who = await nameFor(other);
     let text = "", requestId = "";
+    let cardsV2: any[] | undefined;
     if (evt.startsWith("message.")) {
       let body = String(m.body ?? m.text ?? m.content ?? "").trim();
-      const media = Array.isArray(m.media) ? m.media.length : 0;
-      if (media) body = `${body}${body ? "\n" : ""}[${media} photo${media > 1 ? "s" : ""}/file${media > 1 ? "s" : ""}, open Quo to view]`;
+      const media = Array.isArray(m.media) ? m.media : [];
+      if (media.length) {
+        const shown = await showMedia(media, String(m.id || crypto.randomUUID()), who);
+        cardsV2 = shown.card ? [shown.card] : undefined;
+        body = `${body}${body ? "\n" : ""}${shown.note}`;
+      }
       if (!body) body = "[empty message]";
       const head = outbound ? `📤 ${line.shared ? "Sent" : "You"} → ${who}` : `📱${who}`;
       text = `${head}\n${body}`;
@@ -169,18 +175,25 @@ Deno.serve(async (req) => {
     const post = () => fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=UTF-8" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(cardsV2 ? { text, cardsV2 } : { text }),
     });
     let r = await post();
     // Some spaces' webhooks refuse requestId ("Request Id is not supported for
     // webhooks"). Post again without it rather than lose the message.
     if (r.status === 400 && url.searchParams.has("requestId")) {
       const err = await r.text();
-      if (!/request ?id/i.test(err)) {
+      if (!/request ?id/i.test(err) && !cardsV2) {
         console.error("[quo-gchat] chat post failed", r.status, err.slice(0, 300));
         return ok({ posted: false, evt });
       }
-      url.searchParams.delete("requestId");
+      if (/request ?id/i.test(err)) url.searchParams.delete("requestId");
+      r = await post();
+    }
+    // A photo card Chat will not take must not cost the text: post it plain.
+    if (r.status === 400 && cardsV2) {
+      console.error("[quo-gchat] photo card refused", (await r.text()).slice(0, 200));
+      cardsV2 = undefined;
+      text = text.replace(/\[[^\]\n]*below[^\]\n]*\]$/, `[photos/files, open Quo to view]`);
       r = await post();
     }
     // The space id goes back in the reply so Quo's events log shows where each post landed.
@@ -266,4 +279,56 @@ async function saveLink(posted: any, line: string, other: string) {
   } catch (e) {
     console.error("[quo-gchat] thread link error", String(e));
   }
+}
+
+// Photos and files on a message. Quo's own links may be private or expire,
+// so each one is copied into the private "quo-gchat" bucket and shown through
+// a one-year signed link: photos as images in the thread, other files as an
+// "Open" button. Anything that fails to copy falls back to "open Quo to view".
+async function showMedia(media: any[], msgId: string, who: string): Promise<{ note: string; card?: any }> {
+  const n = media.length;
+  const fallback = `[${n} photo${n > 1 ? "s" : ""}/file${n > 1 ? "s" : ""}, open Quo to view]`;
+  const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !svc) return { note: fallback };
+  const files = createClient(url, svc).storage;
+  const widgets: any[] = [];
+  let photos = 0, others = 0, failed = 0;
+  for (const [i, item] of media.slice(0, 10).entries()) {
+    try {
+      const src = String(item?.url || "");
+      if (!/^https:\/\//.test(src)) { failed++; continue; }
+      let r = await fetch(src, { signal: AbortSignal.timeout(8000) });
+      const key = Deno.env.get("QUO_GCHAT_API_KEY");
+      if ((r.status === 401 || r.status === 403) && key) r = await fetch(src, { headers: { Authorization: key }, signal: AbortSignal.timeout(8000) });
+      if (!r.ok) { failed++; continue; }
+      const type = String(item?.type || r.headers.get("content-type") || "application/octet-stream").split(";")[0];
+      const blob = await r.blob();
+      if (blob.size > 20 * 1024 * 1024) { failed++; continue; }
+      const ext = (type.split("/")[1] || "bin").replace(/[^a-z0-9]/gi, "").slice(0, 5) || "bin";
+      const path = `media/${msgId.replace(/[^A-Za-z0-9_-]/g, "")}-${i}.${ext}`;
+      const put = () => files.from(BUCKET).upload(path, blob, { upsert: true, contentType: type });
+      let up = await put();
+      if (up.error && /not found/i.test(up.error.message)) { await files.createBucket(BUCKET, { public: false }); up = await put(); }
+      if (up.error) { failed++; continue; }
+      const { data } = await files.from(BUCKET).createSignedUrl(path, 365 * 86400);
+      if (!data?.signedUrl) { failed++; continue; }
+      if (type.startsWith("image/")) {
+        photos++;
+        widgets.push({ image: { imageUrl: data.signedUrl, altText: `Photo from ${who}`, onClick: { openLink: { url: data.signedUrl } } } });
+      } else {
+        others++;
+        widgets.push({ buttonList: { buttons: [{ text: `Open ${type.split("/")[1] || "file"}`, onClick: { openLink: { url: data.signedUrl } } }] } });
+      }
+    } catch (e) {
+      console.error("[quo-gchat] media copy failed", String(e).slice(0, 120));
+      failed++;
+    }
+  }
+  failed += Math.max(0, n - 10);
+  const parts = [];
+  if (photos) parts.push(`📷 ${photos} photo${photos > 1 ? "s" : ""} below`);
+  if (others) parts.push(`📎 ${others} file${others > 1 ? "s" : ""} below`);
+  if (failed) parts.push(`${failed} more, open Quo to view`);
+  const note = `[${parts.join(", ")}]`;
+  return widgets.length ? { note, card: { cardId: "media", card: { sections: [{ widgets }] } } } : { note: fallback };
 }

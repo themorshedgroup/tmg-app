@@ -35,6 +35,8 @@
 // number. No *bold* markers: phone notifications print them as raw asterisks.
 // ─────────────────────────────────────────────────────────────────────────
 
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
 const TOKEN_SHA256 = "d00c4d11eb0dd4ce20295cdc7c66f2a19d20ca4bbe8395e4c2a75673aea77a3f";
 
 // Quo line → secret of the Chat space it posts to. Shared lines are flagged
@@ -242,28 +244,25 @@ async function nameFor(d: string) {
 // Remember which line and person each Chat thread belongs to, so /send
 // (quo-gchat-send) knows who to text. One small JSON file per thread in the
 // private "quo-gchat" bucket, rewritten on every post. Never blocks posting.
+// Goes through supabase-js: the injected key is a new-style secret key, not a
+// JWT, and Storage refused it as a bare Bearer token ("Invalid Compact JWS"),
+// so links were not saved and /send said "not linked" in every new thread.
 const BUCKET = "quo-gchat";
 async function saveLink(posted: any, line: string, other: string) {
   try {
     const m = String(posted?.thread?.name || "").match(/^spaces\/([^/]+)\/threads\/([^/]+)$/);
     const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     if (!m || !url || !svc) return;
-    const auth = { Authorization: `Bearer ${svc}` };
-    const put = () => fetch(`${url}/storage/v1/object/${BUCKET}/threads/${m[1]}__${m[2]}.json`, {
-      method: "POST",
-      headers: { ...auth, "Content-Type": "application/json", "x-upsert": "true" },
-      body: JSON.stringify({ line, other }),
-    });
-    let r = await put();
-    if (!r.ok && /bucket not found/i.test(await r.clone().text())) {
-      await fetch(`${url}/storage/v1/bucket`, {
-        method: "POST",
-        headers: { ...auth, "Content-Type": "application/json" },
-        body: JSON.stringify({ id: BUCKET, name: BUCKET, public: false }),
-      });
-      r = await put();
+    const files = createClient(url, svc).storage;
+    const put = () => files.from(BUCKET).upload(`threads/${m[1]}__${m[2]}.json`,
+      new Blob([JSON.stringify({ line, other })], { type: "application/json" }),
+      { upsert: true, contentType: "application/json" });
+    let { error } = await put();
+    if (error && /not found/i.test(error.message)) {
+      await files.createBucket(BUCKET, { public: false });
+      ({ error } = await put());
     }
-    if (!r.ok) console.error("[quo-gchat] thread link not saved", r.status, (await r.text()).slice(0, 200));
+    if (error) console.error("[quo-gchat] thread link not saved", error.message.slice(0, 200));
   } catch (e) {
     console.error("[quo-gchat] thread link error", String(e));
   }

@@ -91,9 +91,15 @@ Deno.serve(async (req) => {
     let group: string[] = [];
     if (evt === "message.received" || evt === "message.delivered") {
       outbound = evt === "message.delivered";
-      const fromN = digits10(m.from || ctx.senderIdentifier);
-      const tos = [...new Set([...(Array.isArray(m.to) ? m.to : [m.to]), ...(ctx.recipientIdentifiers || [])]
+      // The webhook can list only part of a group (seen 2026-10-06: a text to
+      // two numbers arrived as a 1:1), so read Quo's own record of the message.
+      const full = await quoMessage(m.id);
+      const fromN = digits10(full?.from || m.from || ctx.senderIdentifier);
+      const tos = [...new Set([...(Array.isArray(m.to) ? m.to : [m.to]), ...(ctx.recipientIdentifiers || []), ...(full?.to || [])]
         .map(digits10).filter((d) => d.length === 10))];
+      if (full?.phoneNumberId && !m.phoneNumberId) m.phoneNumberId = full.phoneNumberId;
+      console.log("[quo-gchat] message", evt, `from …${fromN.slice(-4)}`, `to ${tos.map((d) => "…" + d.slice(-4)).join(",")}`,
+        `hook to ${(Array.isArray(m.to) ? m.to : [m.to]).length}`, full ? "quo ok" : "quo n/a");
       if (outbound) ourLine = fromN;
       else {
         // A group text lists every member in `to`, not always our line first.
@@ -352,6 +358,22 @@ async function showMedia(media: any[], msgId: string, who: string): Promise<{ no
   if (failed) parts.push(`${failed} more, open Quo to view`);
   const note = `[${parts.join(", ")}]`;
   return widgets.length ? { note, card: { cardId: "media", card: { sections: [{ widgets }] } } } : { note: fallback };
+}
+
+// Quo's own record of a message ({from, to[], phoneNumberId}); null if Quo
+// can't be reached, so the webhook payload is used as before.
+async function quoMessage(id: unknown) {
+  const key = Deno.env.get("QUO_GCHAT_API_KEY");
+  if (!id || !key) return null;
+  try {
+    const r = await fetch(`https://api.openphone.com/v1/messages/${encodeURIComponent(String(id))}`, { headers: { Authorization: key }, signal: AbortSignal.timeout(4000) });
+    if (!r.ok) throw new Error(`message ${r.status}`);
+    const d = (await r.json()).data || {};
+    return { from: d.from, to: Array.isArray(d.to) ? d.to : [d.to].filter(Boolean), phoneNumberId: d.phoneNumberId };
+  } catch (e) {
+    console.error("[quo-gchat] message lookup failed", String(e).slice(0, 120));
+    return null;
+  }
 }
 
 // Quo phone-number id → its 10 digits, for group texts that include two of

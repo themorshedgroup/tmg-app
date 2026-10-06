@@ -275,7 +275,11 @@ async function nameFor(d: string) {
         const u = new URL("https://api.openphone.com/v1/contacts");
         u.searchParams.set("maxResults", "50");
         if (pageToken) u.searchParams.set("pageToken", pageToken);
-        const r = await fetch(u, { headers: { Authorization: key }, signal: AbortSignal.timeout(4000) });
+        let r = await fetch(u, { headers: { Authorization: key }, signal: AbortSignal.timeout(4000) });
+        for (let t = 0; r.status === 429 && t < 2; t++) {
+          await new Promise((ok) => setTimeout(ok, 1200)); // Quo allows 10 calls a second
+          r = await fetch(u, { headers: { Authorization: key }, signal: AbortSignal.timeout(4000) });
+        }
         if (!r.ok) throw new Error(`contacts ${r.status}`);
         const j = await r.json();
         for (const c of j.data || []) {
@@ -291,14 +295,45 @@ async function nameFor(d: string) {
         if (!pageToken) break;
       }
       contacts = { at: Date.now(), map };
+      await keepContacts(map);
     }
     const name = contacts.map.get(d) || teamName(d) || LINES[d]?.label;
     return name ? `${name} | ${num}` : num;
   } catch (e) {
     console.error("[quo-gchat] contact names unavailable", String(e).slice(0, 120));
-    contacts = { at: Date.now() - 9 * 60_000, map: contacts?.map || new Map() }; // retry in a minute
+    contacts = { at: Date.now() - 9 * 60_000, map: contacts?.map?.size ? contacts.map : await savedContacts() }; // retry in a minute
     const name = contacts.map.get(d) || teamName(d) || LINES[d]?.label;
     return name ? `${name} | ${num}` : num;
+  }
+}
+
+// The last good contact list, kept in storage, so a failed Quo lookup (seen
+// 2026-10-06: a group thread got "512-799-8001" instead of Tarek) still names people.
+async function keepContacts(map: Map<string, string>) {
+  const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !svc || !map.size) return;
+  try {
+    const sb = createClient(url, svc);
+    const put = () => sb.storage.from(BUCKET).upload("contacts.json",
+      new Blob([JSON.stringify(Object.fromEntries(map))], { type: "application/json" }), { upsert: true, contentType: "application/json" });
+    let { error } = await put();
+    if (error && /not found/i.test(error.message)) {
+      await sb.storage.createBucket(BUCKET, { public: false });
+      ({ error } = await put());
+    }
+    if (error) console.error("[quo-gchat] contacts not kept", error.message.slice(0, 120));
+  } catch (e) {
+    console.error("[quo-gchat] contacts not kept", String(e).slice(0, 120));
+  }
+}
+async function savedContacts(): Promise<Map<string, string>> {
+  const url = Deno.env.get("SUPABASE_URL"), svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !svc) return new Map();
+  try {
+    const { data } = await createClient(url, svc).storage.from(BUCKET).download("contacts.json");
+    return data ? new Map(Object.entries(JSON.parse(await data.text()))) : new Map();
+  } catch (_) {
+    return new Map();
   }
 }
 

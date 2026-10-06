@@ -44,9 +44,8 @@ const QUO = "https://api.openphone.com/v1";
 const BUCKET = "quo-gchat";
 
 // Quo line → secret holding its space's incoming webhook. Same map as quo-gchat.
-// Group replies are new: only these people may /send into a group thread
-// until a live test shows Quo delivers it as one group text.
-const GROUP_SEND_TESTERS = ["manager@themorshedgroup.com"];
+// Group replies: Quo sends one group text to every member (live test
+// 2026-10-06), so anyone allowed on the line may reply to a group.
 
 const LINES: Record<string, string> = {
   "5126436688": "GCHAT_TEXTS_WEBHOOK",
@@ -121,9 +120,6 @@ async function handle(ev: any, reply: (text: string) => Response): Promise<Respo
   if (!pn) return reply(`Quo line ${pretty(link.line)} wasn't found. Nothing was sent.`);
   const email = String(ev.user?.email || "").toLowerCase();
   const isGroup = (link.group || []).length > 1;
-  if (isGroup && !GROUP_SEND_TESTERS.includes(email)) {
-    return reply("Replying to a group from Chat is still being tested. Reply from the Quo app for now. Nothing was sent.");
-  }
   const sender = (pn.users || []).find((u: any) => email && String(u.email || "").toLowerCase() === email);
   if (!sender) {
     console.log("[quo-gchat-send] not allowed on line", `…${link.line.slice(-4)}`, email ? "email given" : "no email on event");

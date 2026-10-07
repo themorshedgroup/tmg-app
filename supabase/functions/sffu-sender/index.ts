@@ -16,8 +16,9 @@
 //   (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are injected automatically.)
 //
 // Timing: a new showing defaults next_touch_at = now() → touch 1 on the next
-// run inside the 8:00 AM–5:00 PM America/Chicago window (a showing logged
-// after hours waits for 8 AM), then +24h → touch 2 (Day 2), +24h → touch 3
+// run inside the 8:00 AM–5:00 PM America/Chicago window on a business day (a
+// showing logged after hours, or on a weekend or holiday, waits for 8 AM the
+// next business day), then +24h → touch 2 (Day 2), +24h → touch 3
 // (Day 3), then done. Touches 2 and 3 and the "Reply Received" ack are held
 // to the same window — see clampToBusinessWindow below.
 // ─────────────────────────────────────────────────────────────────────────
@@ -81,14 +82,33 @@ function centralToUTC(y: number, m: number, day: number, hour: number, minute: n
   const offMin = centralOffsetMinutes(guess);
   return new Date(Date.UTC(y, m - 1, day, hour, minute) - offMin * 60000);
 }
-// Pushes a candidate send time into the 8:00 AM–5:00 PM Central window: same-day
-// 8:00 AM if it lands before 8am, next-day 8:00 AM if it lands at/after 5pm.
+// TMG's non-working days, same list as the Call Capacity grid (FED_HOLIDAYS in
+// src/crm-tasks.jsx and CALL_HOLIDAYS in src/index.jsx). Keep all three in sync.
+const HOLIDAYS = [
+  "2026-09-07", "2026-10-12", "2026-11-11", "2026-11-26", "2026-12-24", "2026-12-25", "2026-12-31",
+  "2027-01-01", "2027-01-18", "2027-02-15", "2027-05-31", "2027-06-18",
+  "2027-07-05", "2027-09-06", "2027-10-11", "2027-11-11", "2027-11-25", "2027-12-24",
+];
+function isBusinessDay(y: number, m: number, day: number): boolean {
+  const dow = new Date(Date.UTC(y, m - 1, day)).getUTCDay();
+  if (dow === 0 || dow === 6) return false;
+  const iso = y + "-" + String(m).padStart(2, "0") + "-" + String(day).padStart(2, "0");
+  return !HOLIDAYS.includes(iso);
+}
+// Pushes a candidate send time into the 8:00 AM–5:00 PM Central window on a
+// business day. Returns the SAME Date object when it is already inside (callers
+// rely on that identity check). Before 8am on a business day: same-day 8:00 AM.
+// After 5pm, or any time on a weekend/holiday: 8:00 AM on the next business day.
 function clampToBusinessWindow(candidate: Date): Date {
   const p = centralParts(candidate);
-  if (p.hour >= 8 && p.hour < 17) return candidate;
-  if (p.hour < 8) return centralToUTC(p.y, p.m, p.day, 8, 0);
-  const nextDay = new Date(Date.UTC(p.y, p.m - 1, p.day + 1));
-  return centralToUTC(nextDay.getUTCFullYear(), nextDay.getUTCMonth() + 1, nextDay.getUTCDate(), 8, 0);
+  const bizToday = isBusinessDay(p.y, p.m, p.day);
+  if (bizToday && p.hour >= 8 && p.hour < 17) return candidate;
+  if (bizToday && p.hour < 8) return centralToUTC(p.y, p.m, p.day, 8, 0);
+  let d = new Date(Date.UTC(p.y, p.m - 1, p.day + 1));
+  while (!isBusinessDay(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate())) {
+    d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1));
+  }
+  return centralToUTC(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), 8, 0);
 }
 
 Deno.serve(async (req) => {

@@ -16,10 +16,10 @@
 //   (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are injected automatically.)
 //
 // Timing: a new showing defaults next_touch_at = now() → touch 1 on the next
-// run (immediate, whatever time the showing was logged), then +24h → touch 2
-// (Day 2), +24h → touch 3 (Day 3), then done. Touches 2 and 3 are clamped to
-// an 8:00 AM–5:00 PM America/Chicago window (touch 1 is not — it's meant to
-// go out right away) — see clampToBusinessWindow below.
+// run inside the 8:00 AM–5:00 PM America/Chicago window (a showing logged
+// after hours waits for 8 AM), then +24h → touch 2 (Day 2), +24h → touch 3
+// (Day 3), then done. Touches 2 and 3 and the "Reply Received" ack are held
+// to the same window — see clampToBusinessWindow below.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -146,8 +146,17 @@ Deno.serve(async (req) => {
 
   let sent = 0;
   const errors: any[] = [];
+  const nowDate = new Date();
+  const inWindow = clampToBusinessWindow(nowDate) === nowDate; // 8am-5pm Central right now?
   for (const s of due || []) {
     const touch = (s.touch_count || 0) + 1; // 1, 2, or 3
+    // Outside 8am-5pm Central: hold this touch until the window opens. Moving
+    // next_touch_at forward (instead of just skipping) keeps held showings out
+    // of the 25-row due query until then.
+    if (!inWindow) {
+      await sb.from("showings").update({ next_touch_at: clampToBusinessWindow(nowDate).toISOString() }).eq("id", s.id);
+      continue;
+    }
     const body = tplByTouch[touch];
     if (!body) continue;
     (s as any).listing_agent = agentByAddr[s.property_address] || null;
@@ -185,8 +194,7 @@ Deno.serve(async (req) => {
       status: quoStatus, sent_by_name: "Auto · SFFU",
     });
     const done = touch >= 3;
-    // 24h after this touch, then held to 8am-5pm Central if that lands outside it
-    // (touch 1 itself is never clamped — it's meant to go out immediately).
+    // 24h after this touch, then held to 8am-5pm Central if that lands outside it.
     const nextTouchAt = done ? null : clampToBusinessWindow(new Date(Date.now() + 24 * 3600 * 1000));
     const showingUpdate: Record<string, unknown> = {
       touch_count: touch,
@@ -215,6 +223,7 @@ Deno.serve(async (req) => {
   const ackBody = tplByTouch[4];
   for (const s of pendingAcks || []) {
     if (!ackBody) break; // no "Reply Received" template configured yet
+    if (!inWindow) break; // outside 8am-5pm Central: reply_ack_pending stays true, sends when the window opens
     (s as any).listing_agent = agentByAddr[s.property_address] || null;
     (s as any).zillow_url = urlByAddr[s.property_address] || null;
     const content = fill(ackBody, s);

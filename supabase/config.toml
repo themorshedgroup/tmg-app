@@ -450,3 +450,6 @@ verify_jwt = true
 verify_jwt = false
 [functions.quo-gchat-send]
 verify_jwt = false
+[functions.call-audit]
+# no user session: run from SQL via pg_net; bearer checked against vault call_audit_secret
+verify_jwt = false

@@ -22,7 +22,7 @@
 //
 //   { action: 'collect', since?: '2026-09-01', ops_emails?: string[] }
 //
-// Nightly: pg_cron job `call-audit-nightly` (10 PM Manila) collects the last 3 days.
+// Nightly: pg_cron job `call-audit-nightly` (10 PM Manila) collects the last 6 days.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";

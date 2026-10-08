@@ -1,9 +1,9 @@
 -- Nightly call audit pull: every day at 14:00 UTC (10 PM Manila, 9 AM CT in
 -- summer, 8 AM CT in winter), pg_cron calls the call-audit edge function for
--- the last 3 days of Tarek's calendar, so new transcripts and Gemini notes of
+-- the last 6 days of Tarek's calendar, so new transcripts and Gemini notes of
 -- his calls with Operations land in public.call_audit_items without anyone
--- pressing a button. Rows upsert on (event_id, file_id), so the 3-day overlap
--- only refreshes what is already there.
+-- pressing a button. Rows upsert on (event_id, file_id), so the 6-day overlap
+-- only refreshes what is already there, and a missed night is caught up.
 --
 -- The bearer is read from vault (name 'call_audit_secret', created once in
 -- SQL, see 20261005090000_call_audit.sql) on every run, so no secret is in
@@ -21,7 +21,7 @@ select cron.schedule('call-audit-nightly', '0 14 * * *', $job$
       'Content-Type', 'application/json',
       'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'call_audit_secret')
     ),
-    body := jsonb_build_object('action', 'collect', 'since', (now() - interval '3 days')::text),
+    body := jsonb_build_object('action', 'collect', 'since', (now() - interval '6 days')::text),
     timeout_milliseconds := 120000
   );
 $job$);

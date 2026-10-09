@@ -2623,25 +2623,40 @@ Deno.serve(async (req) => {
       // Work out the form type with as few calls as possible: trust the hint
       // the row already drew, and only go and ask Zoho when there isn't one.
       let types: string[] = [];
-      // The Contacts tab shows every form type, not only this contact's: an
-      // agent reading a record wants the whole picture. Taken from the prospect
-      // picklist (live values only) and kept to the ones with a section.
-      const allTypes: string[] = [];
-      if (body.all_types === true && prospectApi) {
-        const pl = meta.get(prospectApi)?.pick_list_values;
-        for (const p of (Array.isArray(pl) ? pl : [])) {
-          if (!p || p.type === "unused") continue;
-          const t = String(p.display_value ?? p.actual_value ?? "").trim();
-          if (t && matchSection(t) && !allTypes.some(x => norm(x) === norm(t))) allTypes.push(t);
-        }
-      }
-      if (allTypes.length) {
-        types = allTypes;
-      } else if (typeHint.length && typeHint.filter(matchSection).length === typeHint.length) {
+      if (typeHint.length && typeHint.filter(matchSection).length === typeHint.length) {
         types = typeHint;
       } else if (prospectApi) {
         await readFields([prospectApi]);
         types = (Array.isArray(values[prospectApi]) ? values[prospectApi].map(flat) : [flat(values[prospectApi])]).filter(Boolean);
+      }
+
+      // The Contacts tab (all_types) groups the record the way Zoho's own
+      // layout rule "Prospect Form Type" does. Zoho will not hand that rule to
+      // the API, so it is copied here by hand from the rule page
+      // (Settings > Contacts > Layout Rules, Standard layout, read 2026-10-10).
+      // If an admin edits the rule in Zoho, update this map to match.
+      // Residential and blank contacts get BOTH the buyer and seller sections
+      // (what Zoho shows for "Both Residential Buyer & Seller"), at Symon's ask.
+      const RES_BOTH = ["Residential Real Estate Experience", "Buyer Prospect Form", "Seller Prospect Form",
+        "Mailing Address Information", "RB Lifestyle & Goals", "RS Lifestyle & Goals"];
+      const COMMON_COM = ["Commercial Strategic Vision", "Commercial Experience/Expectations", "Mailing Address Information"];
+      const LAYOUT_RULE: Record<string, string[]> = {
+        commercialseller: ["Commercial Seller Form", "Commercial Seller Property Info & Parameters", ...COMMON_COM],
+        commercialtenantrep: ["Commercial Tenant Form", "Commercial Tenant Property Info & Parameters", ...COMMON_COM],
+        commerciallandlordrep: ["Commercial Landlord Form", "Commercial Landlord Property Info & Parameters", ...COMMON_COM],
+      };
+      let rulePlan: Array<{ title: string; source: string; apis: string[] }> = [];
+      if (body.all_types === true) {
+        const want = new Set<string>();
+        for (const t of (types.length ? types : [""])) {
+          const list = LAYOUT_RULE[norm(t)] || (/commercial/i.test(t) ? [] : RES_BOTH);
+          for (const n of list) want.add(norm(n));
+        }
+        // Layout order, so the record reads top to bottom the way Zoho draws it.
+        const seenSec = new Set<string>();
+        rulePlan = sections
+          .filter(sec => sec.name && want.has(norm(sec.name)) && !seenSec.has(norm(sec.name)) && !!seenSec.add(norm(sec.name)))
+          .map(sec => ({ title: sec.name, source: "section", apis: arrange(sec.fields, sec.cols) }));
       }
 
       const matched = types.map(matchSection).filter(Boolean);
@@ -2659,6 +2674,7 @@ Deno.serve(async (req) => {
           .map((f: any) => String(f.api_name));
         plan = [{ title: types.join(" · ") || prospectLabel, source: "filled", apis: groupSpouse(custom.filter(keep)) }];
       }
+      if (rulePlan.length) plan = rulePlan;
       await readFields(Array.from(new Set(plan.flatMap(g => g.apis))));
       if (!Object.keys(values).length) return json({ error: "Couldn’t read that contact." }, 404);
 

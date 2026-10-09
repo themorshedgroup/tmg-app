@@ -2623,7 +2623,21 @@ Deno.serve(async (req) => {
       // Work out the form type with as few calls as possible: trust the hint
       // the row already drew, and only go and ask Zoho when there isn't one.
       let types: string[] = [];
-      if (typeHint.length && typeHint.filter(matchSection).length === typeHint.length) {
+      // The Contacts tab shows every form type, not only this contact's: an
+      // agent reading a record wants the whole picture. Taken from the prospect
+      // picklist (live values only) and kept to the ones with a section.
+      const allTypes: string[] = [];
+      if (body.all_types === true && prospectApi) {
+        const pl = meta.get(prospectApi)?.pick_list_values;
+        for (const p of (Array.isArray(pl) ? pl : [])) {
+          if (!p || p.type === "unused") continue;
+          const t = String(p.display_value ?? p.actual_value ?? "").trim();
+          if (t && matchSection(t) && !allTypes.some(x => norm(x) === norm(t))) allTypes.push(t);
+        }
+      }
+      if (allTypes.length) {
+        types = allTypes;
+      } else if (typeHint.length && typeHint.filter(matchSection).length === typeHint.length) {
         types = typeHint;
       } else if (prospectApi) {
         await readFields([prospectApi]);

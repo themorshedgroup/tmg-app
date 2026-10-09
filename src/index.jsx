@@ -570,6 +570,7 @@
     const ACCESS_APPS = [
       { id: 'chat',      label: 'AI Chat',           icon: 'ti-sparkles' },
       { id: 'calls',     label: 'Calls',             icon: 'ti-phone' },
+      { id: 'contacts',  label: 'Contacts',          icon: 'ti-address-book' },
       { id: 'kpis',      label: 'KPIs',              icon: 'ti-chart-bar' },
       { id: 'deals',     label: 'Deals',             icon: 'ti-currency-dollar' },
       { id: 'drives',    label: 'Shared Drives',     icon: 'ti-folders' },
@@ -585,7 +586,8 @@
     // but is now editable per-tool like Sales Agent / Transaction Coordinator.
     const DEFAULT_ACCESS = {
       chat: ['operations', 'agent', 'tc'],
-      calls: ['operations', 'agent'], kpis: ['operations', 'agent'], deals: ['operations', 'agent'],
+      // Contacts is for sales agents only. Admins see every tab anyway.
+      calls: ['operations', 'agent'], contacts: ['agent'], kpis: ['operations', 'agent'], deals: ['operations', 'agent'],
       drives: ['operations', 'agent', 'tc'], directory: ['operations', 'agent', 'tc'], sffu: ['operations', 'tc'],
     };
     // Fill any missing/invalid apps with defaults; keep only configurable roles.
@@ -6165,7 +6167,7 @@ Rules:
     //
     //  Edits go straight to Zoho. Only changed fields are sent, so a field
     //  this window never showed cannot be blanked by saving.
-    function ProspectSheet({ dark, contactId, contactName, label, types, preloaded, onSaved, onClose }) {
+    function ProspectSheet({ dark, contactId, contactName, label, types, preloaded, onSaved, onClose, readOnly, allTypes, header }) {
       const J = "'Jost', sans-serif";
       const headTitle = dark ? '#FFFFFF' : '#001A4A';
       const mutedCol  = dark ? 'rgba(255,255,255,0.45)' : '#8E897C';
@@ -6190,11 +6192,17 @@ Rules:
         // Asking again to draw the same fields is a second wait for nothing.
         if (preloaded && Array.isArray(preloaded.groups)) { setData(preloaded); setState('ready'); return () => { dead = true; }; }
         if (callsIsDev()) {
-          const t = (types && types[0]) || (devPerson(contactId) || {}).pform || null;
-          setTimeout(() => { if (!dead) { setData(devProspect(t, contactId)); setState('ready'); } }, 400);
+          // allTypes: every form's section, the way the Contacts tab asks for it.
+          const pick = allTypes ? Object.keys(DEV_FORMS) : [(types && types[0]) || (devPerson(contactId) || {}).pform || null];
+          setTimeout(() => {
+            if (dead) return;
+            const parts = pick.map(t => devProspect(t, contactId)).filter(Boolean);
+            setData(parts.length ? Object.assign({}, parts[0], { types: pick, groups: [].concat.apply([], parts.map(x => x.groups)) }) : null);
+            setState('ready');
+          }, 400);
           return () => { dead = true; };
         }
-        callZoho({ action: 'prospect_form', contact_id: contactId, types: types || undefined }).then(r => {
+        callZoho({ action: 'prospect_form', contact_id: contactId, types: types || undefined, all_types: allTypes ? true : undefined }).then(r => {
           if (dead) return;
           if (!r.ok) { setErr((r.data && r.data.error) || 'Couldn’t read the prospect form.'); setState('error'); return; }
           setData(r.data); setState('ready');
@@ -6320,8 +6328,8 @@ Rules:
               {f.value}<i className="ti ti-external-link" style={{ fontSize: 11, color: mutedCol }} />
             </a>
           );
-        } else if (f.read_only) {
-          control = <div style={{ fontFamily: J, fontSize: 13, fontWeight: 300, color: mutedCol, padding: '7px 0' }}>{f.value || '—'}</div>;
+        } else if (f.read_only || readOnly) {
+          control = <div style={{ fontFamily: J, fontSize: 13, fontWeight: 300, color: readOnly ? headTitle : mutedCol, padding: '7px 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{f.value || '—'}</div>;
         } else if (f.type === 'boolean') {
           control = (
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '5px 0' }}>
@@ -6373,6 +6381,8 @@ Rules:
               <button onClick={tryClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: faintCol, padding: 0 }}><i className="ti ti-x" style={{ fontSize: 16 }} /></button>
             </div>
 
+            {header}
+
             {state === 'loading' && (
               <div style={{ fontFamily: J, fontSize: 12.5, fontWeight: 300, color: mutedCol, margin: '16px 0' }}>Reading the form from Zoho…</div>
             )}
@@ -6406,6 +6416,12 @@ Rules:
 
             {state === 'ready' && (
               <React.Fragment>
+                {readOnly && (
+                  <div style={{ fontFamily: J, fontSize: 11.5, fontWeight: 300, color: mutedCol, marginTop: 16, lineHeight: 1.55 }}>
+                    View only for now. Editing switches on once each agent connects their own Zoho, so every change carries their name.
+                  </div>
+                )}
+                {!readOnly && (<React.Fragment>
                 {saveErr && <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: redCol, marginTop: 12, lineHeight: 1.5 }}>{saveErr}</div>}
                 {saved && !dirty.length && <div style={{ fontFamily: J, fontSize: 12, fontWeight: 300, color: mutedCol, marginTop: 12 }}>Saved to Zoho.</div>}
                 <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
@@ -6417,6 +6433,7 @@ Rules:
                     {saving ? 'Saving…' : dirty.length ? `Save ${dirty.length} ${dirty.length === 1 ? 'change' : 'changes'}` : 'No changes'}
                   </button>
                 </div>
+                </React.Fragment>)}
                 {/* Honesty about where the grouping came from. If an admin edits
                     the layout rule in Zoho, the "section" case follows along on
                     its own; the "filled" case cannot, and says so. */}
@@ -6428,6 +6445,424 @@ Rules:
               </React.Fragment>
             )}
           </div>
+        </div>
+      );
+    }
+
+    // ─── Contacts tab ────────────────────────────────────────────────
+    //  Every contact in Zoho, opening on the signed-in agent's own book.
+    //  Agents can switch to a colleague's book, because contacts get endorsed
+    //  from one agent to another, so the owner filter is a default and not a
+    //  wall (Symon, 2026-10-10).
+    //
+    //  View only for now. Editing waits for each agent to connect their own
+    //  Zoho: an edit sent through the shared connection shows up in Zoho as
+    //  made by the connection's owner, and the hard rule is that every change
+    //  carries the person who made it.
+    //
+    //  The list is the same full-org pull /contacts-cleanup makes (list_tasks
+    //  on the Contacts module, paged by page_token), so it reaches past Zoho's
+    //  2,000-record search ceiling.
+    const CONTACTS_CACHE_KEY = 'tmg-contacts-list-v1';
+    const CONTACTS_TTL = 15 * 60 * 1000;
+    const CONTACT_BASE_FIELDS = ['Full_Name', 'First_Name', 'Last_Name', 'Email', 'Phone', 'Mobile', 'Client_Classification', 'Owner'];
+    let CONTACTS_MEMO = null;   // { rows, at, capped, dropped } for the life of the page
+
+    // Spouse, the prospect form and Contact Tags are custom fields, so their api
+    // names are found by label, the same rules the Calls tab and the cleanup
+    // page use, so all three always read the same columns.
+    async function resolveContactsMeta() {
+      if (callsIsDev()) {
+        return { pform: { api: 'Prospect_Form_Type', label: 'Prospect Form Type' }, ctags: { api: 'Contact_Tags', label: 'Contact Tags' }, spouse: { api: 'Spouse', label: 'Spouse' } };
+      }
+      const r = await callZoho({ action: 'get_fields', module: 'Contacts' });
+      if (!r.ok || !r.data || !Array.isArray(r.data.fields)) throw new Error((r.data && r.data.error) || 'Could not read the Contacts fields from Zoho.');
+      const fields = r.data.fields;
+      const sp = fields.find(f => f && f.api_name && f.data_type === 'lookup' && /spouse|partner/i.test(f.field_label || ''));
+      return {
+        pform: pickProspectField(fields),
+        ctags: pickTagsField(fields),
+        spouse: sp ? { api: sp.api_name, label: sp.field_label || 'Spouse' } : null,
+      };
+    }
+
+    function devContactsList(me) {
+      const first = ['Molly', 'Dean', 'Rashad', 'Alok', 'Neil', 'Wendy', 'Carl', 'Morgan', 'Priya', 'Gavin', 'Ricardo', 'Dana', 'Steve', 'Courtney', 'Adriana', 'Daksha', 'Chris', 'Ariana', 'Jeremy', 'Melissa', 'Grant', 'Nina', 'Omar', 'Lena'];
+      const last = ['Kinney', 'Rahman', 'Mody', 'Patel', 'Sato', 'Birch', 'Raghunathan', 'Mbeki', 'Carlin', 'Johnson', 'Gill', 'Culling', 'Gober', 'Hall', 'Bell', 'Hudgens'];
+      const owners = [me || 'Kyle Baird', 'Kyle Baird', 'Brett Sanders', 'Tarek Morshed'];
+      const cls = ['A', 'B', 'C', null, 'A', 'B'];
+      const forms = ['Residential Buyer', 'Residential Seller', null, 'Residential Buyer, Residential Seller', null];
+      const tagSets = [[], ['Referral'], ['Past Client'], [], ['Sphere', 'Referral'], ['Do Not Call'], []];
+      const out = [];
+      for (let i = 0; i < 64; i++) {
+        const fn = first[i % first.length], ln = last[(i * 5 + Math.floor(i / first.length)) % last.length];
+        const hasSpouse = i % 3 === 0;
+        out.push({
+          id: String(5500000000100 + i), name: fn + ' ' + ln,
+          cls: cls[i % cls.length], pform: forms[i % forms.length], tags: tagSets[i % tagSets.length],
+          spouse: hasSpouse ? { id: String(5500000000500 + i), name: first[(i + 7) % first.length] + ' ' + ln } : null,
+          owner: owners[i % owners.length], ownerId: String(9100 + (i % owners.length)), ownerEmail: '',
+          phone: i % 7 === 3 ? null : '512555' + String(1000 + i).slice(-4), email: i % 4 === 1 ? null : fn.toLowerCase() + '@example.com',
+        });
+      }
+      return out;
+    }
+
+    async function fetchAllContacts(meta, onProgress) {
+      const extras = [meta.spouse && meta.spouse.api, meta.pform && meta.pform.api, meta.ctags && meta.ctags.api, 'Tag'].filter(Boolean);
+      let fields = CONTACT_BASE_FIELDS.concat(extras), dropped = false;
+      let page = 1, token = null, more = true, guard = 0, capped = false;
+      let all = [];
+      while (more && guard++ < 80) {
+        const args = { action: 'list_tasks', module: 'Contacts', fields, per_page: 200 };
+        if (token) args.page_token = token; else args.page = page;
+        const { ok, status, data } = await callZoho(args);
+        if (!ok) {
+          // Zoho refuses the WHOLE page when one field name is wrong, and the
+          // custom ones are found by label. Drop them and start over once: a
+          // bad guess costs those columns, never the list.
+          if (status === 400 && !dropped && extras.length) { dropped = true; fields = CONTACT_BASE_FIELDS; all = []; page = 1; token = null; more = true; continue; }
+          if (!all.length) throw new Error((data && data.error) || 'Could not load contacts from Zoho.');
+          capped = true; break;
+        }
+        all = all.concat((data && data.tasks) || []);
+        onProgress && onProgress(all.length);
+        more = !!(data.info && data.info.more_records);
+        token = (data.info && data.info.next_page_token) || null;
+        // Past 2,000 Zoho only continues by page_token. No token there means
+        // the rest cannot be reached, so stop and say so.
+        if (more && !token && page >= 10) { capped = true; break; }
+        page++;
+      }
+      if (more && guard >= 80) capped = true;
+      const seen = new Set();
+      const rows = all.filter(c => c && c.id && !seen.has(c.id) && seen.add(c.id));
+      return { rows, capped, dropped };
+    }
+
+    function shapeContact(c, meta) {
+      const own = c.Owner || {};
+      const sp = meta.spouse ? c[meta.spouse.api] : null;
+      const zTags = Array.isArray(c.Tag) ? c.Tag.map(t => (t && typeof t === 'object') ? t.name : t).filter(Boolean) : [];
+      const extra = meta.ctags ? String(prospectText(c[meta.ctags.api]) || '').split(',').map(x => x.trim()).filter(Boolean) : [];
+      const seen = {};
+      const tags = zTags.concat(extra).filter(t => { const k = String(t).toLowerCase(); if (seen[k]) return false; seen[k] = 1; return true; });
+      return {
+        id: String(c.id),
+        name: c.Full_Name || [c.First_Name, c.Last_Name].filter(Boolean).join(' ') || '(no name)',
+        cls: prospectText(c.Client_Classification),
+        pform: meta.pform ? prospectText(c[meta.pform.api]) : null,
+        tags,
+        spouse: (sp && typeof sp === 'object' && sp.id) ? { id: String(sp.id), name: sp.name || '' } : null,
+        owner: own.name || 'Unassigned',
+        ownerId: own.id ? String(own.id) : null,
+        ownerEmail: String(own.email || '').toLowerCase(),
+        phone: c.Mobile || c.Phone || null,
+        email: c.Email || null,
+      };
+    }
+
+    const CLS_RANK = (v) => { const k = String(v || '').trim().toUpperCase(); return k === 'A' ? 0 : k === 'B' ? 1 : k === 'C' ? 2 : v ? 3 : 4; };
+
+    function ContactsTab({ dark, ownerName, ownerEmail }) {
+      const J = "'Jost', sans-serif";
+      const [wide, setWide] = useState(typeof window !== 'undefined' && window.innerWidth >= 769);
+      useEffect(() => { const f = () => setWide(window.innerWidth >= 769); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
+
+      const me = (ownerName && ownerName !== 'Me' && ownerName.trim()) ? ownerName.trim() : '';
+      const myEmail = String(ownerEmail || '').toLowerCase();
+
+      const cached = (() => {
+        if (CONTACTS_MEMO) return CONTACTS_MEMO;
+        try { const p = JSON.parse(localStorage.getItem(CONTACTS_CACHE_KEY) || 'null'); return (p && Array.isArray(p.rows)) ? p : null; } catch (e) { return null; }
+      })();
+      const [data, setData] = useState(cached);          // { rows, at, capped, dropped }
+      const [loading, setLoading] = useState(false);
+      const [progress, setProgress] = useState(0);
+      const [err, setErr] = useState('');
+      // Always opens on the agent's own book. Not remembered between visits:
+      // "my contacts" is the default Symon asked for.
+      const [scope, setScope] = useState('mine');        // 'mine' | 'all' | 'owner:<name>'
+      const [q, setQ] = useState('');
+      const [sort, setSort] = useState({ key: 'cls', dir: 1 });
+      const [limit, setLimit] = useState(300);
+      const [open, setOpen] = useState(null);
+      const [, tick] = useState(0);
+      useEffect(() => { const t = setInterval(() => tick(n => n + 1), 60000); return () => clearInterval(t); }, []);
+
+      async function load(force) {
+        if (loading) return;
+        if (!force && data && Date.now() - (data.at || 0) < CONTACTS_TTL) return;
+        setLoading(true); setErr(''); setProgress(0);
+        try {
+          let next;
+          if (callsIsDev()) {
+            await new Promise(r => setTimeout(r, 500));
+            next = { rows: devContactsList(me), at: Date.now(), capped: false, dropped: false };
+          } else {
+            const meta = await resolveContactsMeta();
+            const res = await fetchAllContacts(meta, n => setProgress(n));
+            const m = res.dropped ? { pform: null, ctags: null, spouse: null } : meta;
+            next = { rows: res.rows.map(c => shapeContact(c, m)), at: Date.now(), capped: res.capped, dropped: res.dropped };
+          }
+          CONTACTS_MEMO = next;
+          try { localStorage.setItem(CONTACTS_CACHE_KEY, JSON.stringify(next)); } catch (e) { /* too big for storage: the page memo still holds it */ }
+          setData(next);
+        } catch (e) {
+          setErr((e && e.message) || String(e));
+        } finally { setLoading(false); }
+      }
+      useEffect(() => { load(false); }, []);
+
+      const rows = (data && data.rows) || [];
+      const isMine = (r) => (myEmail && r.ownerEmail && r.ownerEmail === myEmail) || (me && r.owner.toLowerCase() === me.toLowerCase());
+      const mineCount = useMemo(() => rows.filter(isMine).length, [rows, me, myEmail]);
+      const owners = useMemo(() => {
+        const m = {};
+        rows.forEach(r => { m[r.owner] = (m[r.owner] || 0) + 1; });
+        return Object.keys(m).sort((a, b) => a.localeCompare(b)).map(n => ({ name: n, count: m[n] }));
+      }, [rows]);
+
+      const shown = useMemo(() => {
+        let list = scope === 'mine' ? rows.filter(isMine)
+          : scope.indexOf('owner:') === 0 ? rows.filter(r => r.owner === scope.slice(6))
+          : rows.slice();
+        const needle = q.trim().toLowerCase();
+        if (needle) {
+          const digits = needle.replace(/\D/g, '');
+          list = list.filter(r =>
+            r.name.toLowerCase().indexOf(needle) !== -1
+            || (r.spouse && r.spouse.name.toLowerCase().indexOf(needle) !== -1)
+            || (r.pform && r.pform.toLowerCase().indexOf(needle) !== -1)
+            || r.tags.some(t => String(t).toLowerCase().indexOf(needle) !== -1)
+            || (r.email && r.email.toLowerCase().indexOf(needle) !== -1)
+            || (digits.length >= 3 && r.phone && String(r.phone).replace(/\D/g, '').indexOf(digits) !== -1));
+        }
+        const txt = (r) => sort.key === 'name' ? r.name
+          : sort.key === 'spouse' ? (r.spouse ? r.spouse.name : '')
+          : sort.key === 'pform' ? (r.pform || '')
+          : sort.key === 'tags' ? r.tags.join(', ')
+          : '';
+        const byName = (a, b) => a.name.localeCompare(b.name);
+        list.sort((a, b) => {
+          if (sort.key === 'cls') return (CLS_RANK(a.cls) - CLS_RANK(b.cls)) * sort.dir || byName(a, b);
+          const x = txt(a), y = txt(b);
+          if (!x !== !y) return x ? -1 : 1;           // blanks always last, either direction
+          return x.localeCompare(y) * sort.dir || byName(a, b);
+        });
+        return list;
+      }, [rows, scope, q, sort, me, myEmail]);
+      useEffect(() => { setLimit(300); }, [scope, q, sort]);
+
+      // Same surface tokens as the Calls tab, so the two read as one app.
+      const headTitle = dark ? '#FFFFFF' : '#001A4A';
+      const rowBord   = dark ? '#0D1E3A' : '#F0EEE8';
+      const nameCol   = dark ? '#FFFFFF' : '#1A1A1A';
+      const callBtnBg = dark ? '#AD832F' : '#001A4A';
+      const mutedCol  = dark ? 'rgba(255,255,255,0.45)' : '#8E897C';
+      const faintCol  = dark ? 'rgba(255,255,255,0.28)' : '#BBB6AA';
+      const lineCol   = dark ? '#122A4E' : '#E7E3D9';
+      const trackBg   = dark ? '#0A1730' : '#F6F5F1';
+      const surfaceBg = dark ? '#040C1C' : '#FFFFFF';
+      const creamBg   = dark ? 'rgba(173,131,47,0.15)' : '#F5EEDF';
+      const creamTx   = dark ? '#C9A45A' : '#8C6A24';
+      const addCol    = dark ? '#C9A45A' : '#AD832F';
+      const redCol    = dark ? '#F87171' : '#9B1C1C';
+      const pill = {
+        display: 'inline-flex', alignItems: 'center', gap: 7, height: wide ? 40 : 38,
+        padding: '0 14px', borderRadius: 11, fontFamily: J, fontSize: wide ? 13.5 : 13,
+        fontWeight: 500, whiteSpace: 'nowrap', cursor: 'pointer', border: 'none',
+      };
+      const chip = (text, title, muted) => (
+        <span title={title} style={{ fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.04em', lineHeight: 1.4, padding: '2px 6px', borderRadius: 5, flexShrink: 0,
+          background: muted ? trackBg : creamBg, color: muted ? mutedCol : creamTx, border: muted ? `1px solid ${lineCol}` : 'none' }}>{text}</span>
+      );
+      const tagChip = (name, i) => (
+        <span key={'t' + i} title={'Contact tag in Zoho: ' + name}
+          style={{ fontFamily: J, fontSize: 9, fontWeight: 600, letterSpacing: '0.02em', lineHeight: 1.4, padding: '2px 7px', borderRadius: 20, flexShrink: 0,
+            maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', background: trackBg, color: mutedCol, border: `1px solid ${lineCol}` }}>{name}</span>
+      );
+      const clsChip = (r) => r.cls
+        ? chip(r.cls, 'Client classification ' + r.cls + ', from the contact record in Zoho', false)
+        : chip('No class', 'This contact has no client classification set in Zoho', true);
+      const spouseLine = (r, size) => r.spouse && r.spouse.name ? (
+        <span style={{ fontFamily: J, fontSize: size, color: mutedCol, display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <i className="ti ti-heart-filled" style={{ fontSize: 10, color: '#C9A45A', flexShrink: 0 }} />{r.spouse.name}
+        </span>
+      ) : null;
+
+      const SORTS = [
+        { key: 'cls', label: 'Client Classification' },
+        { key: 'name', label: 'Contact Name' },
+        { key: 'spouse', label: 'Spouse' },
+        { key: 'pform', label: 'Prospect Form Type' },
+        { key: 'tags', label: 'Contact Tags' },
+      ];
+      const sortBy = (key) => setSort(s => (s.key === key ? { key, dir: -s.dir } : { key, dir: 1 }));
+      const COLS = '92px minmax(170px, 1.3fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(160px, 1.4fr)';
+
+      const scopeLabel = scope === 'mine' ? 'My contacts'
+        : scope === 'all' ? 'All agents'
+        : scope.slice(6);
+
+      const mobileRow = (r, last) => (
+        <div key={r.id} onClick={() => setOpen(r)} role="button" tabIndex={0}
+          onKeyDown={e => { if (e.key === 'Enter') setOpen(r); }}
+          style={{ padding: '13px 0', borderBottom: last ? 'none' : `1px solid ${rowBord}`, cursor: 'pointer' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 }}>
+            {clsChip(r)}
+            <span style={{ fontFamily: J, fontSize: 15.5, fontWeight: 600, letterSpacing: '-0.01em', color: nameCol, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
+            {r.pform && chip(r.pform, 'Prospect Form Type: ' + r.pform, true)}
+            {r.tags.map(tagChip)}
+          </div>
+          {(r.spouse || scope !== 'mine') && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4, minWidth: 0 }}>
+              {spouseLine(r, 11)}
+              {scope !== 'mine' && <span style={{ fontFamily: J, fontSize: 10.5, color: faintCol, marginLeft: 'auto', flexShrink: 0 }}>{r.owner}</span>}
+            </div>
+          )}
+        </div>
+      );
+      const deskRow = (r) => (
+        <div key={r.id} onClick={() => setOpen(r)} role="button" tabIndex={0}
+          onKeyDown={e => { if (e.key === 'Enter') setOpen(r); }}
+          style={{ display: 'grid', gridTemplateColumns: COLS, gap: 14, alignItems: 'center', padding: '11px 26px', borderBottom: `1px solid ${rowBord}`, cursor: 'pointer' }}
+          onMouseEnter={e => { e.currentTarget.style.background = trackBg; }} onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+          <div>{clsChip(r)}</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: J, fontSize: 14, fontWeight: 600, color: nameCol, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</div>
+            {scope !== 'mine' && <div style={{ fontFamily: J, fontSize: 10.5, color: faintCol, marginTop: 1 }}>{r.owner}</div>}
+          </div>
+          <div style={{ minWidth: 0, display: 'flex' }}>{spouseLine(r, 12.5) || <span style={{ color: faintCol, fontFamily: J, fontSize: 12 }}>·</span>}</div>
+          <div style={{ minWidth: 0, fontFamily: J, fontSize: 12.5, color: r.pform ? nameCol : faintCol, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.pform || '·'}</div>
+          <div style={{ minWidth: 0, display: 'flex', gap: 5, flexWrap: 'wrap' }}>{r.tags.length ? r.tags.map(tagChip) : <span style={{ color: faintCol, fontFamily: J, fontSize: 12 }}>·</span>}</div>
+        </div>
+      );
+
+      const busyFirst = loading && !rows.length;
+      const pad = wide ? '0 26px' : '0 20px';
+
+      // The record window: the basics up top, then every prospect form
+      // section, both types, so nothing is hidden by Zoho's layout rule.
+      const sheetHeader = (r) => {
+        const line = (icon, content) => (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9, fontFamily: J, fontSize: 13, fontWeight: 300, color: headTitle, padding: '5px 0', minWidth: 0 }}>
+            <i className={'ti ' + icon} style={{ fontSize: 15, color: mutedCol, flexShrink: 0 }} />
+            <div style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{content}</div>
+          </div>
+        );
+        const link = { color: headTitle, textDecoration: 'underline', textDecorationStyle: 'dotted', textUnderlineOffset: 2 };
+        return (
+          <div style={{ marginTop: 12, paddingBottom: 6, borderBottom: `1px solid ${lineCol}` }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+              {clsChip(r)}
+              {r.pform && chip(r.pform, 'Prospect Form Type', true)}
+              {r.tags.map(tagChip)}
+            </div>
+            {line('ti-phone', r.phone ? <a href={'tel:' + String(r.phone).replace(/[^\d+]/g, '')} style={link}>{formatPhone(r.phone)}</a> : <span style={{ color: mutedCol }}>No number</span>)}
+            {line('ti-mail', r.email ? <a href={'mailto:' + r.email} style={link}>{r.email}</a> : <span style={{ color: mutedCol }}>No email</span>)}
+            {r.spouse && line('ti-heart', <a href={zohoContactUrl(r.spouse.id) || undefined} target="_blank" rel="noopener noreferrer" style={link}>{r.spouse.name}</a>)}
+            {zohoContactUrl(r.id) && line('ti-external-link', <a href={zohoContactUrl(r.id)} target="_blank" rel="noopener noreferrer" style={link}>Open in Zoho</a>)}
+          </div>
+        );
+      };
+
+      return (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: wide ? '18px 26px 14px' : '16px 20px 12px', flexShrink: 0, borderBottom: wide ? `1px solid ${rowBord}` : 'none', flexWrap: 'wrap' }}>
+            <div style={{ position: 'relative', flex: wide ? '0 1 360px' : '1 1 100%', minWidth: 0, order: wide ? 0 : 3 }}>
+              <i className="ti ti-search" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 15, color: faintCol }} />
+              <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search name, spouse, tag, phone or email"
+                style={{ ...pill, width: '100%', boxSizing: 'border-box', cursor: 'text', background: trackBg, color: nameCol, paddingLeft: 34, outline: 'none', fontWeight: 400 }} />
+            </div>
+            <div style={{ flex: 1, minWidth: 8 }} />
+            <div style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+              <select value={scope} onChange={e => setScope(e.target.value)} title="Whose contacts to show"
+                style={{ ...pill, background: callBtnBg, color: '#fff', fontWeight: 600, paddingRight: 30, appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none' }}>
+                <option value="mine">My contacts{rows.length ? ' (' + mineCount + ')' : ''}</option>
+                {owners.filter(o => !(me && o.name.toLowerCase() === me.toLowerCase())).map(o => (
+                  <option key={o.name} value={'owner:' + o.name}>{o.name} ({o.count})</option>
+                ))}
+                <option value="all">All agents{rows.length ? ' (' + rows.length + ')' : ''}</option>
+              </select>
+              <span style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: 'rgba(255,255,255,0.7)', fontSize: 9 }}>▼</span>
+            </div>
+            {!wide && (
+              <div style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                <select value={sort.key} onChange={e => setSort({ key: e.target.value, dir: 1 })} title="Sort by"
+                  style={{ ...pill, background: trackBg, color: nameCol, fontWeight: 600, paddingRight: 30, appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none' }}>
+                  {SORTS.map(s => <option key={s.key} value={s.key}>{s.key === 'cls' ? 'Class' : s.key === 'pform' ? 'Form type' : s.key === 'tags' ? 'Tags' : s.key === 'name' ? 'Name' : 'Spouse'}</option>)}
+                </select>
+                <span style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none', color: faintCol, fontSize: 9 }}>▼</span>
+              </div>
+            )}
+            <button onClick={() => load(true)} disabled={loading} title="Refresh from Zoho"
+              style={{ width: 34, height: 34, borderRadius: '50%', border: 'none', cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.5 : 1, background: trackBg, color: mutedCol, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <i className={'ti ti-' + (loading ? 'loader-2' : 'refresh')} style={{ fontSize: 15 }} />
+            </button>
+          </div>
+
+          <div style={{ padding: wide ? '9px 26px' : '0 20px 8px', fontFamily: J, fontSize: 11, color: mutedCol, flexShrink: 0, borderBottom: wide ? `1px solid ${rowBord}` : 'none' }}>
+            {busyFirst ? ('Loading contacts from Zoho' + (progress ? ', ' + progress.toLocaleString() + ' so far' : '') + '…')
+              : (shown.length.toLocaleString() + ' ' + (shown.length === 1 ? 'contact' : 'contacts') + (q.trim() ? ' matching "' + q.trim() + '"' : '') + ' · ' + scopeLabel
+                + (data && data.at ? ' · updated ' + callAgo(data.at) : '') + (loading ? ' · refreshing' + (progress ? ' (' + progress.toLocaleString() + ')' : '') + '…' : ''))}
+          </div>
+
+          {wide && !busyFirst && (
+            <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 14, padding: '10px 26px', borderBottom: `1px solid ${rowBord}`, flexShrink: 0 }}>
+              {SORTS.map(s => {
+                const on = sort.key === s.key;
+                return (
+                  <button key={s.key} onClick={() => sortBy(s.key)} title={'Sort by ' + s.label}
+                    style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left', display: 'inline-flex', alignItems: 'center', gap: 4,
+                      fontFamily: J, fontSize: 9, letterSpacing: '0.16em', textTransform: 'uppercase', fontWeight: 600, color: on ? addCol : faintCol }}>
+                    {s.key === 'cls' ? 'Class' : s.label}
+                    {on && <i className={'ti ti-arrow-' + (sort.dir === 1 ? 'down' : 'up')} style={{ fontSize: 11 }} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+            {err && (
+              <div style={{ padding: '16px 20px', fontFamily: J, fontSize: 12.5, color: redCol, lineHeight: 1.55 }}>
+                {err} <button onClick={() => load(true)} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: J, fontSize: 12.5, fontWeight: 600, color: addCol, textDecoration: 'underline' }}>Try again</button>
+              </div>
+            )}
+            {data && data.capped && (
+              <div style={{ padding: '9px 20px', fontFamily: J, fontSize: 11, color: redCol, lineHeight: 1.5 }}>Zoho stopped handing back contacts part way through, so this list may be incomplete.</div>
+            )}
+            {data && data.dropped && (
+              <div style={{ padding: '9px 20px', fontFamily: J, fontSize: 11, color: redCol, lineHeight: 1.5 }}>Zoho refused the spouse, form type and tag columns this time, so those are blank. The names are complete.</div>
+            )}
+            {busyFirst && <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol }}>Loading…</div>}
+            {!busyFirst && !err && rows.length > 0 && !shown.length && (
+              <div style={{ padding: '24px 20px', textAlign: 'center', fontFamily: J, fontSize: 12.5, color: mutedCol, lineHeight: 1.6 }}>
+                {q.trim() ? 'No contacts match "' + q.trim() + '".'
+                  : scope === 'mine' ? (me ? 'No contacts in Zoho are owned by ' + me + '. Pick an agent above to see theirs.' : 'Add your first and last name in your profile to see your own contacts.')
+                  : 'Nobody here yet.'}
+              </div>
+            )}
+            {!busyFirst && shown.length > 0 && (
+              wide
+                ? shown.slice(0, limit).map(deskRow)
+                : <div style={{ padding: pad }}>{shown.slice(0, limit).map((r, i, a) => mobileRow(r, i === a.length - 1))}</div>
+            )}
+            {shown.length > limit && (
+              <div style={{ padding: '14px 20px 24px', textAlign: 'center' }}>
+                <button onClick={() => setLimit(l => l + 300)} style={{ ...pill, background: trackBg, color: nameCol, fontWeight: 600 }}>
+                  Show more ({(shown.length - limit).toLocaleString()} left)
+                </button>
+              </div>
+            )}
+          </div>
+
+          {open && (
+            <ProspectSheet dark={dark} contactId={open.id} label={open.name} contactName={'Owned by ' + open.owner}
+              types={open.pform ? open.pform.split(',').map(x => x.trim()).filter(Boolean) : null}
+              readOnly allTypes header={sheetHeader(open)} onClose={() => setOpen(null)} />
+          )}
         </div>
       );
     }
@@ -9443,6 +9878,7 @@ Rules:
     const TABS = [
       { id: 'chat',     label: 'AI',    icon: 'ti-sparkles'        },
       { id: 'calls',    label: 'Calls', icon: 'ti-phone'           },
+      { id: 'contacts', label: 'Contacts', icon: 'ti-address-book' },
       { id: 'kpis',     label: 'KPIs',  icon: 'ti-chart-bar'       },
       { id: 'deals',    label: 'Deals', icon: 'ti-currency-dollar' },
       { id: 'more',     label: 'More',  icon: 'ti-dots'            },
@@ -9716,7 +10152,7 @@ Rules:
             borderRadius: 40, padding: 4, width: '100%',
           }}>
             {navTabs.map(({ id, label, icon, img }) => {
-              const coreNavIds = ['chat', 'calls', 'kpis', 'deals', 'more'];
+              const coreNavIds = ['chat', 'calls', 'contacts', 'kpis', 'deals', 'more'];
               const isActive = active === id || (active === 'more' && !coreNavIds.includes(id) && id !== 'more' && activeMoreView === id);
               const activeColor = dark ? '#FFFFFF' : '#001A4A';
               const inactiveColor = dark ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.28)';
@@ -11494,6 +11930,7 @@ Rules:
               );
             })()}
             {activeTab === 'calls' && <CallsTab dark={dark} ownerName={myName} ownerEmail={(profile && profile.email) || null} isAdmin={isAdmin} />}
+            {activeTab === 'contacts' && <ContactsTab dark={dark} ownerName={myName} ownerEmail={(profile && profile.email) || null} />}
             {activeTab === 'kpis' && <KpisTab dark={dark} />}
             {activeTab === 'deals' && <DealsTab />}
             {activeTab === 'more' && (
@@ -11509,7 +11946,7 @@ Rules:
               : moreView === 'timeoff' ? <TimeOffFrame dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : moreView === 'email-notifications' && isSymon ? <EmailNotificationsTab dark={dark} onBack={() => setMoreMenuOpen(true)} />
               : <CompanyDirectory dark={dark} onBack={() => setMoreMenuOpen(true)} />)}
-            {!['chat', 'calls', 'kpis', 'deals', 'more'].includes(activeTab) && (
+            {!['chat', 'calls', 'contacts', 'kpis', 'deals', 'more'].includes(activeTab) && (
               <Placeholder title={(TABS.find(t => t.id === activeTab) || {}).label || ''} />
             )}
           </div>
@@ -11535,7 +11972,7 @@ Rules:
               setMoreMenuOpen(false);
               const item = allItemMap[t];
               if (item && item.href) { window.location.href = item.href; return; }
-              const coreNavIds = ['chat', 'calls', 'kpis', 'deals'];
+              const coreNavIds = ['chat', 'calls', 'contacts', 'kpis', 'deals'];
               if (coreNavIds.includes(t)) { setActiveTab(t); }
               else { setMoreView(t); setActiveTab('more'); }
             }}

@@ -27490,7 +27490,11 @@ function App({
     resumedOnce.current = true;
     const since = Date.parse(CHAT_PIVOT_AT);
     const live = conversations.filter(c => !c.archived && Date.parse(c.updatedAt || 0) >= since).sort((x, y) => Date.parse(y.updatedAt || 0) - Date.parse(x.updatedAt || 0));
-    if (live.length) selectConversation(live[0].id);
+    // stayOnTab: reopening the chat in the background must not drag a
+    // deep link (#calls, #kpis, a More screen) back to the AI tab.
+    if (live.length) selectConversation(live[0].id, {
+      stayOnTab: true
+    });
   }, [conversations]);
   // Clear = archive the current chat and start empty. Archived rather than
   // deleted so nothing is actually lost.
@@ -27839,7 +27843,7 @@ function App({
     setActiveProjectId(projectId !== undefined ? projectId || null : null);
     setInput(localStorage.getItem('tmg-draft-new') || '');
   }
-  async function selectConversation(id) {
+  async function selectConversation(id, opts) {
     const conv = conversations.find(c => c.id === id);
     setDrawerOpen(false);
     setCurrentConvId(id);
@@ -27850,7 +27854,7 @@ function App({
     setInput(localStorage.getItem(draftKey(id)) || '');
     setWorkRequest(conv?.workRequest || null);
     setActiveProjectId(conv?.projectId || null);
-    setActiveTab('chat');
+    if (!(opts && opts.stayOnTab)) setActiveTab('chat');
     const msgs = await ConvDB.loadMessages(id);
     setMessages(msgs);
   }
